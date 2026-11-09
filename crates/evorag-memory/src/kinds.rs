@@ -1,6 +1,7 @@
 //! 会話の層の種類 (03 §3.3、04 §2)。本体は項目を省略せずに書く (値の無い項目は null、03 §4.2 の規則 7)。
 
-use evorag_store::KindSpec;
+use evorag_store::key::OwnedPart;
+use evorag_store::{DeriveFn, Envelope, KindSpec, WriteOp};
 use evorag_types::Id;
 use serde::{Deserialize, Serialize};
 
@@ -20,13 +21,58 @@ pub(crate) const LOOKUP_UPDATED_AT: &str = "updated_at";
 
 /// この版が書く、会話の層の種類。会話の追記は、新しい版の記録があっても今の `v` で足してよい
 /// (巻き戻した後も会話を続けられるように、03 §4.2 の規則 6)。
+///
+/// どれも会話と利用者の明示の操作なので、ジャーナルにも書く (03 §6)。ジャーナルから取り込むときは、
+/// 本体から関係と副索引を作り直す。
 pub fn kinds() -> Vec<KindSpec> {
-    let append = |name| KindSpec {
+    let append = |name, derive: DeriveFn| KindSpec {
         name,
         current_v: 1,
         create_when_newer_present: true,
+        journaled: true,
+        derive: Some(derive),
     };
-    vec![append(KIND_SESSION), append(KIND_TURN), append(KIND_SIGNAL)]
+    vec![
+        append(KIND_SESSION, derive_session),
+        append(KIND_TURN, derive_turn),
+        append(KIND_SIGNAL, derive_signal),
+    ]
+}
+
+fn link(from: Id, rel: &str, to: Id) -> WriteOp {
+    WriteOp::PutLink {
+        from,
+        rel: rel.into(),
+        to,
+        attrs: Vec::new(),
+    }
+}
+
+fn derive_session(e: &Envelope) -> Vec<WriteOp> {
+    vec![WriteOp::PutLookup {
+        kind: KIND_SESSION.into(),
+        field: LOOKUP_UPDATED_AT.into(),
+        value: OwnedPart::Int(e.updated_at.as_millis()),
+        id: e.id,
+    }]
+}
+
+fn derive_turn(e: &Envelope) -> Vec<WriteOp> {
+    let Ok(b) = e.body_as::<TurnBody>() else {
+        return Vec::new();
+    };
+    let mut ops = vec![link(e.id, REL_IN_SESSION, b.session)];
+    if let Some(u) = b.reply_to {
+        ops.push(link(e.id, REL_REPLY_TO, u));
+    }
+    ops
+}
+
+fn derive_signal(e: &Envelope) -> Vec<WriteOp> {
+    match e.body_as::<SignalBody>() {
+        Ok(b) => vec![link(e.id, REL_TARGET, b.target)],
+        Err(_) => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

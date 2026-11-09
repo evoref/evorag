@@ -13,6 +13,7 @@ evorag-types = { workspace = true }
 ciborium = { workspace = true }
 redb = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 

@@ -408,3 +408,30 @@ async fn ratings_are_recorded_against_the_last_reply() {
     core.shutdown().await;
     assert_eq!(signals_on(dir.path(), reply), 2);
 }
+
+/// verifies: AC-FR-202-1
+#[tokio::test(flavor = "multi_thread")]
+async fn a_journal_failure_keeps_the_utterance_out_of_the_database() {
+    let dir = TempDir::new("core-journal-fail");
+    let llm = cassette(8192, OK);
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    new_session(&core, &mut rx).await;
+    let sid = core.sessions(1)[0].id;
+    core.inject_journal_failure();
+    core.command(Command::Send {
+        text: "保存できない発話".into(),
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::SendRejected { .. })).await;
+    let Some(Event::SendRejected { text, error }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(text, "保存できない発話");
+    assert_eq!(error.key, MessageKey::SendNotSaved);
+    assert!(core.turns(sid).is_empty(), "nothing may reach the database");
+    assert!(llm.requests().is_empty(), "nothing may be sent to the LLM");
+    // 次は書ける。
+    core.command(Command::Send { text: "次".into() });
+    until(&mut rx, finished).await;
+    assert_eq!(core.turns(sid).len(), 2);
+    core.shutdown().await;
+}

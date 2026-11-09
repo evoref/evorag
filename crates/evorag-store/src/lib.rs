@@ -5,6 +5,8 @@
 pub mod backup;
 pub mod envelope;
 mod fsutil;
+mod journal;
+mod json;
 pub mod key;
 pub mod lock;
 pub mod meta;
@@ -17,11 +19,13 @@ pub mod version;
 pub mod writer;
 
 pub use envelope::{BodyError, DecodeError, Envelope};
+pub use journal::JOURNAL_DIR;
+pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};
 pub use store::{
-    Census, DB_FILE, Durability, FORMAT_VERSION, KIND_QUARANTINE, KindCount, KindSpec, OpenError,
-    OpenOptions, OpenReport, Read, ReadOnlyReason, ReadTxn, Store, StoreError, WriteToken,
-    WriteTxn,
+    Census, DB_FILE, DeriveFn, Durability, FORMAT_VERSION, KIND_QUARANTINE, KindCount, KindSpec,
+    OpenError, OpenOptions, OpenReport, Read, ReadOnlyReason, ReadTxn, Store, StoreError,
+    WriteToken, WriteTxn,
 };
 pub use writer::{
     Priority, Reply, WriteError, WriteOp, WriteOutcome, WriteRequest, Writer, WriterHandle,

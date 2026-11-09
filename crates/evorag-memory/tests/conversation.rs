@@ -236,3 +236,145 @@ fn deleting_a_session_removes_its_turns_signals_and_links() {
     assert_eq!(census.known[KIND_SESSION].ok, 1);
     assert_eq!(census.known.get(KIND_TURN).map_or(0, |c| c.ok), 0);
 }
+
+fn journal_text(root: &Path) -> String {
+    let dir = root.join(evorag_store::JOURNAL_DIR);
+    let mut out = String::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        out.push_str(&std::fs::read_to_string(e.unwrap().path()).unwrap());
+    }
+    out
+}
+
+/// verifies: AC-FR-202-2
+#[test]
+fn the_conversation_is_rebuilt_from_the_journal_alone() {
+    let dir = TempDir::new("conv-journal-rebuild");
+    let (sid, gone, before, signal);
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("残る").unwrap();
+        sid = id;
+        env.write(ops);
+        let (g, ops) = env.writes().create_session("消す").unwrap();
+        gone = g;
+        env.write(ops);
+        let (u, ops) = env
+            .writes()
+            .user_turn(&env.session(sid), "こんにちは")
+            .unwrap();
+        env.write(ops);
+        env.clock.advance(1_000);
+        let Some(evorag_store::Read::Ok(u1)) = env.store.read().unwrap().get(KIND_TURN, u).unwrap()
+        else {
+            panic!()
+        };
+        let (a, ops) = env
+            .writes()
+            .assistant_turn(
+                &env.session(sid),
+                &u1,
+                reply("どうも", TurnState::Completed),
+            )
+            .unwrap();
+        env.write(ops);
+        let (s, ops) = env.writes().signal(SignalKind::Good, a, None).unwrap();
+        signal = s;
+        env.write(ops);
+        let ops = env
+            .writes()
+            .rename_session(&env.session(sid), "改名")
+            .unwrap();
+        env.write(ops);
+        let ops = {
+            let rtx = env.store.read().unwrap();
+            delete_session(&rtx, &env.session(gone)).unwrap()
+        };
+        env.write(ops);
+        env.write(vec![evorag_store::WriteOp::SetMetaOnce {
+            key: "prompt.language".into(),
+            value: "ja".into(),
+        }]);
+        let rtx = env.store.read().unwrap();
+        before = session_turns(&rtx, sid)
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.envelope.id, t.body.state, t.body.text))
+            .collect::<Vec<_>>();
+    }
+    std::fs::remove_file(dir.path().join(evorag_store::DB_FILE)).unwrap();
+
+    let env = Env::open(dir.path());
+    let rtx = env.store.read().unwrap();
+    let after: Vec<_> = session_turns(&rtx, sid)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.envelope.id, t.body.state, t.body.text))
+        .collect();
+    assert_eq!(after, before);
+    let titles: Vec<String> = list_sessions(&rtx, 10)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.body.title)
+        .collect();
+    assert_eq!(titles, ["改名"], "the deleted session must stay deleted");
+    assert!(load_session(&rtx, gone).is_err());
+    assert_eq!(rtx.links_to(after[1].0, REL_TARGET).unwrap()[0].0, signal);
+    assert_eq!(rtx.links_to(after[0].0, REL_REPLY_TO).unwrap().len(), 1);
+    drop(rtx);
+    assert_eq!(
+        env.store.meta("prompt.language").unwrap().as_deref(),
+        Some("ja")
+    );
+}
+
+/// 09 §4: DB だけのコミットに失敗したときの行は、起動時にジャーナルから取り込まれる。
+#[test]
+fn journal_lines_missing_from_the_database_are_replayed_at_startup() {
+    let dir = TempDir::new("conv-journal-replay");
+    let (sid, u);
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("s").unwrap();
+        sid = id;
+        env.write(ops);
+        let (t, ops) = env
+            .writes()
+            .user_turn(&env.session(sid), "失われかけた発話")
+            .unwrap();
+        u = t;
+        env.write(ops);
+    }
+    // DB から発話を消し、取り込んだ連番を戻す (ジャーナルにだけある状態を作る)。
+    evorag_store::testutil::raw_remove_record(dir.path(), KIND_TURN, u);
+    evorag_store::testutil::raw_set_meta(dir.path(), "journal.last_seq", "1");
+    let env = Env::open(dir.path());
+    let rtx = env.store.read().unwrap();
+    let turns = session_turns(&rtx, sid).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].body.text, "失われかけた発話");
+}
+
+/// FR-309 のジャーナルの分: 消したセッションの本文は、ジャーナルのファイルからも消える。
+#[test]
+fn deleting_a_session_removes_its_text_from_the_journal() {
+    let dir = TempDir::new("conv-journal-delete");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("消す題名").unwrap();
+    env.write(ops);
+    let (_, ops) = env
+        .writes()
+        .user_turn(&env.session(sid), "秘密の本文")
+        .unwrap();
+    env.write(ops);
+    assert!(journal_text(dir.path()).contains("秘密の本文"));
+    let ops = {
+        let rtx = env.store.read().unwrap();
+        delete_session(&rtx, &env.session(sid)).unwrap()
+    };
+    env.write(ops);
+    let text = journal_text(dir.path());
+    assert!(!text.contains("秘密の本文"), "{text}");
+    assert!(!text.contains("消す題名"), "{text}");
+    assert!(text.contains("\"delete\""));
+}

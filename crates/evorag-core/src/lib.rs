@@ -254,6 +254,12 @@ impl Core {
             .collect()
     }
 
+    /// 試験のための注入: 次のジャーナルの書き込みを失敗させる (AC-FR-202-1)。
+    #[doc(hidden)]
+    pub fn inject_journal_failure(&self) {
+        self.inner.store.fail_next_journal_append();
+    }
+
     /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
     pub fn tokenize_calls(&self) -> usize {
         self.inner.tokens.calls()

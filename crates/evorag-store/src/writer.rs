@@ -13,7 +13,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use evorag_types::Id;
 
+use std::collections::BTreeSet;
+
 use crate::envelope::Envelope;
+use crate::journal::LineOp;
 use crate::key::{OwnedPart, Part};
 use crate::store::{Durability, Store, StoreError, WriteToken, WriteTxn};
 
@@ -243,7 +246,12 @@ impl Writer {
     }
 
     fn apply(&self, req: &WriteRequest) -> Result<WriteOutcome, WriteError> {
+        // 先にジャーナルに書いて書き切る (03 §6)。書けなければ DB にも書かない。
+        let last_seq = self.journal(req)?;
         let mut tx = self.store.write(&self.token, req.durability)?;
+        if let Some(seq) = last_seq {
+            tx.set_journal_seq(seq)?;
+        }
         let mut out = WriteOutcome::default();
         if self.store.suspect_count() > 0 {
             out.quarantined = tx.quarantine_suspects()?;
@@ -256,6 +264,48 @@ impl Writer {
     }
 }
 
+impl Writer {
+    /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) を書く。
+    fn journal(&self, req: &WriteRequest) -> Result<Option<u64>, StoreError> {
+        let mut lines = Vec::new();
+        let mut deleted = BTreeSet::new();
+        for op in &req.ops {
+            match op {
+                WriteOp::Put(e) if self.store.is_journaled(&e.kind) => {
+                    let mut e = e.clone();
+                    e.writer = self.store.evorag_version().to_owned();
+                    lines.push(LineOp::Put(e));
+                }
+                WriteOp::Delete { kind, id } if self.store.is_journaled(kind) => {
+                    deleted.insert(*id);
+                    lines.push(LineOp::Delete {
+                        kind: kind.clone(),
+                        id: *id,
+                    });
+                }
+                WriteOp::SetMetaOnce { key, value } => lines.push(LineOp::Meta {
+                    key: key.clone(),
+                    value: value.clone(),
+                }),
+                _ => {}
+            }
+        }
+        if lines.is_empty() {
+            return Ok(None);
+        }
+        let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(journal) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let now = self.store.clock().now();
+        journal
+            .remove_ids(&deleted)
+            .and_then(|()| journal.append(now, &lines))
+            .map(Some)
+            .map_err(|e| StoreError::Journal(e.to_string()))
+    }
+}
+
 fn part(p: &OwnedPart) -> Part<'_> {
     match p {
         OwnedPart::Str(s) => Part::Str(s),
@@ -265,7 +315,11 @@ fn part(p: &OwnedPart) -> Part<'_> {
     }
 }
 
-fn apply_op(tx: &mut WriteTxn<'_>, op: &WriteOp, out: &mut WriteOutcome) -> Result<(), StoreError> {
+pub(crate) fn apply_op(
+    tx: &mut WriteTxn<'_>,
+    op: &WriteOp,
+    out: &mut WriteOutcome,
+) -> Result<(), StoreError> {
     match op {
         WriteOp::Put(env) => {
             let mut env = env.clone();
