@@ -96,6 +96,12 @@ message_keys! {
     CliPromptLanguageFixed => "cli.prompt_language_fixed",
     /// 引数: `detail`。
     CliError => "cli.error",
+    /// 引数: `moved_to`、`reason`。
+    CliBroken => "cli.broken",
+    CliAskRestore => "cli.ask_restore",
+    /// 引数: `from`。
+    CliRestored => "cli.restored",
+    CliRestoredFromJournal => "cli.restored_from_journal",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
 }

@@ -257,3 +257,45 @@ pub fn delete_session(
     ops.push(WriteOp::DeleteLinksOf(session.id));
     Ok(ops)
 }
+
+/// 消した記録を退避から除く job (03 §7.3)。削除と同じ依頼に入れる。
+pub fn purge_job(writes: &Writes<'_>, ids: Vec<Id>) -> Result<(Id, WriteOp), BodyError> {
+    let id = writes.ids.next_id();
+    let e = envelope(
+        id,
+        KIND_JOB,
+        writes.clock.now(),
+        &JobBody {
+            task: JOB_PURGE_BACKUPS.into(),
+            ids,
+        },
+    )?;
+    Ok((id, WriteOp::Put(e)))
+}
+
+/// 残っている退避の整理の job (起動時に続きを行う)。
+pub fn pending_purge_jobs(
+    tx: &evorag_store::ReadTxn<'_>,
+) -> Result<Vec<(Id, Vec<Id>)>, crate::MemoryError> {
+    let mut out = Vec::new();
+    tx.for_each(KIND_JOB, |r| {
+        if let evorag_store::Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<JobBody>()
+            && b.task == JOB_PURGE_BACKUPS
+        {
+            out.push((e.id, b.ids));
+        }
+        true
+    })?;
+    Ok(out)
+}
+
+/// セッションを消す操作が対象にする記録の ID (退避の整理に渡す)。
+pub fn deleted_ids(ops: &[WriteOp]) -> Vec<Id> {
+    ops.iter()
+        .filter_map(|op| match op {
+            WriteOp::Delete { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect()
+}

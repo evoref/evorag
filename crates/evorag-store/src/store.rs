@@ -153,6 +153,9 @@ pub enum OpenError {
     /// DB のファイルが開けない (03 §8 の「DB のファイルの破損」)。
     #[error("the database file cannot be opened: {0}")]
     Unreadable(String),
+    /// DB のファイルが壊れていたので `broken/` へ移した。退避とジャーナルから戻せる (FR-205)。
+    #[error("the database file was broken ({reason}) and was moved to {}", moved_to.display())]
+    Broken { moved_to: PathBuf, reason: String },
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -308,6 +311,17 @@ fn classify(kind: &str, id: Id, k: &[u8], v: &[u8]) -> Read {
 fn map_db_error(e: redb::DatabaseError) -> OpenError {
     match e {
         redb::DatabaseError::DatabaseAlreadyOpen => OpenError::DatabaseInUse,
+        // redb のファイルの形式が新しい (壊れてはいない)。broken/ へ移さない (03 §4.2 の規則 6、§12.2)。
+        redb::DatabaseError::UpgradeRequired(v) => OpenError::TooNew {
+            format: format!("redb file format {v}"),
+            min_read: "a newer evorag".into(),
+        },
+        // redb は、先頭の印が合わない・中身が読めないファイルを InvalidData の I/O のエラーで返す。
+        redb::DatabaseError::Storage(redb::StorageError::Io(io))
+            if io.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            OpenError::Unreadable(io.to_string())
+        }
         redb::DatabaseError::Storage(redb::StorageError::Io(io)) => OpenError::Io(io),
         other => OpenError::Unreadable(other.to_string()),
     }
@@ -379,7 +393,15 @@ impl Store {
         fsutil::create_private_dir(&opts.data_root)?;
         let lock = DataRootLock::acquire(&opts.data_root)?;
         migrate::recover(&opts.data_root)?;
-        let mut database = open_db(&opts.data_root)?;
+        let mut database = match open_db(&opts.data_root) {
+            // 開けない DB のファイルは broken/ へ移し (消さない)、戻すかを尋ねる (03 §8、FR-205)。
+            Err(OpenError::Unreadable(reason)) if opts.data_root.join(DB_FILE).is_file() => {
+                let moved_to =
+                    crate::restore::move_broken(&opts.data_root, opts.clock.now().as_millis())?;
+                return Err(OpenError::Broken { moved_to, reason });
+            }
+            r => r?,
+        };
 
         let ours: Version = plan
             .version
