@@ -1,15 +1,25 @@
-//! ファイルの入れ替えを書き切る (03 §6 の「書き切る手順」と「入れ替えの rename」)。
+//! ファイルとフォルダを書き切る (03 §6 の「書き切る手順」と「入れ替えの rename」)。
 //!
-//! - Windows: `MoveFileExW` に `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` を付ける
-//!   (std の `fs::rename` は WRITE_THROUGH を付けない。Windows にはフォルダの書き切りが無いので、この旗で代える)。
-//! - Unix: rename の後に、入れ替えたフォルダを書き切る。
+//! - Windows: `MoveFileExW` に `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` を付ける。
+//!   Windows にはフォルダの書き切りが無い。NTFS はメタデータのジャーナルを順に書くので、電源断の
+//!   後は入れ替えの前か後のどちらかになる (どちらでも `migrate::recover` が直す)。
+//!   ほかのプログラム (ウイルス対策・索引・同期) が一時的にファイルを掴んでいるときの共有違反は、
+//!   少し待って再試行する。長いパスでも動くように `\\?\` を付けて渡す。
+//! - Unix: rename の後に、入れ替えたフォルダを書き切る。フォルダの書き切りに対応しない
+//!   ファイルシステム (EINVAL / ENOTSUP) では、書き切りを省く。
+//!
+//! `rename_durable` は同じフォルダの中の入れ替えに使う (書き切るのは `to` の親のフォルダだけ)。
 
 use std::io;
 use std::path::Path;
 
 /// `from` を `to` に入れ替え (既にあれば置き換え)、入れ替えをディスクへ書き切る。
 pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
-    imp::rename_durable(from, to)
+    imp::rename(from, to)?;
+    if let Some(dir) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
+        sync_dir(dir)?;
+    }
+    Ok(())
 }
 
 /// ファイルの中身をディスクへ書き切る (書き込みの権限で開く。Windows の `FlushFileBuffers` は
@@ -22,54 +32,150 @@ pub fn sync_file(path: &Path) -> io::Result<()> {
         .sync_all()
 }
 
+/// フォルダの中の名前の変更 (作成・rename・削除) を書き切る。Windows では何もしない。
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    imp::sync_dir(dir)
+}
+
+/// 所有者だけが読み書きできるフォルダを作る (NFR-503。Windows の ACL は setup のタスクで入れる)。
+pub fn create_private_dir(p: &Path) -> io::Result<()> {
+    imp::create_private_dir(p)
+}
+
+/// 所有者だけが読み書きできるファイルにする。無ければ空のファイルを作る (中身は消さない)。
+/// redb に渡す前に呼び、ほかの利用者が読める権限で作られる間を作らない。
+pub fn prepare_private_file(p: &Path) -> io::Result<()> {
+    imp::prepare_private_file(p)
+}
+
 #[cfg(windows)]
 mod imp {
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Component, Path, Prefix};
+    use std::time::Duration;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
 
-    fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    /// `\\?\` を付けた NUL 終端の UTF-16 (MAX_PATH を超えるパスのため)。
+    fn wide(p: &Path) -> io::Result<Vec<u16>> {
+        let abs = std::path::absolute(p)?;
+        let mut s: Vec<u16> = Vec::new();
+        if let Some(Component::Prefix(pre)) = abs.components().next() {
+            match pre.kind() {
+                Prefix::Verbatim(_) | Prefix::VerbatimUNC(..) | Prefix::VerbatimDisk(_) => {}
+                Prefix::UNC(..) => {
+                    // \\server\share\... → \\?\UNC\server\share\...
+                    s.extend("\\\\?\\UNC".encode_utf16());
+                    s.extend(abs.as_os_str().encode_wide().skip(1));
+                    s.push(0);
+                    return Ok(s);
+                }
+                _ => s.extend("\\\\?\\".encode_utf16()),
+            }
+        }
+        s.extend(abs.as_os_str().encode_wide());
+        s.push(0);
+        Ok(s)
     }
 
-    pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
-        let (f, t) = (wide(from), wide(to));
-        // SAFETY: 両方とも NUL で終わる UTF-16 の列で、呼び出しの間は生きている。
-        let ok = unsafe {
-            MoveFileExW(
-                f.as_ptr(),
-                t.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
+    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        let (f, t) = (wide(from)?, wide(to)?);
+        // 合わせて約 2 秒まで待つ。
+        let mut wait = Duration::from_millis(20);
+        for attempt in 0.. {
+            // SAFETY: 両方とも NUL で終わる UTF-16 の列で、呼び出しの間は生きている。
+            let ok = unsafe {
+                MoveFileExW(
+                    f.as_ptr(),
+                    t.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if ok != 0 {
+                return Ok(());
+            }
+            let e = io::Error::last_os_error();
+            let transient = matches!(
+                e.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+            );
+            if !transient || attempt == 7 {
+                return Err(e);
+            }
+            std::thread::sleep(wait);
+            wait *= 2;
         }
+        unreachable!()
+    }
+
+    pub fn sync_dir(_dir: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn create_private_dir(p: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(p)
+    }
+
+    pub fn prepare_private_file(p: &Path) -> io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(p)
+            .map(drop)
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod imp {
     use std::io;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
-    pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
-        std::fs::rename(from, to)?;
-        let dir = to
-            .parent()
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        std::fs::File::open(dir)?.sync_all()
+    // EINVAL と ENOTSUP / EOPNOTSUPP (Linux は 95、macOS は 45 と 102)。
+    fn unsupported(e: &io::Error) -> bool {
+        matches!(e.raw_os_error(), Some(22 | 45 | 95 | 102))
+            || e.kind() == io::ErrorKind::Unsupported
+    }
+
+    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    pub fn sync_dir(dir: &Path) -> io::Result<()> {
+        match std::fs::File::open(dir)?.sync_all() {
+            Err(e) if unsupported(&e) => Ok(()),
+            r => r,
+        }
+    }
+
+    pub fn create_private_dir(p: &Path) -> io::Result<()> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(p)?;
+        // 既にあったフォルダも締め直す。
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
+    }
+
+    pub fn prepare_private_file(p: &Path) -> io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(p)?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
     }
 }
 
@@ -93,5 +199,37 @@ mod tests {
     fn reports_a_missing_source() {
         let dir = crate::testutil::TempDir::new("rename-missing");
         assert!(rename_durable(&dir.path().join("nope"), &dir.path().join("x")).is_err());
+    }
+
+    #[test]
+    fn works_with_paths_longer_than_max_path() {
+        let dir = crate::testutil::TempDir::new("rename-long");
+        let mut deep = dir.path().to_path_buf();
+        for i in 0..12 {
+            deep.push(format!("{i:02}-long-directory-name-for-max-path"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(deep.as_os_str().len() > 300);
+        let (a, b) = (deep.join("a"), deep.join("b"));
+        std::fs::write(&a, b"x").unwrap();
+        rename_durable(&a, &b).unwrap();
+        assert!(b.exists());
+    }
+
+    #[test]
+    fn prepare_private_file_keeps_existing_content() {
+        let dir = crate::testutil::TempDir::new("private-file");
+        let f = dir.path().join("f");
+        std::fs::write(&f, b"keep").unwrap();
+        prepare_private_file(&f).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"keep");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }

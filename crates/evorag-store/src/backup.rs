@@ -32,7 +32,14 @@ const BATCH: usize = 10_000;
 pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError> {
     let tmp = dst.with_extension("partial");
     let _ = std::fs::remove_file(&tmp);
-    let stats = copy_into(src, &tmp)?;
+    fsutil::prepare_private_file(&tmp).map_err(|e| StoreError::Io(e.to_string()))?;
+    let stats = match copy_into(src, &tmp) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
     fsutil::rename_durable(&tmp, dst).map_err(|e| StoreError::Io(e.to_string()))?;
     Ok(stats)
 }
@@ -115,35 +122,63 @@ pub fn pre_op(
     format_version: &str,
     extra_files: &[&Path],
 ) -> Result<PathBuf, StoreError> {
-    let base = data_root.join(BACKUPS_DIR).join(PRE_OP_DIR);
-    let dir = base.join(format!("{}-{operation}-v{format_version}", stamp(now_ms)));
-    std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(e.to_string()))?;
-    logical_copy(src, &dir.join(crate::store::DB_FILE))?;
-    for f in extra_files {
-        if let Some(name) = f.file_name()
-            && f.exists()
-        {
-            let to = dir.join(name);
-            std::fs::copy(f, &to).map_err(|e| StoreError::Io(e.to_string()))?;
-            fsutil::sync_file(&to).map_err(|e| StoreError::Io(e.to_string()))?;
-        }
+    let backups = data_root.join(BACKUPS_DIR);
+    let base = backups.join(PRE_OP_DIR);
+    let io = |e: std::io::Error| StoreError::Io(e.to_string());
+    let new_backups = !backups.exists();
+    fsutil::create_private_dir(&base).map_err(io)?;
+    // 同じ名前 (同じミリ秒) の退避を上書きしないように、番号を足す。
+    let name = format!("{}-{operation}-v{format_version}", stamp(now_ms));
+    let mut dir = base.join(&name);
+    let mut n = 1;
+    while dir.exists() {
+        dir = base.join(format!("{name}-{n}"));
+        n += 1;
     }
-    prune(&base, PRE_OP_KEEP);
+    fsutil::create_private_dir(&dir).map_err(io)?;
+    let made = (|| {
+        logical_copy(src, &dir.join(crate::store::DB_FILE))?;
+        for f in extra_files {
+            if let Some(name) = f.file_name()
+                && f.exists()
+            {
+                let to = dir.join(name);
+                fsutil::prepare_private_file(&to).map_err(io)?;
+                std::fs::copy(f, &to).map_err(io)?;
+                fsutil::sync_file(&to).map_err(io)?;
+            }
+        }
+        // 退避のフォルダの作成を書き切る (電源断で退避のフォルダごと消えないように)。
+        fsutil::sync_dir(&base).map_err(io)?;
+        if new_backups {
+            fsutil::sync_dir(&backups).map_err(io)?;
+            fsutil::sync_dir(data_root).map_err(io)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = made {
+        // 作りかけの退避を世代に数えないように消す。
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    prune(&base, PRE_OP_KEEP, &dir);
     Ok(dir)
 }
 
-/// `base` の下のフォルダを名前の新しい順に `keep` 個だけ残す。消せないものは残す (次の機会に消す)。
-fn prune(base: &Path, keep: usize) {
+/// `base` の下の退避 (DB の写しを持つフォルダ) を、名前の新しい順に `keep` 個だけ残す。
+/// 今作った `keep_always` は、時計が戻されて名前が古く並んでも消さない。消せないものは残す
+/// (次の機会に消す)。DB の写しを持たないフォルダは、世代に数えず、消さない。
+fn prune(base: &Path, keep: usize, keep_always: &Path) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
     let mut dirs: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
+        .filter(|p| p.is_dir() && p.join(crate::store::DB_FILE).is_file() && p != keep_always)
         .collect();
     dirs.sort();
-    let excess = dirs.len().saturating_sub(keep);
+    let excess = dirs.len().saturating_sub(keep.saturating_sub(1));
     for d in dirs.into_iter().take(excess) {
         let _ = std::fs::remove_dir_all(d);
     }
@@ -164,15 +199,19 @@ mod tests {
     #[test]
     fn prune_keeps_the_newest() {
         let dir = crate::testutil::TempDir::new("prune");
-        for n in ["a", "b", "c", "d", "e"] {
+        for n in ["a", "b", "c", "d", "e", "f"] {
             std::fs::create_dir(dir.path().join(n)).unwrap();
+            std::fs::write(dir.path().join(n).join(crate::store::DB_FILE), b"").unwrap();
         }
-        prune(dir.path(), 3);
+        // 写しを持たないフォルダは数えない。
+        std::fs::create_dir(dir.path().join("z-empty")).unwrap();
+        // 今作った退避 (時計が戻って名前が最も古い) は残す。
+        prune(dir.path(), 3, &dir.path().join("a"));
         let mut left: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["c", "d", "e"]);
+        assert_eq!(left, ["a", "e", "f", "z-empty"]);
     }
 }

@@ -34,6 +34,7 @@ fn opts(root: &Path, version: &str) -> OpenOptions {
         kinds: vec![SAMPLE, APPEND],
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+        config_file: None,
     }
 }
 

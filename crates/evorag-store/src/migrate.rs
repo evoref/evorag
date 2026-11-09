@@ -30,6 +30,8 @@ pub struct Migration {
     pub from: &'static str,
     pub to: &'static str,
     pub run: MigrateFn,
+    /// 移行で行の数が変わる表。それ以外の表は、移行の前後で行の数が同じことを確かめる。
+    pub counts_change: &'static [Table],
 }
 
 impl std::fmt::Debug for Migration {
@@ -160,31 +162,46 @@ fn meta_get(db: &Database, key: &str) -> Option<String> {
     Some(String::from_utf8_lossy(v.value()).into_owned())
 }
 
+/// 移行を書き終えた (`migration.state == none` の) redb のファイルか。
+fn is_complete_db(path: &Path) -> bool {
+    path.exists()
+        && Database::open(path)
+            .ok()
+            .and_then(|db| meta_get(&db, meta::MIGRATION_STATE))
+            .is_some_and(|s| s == meta::MIGRATION_NONE)
+}
+
+/// 移行の跡のファイルで、残っているもの (無ければ `None`)。
+pub(crate) fn leftover(root: &Path) -> Option<&'static str> {
+    [MIGRATING_FILE, PRE_MIGRATION_FILE]
+        .into_iter()
+        .find(|f| root.join(f).exists())
+}
+
 /// 前の移行が途中で止まった跡を片付ける。データ根を開く前 (ロックを取った後) に呼ぶ。
+///
+/// 跡のファイルを消すのは、本体が redb として開け、移行を終えた状態 (`none`) と確かめられたとき
+/// だけにする。確かめられなければ何も消さない (開くときに止まり、利用者に知らせる)。
 pub(crate) fn recover(root: &Path) -> std::io::Result<()> {
     let main = root.join(DB_FILE);
     let migrating = root.join(MIGRATING_FILE);
     let pre = root.join(PRE_MIGRATION_FILE);
     if !main.exists() {
         // 入れ替えの途中 (元を退けた後、移行先を置く前) に止まった。
-        let finished = migrating.exists()
-            && Database::open(&migrating)
-                .ok()
-                .and_then(|db| meta_get(&db, meta::MIGRATION_STATE))
-                .is_some_and(|s| s == meta::MIGRATION_NONE);
-        if finished {
+        if is_complete_db(&migrating) {
             fsutil::rename_durable(&migrating, &main)?;
         } else if pre.exists() {
             fsutil::rename_durable(&pre, &main)?;
         }
     }
-    if main.exists() {
+    if (migrating.exists() || pre.exists()) && is_complete_db(&main) {
         // 入れ替えの前に止まった移行先と、入れ替えの後に消し損ねた元は要らない (退避はある)。
         for f in [&migrating, &pre] {
             if f.exists() {
                 std::fs::remove_file(f)?;
             }
         }
+        fsutil::sync_dir(root)?;
     }
     Ok(())
 }
@@ -195,7 +212,8 @@ pub(crate) enum Outcome {
     Migrated { db: Database, backup: PathBuf },
     /// 移行しなかった (元の DB のまま)。理由を示して読むだけで開く。
     Failed { db: Database, reason: String },
-    /// 入れ替えに失敗し、元の DB も開き直せない (03 §8 の「DB のファイルの破損」として扱う)。
+    /// 入れ替えに失敗し、元の DB も開き直せない。ファイルは消さずに残してある
+    /// (03 §8 の「DB のファイルの破損」として扱う)。
     Fatal(String),
 }
 
@@ -214,19 +232,25 @@ fn chain<'p>(plan: &'p FormatPlan, from: &Version) -> Option<Vec<&'p Migration>>
             .migrations
             .iter()
             .find(|m| m.from.parse::<Version>().is_ok_and(|f| f == at))?;
-        at = m.to.parse().ok()?;
+        let next: Version = m.to.parse().ok()?;
+        if next <= at {
+            // 版が進まない移行 (定義の誤り)。
+            return None;
+        }
+        at = next;
         steps.push(m);
     }
     (at == target).then_some(steps)
 }
 
-/// `db` (形式の版 `found`) を `plan` の版まで移行する。
+/// `db` (形式の版 `found`) を `plan` の版まで移行する。`extra_files` (`config.toml`) は退避に含める。
 pub(crate) fn run(
     db: Database,
     root: &Path,
     found: &Version,
     plan: &FormatPlan,
     now_ms: i64,
+    extra_files: &[&Path],
 ) -> Outcome {
     let Some(steps) = chain(plan, found) else {
         return Outcome::Failed {
@@ -234,7 +258,14 @@ pub(crate) fn run(
             reason: format!("no migration from format {found} to {}", plan.version),
         };
     };
-    let backup = match backup::pre_op(&db, root, now_ms, "migrate", &found.to_string(), &[]) {
+    let backup = match backup::pre_op(
+        &db,
+        root,
+        now_ms,
+        "migrate",
+        &found.to_string(),
+        extra_files,
+    ) {
         Ok(dir) => dir,
         Err(e) => {
             return Outcome::Failed {
@@ -254,9 +285,17 @@ pub(crate) fn run(
         match migrate_step(db, root, step, i, min_read, min_write) {
             Ok(next) => db = next,
             Err(StepError::Kept(old, reason)) => {
+                let partial = if i > 0 {
+                    format!(" (stopped at the intermediate format {})", step.from)
+                } else {
+                    String::new()
+                };
                 return Outcome::Failed {
                     db: old,
-                    reason: format!("migration {} -> {} failed: {reason}", step.from, step.to),
+                    reason: format!(
+                        "migration {} -> {} failed{partial}: {reason}",
+                        step.from, step.to
+                    ),
                 };
             }
             Err(StepError::Fatal(reason)) => return Outcome::Fatal(reason),
@@ -278,6 +317,7 @@ fn migrate_step(
         if path.exists() {
             std::fs::remove_file(&path).map_err(err)?;
         }
+        fsutil::prepare_private_file(&path).map_err(err)?;
         let dst = Database::create(&path).map_err(err)?;
         let rtx = src.begin_read().map_err(err)?;
         let mut wtx = dst.begin_write().map_err(err)?;
@@ -309,7 +349,7 @@ fn migrate_step(
             }
         }
         wtx.commit().map_err(err)?;
-        verify(&rtx, &dst)?;
+        verify(&rtx, &dst, step.counts_change)?;
         let mut done = dst.begin_write().map_err(err)?;
         done.set_durability(redb::Durability::Immediate)
             .map_err(err)?;
@@ -332,51 +372,96 @@ fn migrate_step(
     let main = root.join(DB_FILE);
     let pre = root.join(PRE_MIGRATION_FILE);
     drop(src);
-    let swapped =
-        fsutil::rename_durable(&main, &pre).and_then(|()| fsutil::rename_durable(&path, &main));
-    if let Err(e) = swapped {
-        // 元に戻して、元の DB を開き直す。
-        if !main.exists() && pre.exists() {
-            let _ = fsutil::rename_durable(&pre, &main);
+    let first = fsutil::rename_durable(&main, &pre);
+    let second = first
+        .as_ref()
+        .map_err(|_| ())
+        .ok()
+        .map(|()| fsutil::rename_durable(&path, &main));
+    // rename は済んだが書き切りで失敗を返したときのため、結果ではなくファイルの状態で判断する。
+    let swapped = main.exists() && !path.exists();
+    if !swapped {
+        // 元に戻す。戻せないときは何も消さずに止める (次の起動の `recover` が直す)。
+        if !main.exists() && pre.exists() && fsutil::rename_durable(&pre, &main).is_err() {
+            return Err(StepError::Fatal(format!(
+                "could not swap the migrated file ({}) nor put the original back; \
+                 {PRE_MIGRATION_FILE} and {MIGRATING_FILE} are kept",
+                describe(&first, second.as_ref())
+            )));
         }
         let _ = std::fs::remove_file(&path);
-        return Err(match Database::create(&main) {
-            Ok(db) => StepError::Kept(db, format!("could not swap the migrated file: {e}")),
-            Err(open) => StepError::Fatal(format!(
-                "could not swap the migrated file ({e}) nor reopen the original ({open})"
+        return match Database::open(&main) {
+            Ok(db) => Err(StepError::Kept(
+                db,
+                format!(
+                    "could not swap the migrated file: {}",
+                    describe(&first, second.as_ref())
+                ),
             )),
-        });
+            Err(open) => Err(StepError::Fatal(format!(
+                "could not reopen the original database after a failed swap: {open}"
+            ))),
+        };
     }
-    let _ = std::fs::remove_file(&pre);
-    Database::create(&main)
+    if pre.exists() {
+        let _ = std::fs::remove_file(&pre);
+        let _ = fsutil::sync_dir(root);
+    }
+    let _ = fsutil::prepare_private_file(&main);
+    Database::open(&main)
         .map_err(|e| StepError::Fatal(format!("the migrated database could not be opened: {e}")))
 }
 
-/// 件数と、記録のチェックサムを突き合わせる (03 §12.1)。記録の数が変わらず、移行先で壊れた
-/// 記録が元より増えていないこと (元から壊れていた記録は、原文のまま写って隔離を待つ)。
-fn verify(src: &redb::ReadTransaction, dst: &Database) -> Result<(), String> {
-    fn census(t: &impl ReadableTable<&'static [u8], &'static [u8]>) -> Result<(u64, u64), String> {
+fn describe(first: &std::io::Result<()>, second: Option<&std::io::Result<()>>) -> String {
+    match (first, second) {
+        (Err(e), _) => format!("moving the original aside failed: {e}"),
+        (Ok(()), Some(Err(e))) => format!("putting the migrated file in place failed: {e}"),
+        _ => "unknown".into(),
+    }
+}
+
+/// 表ごとの件数と、記録のチェックサムを突き合わせる (03 §12.1)。
+///
+/// - `meta` 以外の表は、移行が件数を変えると宣言した表 (`counts_change`) を除き、件数が同じこと。
+/// - 移行先で壊れた記録が、元より増えていないこと (元から壊れていた記録は、原文のまま写って隔離を待つ)。
+fn verify(
+    src: &redb::ReadTransaction,
+    dst: &Database,
+    counts_change: &[Table],
+) -> Result<(), String> {
+    fn census(
+        t: &impl ReadableTable<&'static [u8], &'static [u8]>,
+        check: bool,
+    ) -> Result<(u64, u64), String> {
         let (mut n, mut corrupt) = (0, 0);
         for item in t.iter().map_err(err)? {
             let (k, v) = item.map_err(err)?;
             n += 1;
-            if matches!(
-                Envelope::decode(k.value(), v.value()),
-                Err(DecodeError::Corrupt(_))
-            ) {
+            if check
+                && matches!(
+                    Envelope::decode(k.value(), v.value()),
+                    Err(DecodeError::Corrupt(_))
+                )
+            {
                 corrupt += 1;
             }
         }
         Ok((n, corrupt))
     }
-    let (n_src, c_src) = census(&src.open_table(RECORDS).map_err(err)?)?;
     let rtx = dst.begin_read().map_err(err)?;
-    let (n_dst, c_dst) = census(&rtx.open_table(RECORDS).map_err(err)?)?;
-    if n_src != n_dst {
-        return Err(format!("record count changed from {n_src} to {n_dst}"));
-    }
-    if c_dst > c_src {
-        return Err(format!("{} migrated record(s) are corrupt", c_dst - c_src));
+    for t in Table::ALL {
+        if t == Table::Meta {
+            continue;
+        }
+        let records = t == Table::Records;
+        let (n_src, c_src) = census(&src.open_table(t.def()).map_err(err)?, records)?;
+        let (n_dst, c_dst) = census(&rtx.open_table(t.def()).map_err(err)?, records)?;
+        if n_src != n_dst && !counts_change.contains(&t) {
+            return Err(format!("{t:?} row count changed from {n_src} to {n_dst}"));
+        }
+        if c_dst > c_src {
+            return Err(format!("{} migrated record(s) are corrupt", c_dst - c_src));
+        }
     }
     Ok(())
 }

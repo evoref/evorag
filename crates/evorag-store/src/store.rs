@@ -13,6 +13,7 @@ use evorag_types::{Clock, Id, IdGen, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::envelope::{DecodeError, Envelope};
+use crate::fsutil;
 use crate::key::{self, KeyBuf, OwnedPart};
 use crate::lock::{DataRootLock, LockError};
 use crate::meta;
@@ -86,6 +87,8 @@ pub struct OpenOptions {
     pub kinds: Vec<KindSpec>,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
+    /// 設定のファイル (`config.toml`)。移行の前の退避に含める (03 §7.2)。
+    pub config_file: Option<PathBuf>,
 }
 
 /// 書き込みを断る理由。
@@ -268,39 +271,39 @@ fn classify(kind: &str, id: Id, k: &[u8], v: &[u8]) -> Read {
     }
 }
 
-#[cfg(unix)]
-fn create_private_dir(p: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(p)
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(p: &Path) -> std::io::Result<()> {
-    // Windows の所有者だけの ACL (NFR-503) は、setup のタスクで入れる。既定の置き場所
-    // (%LOCALAPPDATA%) は利用者ごとのフォルダ。
-    std::fs::create_dir_all(p)
-}
-
-#[cfg(unix)]
-fn make_private_file(p: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn make_private_file(_p: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-fn open_db(path: &Path) -> Result<Database, OpenError> {
-    Database::create(path).map_err(|e| match e {
+fn map_db_error(e: redb::DatabaseError) -> OpenError {
+    match e {
         redb::DatabaseError::DatabaseAlreadyOpen => OpenError::DatabaseInUse,
         redb::DatabaseError::Storage(redb::StorageError::Io(io)) => OpenError::Io(io),
         other => OpenError::Unreadable(other.to_string()),
-    })
+    }
+}
+
+/// DB のファイルを開く。新しく作るのは、データ根に DB も移行の跡も無いときだけ
+/// (移行の途中のファイルが残っているのに空の DB を作ると、次の後始末で元を失うため)。
+fn open_db(root: &Path) -> Result<Database, OpenError> {
+    let main = root.join(DB_FILE);
+    match std::fs::metadata(&main) {
+        Ok(m) if m.len() > 0 => {
+            fsutil::prepare_private_file(&main)?;
+            Database::open(&main).map_err(map_db_error)
+        }
+        Ok(_) => {
+            // 作った直後 (中身を書く前) に止まった空のファイル。
+            fsutil::prepare_private_file(&main)?;
+            Database::create(&main).map_err(map_db_error)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(left) = migrate::leftover(root) {
+                return Err(OpenError::Unreadable(format!(
+                    "{DB_FILE} is missing but {left} remains; not creating a new database"
+                )));
+            }
+            fsutil::prepare_private_file(&main)?;
+            Database::create(&main).map_err(map_db_error)
+        }
+        Err(e) => Err(OpenError::Io(e)),
+    }
 }
 
 fn read_meta_db(database: &Database) -> Result<Option<BTreeMap<String, String>>, StoreError> {
@@ -339,12 +342,10 @@ impl Store {
 
     /// 書く形式と移行を指定して開く (移行の試験のため)。
     pub fn open_with(opts: OpenOptions, plan: FormatPlan) -> Result<(Self, OpenReport), OpenError> {
-        create_private_dir(&opts.data_root)?;
+        fsutil::create_private_dir(&opts.data_root)?;
         let lock = DataRootLock::acquire(&opts.data_root)?;
         migrate::recover(&opts.data_root)?;
-        let path = opts.data_root.join(DB_FILE);
-        let mut database = open_db(&path)?;
-        make_private_file(&path)?;
+        let mut database = open_db(&opts.data_root)?;
 
         let ours: Version = plan
             .version
@@ -370,7 +371,8 @@ impl Store {
             }
             if format < ours {
                 let now = opts.clock.now().as_millis();
-                match migrate::run(database, &opts.data_root, &format, &plan, now) {
+                let extra: Vec<&Path> = opts.config_file.as_deref().into_iter().collect();
+                match migrate::run(database, &opts.data_root, &format, &plan, now, &extra) {
                     migrate::Outcome::Migrated { db, backup } => {
                         database = db;
                         report.migrated_from = Some(format.to_string());
