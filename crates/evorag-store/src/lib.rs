@@ -9,6 +9,7 @@ pub mod inspect;
 mod journal;
 mod json;
 pub mod key;
+pub mod location;
 pub mod lock;
 pub mod meta;
 pub mod migrate;
@@ -26,8 +27,8 @@ pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};
 pub use store::{
     Census, DB_FILE, DeriveFn, Durability, FORMAT_VERSION, KIND_QUARANTINE, KindCount, KindSpec,
-    OpenError, OpenOptions, OpenReport, Read, ReadOnlyReason, ReadTxn, Store, StoreError,
-    WriteToken, WriteTxn,
+    OpenError, OpenOptions, OpenReport, RESERVE_FILE, Read, ReadOnlyReason, ReadTxn, Store,
+    StoreError, WriteToken, WriteTxn,
 };
 pub use writer::{
     Priority, Reply, WriteError, WriteOp, WriteOutcome, WriteRequest, Writer, WriterHandle,

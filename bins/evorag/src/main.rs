@@ -241,6 +241,8 @@ fn main() -> ExitCode {
         generation: generation.clone(),
         reserve_for_output: cfg.context.reserve_for_output,
         backup_dir: backup_dir.clone(),
+        allow_unsafe_location: cfg.storage.allow_unsafe_location.unwrap_or(false),
+        probe: evorag_core::Probe::system(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };
@@ -299,6 +301,14 @@ fn main() -> ExitCode {
                 &[("url", &url), ("detail", &e.to_string())],
             );
         }
+        Err(StartError::UnsafeLocation(d)) => {
+            return fail(
+                &catalog,
+                2,
+                MessageKey::CliUnsafeLocation,
+                &[("detail", &d)],
+            );
+        }
         Err(
             e @ (StartError::Store(OpenError::Lock(LockError::InUse { .. }))
             | StartError::Store(OpenError::DatabaseInUse)
@@ -330,6 +340,12 @@ fn main() -> ExitCode {
             n_ctx: report.server.n_ctx,
         },
     );
+    for w in &report.location_warnings {
+        let m = app
+            .catalog
+            .with(MessageKey::CliLocationWarning, &[("detail", w)]);
+        app.notices.push(m);
+    }
     if report.prompt_language_mismatch {
         let m = app.catalog.with(
             MessageKey::CliPromptLanguageFixed,

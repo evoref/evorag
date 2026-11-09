@@ -56,6 +56,8 @@ fn crash_child() {
             generation: Generation::default(),
             reserve_for_output: None,
             backup_dir: None,
+            allow_unsafe_location: false,
+            probe: evorag_core::Probe::system(),
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),
         };

@@ -43,8 +43,29 @@ pub struct CoreConfig {
     pub reserve_for_output: Option<usize>,
     /// 設定 `storage.backup_dir` (03 §7.1)。省くとデータ根の `backups/`。
     pub backup_dir: Option<PathBuf>,
+    /// 設定 `storage.allow_unsafe_location` (03 §2.2)。危ない置き場所でも警告だけにする。
+    pub allow_unsafe_location: bool,
+    /// 置き場所と空きを調べる関数 (試験で差し替える)。
+    pub probe: Probe,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
+}
+
+/// 置き場所と空きを調べる関数 (03 §2.2、§8)。
+#[derive(Clone, Copy)]
+pub struct Probe {
+    pub location: fn(&std::path::Path) -> evorag_store::location::Verdict,
+    pub free_bytes: fn(&std::path::Path) -> Option<u64>,
+}
+
+impl Probe {
+    /// OS に問い合わせる。
+    pub fn system() -> Self {
+        Self {
+            location: evorag_store::location::check,
+            free_bytes: evorag_store::location::free_bytes,
+        }
+    }
 }
 
 /// 起動できない理由。
@@ -57,6 +78,9 @@ pub enum StartError {
     Store(#[from] OpenError),
     #[error("the data root cannot be written: {0}")]
     ReadOnly(String),
+    /// データ根か退避先が危ない置き場所 (ネットワーク・同期フォルダ、03 §2.2、FR-216)。
+    #[error("unsafe location: {0}")]
+    UnsafeLocation(String),
     #[error("storage error: {0}")]
     Storage(String),
 }
@@ -69,6 +93,8 @@ pub struct StartReport {
     pub prompt_language: PromptLanguage,
     /// 設定の `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
     pub prompt_language_mismatch: bool,
+    /// 置き場所の注意 (FAT / exFAT、または設定で許した危ない置き場所)。
+    pub location_warnings: Vec<String>,
 }
 
 /// 生成の取り消しの理由。
@@ -106,6 +132,7 @@ struct Inner {
     reserve: Option<usize>,
     language: PromptLanguage,
     backup_dir: Option<PathBuf>,
+    probe: Probe,
     /// 裏で走らせている退避・退避の整理の task (終了のときに待つ。ストアを持ったまま戻らないように)。
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// 命令の待ち行列を回す task と、その止め方。
@@ -142,6 +169,23 @@ impl Core {
             .server_info()
             .await
             .map_err(StartError::LlmUnreachable)?;
+
+        // 危ない置き場所は、既定で起動を拒否する (03 §2.2)。データ根と退避先の両方を調べる。
+        let mut location_warnings = Vec::new();
+        let mut places = vec![cfg.data_root.clone()];
+        places.extend(cfg.backup_dir.clone());
+        for place in &places {
+            match (cfg.probe.location)(place) {
+                evorag_store::location::Verdict::Ok => {}
+                evorag_store::location::Verdict::Warn(w) => location_warnings.push(w),
+                evorag_store::location::Verdict::Unsafe(u) if cfg.allow_unsafe_location => {
+                    location_warnings.push(u);
+                }
+                evorag_store::location::Verdict::Unsafe(u) => {
+                    return Err(StartError::UnsafeLocation(u));
+                }
+            }
+        }
 
         let mut kinds = evorag_memory::kinds();
         kinds.sort_by_key(|k| k.name);
@@ -199,6 +243,7 @@ impl Core {
             reserve: cfg.reserve_for_output,
             language,
             backup_dir: cfg.backup_dir,
+            probe: cfg.probe,
             background: Mutex::new(Vec::new()),
             command_loop: Mutex::new(None),
         });
@@ -231,6 +276,9 @@ impl Core {
                 .ok()
                 .and_then(|r| evorag_memory::pending_purge_jobs(&r).ok())
                 .unwrap_or_default();
+            if !enough_space(&worker) {
+                return;
+            }
             for (job, ids) in jobs {
                 purge(&worker, job, &ids);
             }
@@ -246,6 +294,7 @@ impl Core {
             store: open_report,
             prompt_language: language,
             prompt_language_mismatch: language != cfg.prompt_language,
+            location_warnings,
         };
         Ok((core, rx, report))
     }
@@ -329,9 +378,13 @@ impl Core {
             let _ = t.await;
         }
         // 今日の退避がまだなら作る (読み取りのトランザクションで写すので、書き手と並んでよい)。
-        let store = self.inner.store.clone();
-        let dir = self.inner.backup_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || store.daily_backup(dir.as_deref())).await;
+        let worker = self.inner.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if enough_space(&worker) {
+                let _ = worker.store.daily_backup(worker.backup_dir.as_deref());
+            }
+        })
+        .await;
         self.inner.writer.shutdown();
         let thread = self
             .inner
@@ -523,8 +576,36 @@ async fn delete(inner: &Arc<Inner>) {
         .push(task);
 }
 
+/// 退避と退避の整理の前に、空きが DB の大きさ以上あるかを確かめる (03 §7.1、§8)。足りなければ
+/// 裏の処理を止めて知らせる (会話の追記は続ける、FR-217)。
+fn enough_space(inner: &Inner) -> bool {
+    let root = inner.store.data_root();
+    let need = std::fs::metadata(root.join(evorag_store::DB_FILE)).map_or(0, |m| m.len());
+    let place = inner
+        .backup_dir
+        .clone()
+        .unwrap_or_else(|| root.to_path_buf());
+    match (inner.probe.free_bytes)(&place) {
+        Some(free) if free < need => {
+            emit(
+                inner,
+                Event::BackgroundPaused {
+                    reason: Message::new(MessageKey::LowSpace)
+                        .arg("free", (free / (1024 * 1024)).to_string())
+                        .arg("need", need.div_ceil(1024 * 1024).to_string()),
+                },
+            );
+            false
+        }
+        _ => true,
+    }
+}
+
 /// 退避の整理の job を行い、終えたら job を消す。失敗したら job を残す (次の起動で続ける)。
 fn purge(inner: &Inner, job: Id, ids: &[Id]) {
+    if !enough_space(inner) {
+        return;
+    }
     let root = inner.store.data_root().to_path_buf();
     if evorag_store::restore::purge_backups(&root, inner.backup_dir.as_deref(), ids).is_ok() {
         let _ = inner

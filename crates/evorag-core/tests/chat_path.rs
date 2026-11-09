@@ -39,6 +39,8 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         generation: Generation::default(),
         reserve_for_output: None,
         backup_dir: None,
+        allow_unsafe_location: false,
+        probe: evorag_core::Probe::system(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }
@@ -478,4 +480,60 @@ async fn deleting_a_session_purges_it_from_the_backups() {
     for b in backups {
         assert!(!file_contains(&b, "退避から消える本文"), "{}", b.display());
     }
+}
+
+fn unsafe_place(_: &Path) -> evorag_store::location::Verdict {
+    evorag_store::location::Verdict::Unsafe("synced folder (test)".into())
+}
+
+fn no_space(_: &Path) -> Option<u64> {
+    Some(0)
+}
+
+/// verifies: AC-FR-216-1 (コアの層: 既定で起動を拒否し、設定で警告だけにできる)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsafe_location_is_refused_unless_allowed() {
+    let dir = TempDir::new("core-unsafe");
+    let llm = cassette(8192, "");
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.probe.location = unsafe_place;
+    let r = Core::start(cfg, Arc::new(llm.clone())).await;
+    assert!(matches!(r, Err(StartError::UnsafeLocation(_))));
+    assert!(!dir.path().join("evorag.redb").exists());
+
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.probe.location = unsafe_place;
+    cfg.allow_unsafe_location = true;
+    let (core, _rx, report) = Core::start(cfg, Arc::new(llm)).await.unwrap();
+    assert_eq!(report.location_warnings.len(), 1);
+    core.shutdown().await;
+}
+
+/// verifies: AC-FR-217-1
+#[tokio::test(flavor = "multi_thread")]
+async fn low_space_pauses_background_work_but_the_conversation_continues() {
+    let dir = TempDir::new("core-low-space");
+    let llm = cassette(8192, OK);
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.probe.free_bytes = no_space;
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm)).await.unwrap();
+    let ev = until(&mut rx, |e| matches!(e, Event::BackgroundPaused { .. })).await;
+    let Some(Event::BackgroundPaused { reason }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(reason.key, MessageKey::LowSpace);
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "空きが無くても話せる".into(),
+    });
+    let ev = until(&mut rx, finished).await;
+    let Some(Event::ResponseFinished { turn, .. }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(turn.status, TurnStatus::Completed);
+    core.shutdown().await;
+    assert!(
+        !dir.path().join("backups").join("daily").exists(),
+        "no backup was taken"
+    );
 }
