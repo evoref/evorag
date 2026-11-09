@@ -243,6 +243,8 @@ jobs:
       - name: run the tests without network
         run: |
           set -euo pipefail
+          # runner の作業フォルダは nonet から読めないので、写しの中で走らせる。
+          cd /tmp/nonet-ws
           sudo -u nonet -H env NEXTEST_PROFILE=ci \
             cargo-nextest nextest run \
               --archive-file /tmp/nonet-tests.tar.zst \
