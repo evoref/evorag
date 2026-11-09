@@ -12,6 +12,7 @@ publish.workspace = true
 evorag-types = { workspace = true }
 evorag-core = { workspace = true }
 ratatui = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 toml = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }

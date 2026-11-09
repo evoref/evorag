@@ -15,7 +15,16 @@ path = "src/main.rs"
 [dependencies]
 evorag-types = { workspace = true }
 evorag-core = { workspace = true }
+evorag-llm = { workspace = true }
+evorag-store = { workspace = true }
 evorag-tui = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+toml = { workspace = true }
+
+[dev-dependencies]
+evorag-store = { workspace = true }
 
 [lints]
 workspace = true
