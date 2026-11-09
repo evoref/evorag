@@ -467,46 +467,46 @@ note = "verifies: の注記が無い (注記を足すこと)。記録した言�
 id = "AC-NFR-101-1"
 requirement = "NFR-101"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_101_startup"]
 manual = ""
-note = "09 §5 の計測が未整備。01 §5 では AC-NFR-101〜104-1 の 1 行。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 会話 1 万ターンのデータ根で、起動から最新のセッションを開くまでの中央値。"
 
 [[ac]]
 id = "AC-NFR-102-1"
 requirement = "NFR-102"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_102_send_to_request"]
 manual = ""
-note = "09 §5 の計測が未整備。01 §5 では AC-NFR-101〜104-1 の 1 行。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 発話を保存してから llama-server へ要求を出すまでの平均 (再生のサーバ)。"
 
 [[ac]]
 id = "AC-NFR-103-1"
 requirement = "NFR-103"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-tui/tests/bench.rs::bm_103_key_to_render"]
 manual = ""
-note = "09 §5 の計測が未整備。01 §5 では AC-NFR-101〜104-1 の 1 行。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 500 ターンの会話で、キーの処理と 1 回の描画の p95。"
 
 [[ac]]
 id = "AC-NFR-104-1"
 requirement = "NFR-104"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-tui/tests/bench.rs::bm_104_token_to_render"]
 manual = ""
-note = "09 §5 の計測が未整備。01 §5 では AC-NFR-101〜104-1 の 1 行。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 500 ターンの会話で、トークンの処理と 1 回の描画の p95。"
 
 [[ac]]
 id = "AC-NFR-201-1"
 requirement = "NFR-201"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_201_memory"]
 manual = ""
-note = "09 §5 の計測が未整備。01 §5 では 201-1 / 204-1 の 1 行。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 最大の常駐の大きさ (データ根を作る分も含むので多めに出る)。"
 
 [[ac]]
 id = "AC-NFR-204-1"
@@ -647,10 +647,10 @@ note = "Windows は今の利用者だけを許す保護した DACL (evorag が�
 id = "AC-NFR-504-1"
 requirement = "NFR-504"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/live_llm.rs::instructions_in_earlier_conversations_are_not_followed"]
 manual = ""
-note = "LLM を使う試験 (09 §3.4) が未整備。枠の区切りの試験は AC-FR-407-1。"
+note = "cargo xtask live-llm (実際の llama-server、EVORAG_LIVE_LLM_URL)。5 回のうち 4 回以上で合格 (09 §3.4)。指示の入った会話が添えられた回だけを数える。"
 
 [[ac]]
 id = "AC-NFR-506-1"
@@ -692,10 +692,10 @@ note = "未 (`setup` が済んだので実施できる)。"
 id = "AC-NFR-701-1"
 requirement = "NFR-701"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = [".github/workflows/nightly.yml#determinism"]
 manual = ""
-note = "試験を 2 回繰り返して同じ結果になることの確認手段が見当たらない。"
+note = "毎晩、試験を 2 回流して、試験ごとの結果が同じで失敗が無いこと (Windows と Linux)。"
 
 [[ac]]
 id = "AC-NFR-702-1"

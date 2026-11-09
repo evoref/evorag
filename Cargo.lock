@@ -655,6 +655,7 @@ dependencies = [
  "evorag-core",
  "evorag-types",
  "ratatui",
+ "serde_json",
  "tokio",
  "toml",
  "unicode-segmentation",

@@ -16,7 +16,9 @@
 | Must の AC | `tests/ac-checklist.toml` で、すべての v0.1 の AC が `test`・`manual`・`review` のどれかで合格 (status = `missing` が残らない) | | |
 | 障害の注入 | `EVORAG_FAULT_RUNS=1000 cargo nextest run -p evorag-core --test fault_injection` (nightly でも可) で失敗 0 | | |
 | 互換 | 09 §3.6 の試験 (golden fixture・新しい版のデータを読むだけで開く) が CI で通る | | |
-| 性能 | 09 §5.1 の目標を基準機で満たす (NFR-101〜104・201。NFR-204 は `cargo xtask dist` が判定) | | |
+| 性能 | 09 §5.1 の目標を基準機で満たす。`cargo xtask bench` (NFR-101〜104・201、結果は `docs/perf/v0.1/`)。NFR-204 は `cargo xtask dist` が判定 | | |
+| 実際の LLM | `EVORAG_LIVE_LLM_URL=… cargo xtask live-llm` で、以前の会話に紛れ込ませた指示に従わない (AC-NFR-504-1、5 回中 4 回以上) | | |
+| 再現性 | nightly の `determinism` (試験を 2 回流して結果が同じ、AC-NFR-701-1) が通っている | | |
 | 手動の受入 | `docs/compat/v0.1/acceptance.md` がすべて「合」 | | |
 | 文書 | `dist/README.md` とリリースノートに、既知の制約・更新と巻き戻しの手順・データの移行の有無がある | | |
 | 秘密 | 配布物・docs・試験データに秘密と個人情報が無い (12 §6 の PC-1・PC-2・PC-6) | | |
