@@ -40,6 +40,9 @@ evorag-tui = { path = "crates/evorag-tui" }
 
 # 外部の crate (版は workspace で 1 か所に決める)。
 serde = { version = "1.0.228", features = ["derive"] }
+ciborium = "0.2.2"
+thiserror = "2.0.17"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
