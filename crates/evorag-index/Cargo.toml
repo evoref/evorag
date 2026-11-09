@@ -1,0 +1,16 @@
+[package]
+name = "evorag-index"
+description = "evorag: 語彙の索引とベクトルの索引、セグメントの形式と入れ替え"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-store = { workspace = true }
+
+[lints]
+workspace = true

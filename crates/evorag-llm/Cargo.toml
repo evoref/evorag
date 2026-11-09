@@ -1,0 +1,15 @@
+[package]
+name = "evorag-llm"
+description = "evorag: llama-server のクライアント (chat・embed・rerank・tokenize・props・slots)。TLS を持たない"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,3 @@
+# clippy の設定 (docs/11-dev-workflow.md §1)。有効にする lint は Cargo.toml の [workspace.lints] に置く。
+# 試験のコードでは dbg! を許す。
+allow-dbg-in-tests = true

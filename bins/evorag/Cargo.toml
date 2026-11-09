@@ -1,0 +1,21 @@
+[package]
+name = "evorag"
+description = "evorag: ローカルの llama-server を使うチャットと長期メモリのツール"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "evorag"
+path = "src/main.rs"
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-core = { workspace = true }
+evorag-tui = { workspace = true }
+
+[lints]
+workspace = true

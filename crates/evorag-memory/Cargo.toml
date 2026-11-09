@@ -1,0 +1,16 @@
+[package]
+name = "evorag-memory"
+description = "evorag: メモリの書き込み・統合・読み出し、事実の入口、訂正の検証"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-store = { workspace = true }
+
+[lints]
+workspace = true

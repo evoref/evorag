@@ -1,0 +1,16 @@
+[package]
+name = "evorag-tui"
+description = "evorag: TUI (描画と入力)。`evorag-types` と `evorag-core` の公開 API だけを使う (02 §4.3 の R1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-core = { workspace = true }
+
+[lints]
+workspace = true

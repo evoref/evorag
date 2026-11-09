@@ -1,0 +1,53 @@
+# evorag の workspace (docs/11-dev-workflow.md §1、crate の構成は docs/02-architecture.md §4)。
+# v0.1 で入る crate だけを置く。evorag-learn (v0.4)・evorag-cartridge (v0.5)・evorag-update (v0.3) は、その版で足す。
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/evorag-types",
+    "crates/evorag-store",
+    "crates/evorag-llm",
+    "crates/evorag-index",
+    "crates/evorag-memory",
+    "crates/evorag-retrieval",
+    "crates/evorag-core",
+    "crates/evorag-tui",
+    "bins/evorag",
+    "xtask",
+]
+
+[workspace.package]
+# v0.1.0 のリリースまでは内部カウンタ 0.0.x (docs/11-dev-workflow.md §9.1)。
+version = "0.0.0"
+edition = "2024"
+# rust-toolchain.toml の版と同じにする (docs/11-dev-workflow.md §1.1)。
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/evoref/evorag"
+# crates.io には公開しない (コアの API は同じプロセスの中だけで使う、docs/02-architecture.md §3)。
+publish = false
+
+[workspace.dependencies]
+# workspace の中の crate。依存の方向は docs/02-architecture.md §4.2。
+evorag-types = { path = "crates/evorag-types" }
+evorag-store = { path = "crates/evorag-store" }
+evorag-llm = { path = "crates/evorag-llm" }
+evorag-index = { path = "crates/evorag-index" }
+evorag-memory = { path = "crates/evorag-memory" }
+evorag-retrieval = { path = "crates/evorag-retrieval" }
+evorag-core = { path = "crates/evorag-core" }
+evorag-tui = { path = "crates/evorag-tui" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.release]
+# 配布物の大きさと起動の速さのため (docs/12-licensing-distribution.md §5)。
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
