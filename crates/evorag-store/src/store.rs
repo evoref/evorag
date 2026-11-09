@@ -167,6 +167,12 @@ pub enum StoreError {
     Db(#[from] redb::Error),
     #[error("i/o error: {0}")]
     Io(String),
+    /// 一度だけ書く `meta` の値が、もう別の値で書かれている (07 §6.1 のプロンプトの言語など)。
+    #[error("meta `{key}` is already `{existing}`")]
+    MetaConflict { key: String, existing: String },
+    /// 書き込みの操作で書いてよい `meta` のキーではない。
+    #[error("meta `{0}` cannot be written by a request")]
+    MetaNotWritable(String),
 }
 
 pub(crate) fn db<E: Into<redb::Error>>(e: E) -> StoreError {
@@ -803,6 +809,30 @@ impl WriteTxn<'_> {
             moved += 1;
         }
         Ok(moved)
+    }
+
+    /// `meta` の値を一度だけ書く。同じ値ならそのまま、違う値なら `MetaConflict`。
+    /// 書いてよいのは、一度書いたら変えないキー (`prompt.language`、07 §6.1) だけ。
+    pub fn set_meta_once(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
+        if key != meta::PROMPT_LANGUAGE {
+            return Err(StoreError::MetaNotWritable(key.to_owned()));
+        }
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        let existing = m
+            .get(key.as_bytes())
+            .map_err(db)?
+            .map(|v| String::from_utf8_lossy(v.value()).into_owned());
+        match existing {
+            Some(e) if e == value => Ok(()),
+            Some(e) => Err(StoreError::MetaConflict {
+                key: key.to_owned(),
+                existing: e,
+            }),
+            None => {
+                m.insert(key.as_bytes(), value.as_bytes()).map_err(db)?;
+                Ok(())
+            }
+        }
     }
 
     pub fn commit(self) -> Result<(), StoreError> {

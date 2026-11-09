@@ -64,6 +64,11 @@ pub enum WriteOp {
         bytes: Vec<u8>,
     },
     DeleteBlobs(Id),
+    /// 一度だけ書く `meta` の値 (`WriteTxn::set_meta_once`)。
+    SetMetaOnce {
+        key: String,
+        value: String,
+    },
 }
 
 /// 書き込みの依頼。`ops` は 1 つのトランザクションで、すべて書くか、何も書かない。
@@ -302,6 +307,7 @@ fn apply_op(tx: &mut WriteTxn<'_>, op: &WriteOp, out: &mut WriteOutcome) -> Resu
         WriteOp::DeleteBlobs(id) => {
             tx.delete_blobs(*id)?;
         }
+        WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
     }
     Ok(())
 }
