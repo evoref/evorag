@@ -1,0 +1,19 @@
+{
+  "props": {
+    "build_info": "b1-replay",
+    "model_path": "/models/replay-model.gguf",
+    "total_slots": 2,
+    "default_generation_settings": { "n_ctx": 8192 }
+  },
+  "models": {
+    "data": [
+      { "id": "replay-model", "meta": { "n_params": 1000, "size": 2000, "n_vocab": 3000, "n_ctx_train": 32768 } }
+    ]
+  },
+  "chats": [
+    { "events": [ { "delta": "こんにちは。" }, { "wait_ms": 1 }, { "delta": "ご用件は?" }, { "done": { "finish_reason": "stop", "prompt_tokens": 12, "completion_tokens": 8 } } ] },
+    { "events": [ { "delta": "途中まで" }, { "cut": "connection reset" } ] },
+    { "events": [ { "delta": "考え中" }, { "hang": true } ] },
+    { "http_error": { "status": 503, "body": "loading model" } }
+  ]
+}
