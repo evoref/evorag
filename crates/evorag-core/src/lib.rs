@@ -9,6 +9,7 @@
 //! 書き手のスレッドはここで作る (02 §4.3 の R7)。tokio の実行器の中で使う。
 
 mod context;
+pub mod localtime;
 mod prompt;
 mod views;
 

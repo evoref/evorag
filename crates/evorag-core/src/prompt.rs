@@ -35,31 +35,13 @@ const EN: &str = "You are an assistant running on the user's own computer. Answe
 If you do not know something, say so instead of making it up. \
 Reply in the language the user writes in.";
 
-/// UTC のミリ秒を `YYYY-MM-DD HH:MM UTC` にする。
-fn utc(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let days = secs.div_euclid(86_400);
-    let sod = secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
-        sod / 3600,
-        sod / 60 % 60
-    )
-}
-
 pub fn system_prompt(lang: PromptLanguage, now_ms: i64) -> String {
     match lang {
-        PromptLanguage::Ja => format!("{JA}\n今の日時: {}", utc(now_ms)),
-        PromptLanguage::En => format!("{EN}\nCurrent date and time: {}", utc(now_ms)),
+        PromptLanguage::Ja => format!("{JA}\n今の日時: {}", crate::localtime::datetime(now_ms)),
+        PromptLanguage::En => format!(
+            "{EN}\nCurrent date and time: {}",
+            crate::localtime::datetime(now_ms)
+        ),
     }
 }
 
@@ -70,7 +52,7 @@ mod tests {
     #[test]
     fn includes_the_date() {
         let p = system_prompt(PromptLanguage::Ja, 1_762_650_000_000);
-        assert!(p.ends_with("2025-11-09 01:00 UTC"), "{p}");
-        assert!(system_prompt(PromptLanguage::En, 0).contains("1970-01-01 00:00 UTC"));
+        assert!(p.contains("今の日時: 2025-11-09"), "{p}");
+        assert!(system_prompt(PromptLanguage::En, 0).contains("Current date and time: 19"));
     }
 }
