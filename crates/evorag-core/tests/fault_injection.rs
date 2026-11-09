@@ -10,6 +10,8 @@
 //!
 //! 回数は `EVORAG_FAULT_RUNS` (既定 100。v0.1 のリリースゲートは 1,000、09 §8.2)。
 //! 強制終了の時点は、起動 (退避・ジャーナルの取り込みを含む)・発話の保存・応答の保存の最中に散らばる。
+//! 4 回に 1 回は起動してからの時間で、ほかは READY からの時間で殺す (起動の速さが機械で違っても、
+//! 保存の最中に殺す回が必ずあるように)。
 //!
 //! verifies: AC-NFR-301-1
 
@@ -125,8 +127,17 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// 子を起動し、`kill_after` (READY から) で強制終了する。子が知らせた行を返す。
-fn run_and_kill(root: &Path, kill_after: Duration) -> Vec<String> {
+/// いつから測って殺すか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillFrom {
+    /// 起動してから (起動の最中に殺す回)。
+    Spawn,
+    /// READY を知らせてから (保存の最中に殺す回)。起動の速さ (CI の機械の速さ) に左右されない。
+    Ready,
+}
+
+/// 子を起動し、`from` から `kill_after` で強制終了する。子が知らせた行を返す。
+fn run_and_kill(root: &Path, from: KillFrom, kill_after: Duration) -> Vec<String> {
     let exe = std::env::current_exe().unwrap();
     let mut child = KillOnDrop(
         Process::new(exe)
@@ -160,11 +171,14 @@ fn run_and_kill(root: &Path, kill_after: Duration) -> Vec<String> {
             }
         })
     };
-    // 起動の最中に殺す回もある (READY を待たずに時間で殺す)。
-    let started = Instant::now();
-    let _ = ready_rx.recv_timeout(kill_after);
-    let rest = kill_after.saturating_sub(started.elapsed());
-    std::thread::sleep(rest.min(kill_after));
+    match from {
+        KillFrom::Spawn => std::thread::sleep(kill_after),
+        KillFrom::Ready => {
+            // READY が来ないまま止まった子も、待ちすぎずに殺す。
+            let _ = ready_rx.recv_timeout(Duration::from_secs(30));
+            std::thread::sleep(kill_after);
+        }
+    }
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     reader.join().unwrap();
@@ -213,7 +227,13 @@ fn committed_turns_survive_kills_at_random_points() {
     let (mut saved_total, mut answered_total) = (0usize, 0usize);
     for run in 0..runs {
         let kill_after = Duration::from_millis(next(&mut seed) % 400);
-        let lines = run_and_kill(dir.path(), kill_after);
+        // 4 回に 1 回は起動の最中 (退避・ジャーナルの取り込み・索引の突き合わせ) に殺す。
+        let from = if run % 4 == 0 {
+            KillFrom::Spawn
+        } else {
+            KillFrom::Ready
+        };
+        let lines = run_and_kill(dir.path(), from, kill_after);
         let saved: BTreeSet<String> = lines
             .iter()
             .filter_map(|l| l.strip_prefix("SAVED ").map(str::to_owned))
