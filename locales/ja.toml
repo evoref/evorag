@@ -29,6 +29,7 @@ interrupted_by_shutdown = "終了のため中断しました。受け取った�
 [ui]
 you = "あなた"
 assistant = "evorag"
+thinking = "(考えています…)"
 quit_hint = "もう一度 Ctrl+C で終了します。"
 default_session_title = "新しい会話"
 
@@ -40,6 +41,7 @@ no_reply = "(応答なし)"
 [ui.status]
 idle = "待機中"
 generating = "生成中 (Esc で中断)"
+thinking = "考えています (Esc で中断)"
 
 [ui.title]
 session = "セッション: {title}"

@@ -177,6 +177,12 @@ pub(crate) fn chat_body(req: &ChatRequest) -> Value {
     if let Some(m) = &req.model {
         o.insert("model".into(), m.clone().into());
     }
+    for (k, v) in &req.extra {
+        // evorag が決めた項目は上書きしない (07 §4.2)。
+        if !o.contains_key(k) {
+            o.insert(k.clone(), v.clone());
+        }
+    }
     body
 }
 
@@ -288,6 +294,7 @@ mod tests {
             generation: Generation::default(),
             id_slot: None,
             model: None,
+            extra: Default::default(),
         };
         let b = chat_body(&req);
         assert_eq!(b["stream"], true);
@@ -295,8 +302,15 @@ mod tests {
         assert!(b.get("id_slot").is_none() && b.get("model").is_none());
         req.id_slot = Some(0);
         req.model = Some("m".into());
+        req.extra.insert(
+            "chat_template_kwargs".into(),
+            json!({"enable_thinking": false}),
+        );
+        req.extra.insert("stream".into(), false.into());
         let b = chat_body(&req);
         assert_eq!(b["id_slot"], 0);
         assert_eq!(b["model"], "m");
+        assert_eq!(b["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(b["stream"], true, "extra must not override evorag's fields");
     }
 }

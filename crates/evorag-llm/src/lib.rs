@@ -19,7 +19,8 @@ pub use endpoint::Endpoint;
 pub use http::{HttpClient, RetryPolicy};
 pub use model_key::model_key;
 pub use types::{
-    ChatEvent, ChatMessage, ChatRequest, Generation, ModelMeta, Role, ServerInfo, Usage,
+    ChatEvent, ChatMessage, ChatRequest, Generation, ModelMeta, RequestExtra, Role, ServerInfo,
+    Usage,
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

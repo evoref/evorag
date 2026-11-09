@@ -160,6 +160,7 @@ fn req() -> ChatRequest {
         generation: Generation::default(),
         id_slot: Some(0),
         model: None,
+        extra: Default::default(),
     }
 }
 
