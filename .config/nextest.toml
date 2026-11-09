@@ -9,3 +9,8 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 fail-fast = false
 retries = 0
 failure-output = "immediate-final"
+
+# 障害の注入の長い版 (EVORAG_FAULT_RUNS=1000) は時間がかかる (09 §4)。この試験だけ上限を 60 分にする。
+[[profile.default.overrides]]
+filter = 'test(committed_turns_survive_kills_at_random_points)'
+slow-timeout = { period = "60s", terminate-after = 60 }
