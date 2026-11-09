@@ -41,6 +41,7 @@ evorag-tui = { path = "crates/evorag-tui" }
 # 外部の crate (版は workspace で 1 か所に決める)。
 serde = { version = "1.0.228", features = ["derive"] }
 ciborium = "0.2.2"
+redb = "4.5.0"
 thiserror = "2.0.17"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 

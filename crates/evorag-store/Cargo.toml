@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 evorag-types = { workspace = true }
 ciborium = { workspace = true }
+redb = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
