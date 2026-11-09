@@ -38,7 +38,7 @@
 ## 機械的な強制
 
 - `.claude/settings.json` の PreToolUse hook (`.claude/hooks/guard-git.py`) が、次を拒否または確認にする。
-  - `main` / `develop` への push と削除、force push (リモートのブランチの削除は、作業ブランチの名前なら許し、それ以外は確認)
+  - `main` / `develop` への push と削除、force push (作業ブランチへの `--force-with-lease` だけは許す。リモートのブランチの削除は、作業ブランチの名前なら許し、それ以外は確認)
   - `main` / `develop` 上の commit / merge / rebase など
   - `v*` タグの作成と push
   - `git stash` (作業ツリーを動かし、改行コードや未追跡の変更を壊しやすいため)

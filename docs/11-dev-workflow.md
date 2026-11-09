@@ -64,8 +64,8 @@ evorag/
 
 - リポジトリ直下の `CLAUDE.md` に、エージェント向けの要約 (仕様書駆動、ブランチ運用、コミットの規約、サブエージェントに任せるときの注意) を置く。本書が正本で、`CLAUDE.md` は要約だけを持つ。
 - `.claude/settings.json` の PreToolUse hook (`.claude/hooks/guard-git.py`) が、§9.1 の運用を機械的に守らせる。
-  - 拒否: `main` / `develop` への push と削除、force push、`main` / `develop` 上の commit / merge / rebase など、`v*` タグの作成と push、`git stash`。
-  - 許可: 作業ブランチ (`feat/`・`fix/`・`spec/`・`chore/`・`spike/`・`agent/`) のリモートのブランチの削除 (マージ後の片付け)。それ以外の名前の削除は確認。
+  - 拒否: `main` / `develop` への push と削除、force push (`--force`・`-f`・`+refspec`)、`main` / `develop` 上の commit / merge / rebase など、`v*` タグの作成と push、`git stash`。
+  - 許可: 作業ブランチ (`feat/`・`fix/`・`spec/`・`chore/`・`spike/`・`agent/`) への `--force-with-lease` (作業ブランチの中の rebase の後の push)、作業ブランチのリモートのブランチの削除 (マージ後の片付け)。それ以外の名前の削除は確認。
   - 確認: `git reset --hard` / `git clean -f` / `git restore` / `git checkout -- <path>`、`gh pr merge`。
 - hook に拒否されたら、回避せずに理由を人間に伝えて指示を待つ。
 
@@ -102,7 +102,7 @@ evorag/
 - **凍結**: リリース候補の判定 (09 §9.2) から昇格までは、`develop` への merge を保留する (例外は `main` → `develop` の取り込みだけ)。
 - **プレリリース** (`-rc.N` など) のタグは `develop` の先頭のコミットに付ける (人間)。
 - `dev/<版>`・`release/*`・`hotfix/*` のブランチは作らない。
-- rebase は作業ブランチ内で自由。保護したブランチへの force push は禁止 (GitHub のブランチ保護と `.claude/settings.json` の両方で拒否)。
+- rebase は作業ブランチ内で自由。rebase の後の push は `--force-with-lease` で行う。保護したブランチへの force push は禁止 (GitHub のブランチ保護と `.claude/settings.json` の両方で拒否)。
 - **ブランチ保護** (`main`・`develop`): PR 必須、直接 push・force push・削除の禁止、必須のステータスチェック (09 §6.2。存在するジョブだけを必須にし、ジョブを足したら加える)、管理者もバイパス不可。単独開発の間は承認必須を 0 にし、代わりにセルフレビューのチェックリストを PR に貼る。タグ `v*` はルールセットで保護する。
 - **最初の push** (08 §2.1 の M0.2): リポジトリは最初から public にする ([OQ-28](10-decisions.md#oq-28-公開の時期と外部寄稿の受付))。(1) `main` に初期コミット (`LICENSE`・`README.md`・`.gitignore`) を作る。(2) `main` から `develop` を作り、docs/ と初期ファイル (`NOTICE`・`.gitattributes`・`CONTRIBUTING.md`・`SECURITY.md`・`CLAUDE.md`・`.claude/`・`.github/`・設定ファイル) をコミットする (DCO の署名を付ける)。(3) 公開前チェック ([12 §6](12-licensing-distribution.md#6-公開前チェック)) を作業ツリーと全履歴に対して行う。(4) `main` と `develop` を push する。(5) 既定ブランチを `develop` にし、ブランチとタグの保護と private vulnerability reporting を設定する。(1) と (2) は hook が `main` / `develop` 上の commit を拒否するため、人間が行う。
 
