@@ -14,11 +14,13 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::envelope::{DecodeError, Envelope};
 use crate::fsutil;
+use crate::journal::{Journal, LineOp};
 use crate::key::{self, KeyBuf, OwnedPart};
 use crate::lock::{DataRootLock, LockError};
 use crate::meta;
 use crate::migrate::{self, FormatPlan};
 use crate::version::Version;
+use crate::writer::WriteOp;
 
 /// DB のファイルの名前。
 pub const DB_FILE: &str = "evorag.redb";
@@ -56,14 +58,22 @@ impl From<Durability> for redb::Durability {
 /// 種類の名前: quarantine (03 §3.3)。
 pub const KIND_QUARANTINE: &str = "quarantine";
 
+/// 封筒から、その記録の関係と副索引を作る関数。ジャーナルから取り込むときに使う
+/// (関係と副索引は記録から作り直せる、03 §6・§10 の repair)。
+pub type DeriveFn = fn(&Envelope) -> Vec<crate::writer::WriteOp>;
+
 /// 種類の定め (03 §3.3)。種類を持つ crate が、開くときに渡す。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct KindSpec {
     pub name: &'static str,
     /// この版が書く、その種類の形式の版。
     pub current_v: u32,
     /// 新しい `v` の記録があるときも、新しい記録を今の `v` で作ってよいか (03 §4.2 の規則 6。既定は作らない)。
     pub create_when_newer_present: bool,
+    /// ジャーナルにも書くか (会話と明示の操作、03 §6)。
+    pub journaled: bool,
+    /// ジャーナルから取り込むときに、関係と副索引を作る関数。
+    pub derive: Option<DeriveFn>,
 }
 
 impl KindSpec {
@@ -72,6 +82,8 @@ impl KindSpec {
             name,
             current_v,
             create_when_newer_present: false,
+            journaled: false,
+            derive: None,
         }
     }
 }
@@ -113,6 +125,14 @@ pub struct OpenReport {
     pub migrated_from: Option<String>,
     /// 移行の前に作った退避。
     pub pre_op_backup: Option<PathBuf>,
+    /// 起動時にジャーナルから取り込んだ行の数 (03 §6)。
+    pub journal_replayed: usize,
+    /// ジャーナルの読めない行 (チェックサムが合わない) の数。`doctor` が報告する。
+    pub journal_bad_lines: usize,
+    /// 書きかけで切り詰めたジャーナルの末尾のバイト数。
+    pub journal_truncated: usize,
+    /// ジャーナルの新しい版の行 (チェックサムは合うが読めない) の数。
+    pub journal_newer_lines: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +187,12 @@ pub enum StoreError {
     Db(#[from] redb::Error),
     #[error("i/o error: {0}")]
     Io(String),
+    /// ジャーナルに書いた後でコミットに失敗したので、開き直して取り込み直すまで書かない (03 §6)。
+    #[error("the database must be reopened before further writes")]
+    NeedsRestart,
+    /// ジャーナルに書けなかった。DB にも書いていない (03 §6、AC-FR-202-1)。
+    #[error("the journal could not be written: {0}")]
+    Journal(String),
     /// 一度だけ書く `meta` の値が、もう別の値で書かれている (07 §6.1 のプロンプトの言語など)。
     #[error("meta `{key}` is already `{existing}`")]
     MetaConflict { key: String, existing: String },
@@ -233,6 +259,8 @@ pub struct Store {
     suspects: Mutex<BTreeSet<Vec<u8>>>,
     /// 書き込みの権利 (`WriteToken`) を渡したか。1 つのストアにつき 1 つだけ (02 §5)。
     token_issued: AtomicBool,
+    /// ジャーナル (書き込みで開いたときだけ)。書き手だけが使う。
+    pub(crate) journal: Mutex<Option<Journal>>,
     // ロックは DB の後に外す (フィールドは宣言の順に落ちる)。
     _lock: DataRootLock,
 }
@@ -411,6 +439,7 @@ impl Store {
             newer_kinds: Mutex::default(),
             suspects: Mutex::default(),
             token_issued: AtomicBool::new(false),
+            journal: Mutex::new(None),
             _lock: lock,
         };
 
@@ -419,6 +448,7 @@ impl Store {
                 .init()
                 .map_err(|e| OpenError::Unreadable(e.to_string()))?;
             report.created = true;
+            store.open_journal(&mut report)?;
             return Ok((store, report));
         };
 
@@ -448,8 +478,130 @@ impl Store {
             store
                 .record_writer(&existing, &our_writer)
                 .map_err(|e| OpenError::Unreadable(e.to_string()))?;
+            store.open_journal(&mut report)?;
         }
         Ok((store, report))
+    }
+
+    /// ジャーナルを開き、DB にまだ無い行を取り込む (03 §6)。読むだけで開いたときは呼ばない。
+    fn open_journal(&self, report: &mut OpenReport) -> Result<(), OpenError> {
+        let last: u64 = self
+            .meta(meta::JOURNAL_LAST_SEQ)
+            .map_err(|e| OpenError::BadMeta(e.to_string()))?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let (journal, scan) = Journal::open(&self.root, last)?;
+        report.journal_bad_lines = scan.bad;
+        report.journal_newer_lines = scan.newer;
+        report.journal_truncated = scan.truncated;
+        if let Some(last_line) = scan.lines.last() {
+            let last_seq = last_line.seq;
+            let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
+            let mut tx = self
+                .write_internal(Durability::Immediate)
+                .map_err(unreadable)?;
+            for line in &scan.lines {
+                self.replay_line(&mut tx, &line.op).map_err(unreadable)?;
+            }
+            tx.set_journal_seq(last_seq).map_err(unreadable)?;
+            tx.commit().map_err(unreadable)?;
+            report.journal_replayed = scan.lines.len();
+        }
+        *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = Some(journal);
+        Ok(())
+    }
+
+    /// ジャーナルの 1 行を、何度当てても同じになるように当てる。
+    fn replay_line(&self, tx: &mut WriteTxn<'_>, op: &LineOp) -> Result<(), StoreError> {
+        match op {
+            LineOp::Put(env) => {
+                // 通常の書き込みと同じ規則で当てる (03 §6): 新しい `v` の記録と読めない記録は上書き
+                // しない。順序は連番で決まるので、時刻は比べない。
+                let spec = self.kinds.get(env.kind.as_str());
+                match tx.get(&env.kind, env.id)? {
+                    Some(Read::Ok(old)) => {
+                        if spec.is_some_and(|s| old.v > s.current_v) {
+                            return Ok(());
+                        }
+                        self.undo_derived(tx, &old)?;
+                    }
+                    Some(Read::Newer { .. } | Read::Corrupt { .. }) => return Ok(()),
+                    None => {}
+                }
+                tx.put_raw(env)?;
+                if let Some(derive) = spec.and_then(|k| k.derive) {
+                    let mut out = crate::writer::WriteOutcome::default();
+                    for op in derive(env) {
+                        crate::writer::apply_op(tx, &op, &mut out)?;
+                    }
+                }
+            }
+            LineOp::Delete { kind, id } => {
+                if let Some(Read::Ok(old)) = tx.get(kind, *id)? {
+                    self.undo_derived(tx, &old)?;
+                }
+                tx.delete(kind, *id)?;
+                tx.delete_links_of(*id)?;
+                tx.delete_blobs(*id)?;
+            }
+            LineOp::Meta { key, value } => match tx.set_meta_once(key, value) {
+                Ok(()) | Err(StoreError::MetaConflict { .. } | StoreError::MetaNotWritable(_)) => {}
+                Err(e) => return Err(e),
+            },
+        }
+        Ok(())
+    }
+
+    /// 記録から作った関係と副索引を消す (上書き・削除の前に)。
+    fn undo_derived(&self, tx: &mut WriteTxn<'_>, old: &Envelope) -> Result<(), StoreError> {
+        let Some(derive) = self.kinds.get(old.kind.as_str()).and_then(|k| k.derive) else {
+            return Ok(());
+        };
+        let mut out = crate::writer::WriteOutcome::default();
+        for op in derive(old) {
+            let undo = match op {
+                WriteOp::PutLink { from, rel, to, .. } => WriteOp::DeleteLink { from, rel, to },
+                WriteOp::PutLookup {
+                    kind,
+                    field,
+                    value,
+                    id,
+                } => WriteOp::DeleteLookup {
+                    kind,
+                    field,
+                    value,
+                    id,
+                },
+                _ => continue,
+            };
+            crate::writer::apply_op(tx, &undo, &mut out)?;
+        }
+        Ok(())
+    }
+
+    /// 書き込みのトランザクション (書き込みの権利を経ない。開くときの取り込みだけで使う)。
+    fn write_internal(&self, durability: Durability) -> Result<WriteTxn<'_>, StoreError> {
+        let mut tx = self.db.begin_write().map_err(db)?;
+        tx.set_durability(durability.into()).map_err(db)?;
+        Ok(WriteTxn { store: self, tx })
+    }
+
+    /// その種類をジャーナルにも書くか。
+    pub(crate) fn is_journaled(&self, kind: &str) -> bool {
+        self.kinds.get(kind).is_some_and(|k| k.journaled)
+    }
+
+    /// 試験のための注入: 次のジャーナルの追記を失敗させる (AC-FR-202-1)。
+    #[doc(hidden)]
+    pub fn fail_next_journal_append(&self) {
+        if let Some(j) = self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            j.fail_next_append();
+        }
     }
 
     pub fn data_root(&self) -> &Path {
@@ -755,6 +907,26 @@ impl WriteTxn<'_> {
     }
 
     /// 記録を消す。新しい `v` の記録も消せる (本体を解釈しないため、03 §4.2 の規則 6)。
+    /// 封筒をそのまま書く (検査も `writer` の書き換えもしない。ジャーナルからの取り込みだけで使う)。
+    pub(crate) fn put_raw(&mut self, env: &Envelope) -> Result<(), StoreError> {
+        let k = record_key(&env.kind, env.id);
+        let bytes = env.encode(&k);
+        let mut table = self.tx.open_table(RECORDS).map_err(db)?;
+        table.insert(k.as_slice(), bytes.as_slice()).map_err(db)?;
+        Ok(())
+    }
+
+    /// ジャーナルから取り込んだ最後の連番 (`meta` の `journal.last_seq`)。
+    pub(crate) fn set_journal_seq(&mut self, seq: u64) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        m.insert(
+            meta::JOURNAL_LAST_SEQ.as_bytes(),
+            seq.to_string().as_bytes(),
+        )
+        .map_err(db)?;
+        Ok(())
+    }
+
     pub fn delete(&mut self, kind: &str, id: Id) -> Result<bool, StoreError> {
         let k = record_key(kind, id);
         let mut table = self.tx.open_table(RECORDS).map_err(db)?;

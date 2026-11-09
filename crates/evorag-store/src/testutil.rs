@@ -32,3 +32,26 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// 閉じた DB の記録を 1 件、直接消す (試験で「ジャーナルにだけある状態」を作るため)。
+pub fn raw_remove_record(data_root: &Path, kind: &str, id: evorag_types::Id) {
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::RECORDS).expect("records");
+        t.remove(crate::store::record_key(kind, id).as_slice())
+            .expect("remove");
+    }
+    tx.commit().expect("commit");
+}
+
+/// 閉じた DB の `meta` の値を直接書く (試験だけ)。
+pub fn raw_set_meta(data_root: &Path, key: &str, value: &str) {
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::META).expect("meta");
+        t.insert(key.as_bytes(), value.as_bytes()).expect("insert");
+    }
+    tx.commit().expect("commit");
+}

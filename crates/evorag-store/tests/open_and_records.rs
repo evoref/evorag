@@ -19,6 +19,8 @@ const APPEND: KindSpec = KindSpec {
     name: "append",
     current_v: 1,
     create_when_newer_present: true,
+    journaled: false,
+    derive: None,
 };
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
