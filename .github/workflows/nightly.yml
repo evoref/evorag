@@ -42,3 +42,42 @@ jobs:
         env:
           EVORAG_FAULT_RUNS: "1000"
         run: cargo nextest run -p evorag-core --test fault_injection --locked --profile ci --no-capture
+
+  determinism:
+    # 試験の実行を 2 回繰り返して結果が同じ (AC-NFR-701-1)。時刻・乱数・ネットワークに依存しない
+    # ことの確かめ (ネットワークは ci.yml の no-network が見る)。
+    name: determinism (${{ matrix.role }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: windows
+            os: windows-2025
+          - role: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: develop
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
+      - name: run the tests twice and compare
+        shell: bash
+        run: |
+          set -uo pipefail
+          for i in 1 2; do
+            cargo nextest run --workspace --locked --profile ci --no-fail-fast \
+              --message-format libtest-json-plus 2>/dev/null \
+              | grep -E '"type":"test"' | grep -E '"event":"(ok|failed|ignored)"' \
+              | sed -E 's/.*"event":"([a-z]+)".*"name":"([^"]+)".*/\2 \1/' | sort > "run-$i.txt"
+            echo "run $i: $(grep -c ' ok$' run-$i.txt) ok, $(grep -c ' failed$' run-$i.txt) failed"
+          done
+          diff run-1.txt run-2.txt && ! grep -q ' failed$' run-1.txt
+        env:
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"

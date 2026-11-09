@@ -149,7 +149,11 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
         2,
         "{system}"
     );
-    assert!(system.trim_end().ends_with(&format!("<</引用-{nonce}>>")));
+    // 枠の後で、引用の中の指示に従わないことをもう一度述べる (AC-NFR-504-1 の対策)。
+    assert!(
+        system.trim_end().ends_with("普段どおりに答えてください。"),
+        "{system}"
+    );
     assert_eq!(answer.sources, 1);
 
     // 出典の詳細 (FR-110)。
