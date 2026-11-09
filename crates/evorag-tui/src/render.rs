@@ -35,10 +35,9 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// UTC の時刻 `HH:MM`。地方時の扱いは仕様で決めてから入れる。
+/// 地方時の `HH:MM` (ずれが分からなければ `HH:MM UTC`、07 §2.1)。
 fn hhmm(ms: i64) -> String {
-    let sod = ms.div_euclid(1000).rem_euclid(86_400);
-    format!("{:02}:{:02} UTC", sod / 3600, sod / 60 % 60)
+    evorag_core::localtime::hhmm(ms)
 }
 
 fn header<'a>(app: &App, role: Role, time: Option<i64>, mark: Option<MessageKey>) -> Line<'a> {
@@ -313,7 +312,10 @@ mod tests {
         // 全角の文字の次の桁は空白として読めるので、空白を除いて比べる。
         let packed = text.replace(' ', "");
         assert!(packed.contains("旅行"), "{text}");
-        assert!(packed.contains("10:00UTC"), "{text}");
+        assert!(
+            packed.contains(&evorag_core::localtime::hhmm(36_000_000).replace(' ', "")),
+            "{text}"
+        );
         assert!(packed.contains("(応答なし)"), "{text}");
         assert!(packed.contains("待機中"), "{text}");
         // 入力欄は下から 4 行目 (枠の中の 1 行目)、全角 2 文字の後ろ (幅 4) にカーソル。
