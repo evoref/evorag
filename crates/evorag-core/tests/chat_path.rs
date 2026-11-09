@@ -38,6 +38,7 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         prompt_language: lang,
         generation: Generation::default(),
         reserve_for_output: None,
+        backup_dir: None,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }

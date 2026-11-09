@@ -165,6 +165,59 @@ pub fn pre_op(
     Ok(dir)
 }
 
+/// 自動の退避のフォルダ (03 §7.1)。
+pub const DAILY_DIR: &str = "daily";
+pub const WEEKLY_DIR: &str = "weekly";
+/// 日次 7 世代と週次 4 世代を残す (ADR-0007)。
+pub const DAILY_KEEP: usize = 7;
+pub const WEEKLY_KEEP: usize = 4;
+
+/// 1 日 1 回までの自動の退避 (03 §7.1)。今日の分が既にあれば何もしない (`None`)。
+///
+/// `backups/daily/<YYYYMMDD>/` に一貫した写しを作り、その週の最初の退避なら `backups/weekly/` にも
+/// 残す。新しいものから日次 7 世代・週次 4 世代を残す。日付は UTC。
+pub fn daily(src: &Database, backups: &Path, now_ms: i64) -> Result<Option<PathBuf>, StoreError> {
+    let io = |e: std::io::Error| StoreError::Io(e.to_string());
+    let day = stamp(now_ms)[..8].to_owned();
+    let daily_base = backups.join(DAILY_DIR);
+    let dir = daily_base.join(&day);
+    if dir.join(crate::store::DB_FILE).is_file() {
+        return Ok(None);
+    }
+    fsutil::create_private_dir(&dir).map_err(io)?;
+    if let Err(e) = logical_copy(src, &dir.join(crate::store::DB_FILE)) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    fsutil::sync_dir(&daily_base).map_err(io)?;
+    prune(&daily_base, DAILY_KEEP, &dir);
+
+    // 週は月曜から (1970-01-01 は木曜)。名前は週の番号と、その週の最初の退避の日付。
+    let week = (now_ms.div_euclid(86_400_000) + 3).div_euclid(7);
+    let prefix = format!("w{week:06}-");
+    let weekly_base = backups.join(WEEKLY_DIR);
+    fsutil::create_private_dir(&weekly_base).map_err(io)?;
+    let has_week = std::fs::read_dir(&weekly_base)
+        .map_err(io)?
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
+    if !has_week {
+        let wdir = weekly_base.join(format!("{prefix}{day}"));
+        fsutil::create_private_dir(&wdir).map_err(io)?;
+        let to = wdir.join(crate::store::DB_FILE);
+        let tmp = to.with_extension("partial");
+        let copied = std::fs::copy(dir.join(crate::store::DB_FILE), &tmp)
+            .and_then(|_| fsutil::sync_file(&tmp))
+            .and_then(|()| fsutil::rename_durable(&tmp, &to));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_dir_all(&wdir);
+            return Err(io(e));
+        }
+        prune(&weekly_base, WEEKLY_KEEP, &wdir);
+    }
+    Ok(Some(dir))
+}
+
 /// `base` の下の退避 (DB の写しを持つフォルダ) を、名前の新しい順に `keep` 個だけ残す。
 /// 今作った `keep_always` は、時計が戻されて名前が古く並んでも消さない。消せないものは残す
 /// (次の機会に消す)。DB の写しを持たないフォルダは、世代に数えず、消さない。

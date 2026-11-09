@@ -155,6 +155,7 @@ fn main() -> ExitCode {
         prompt_language,
         generation,
         reserve_for_output: cfg.context.reserve_for_output,
+        backup_dir: cfg.storage.backup_dir.clone(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock)),
     };

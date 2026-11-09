@@ -586,6 +586,17 @@ impl Store {
         Ok(WriteTxn { store: self, tx })
     }
 
+    /// 1 日 1 回までの自動の退避 (03 §7.1)。`backups` を省くとデータ根の `backups/`。
+    /// 読み取りのトランザクションで写すので、書き手と並んで動かしてよい。
+    pub fn daily_backup(&self, backups: Option<&Path>) -> Result<Option<PathBuf>, StoreError> {
+        let default = self.root.join(crate::backup::BACKUPS_DIR);
+        crate::backup::daily(
+            &self.db,
+            backups.unwrap_or(&default),
+            self.clock.now().as_millis(),
+        )
+    }
+
     /// その種類をジャーナルにも書くか。
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
