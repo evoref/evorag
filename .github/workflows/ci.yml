@@ -1,0 +1,271 @@
+# 必須のチェック (docs/09-testing-quality.md §6.2)。ジョブの名前は固定で、OS の役割だけを入れる。
+# 名前を変えるとブランチ保護の必須のチェックと合わなくなるので、変えるときは保護の設定も同時に直す。
+# action はコミットの SHA で固定する (更新は Dependabot)。
+name: ci
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml の版を入れる (docs/11-dev-workflow.md §1.1)。
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.role }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: windows
+            os: windows-2025
+          - role: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.role }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: windows
+            os: windows-2025
+          - role: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --workspace --locked --profile ci --no-tests=pass
+
+  deps:
+    name: deps
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny
+      # 02 §4.3 の規則、C を含む依存、推移的な依存の数 (deps-policy.toml)。
+      - run: cargo xtask check-deps
+      # ライセンス・脆弱性・取得元 (deny.toml)。
+      - run: cargo deny --locked check
+
+  i18n:
+    name: i18n
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo xtask i18n
+
+  dco:
+    name: dco
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # すべてのコミット (merge commit を除く) に Signed-off-by: がある (docs/11-dev-workflow.md §9.4)。
+      # Dependabot は署名を付けられないので、Dependabot が作ったコミットだけを除く。
+      - name: check Signed-off-by
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            range="$PUSH_AFTER^!"
+          else
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          fi
+          echo "checking $range"
+          bad=0
+          for c in $(git rev-list --no-merges "$range"); do
+            author=$(git log -1 --format=%ae "$c")
+            if [ "$author" = "49699333+dependabot[bot]@users.noreply.github.com" ]; then
+              echo "skip (dependabot): $c"
+              continue
+            fi
+            if git log -1 --format=%B "$c" | grep -qE '^Signed-off-by: .+ <[^>]+>$'; then
+              echo "ok: $c"
+            else
+              echo "::error::commit $c has no Signed-off-by: line (git commit -s)"
+              bad=1
+            fi
+          done
+          exit $bad
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # gitleaks-action は組織のリポジトリでライセンスが要るので、配布物を直接使う (ハッシュで確かめる)。
+      - name: install gitleaks
+        run: |
+          set -euo pipefail
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
+      # 全履歴を検査する (docs/11-dev-workflow.md §9.7)。見つかった値はログに出さない。
+      - run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .'
+
+  pr-source:
+    name: pr-source
+    runs-on: ubuntu-24.04
+    steps:
+      # PR の出どころ (docs/11-dev-workflow.md §9.1、docs/09-testing-quality.md §6.2)。
+      # main へは develop からだけ。develop へは作業ブランチ・Dependabot・main から。
+      # 外部からの PR (fork) はまだ受け付けない (docs/12-licensing-distribution.md §3)。
+      - name: check head and base
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "not a pull request; nothing to check"
+            exit 0
+          fi
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "::error::pull requests from forks are not accepted yet (CONTRIBUTING.md)"
+            exit 1
+          fi
+          case "$BASE" in
+            main)
+              [ "$HEAD" = develop ] && exit 0
+              echo "::error::main accepts pull requests only from develop (got $HEAD)"
+              exit 1 ;;
+            develop)
+              if [ "$HEAD" = main ] \
+                || [[ "$HEAD" =~ ^(feat|fix|spec|chore|spike)/[a-z0-9][a-z0-9._-]*$ ]] \
+                || [[ "$HEAD" =~ ^agent/[a-z0-9._-]+/[0-9]+-[a-z0-9._-]+$ ]] \
+                || [[ "$HEAD" =~ ^dependabot/ ]]; then
+                exit 0
+              fi
+              echo "::error::branch name $HEAD does not follow docs/11-dev-workflow.md §9.1 (<type>/<crate>-<desc> or agent/<name>/<issue>-<desc>)"
+              exit 1 ;;
+            *)
+              echo "::error::unexpected base branch $BASE"
+              exit 1 ;;
+          esac
+
+  no-network:
+    name: no-network
+    runs-on: ubuntu-24.04
+    steps:
+      # 試験の実行中に、ループバック以外への接続が 0 件であること (docs/09-testing-quality.md §3.7、AC-NFR-501-1)。
+      # 試験は専用の利用者 (nonet) で走らせ、その利用者のループバック以外への通信を拒否して数える。
+      # runner 自身の通信は止めない。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
+      - name: build the tests into an archive
+        run: cargo nextest archive --workspace --locked --archive-file "$RUNNER_TEMP/tests.tar.zst"
+      - name: prepare the offline user
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home nonet
+          sudo install -m 0755 "$(command -v cargo-nextest)" /usr/local/bin/cargo-nextest
+          ws=/tmp/nonet-ws
+          sudo mkdir -p "$ws"
+          git ls-files -z | sudo xargs -0 cp --parents -t "$ws"
+          sudo cp "$RUNNER_TEMP/tests.tar.zst" /tmp/nonet-tests.tar.zst
+          sudo chown -R nonet:nonet "$ws" /tmp/nonet-tests.tar.zst
+          for t in iptables ip6tables; do
+            sudo "$t" -I OUTPUT 1 -m owner --uid-owner nonet ! -o lo -j REJECT
+          done
+      - name: run the tests without network
+        run: |
+          set -euo pipefail
+          # runner の作業フォルダは nonet から読めないので、写しの中で走らせる。
+          cd /tmp/nonet-ws
+          # runner の環境の変数 (XDG_CONFIG_HOME など) が残らないように、nonet の側の値を渡す。
+          sudo -u nonet -H env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/nonet \
+            XDG_CONFIG_HOME=/home/nonet/.config NEXTEST_PROFILE=ci CARGO_TERM_COLOR=always \
+            cargo-nextest nextest run \
+              --archive-file /tmp/nonet-tests.tar.zst \
+              --workspace-remap /tmp/nonet-ws \
+              --no-tests=pass
+      - name: count rejected connections
+        if: always()
+        run: |
+          set -euo pipefail
+          total=0
+          for t in iptables ip6tables; do
+            n=$(sudo "$t" -L OUTPUT -v -n -x | awk '$3 == "REJECT" { s += $1 } END { print s + 0 }')
+            echo "$t: $n rejected packet(s)"
+            total=$((total + n))
+          done
+          for t in iptables ip6tables; do
+            sudo "$t" -D OUTPUT -m owner --uid-owner nonet ! -o lo -j REJECT || true
+          done
+          if [ "$total" -ne 0 ]; then
+            echo "::error::tests tried to reach the network ($total packet(s) rejected; AC-NFR-501-1)"
+            exit 1
+          fi
