@@ -5,6 +5,7 @@
 
 mod config;
 mod doctor;
+mod export;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -46,6 +47,11 @@ enum Sub {
     Backups {
         #[command(subcommand)]
         action: BackupsAction,
+    },
+    /// 記録を種類ごとの JSON Lines に書き出す (設定は API キーを除いて写す)
+    Export {
+        /// 書き出すフォルダ (空か、まだ無いフォルダ)
+        out: PathBuf,
     },
     /// 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
@@ -200,6 +206,15 @@ fn main() -> ExitCode {
     }) = &args.command
     {
         return doctor::list_backups(&catalog, &data_root, backup_dir.as_deref());
+    }
+    if let Some(Sub::Export { out }) = &args.command {
+        return export::run(
+            &catalog,
+            &data_root,
+            &config_file,
+            out,
+            clock.now().as_millis(),
+        );
     }
     if let Some(Sub::Restore { backup }) = &args.command {
         return match evorag_store::restore::restore(
