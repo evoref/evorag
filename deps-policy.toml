@@ -1,0 +1,83 @@
+# 依存の規則 (docs/02-architecture.md §4.3、docs/09-testing-quality.md §7)。`cargo xtask check-deps` が読む。
+# 「使う」は直接の依存 (Cargo.toml の [dependencies]) を指す。依存の木に入ること自体を限るものは tree_only_in に書く。
+
+# 検査する対象 (deny.toml の [graph] targets と同じにする)。依存の木は対象ごとに `cargo tree` で解決する。
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+
+[transitive]
+# NFR-203: 配布物 (bin の evorag) の推移的な依存の数の上限。dev 依存と xtask は数えない。
+# 対象ごとに、workspace の外の package (名前と版の組) を数える。
+# 計測 (2026-11-09、M1.1): 02 §4.1 の v0.1 の主な依存を最新の版で解決し、
+# `cargo xtask check-deps --manifest-path <計測用の workspace>` で数えて、x86_64-pc-windows-msvc で 181、ほかの 3 つで 182。
+# 上限はその 2 割増し。超えるときは、依存を足す PR で理由を書いて上限を上げる (docs/11-dev-workflow.md §9.5)。
+max = 220
+
+[c_code]
+# R5: C を含む依存は 0。例外は作らない (ADR-0015)。
+# どの package も、次の crate を依存の木に入れない (dev 依存と xtask も含む)。build 依存の道具も同じ扱い。
+forbidden = ["ring", "aws-lc-rs", "aws-lc-sys", "aws-lc-fips-sys", "openssl", "openssl-sys", "native-tls", "libsqlite3-sys"]
+# C や C++ を作る道具。依存の木のどこにも入れない。
+forbidden_build = ["cc", "cmake", "bindgen", "pkg-config", "vcpkg", "autotools", "nasm-rs"]
+
+# `links` を持つ package は C の library につなぐ印なので、既定では拒否する。
+# C を作らず、重複を防ぐだけのものは、理由を付けてここに足す。
+[[c_code.links_allowed]]
+name = "rayon-core"
+reason = "links は同じ crate の別の版が 2 つ入るのを防ぐ印だけで、build script は C を作らない"
+
+# 直接の依存として使ってよい workspace の外の crate を限る規則。
+# crates に挙げた crate は、only_in に挙げた workspace の crate だけが直接の依存にしてよい。
+[[direct_only_in]]
+rule = "R2"
+crates = ["redb"]
+only_in = ["evorag-store"]
+
+[[direct_only_in]]
+rule = "R3"
+crates = ["reqwest", "ureq", "hyper", "hyper-util", "isahc", "attohttpc", "minreq"]
+only_in = ["evorag-llm", "evorag-update"]
+
+[[direct_only_in]]
+rule = "R6"
+crates = ["ratatui", "crossterm", "ratatui-core", "ratatui-widgets"]
+only_in = ["evorag-tui"]
+
+# 依存の木 (normal と build) に入れてはいけない crate を、workspace の crate ごとに限る規則。
+# crates に挙げた crate は、only_in 以外の workspace の crate の依存の木に入れない。
+[[tree_only_in]]
+rule = "R3, R5"
+# TLS を持ってよいのは evorag-update だけ。evorag-llm は TLS を持たない。
+crates = ["rustls", "rustls-graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "rustls-platform-verifier", "rustls-native-certs"]
+only_in = ["evorag-update"]
+
+# workspace の crate ごとに、直接の依存として使ってよいものを列挙する規則。
+[[direct_allow]]
+rule = "R1"
+crate = "evorag-tui"
+# workspace の中の crate は evorag-types と evorag-core だけ (外部の crate は限らない)。
+workspace = ["evorag-types", "evorag-core"]
+
+[[direct_allow]]
+rule = "R4"
+crate = "evorag-types"
+# 外部の依存は serde だけ。workspace の中の crate には依存しない。
+external = ["serde"]
+workspace = []
+
+# 02 §4.2 の層 (上から順)。workspace の crate は、自分より上の層の crate に依存しない (dev 依存も含む)。
+# まだ無い crate (evorag-learn など) は、その版で置いたときに検査の対象になる。xtask は層の外。
+[layers]
+order = [
+    ["evorag"],
+    ["evorag-tui"],
+    ["evorag-core"],
+    ["evorag-retrieval", "evorag-learn", "evorag-cartridge", "evorag-update"],
+    ["evorag-memory", "evorag-index", "evorag-llm"],
+    ["evorag-store"],
+    ["evorag-types"],
+]
