@@ -161,7 +161,8 @@ jobs:
         run: |
           set -euo pipefail
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          # GitHub の Releases が一時的に 5xx を返すことがあるので、再試行する。
+          curl -sSfL --retry 5 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
       # 全履歴を検査する (docs/11-dev-workflow.md §9.7)。見つかった値はログに出さない。
