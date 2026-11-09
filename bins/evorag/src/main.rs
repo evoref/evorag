@@ -242,6 +242,41 @@ fn main() -> ExitCode {
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+    // `/model` の候補 (07 §4.2 の `llm.chat.models`: 名前と url)。
+    let mut models = Vec::new();
+    for t in cfg.llm.chat.models.iter().flatten() {
+        let (Some(name), Some(url)) = (
+            t.get("name").and_then(|v| v.as_str()),
+            t.get("url").and_then(|v| v.as_str()),
+        ) else {
+            return fail(
+                &catalog,
+                4,
+                MessageKey::CliConfigError,
+                &[("detail", "each [[llm.chat.models]] needs name and url")],
+            );
+        };
+        models.push(evorag_core::ModelChoice {
+            name: name.to_owned(),
+            url: url.to_owned(),
+        });
+    }
+    let (key_for_switch, allow_remote) = (
+        cfg.llm.chat.api_key.clone().or_else(|| {
+            cfg.llm
+                .chat
+                .api_key_env
+                .as_ref()
+                .and_then(|v| std::env::var(v).ok())
+        }),
+        cfg.llm.allow_remote,
+    );
+    let connect: evorag_core::Connector = Arc::new(move |u: &str| {
+        let endpoint = Endpoint::new(u, key_for_switch.clone(), allow_remote)?;
+        let c = HttpClient::new(endpoint, RetryPolicy::default())?;
+        Ok(Arc::new(c) as Arc<dyn evorag_llm::LlmClient>)
+    });
+    let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
         config_file: Some(config_file.clone()),
@@ -253,6 +288,9 @@ fn main() -> ExitCode {
         backup_dir: backup_dir.clone(),
         allow_unsafe_location: cfg.storage.allow_unsafe_location.unwrap_or(false),
         probe: evorag_core::Probe::system(),
+        model_name: model_name.clone(),
+        models: models.clone(),
+        connect: Some(connect.clone()),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };

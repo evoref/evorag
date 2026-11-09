@@ -193,6 +193,30 @@ impl App {
                 let m = self.catalog.key(MessageKey::UiNoticeDeleted);
                 self.notice(m);
             }
+            Event::ModelInfo {
+                current,
+                model,
+                n_ctx,
+                choices,
+            } => {
+                self.status.model.clone_from(&model);
+                self.status.n_ctx = n_ctx;
+                let choices = if choices.is_empty() {
+                    "-".to_owned()
+                } else {
+                    choices.join(", ")
+                };
+                let m = self.catalog.with(
+                    MessageKey::UiModelInfo,
+                    &[
+                        ("current", &current),
+                        ("model", &model),
+                        ("n_ctx", &n_ctx.to_string()),
+                        ("choices", &choices),
+                    ],
+                );
+                self.notice(m);
+            }
             Event::BackgroundPaused { reason } => {
                 let m = self.catalog.message(&reason);
                 self.notice(m);
@@ -400,6 +424,7 @@ impl App {
                 reason,
             }),
             Slash::Quit => vec![Action::Quit],
+            Slash::Model(name) => c(Command::Model { name }),
             Slash::NotYet(name) => {
                 let m = self.catalog.with(MessageKey::UiNotYet, &[("name", &name)]);
                 self.notice(m);
@@ -493,9 +518,9 @@ mod tests {
             a.on_key(Key::Enter { newline: false }),
             vec![Action::Command(Command::Retry)]
         );
-        type_text(&mut a, "/model");
+        type_text(&mut a, "/memory");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());
-        assert!(a.notices.last().unwrap().contains("/model"));
+        assert!(a.notices.last().unwrap().contains("/memory"));
     }
 
     /// verifies: AC-FR-105-1 (画面の層: 確認の後にだけ消す)

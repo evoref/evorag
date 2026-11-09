@@ -68,6 +68,9 @@ fn fault_child() {
             backup_dir: None,
             allow_unsafe_location: true,
             probe: Probe::system(),
+            model_name: "test".into(),
+            models: Vec::new(),
+            connect: None,
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),
         };

@@ -12,6 +12,7 @@ pub enum Slash {
     Good,
     Bad(Option<String>),
     Quit,
+    Model(Option<String>),
     /// 名前は予約してあるが、この版ではまだ使えない (`/sources`・`/model`・`/memory` など)。
     NotYet(String),
     /// 知らないコマンド・引数の誤り。
@@ -19,9 +20,7 @@ pub enum Slash {
 }
 
 /// 後の版で入るコマンド (07 §3)。
-const RESERVED: &[&str] = &[
-    "sources", "model", "memory", "forget", "private", "precepts",
-];
+const RESERVED: &[&str] = &["sources", "memory", "forget", "private", "precepts"];
 
 /// `/` で始まる入力を読む。`/` で始まらなければ `None` (普通の発話)。
 /// `//` で始めると、先頭の `/` を 1 つ取った普通の発話として送る。
@@ -45,6 +44,7 @@ pub fn parse(input: &str) -> Option<Slash> {
         ("good", None) => Slash::Good,
         ("bad", a) => Slash::Bad(a.map(str::to_owned)),
         ("quit", None) => Slash::Quit,
+        ("model", a) => Slash::Model(a.map(str::to_owned)),
         (n, _) if RESERVED.contains(&n) => Slash::NotYet(format!("/{n}")),
         _ => Slash::Invalid(format!("/{name}")),
     })
@@ -81,7 +81,9 @@ mod tests {
 
     #[test]
     fn reserved_unknown_and_wrong_arguments() {
-        assert_eq!(parse("/model"), Some(Slash::NotYet("/model".into())));
+        assert_eq!(parse("/model"), Some(Slash::Model(None)));
+        assert_eq!(parse("/model big"), Some(Slash::Model(Some("big".into()))));
+        assert_eq!(parse("/memory"), Some(Slash::NotYet("/memory".into())));
         assert_eq!(
             parse("/frobnicate"),
             Some(Slash::Invalid("/frobnicate".into()))

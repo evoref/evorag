@@ -42,6 +42,9 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         backup_dir: None,
         allow_unsafe_location: false,
         probe: evorag_core::Probe::system(),
+        model_name: "test".into(),
+        models: Vec::new(),
+        connect: None,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }
@@ -571,5 +574,84 @@ async fn thinking_is_announced_once_and_not_saved() {
         llm.requests()[0].extra["chat_template_kwargs"]["enable_thinking"],
         false
     );
+    core.shutdown().await;
+}
+
+/// FR-108: `/model` で今のモデルと候補を示し、候補に切り替える。繋がらなければ今のまま。
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_can_be_switched_to_a_configured_choice() {
+    let dir = TempDir::new("core-model");
+    let a = cassette(8192, OK);
+    let b = cassette(4096, OK);
+    let down = ReplayClient::from_json(r#"{"props": {}, "models": {}, "health": false}"#).unwrap();
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.model_name = "a".into();
+    cfg.models = vec![
+        evorag_core::ModelChoice {
+            name: "b".into(),
+            url: "replay-b".into(),
+        },
+        evorag_core::ModelChoice {
+            name: "down".into(),
+            url: "replay-down".into(),
+        },
+    ];
+    let (bb, dd) = (b.clone(), down.clone());
+    cfg.connect = Some(Arc::new(move |u: &str| {
+        Ok(match u {
+            "replay-b" => Arc::new(bb.clone()) as Arc<dyn evorag_llm::LlmClient>,
+            _ => Arc::new(dd.clone()) as Arc<dyn evorag_llm::LlmClient>,
+        })
+    }));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(a.clone())).await.unwrap();
+    new_session(&core, &mut rx).await;
+
+    core.command(Command::Model { name: None });
+    let ev = until(&mut rx, |e| matches!(e, Event::ModelInfo { .. })).await;
+    let Some(Event::ModelInfo {
+        current,
+        choices,
+        n_ctx,
+        ..
+    }) = ev.last()
+    else {
+        panic!()
+    };
+    assert_eq!((current.as_str(), *n_ctx), ("a", 8192));
+    assert_eq!(choices, &["b", "down"]);
+
+    core.command(Command::Model {
+        name: Some("nope".into()),
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
+    let Some(Event::Rejected { error }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(error.key, MessageKey::UnknownModel);
+
+    core.command(Command::Model {
+        name: Some("down".into()),
+    });
+    until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
+    assert_eq!(
+        core.server().n_ctx,
+        8192,
+        "a failed switch keeps the current model"
+    );
+
+    core.command(Command::Model {
+        name: Some("b".into()),
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::ModelInfo { .. })).await;
+    let Some(Event::ModelInfo { current, n_ctx, .. }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!((current.as_str(), *n_ctx), ("b", 4096));
+    core.command(Command::Send {
+        text: "新しいモデルへ".into(),
+    });
+    until(&mut rx, finished).await;
+    assert_eq!(b.requests().len(), 1);
+    assert!(a.requests().is_empty());
     core.shutdown().await;
 }

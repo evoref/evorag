@@ -20,6 +20,7 @@ busy = "応答を生成しています。Esc で中断してから送ってく�
 no_session = "セッションが開いていません。"
 nothing_to_retry = "作り直す発話がありません。"
 nothing_to_rate = "評価する応答がありません。"
+unknown_model = "モデルの候補「{name}」は設定にありません (設定の [[llm.chat.models]] に名前と url を書きます)。"
 delete_failed = "セッションを消せませんでした ({detail})。"
 
 [response]
@@ -65,6 +66,7 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /delete          今のセッションを消す (確認あり)
 /retry           直前の応答を作り直す
 /good, /bad [理由]  直前の応答を評価する
+/model [名前]    使っているモデルの表示と、設定にある候補への切り替え
 /quit            終了
 //...            / で始まる文をそのまま送る"""
 
@@ -74,6 +76,7 @@ rated_bad = "評価 (bad) を記録しました。"
 deleted = "セッションを消しました。"
 renamed = "セッションの名前を「{title}」にしました。"
 draft_restored = "前回の書きかけを入力欄に戻しました。"
+model = "モデル: {current} ({model}、n_ctx {n_ctx})。候補: {choices}"
 
 [ui.error]
 unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"

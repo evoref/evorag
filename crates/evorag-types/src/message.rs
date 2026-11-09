@@ -59,6 +59,10 @@ message_keys! {
     CliUnsafeLocation => "cli.unsafe_location",
     /// 引数: `detail`。
     CliLocationWarning => "cli.location_warning",
+    /// 引数: `name`。
+    UnknownModel => "error.unknown_model",
+    /// 引数: `current`、`model`、`n_ctx`、`choices`。
+    UiModelInfo => "ui.notice.model",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。

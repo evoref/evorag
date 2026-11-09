@@ -26,6 +26,8 @@ pub enum Command {
     DeleteSession,
     /// 直前の応答を評価する (`/good`、`/bad [理由]`、FR-311)。
     Rate { good: bool, reason: Option<String> },
+    /// `/model [名前]` (FR-108): 名前が無ければ今のモデルと候補を示し、あれば切り替える。
+    Model { name: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +103,15 @@ pub enum Event {
     SessionDeleted { id: Id },
     /// 評価を記録した。
     Rated { good: bool },
+    /// 今のモデルと切り替えの候補 (`/model` の答え、切り替えた後)。
+    ModelInfo {
+        /// 候補の名前 (設定の名前。候補から選んでいなければ接続先)。
+        current: String,
+        /// llama-server が返したモデルの名前。
+        model: String,
+        n_ctx: u32,
+        choices: Vec<String>,
+    },
     /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
     BackgroundPaused { reason: Message },
 }
