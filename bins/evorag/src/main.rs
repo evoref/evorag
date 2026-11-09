@@ -363,7 +363,8 @@ fn main() -> ExitCode {
         );
         app.notices.push(m);
     }
-    let result = evorag_tui::run::run(&core, events, app);
+    let state_dir = places.as_ref().map(|p| p.state_dir.clone());
+    let result = evorag_tui::run::run(&core, events, app, state_dir.as_deref());
     // 生成中なら中断として書き、会話の追記を書き切ってから終わる (02 §5)。
     rt.block_on(core.shutdown());
     match result {
