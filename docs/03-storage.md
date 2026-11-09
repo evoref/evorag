@@ -23,7 +23,7 @@
 
 ### 2.1 フォルダ
 
-置き場所は `directories` crate で OS ごとに解決し、`--data-root` (と設定 `storage.data_root`) で変えられる (確定、[OQ-17](10-decisions.md#oq-17-置き場所))。
+置き場所は OS ごとに環境変数から解決し (Windows は `LOCALAPPDATA`、Linux は `XDG_CONFIG_HOME`・`XDG_DATA_HOME` (無ければ `HOME` の下の既定)、macOS は `HOME`)、`--data-root` (と設定 `storage.data_root`) で変えられる (確定、[OQ-17](10-decisions.md#oq-17-置き場所))。`directories` crate は、依存に MPL-2.0 の crate を含むので使わない (12 §2)。
 
 | 区分 | 中身 | Windows | Linux | macOS |
 |---|---|---|---|---|
@@ -33,7 +33,7 @@
 
 - Windows で Roaming (`%APPDATA%`) を使わない。移動プロファイルで同期され、§2.2 の「危ない置き場所」に自分から当たるため。
 - macOS では設定とデータ根を別の下位フォルダにする。`evorag reset` (データ根を消し、設定は残す) が設定まで消さないようにするため。
-- `directories` の `state_dir` は Linux でしか値を返さないので、Windows と macOS は上の表の場所を使う。
+- 状態のフォルダは、Linux は `XDG_STATE_HOME` (無ければ `~/.local/state`)、Windows と macOS は上の表の場所を使う。
 - 作るフォルダとファイルは、所有者だけが読み書きできる権限にする (Windows は所有者だけの ACL、Unix は 0700 / 0600、NFR-503)。
 
 ### 2.2 危ない置き場所
