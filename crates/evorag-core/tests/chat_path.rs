@@ -436,3 +436,46 @@ async fn a_journal_failure_keeps_the_utterance_out_of_the_database() {
     assert_eq!(core.turns(sid).len(), 2);
     core.shutdown().await;
 }
+
+fn file_contains(file: &Path, text: &str) -> bool {
+    std::fs::read(file)
+        .map(|b| b.windows(text.len()).any(|w| w == text.as_bytes()))
+        .unwrap_or(false)
+}
+
+/// verifies: AC-NFR-506-1 の退避の部分 (03 §7.3: 消したセッションの本文は、退避からも除かれる)
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_purges_it_from_the_backups() {
+    let dir = TempDir::new("core-purge");
+    let llm = cassette(8192, OK);
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "退避から消える本文".into(),
+    });
+    until(&mut rx, finished).await;
+    core.shutdown().await;
+
+    // 次の日に起動し直すと、起動時の退避に本文が入る。
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.clock = Arc::new(ManualClock::new(Timestamp::from_millis(
+        1_762_650_000_000 + 86_400_000,
+    )));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    let sid = core.sessions(1)[0].id;
+    core.command(Command::OpenSession { id: sid });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.shutdown().await;
+
+    let daily = dir.path().join("backups").join("daily");
+    let backups: Vec<_> = std::fs::read_dir(&daily)
+        .unwrap()
+        .map(|e| e.unwrap().path().join("evorag.redb"))
+        .collect();
+    assert_eq!(backups.len(), 2);
+    for b in backups {
+        assert!(!file_contains(&b, "退避から消える本文"), "{}", b.display());
+    }
+}

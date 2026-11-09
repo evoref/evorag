@@ -12,6 +12,7 @@ pub mod lock;
 pub mod meta;
 pub mod migrate;
 pub mod relations;
+pub mod restore;
 mod store;
 #[doc(hidden)]
 pub mod testutil;

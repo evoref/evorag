@@ -10,11 +10,13 @@ mod read;
 mod write;
 
 pub use kinds::{
-    GenerationRecord, KIND_SESSION, KIND_SIGNAL, KIND_TURN, REL_IN_SESSION, REL_REPLY_TO,
-    REL_TARGET, SessionBody, SessionState, SignalBody, SignalKind, TurnBody, TurnRole, TurnState,
-    kinds,
+    GenerationRecord, JOB_PURGE_BACKUPS, JobBody, KIND_JOB, KIND_SESSION, KIND_SIGNAL, KIND_TURN,
+    REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, SessionBody, SessionState, SignalBody, SignalKind,
+    TurnBody, TurnRole, TurnState, kinds,
 };
 pub use read::{
     MemoryError, Session, Turn, list_sessions, load_session, pending_user_turns, session_turns,
 };
-pub use write::{AssistantTurn, Writes, delete_session};
+pub use write::{
+    AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
+};

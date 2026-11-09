@@ -16,7 +16,7 @@ use evorag_store::OpenError;
 use evorag_store::lock::LockError;
 use evorag_tui::app::{App, Status};
 use evorag_tui::catalog::Catalog;
-use evorag_types::{MessageKey, SystemClock, UuidV7Gen};
+use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 
@@ -28,11 +28,31 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 )]
 struct Args {
     /// データ根 (設定の storage.data_root より優先する)
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     data_root: Option<PathBuf>,
     /// 設定ファイル
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Sub>,
+}
+
+#[derive(clap::Subcommand)]
+enum Sub {
+    /// 退避から戻す (その後の会話はジャーナルから足す)
+    Restore {
+        /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
+        backup: PathBuf,
+    },
+}
+
+/// y / n を尋ねる。端末でなければ n。
+fn ask_yes(prompt: &str) -> bool {
+    use std::io::{BufRead, Write};
+    eprint!("{prompt} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
 }
 
 fn fail(catalog: &Catalog, code: u8, key: MessageKey, args: &[(&str, &str)]) -> ExitCode {
@@ -148,18 +168,95 @@ fn main() -> ExitCode {
         }
     };
     let clock = Arc::new(SystemClock);
-    let core_cfg = CoreConfig {
-        data_root,
-        config_file: Some(config_file),
+    let backup_dir = cfg.storage.backup_dir.clone();
+
+    if let Some(Sub::Restore { backup }) = &args.command {
+        return match evorag_store::restore::restore(
+            &data_root,
+            backup,
+            clock.now().as_millis(),
+            Some(&config_file),
+        ) {
+            Ok(_) => {
+                eprintln!(
+                    "{}",
+                    catalog.with(
+                        MessageKey::CliRestored,
+                        &[("from", &backup.display().to_string())]
+                    )
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e @ OpenError::Lock(_)) => fail(
+                &catalog,
+                2,
+                MessageKey::CliDataRootUnusable,
+                &[("detail", &e.to_string())],
+            ),
+            Err(e) => fail(
+                &catalog,
+                1,
+                MessageKey::CliError,
+                &[("detail", &e.to_string())],
+            ),
+        };
+    }
+
+    let make_cfg = || CoreConfig {
+        data_root: data_root.clone(),
+        config_file: Some(config_file.clone()),
         evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_language,
-        generation,
+        generation: generation.clone(),
         reserve_for_output: cfg.context.reserve_for_output,
-        backup_dir: cfg.storage.backup_dir.clone(),
+        backup_dir: backup_dir.clone(),
         clock: clock.clone(),
-        ids: Arc::new(UuidV7Gen::new(clock)),
+        ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };
-    let started = rt.block_on(Core::start(core_cfg, llm));
+    let mut started = rt.block_on(Core::start(make_cfg(), llm.clone()));
+    // DB のファイルが壊れていたら、退避とジャーナルから戻すかを尋ねる (03 §8、FR-205)。
+    if let Err(StartError::Store(OpenError::Broken { moved_to, reason })) = &started {
+        eprintln!(
+            "{}",
+            catalog.with(
+                MessageKey::CliBroken,
+                &[
+                    ("moved_to", &moved_to.display().to_string()),
+                    ("reason", reason)
+                ]
+            )
+        );
+        if !ask_yes(&catalog.key(MessageKey::CliAskRestore)) {
+            return ExitCode::from(2);
+        }
+        let latest = evorag_store::restore::list_backups(&data_root, backup_dir.as_deref());
+        if let Some(b) = latest.first() {
+            if let Err(e) = evorag_store::restore::restore(
+                &data_root,
+                &b.dir,
+                clock.now().as_millis(),
+                Some(&config_file),
+            ) {
+                return fail(
+                    &catalog,
+                    1,
+                    MessageKey::CliError,
+                    &[("detail", &e.to_string())],
+                );
+            }
+            eprintln!(
+                "{}",
+                catalog.with(
+                    MessageKey::CliRestored,
+                    &[("from", &b.dir.display().to_string())]
+                )
+            );
+        } else {
+            // 退避が無ければ、ジャーナルだけから作り直す (開くと全部の行が取り込まれる)。
+            eprintln!("{}", catalog.key(MessageKey::CliRestoredFromJournal));
+        }
+        started = rt.block_on(Core::start(make_cfg(), llm));
+    }
     let (core, events, report) = match started {
         Ok(v) => v,
         Err(StartError::LlmUnreachable(e)) => {

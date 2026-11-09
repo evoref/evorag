@@ -108,3 +108,15 @@ fn signal_v1() {
         },
     );
 }
+
+#[test]
+fn job_v1() {
+    check(
+        KIND_JOB,
+        id("019a6a2b-0000-7000-8000-000000000005"),
+        JobBody {
+            task: JOB_PURGE_BACKUPS.into(),
+            ids: vec![id("019a6a2b-0000-7000-8000-000000000001")],
+        },
+    );
+}

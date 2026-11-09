@@ -30,10 +30,19 @@ const BATCH: usize = 10_000;
 
 /// `src` の一貫した写しを `dst` に作る (`dst` は無いこと)。一時名に書いて書き切ってから入れ替える。
 pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError> {
+    logical_copy_excluding(src, dst, &|_| false)
+}
+
+/// `exclude` が真を返すキーの行を除いて写す (削除した記録を退避から除く、03 §7.3)。
+pub fn logical_copy_excluding(
+    src: &Database,
+    dst: &Path,
+    exclude: &dyn Fn(&[u8]) -> bool,
+) -> Result<CopyStats, StoreError> {
     let tmp = dst.with_extension("partial");
     let _ = std::fs::remove_file(&tmp);
     fsutil::prepare_private_file(&tmp).map_err(|e| StoreError::Io(e.to_string()))?;
-    let stats = match copy_into(src, &tmp) {
+    let stats = match copy_into(src, &tmp, exclude) {
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -44,7 +53,11 @@ pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError>
     Ok(stats)
 }
 
-fn copy_into(src: &Database, path: &Path) -> Result<CopyStats, StoreError> {
+fn copy_into(
+    src: &Database,
+    path: &Path,
+    exclude: &dyn Fn(&[u8]) -> bool,
+) -> Result<CopyStats, StoreError> {
     let out = Database::create(path).map_err(db)?;
     let rtx = src.begin_read().map_err(db)?;
     let mut stats = CopyStats::default();
@@ -58,6 +71,9 @@ fn copy_into(src: &Database, path: &Path) -> Result<CopyStats, StoreError> {
         let table = rtx.open_table(*t).map_err(db)?;
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
+            if exclude(k.value()) {
+                continue;
+            }
             tx.open_table(*t)
                 .map_err(db)?
                 .insert(k.value(), v.value())

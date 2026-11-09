@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const KIND_SESSION: &str = "session";
 pub const KIND_TURN: &str = "turn";
 pub const KIND_SIGNAL: &str = "signal";
+/// 裏の処理の手順の進み具合 (03 §3.3)。
+pub const KIND_JOB: &str = "job";
+/// job の手順: 消した記録を退避から除く (03 §7.3)。
+pub const JOB_PURGE_BACKUPS: &str = "purge_backups";
 
 /// ターン → セッション。
 pub const REL_IN_SESSION: &str = "in_session";
@@ -36,7 +40,18 @@ pub fn kinds() -> Vec<KindSpec> {
         append(KIND_SESSION, derive_session),
         append(KIND_TURN, derive_turn),
         append(KIND_SIGNAL, derive_signal),
+        // job は作り直せる手順の記録なので、ジャーナルには書かない。
+        KindSpec::new(KIND_JOB, 1),
     ]
+}
+
+/// `job` の本体 (v1)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobBody {
+    /// 手順の名前 (`purge_backups` など)。
+    pub task: String,
+    /// 手順の対象の記録の ID。
+    pub ids: Vec<Id>,
 }
 
 fn link(from: Id, rel: &str, to: Id) -> WriteOp {

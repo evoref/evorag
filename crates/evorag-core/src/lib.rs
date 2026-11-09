@@ -104,8 +104,8 @@ struct Inner {
     reserve: Option<usize>,
     language: PromptLanguage,
     backup_dir: Option<PathBuf>,
-    /// 起動時の退避の task (終了のときに待つ。ストアを持ったまま戻らないように)。
-    startup_backup: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 裏で走らせている退避・退避の整理の task (終了のときに待つ。ストアを持ったまま戻らないように)。
+    background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// 命令の待ち行列を回す task と、その止め方。
     command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
 }
@@ -197,7 +197,7 @@ impl Core {
             reserve: cfg.reserve_for_output,
             language,
             backup_dir: cfg.backup_dir,
-            startup_backup: Mutex::new(None),
+            background: Mutex::new(Vec::new()),
             command_loop: Mutex::new(None),
         });
         let core = Self { inner, commands };
@@ -220,16 +220,25 @@ impl Core {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some((stop_tx, task));
         // 自動の退避: v0.1 は起動時と終了時の空き時間に作る (03 §7.1)。会話の邪魔をしないよう裏で。
-        let store = core.inner.store.clone();
-        let dir = core.inner.backup_dir.clone();
+        // 前の起動で終わらなかった退避の整理を続けてから、今日の退避を作る (03 §7.3)。
+        let worker = core.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
-            let _ = store.daily_backup(dir.as_deref());
+            let jobs = worker
+                .store
+                .read()
+                .ok()
+                .and_then(|r| evorag_memory::pending_purge_jobs(&r).ok())
+                .unwrap_or_default();
+            for (job, ids) in jobs {
+                purge(&worker, job, &ids);
+            }
+            let _ = worker.store.daily_backup(worker.backup_dir.as_deref());
         });
-        *core
-            .inner
-            .startup_backup
+        core.inner
+            .background
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(task);
+            .unwrap_or_else(|e| e.into_inner())
+            .push(task);
         let report = StartReport {
             server,
             store: open_report,
@@ -307,13 +316,14 @@ impl Core {
             }
             let _ = r.task.await;
         }
-        let startup = self
+        let background: Vec<_> = self
             .inner
-            .startup_backup
+            .background
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(t) = startup {
+            .drain(..)
+            .collect();
+        for t in background {
             let _ = t.await;
         }
         // 今日の退避がまだなら作る (読み取りのトランザクションで写すので、書き手と並んでよい)。
@@ -477,10 +487,16 @@ async fn delete(inner: &Arc<Inner>) {
         let s = evorag_memory::load_session(&rtx, sid).ok()?;
         evorag_memory::delete_session(&rtx, &s.envelope).ok()
     });
-    let Some(ops) = ops else {
+    let Some(mut ops) = ops else {
         reject(inner, MessageKey::NoSession);
         return;
     };
+    // 退避からも除く (03 §7.3)。途中で止まっても続けられるように、job を同じ依頼で書く。
+    let ids = evorag_memory::deleted_ids(&ops);
+    let Ok((job, put)) = evorag_memory::purge_job(&writes(inner), ids.clone()) else {
+        return;
+    };
+    ops.push(put);
     if let Err(e) = write(inner, ops).await {
         emit(
             inner,
@@ -496,6 +512,26 @@ async fn delete(inner: &Arc<Inner>) {
         .unwrap_or_else(|e| e.into_inner())
         .session = None;
     emit(inner, Event::SessionDeleted { id: sid });
+    let worker = inner.clone();
+    let task = tokio::task::spawn_blocking(move || purge(&worker, job, &ids));
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(task);
+}
+
+/// 退避の整理の job を行い、終えたら job を消す。失敗したら job を残す (次の起動で続ける)。
+fn purge(inner: &Inner, job: Id, ids: &[Id]) {
+    let root = inner.store.data_root().to_path_buf();
+    if evorag_store::restore::purge_backups(&root, inner.backup_dir.as_deref(), ids).is_ok() {
+        let _ = inner
+            .writer
+            .submit_wait(WriteRequest::background(vec![WriteOp::Delete {
+                kind: evorag_memory::KIND_JOB.into(),
+                id: job,
+            }]));
+    }
 }
 
 async fn rate(inner: &Arc<Inner>, good: bool, reason: Option<String>) {
