@@ -11,6 +11,10 @@ publish.workspace = true
 [dependencies]
 evorag-types = { workspace = true }
 evorag-core = { workspace = true }
+ratatui = { workspace = true }
+toml = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
 
 [lints]
 workspace = true

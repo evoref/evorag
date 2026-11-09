@@ -655,6 +655,12 @@ async fn generate(
         },
         _ => Err("the session or the utterance is gone".into()),
     };
+    // 終わりのイベントを出す前に「生成中」を解く (イベントを受けてすぐ次を送っても断られないように)。
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .running = None;
     match written
         .ok()
         .and_then(|id| read_env(inner, evorag_memory::KIND_TURN, id))
