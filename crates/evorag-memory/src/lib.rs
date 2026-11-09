@@ -17,4 +17,4 @@ pub use kinds::{
 pub use read::{
     MemoryError, Session, Turn, list_sessions, load_session, pending_user_turns, session_turns,
 };
-pub use write::{AssistantTurn, Writes};
+pub use write::{AssistantTurn, Writes, delete_session};

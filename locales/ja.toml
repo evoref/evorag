@@ -19,6 +19,8 @@ not_saved = "応答を保存できませんでした ({detail})。"
 busy = "応答を生成しています。Esc で中断してから送ってください。"
 no_session = "セッションが開いていません。"
 nothing_to_retry = "作り直す発話がありません。"
+nothing_to_rate = "評価する応答がありません。"
+delete_failed = "セッションを消せませんでした ({detail})。"
 
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"

@@ -49,6 +49,10 @@ message_keys! {
     NoSession => "error.no_session",
     /// 作り直す・送り直す発話が無い。
     NothingToRetry => "error.nothing_to_retry",
+    /// 評価する応答が無い。
+    NothingToRate => "error.nothing_to_rate",
+    /// セッションを消せなかった。引数: `detail`。
+    DeleteFailed => "error.delete_failed",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     /// 終了のために中断した。
