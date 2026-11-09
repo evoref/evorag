@@ -245,7 +245,9 @@ jobs:
           set -euo pipefail
           # runner の作業フォルダは nonet から読めないので、写しの中で走らせる。
           cd /tmp/nonet-ws
-          sudo -u nonet -H env NEXTEST_PROFILE=ci \
+          # runner の環境の変数 (XDG_CONFIG_HOME など) が残らないように、nonet の側の値を渡す。
+          sudo -u nonet -H env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/nonet \
+            XDG_CONFIG_HOME=/home/nonet/.config NEXTEST_PROFILE=ci CARGO_TERM_COLOR=always \
             cargo-nextest nextest run \
               --archive-file /tmp/nonet-tests.tar.zst \
               --workspace-remap /tmp/nonet-ws \
