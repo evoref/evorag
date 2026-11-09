@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 evorag-types = { workspace = true }
+ciborium = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [lints]
 workspace = true
