@@ -330,6 +330,7 @@ enabled = true
     }
 
     /// FR-904: 読めないキー・型の誤り・範囲外の値は、行番号つきのエラー。
+    /// verifies: AC-FR-904-1
     #[test]
     fn unknown_keys_bad_types_and_ranges_are_errors_with_a_line() {
         let e = parse("[llm.chat]\nurll = \"x\"\n").unwrap_err();
@@ -379,5 +380,15 @@ url = \"http://127.0.0.1:8081\"
         // 2 回目は何もしない。
         assert_eq!(load(&path, true).unwrap().migrated, None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 配布物に同梱する設定の例が、そのまま読める (12 §5.1)。
+    #[test]
+    fn the_shipped_example_is_valid() {
+        let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        let text = std::fs::read_to_string(root.join("../../dist/config.example.toml")).unwrap();
+        let l = parse(&text).unwrap();
+        assert!(l.ignored.is_empty(), "{:?}", l.ignored);
+        assert_eq!(l.config.version, Some(CONFIG_VERSION));
     }
 }

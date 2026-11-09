@@ -266,6 +266,7 @@ mod tests {
         assert_eq!(wrap("a\nb", 10), ["a", "b"]);
     }
 
+    /// verifies: AC-FR-901-1
     #[test]
     fn draws_turns_marks_status_and_places_the_cursor_at_the_input() {
         let mut app = App::new(

@@ -3,6 +3,7 @@
 //! 仕様: 02 §4.1, 02 §4.3, 09 §6.2, 09 §7, 11 §6。
 
 mod deps;
+mod dist;
 mod i18n;
 mod metadata;
 
@@ -15,7 +16,11 @@ commands:
   check                    fast lane before a PR: fmt, clippy, tests, check-deps, i18n (11 §6)
   check-deps               dependency rules (02 §4.3) and transitive count (NFR-203)
       [--manifest-path P]  measure another workspace (C-code check and count only)
-  i18n                     message keys in code vs locales/*.toml (NFR-602)";
+  i18n                     message keys in code vs locales/*.toml (NFR-602)
+  dist                     build the release archive, SHA256SUMS and release.json (12 §5)
+      [--target T] [--out DIR] [--skip-build]
+  verify-release DIR       check SHA256SUMS, release.json and the minisign signatures (AC-FR-801-1)
+      [--pubkey FILE] [--require-signatures]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,6 +33,8 @@ fn main() -> ExitCode {
         Some("check") => check(&root),
         Some("check-deps") => check_deps(&root, &args[1..]),
         Some("i18n") => report("i18n", i18n::run(&root)),
+        Some("dist") => done("dist", dist::dist(&root, &args[1..])),
+        Some("verify-release") => done("verify-release", dist::verify_release(&root, &args[1..])),
         Some(other) => {
             eprintln!("unknown command: {other}\n\n{USAGE}");
             return ExitCode::from(2);
@@ -136,5 +143,15 @@ fn check(root: &Path) -> bool {
     } else {
         eprintln!("check: failed: {}", failed.join(", "));
         false
+    }
+}
+
+fn done(name: &str, r: Result<(), String>) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("{name}: {e}");
+            false
+        }
     }
 }

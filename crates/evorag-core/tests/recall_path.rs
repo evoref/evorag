@@ -284,6 +284,7 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
 }
 
 /// 索引が無くなっても、起動の後に DB から作り直して引ける (NFR-306)。
+/// verifies: AC-NFR-306-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_index_is_rebuilt_from_the_database() {
     let dir = TempDir::new("recall-rebuild");

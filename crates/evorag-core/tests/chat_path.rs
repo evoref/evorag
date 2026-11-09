@@ -255,7 +255,7 @@ async fn start_fails_when_llama_server_is_down() {
     assert!(!dir.path().join("evorag.redb").exists());
 }
 
-/// verifies: AC-FR-506-1
+/// verifies: AC-FR-506-1, AC-FR-406-1 (n_ctx は 1,100 で、4,096 より厳しい)
 #[tokio::test(flavor = "multi_thread")]
 async fn the_context_fits_the_budget_and_token_counts_are_cached() {
     let dir = TempDir::new("core-budget");
@@ -319,6 +319,7 @@ async fn sending_while_generating_is_rejected_and_shutdown_saves_the_partial_rep
 }
 
 /// 07 §6.1: プロンプトの言語は最初の起動で記録し、後で設定を変えても変わらない。
+/// verifies: AC-FR-909-1, AC-FR-909-2
 #[tokio::test(flavor = "multi_thread")]
 async fn the_prompt_language_is_fixed_per_data_root() {
     let dir = TempDir::new("core-lang");

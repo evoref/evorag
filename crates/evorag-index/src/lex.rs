@@ -729,6 +729,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// verifies: AC-NFR-306-1
     #[test]
     fn a_bad_hash_or_other_rules_ask_for_a_rebuild() {
         let dir = temp();

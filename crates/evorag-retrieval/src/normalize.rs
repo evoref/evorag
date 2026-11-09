@@ -133,6 +133,7 @@ mod tests {
     }
 
     /// AC-FR-401-1: 全角と半角・大文字と小文字・ひらがなとカタカナだけが違う語は、同じ単位になる。
+    /// verifies: AC-FR-401-1
     #[test]
     fn width_case_and_kana_differences_vanish() {
         assert_eq!(terms("ＴＯＥＩＣ"), terms("toeic"));
