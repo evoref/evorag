@@ -2,6 +2,9 @@
 //!
 //! 仕様: 07。画面はコアの API の命令を出し、イベントを描画するだけにする (07 §1)。
 
+pub mod app;
 pub mod catalog;
 pub mod input;
+pub mod render;
+pub mod run;
 pub mod slash;
