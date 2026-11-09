@@ -128,6 +128,21 @@ message_keys! {
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// 引数: `count`、`path`、`kinds`。
     CliExported => "cli.exported",
+    /// 引数: `tried`。
+    CliSetupGuide => "cli.setup_guide",
+    /// 引数: `url`。
+    CliSetupNeedsKey => "cli.setup_needs_key",
+    /// 引数: `url`、`model`、`n_ctx`、`build`。
+    CliSetupFound => "cli.setup_found",
+    CliSetupAskLanguage => "cli.setup_ask_language",
+    /// 引数: `path`、`backup`。
+    CliSetupAskOverwrite => "cli.setup_ask_overwrite",
+    /// 引数: `path`。
+    CliSetupWritten => "cli.setup_written",
+    /// 引数: `path`。
+    CliSetupUnchanged => "cli.setup_unchanged",
+    /// 引数: `path`。
+    CliSetupNotWritten => "cli.setup_not_written",
     /// 引数: `newer`、`corrupt`。
     CliExportSkipped => "cli.export_skipped",
     /// 引数: `count`。

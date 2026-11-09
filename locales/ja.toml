@@ -107,6 +107,24 @@ exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました�
 export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
 export_pending = "ジャーナルに、まだデータベースに入っていない {count} 行があります。evorag を一度起動して終了してから書き出すと、それも含まれます。"
 export_not_empty = "{path} は空ではありません。空のフォルダか、まだ無いフォルダを指定してください。"
+setup_guide = """
+llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
+次の手順で llama-server を用意してから、もう一度 evorag setup を実行してください。
+
+1. llama.cpp の配布物 (https://github.com/ggml-org/llama.cpp/releases) から、お使いの PC に合う llama-server を入手します。
+2. GGUF 形式のモデルを用意します。
+3. 自分の PC の中だけで受け付けるように、API キーを付けて起動します。例:
+     llama-server -m <モデル>.gguf --host 127.0.0.1 --port 8080 -c 8192 --jinja --api-key <長いランダムな文字列>
+4. 同じ文字列を環境変数 (例: EVORAG_API_KEY) に入れてから、次を実行します:
+     evorag setup --api-key-env EVORAG_API_KEY
+   別のポートで起動したときは --url http://127.0.0.1:<ポート> を付けます。"""
+setup_needs_key = "llama-server ({url}) は API キーを求めています。キーを入れた環境変数の名前を --api-key-env で指定して、もう一度実行してください。"
+setup_found = "llama-server を見つけました: {url} (モデル {model}、n_ctx {n_ctx}、{build})"
+setup_ask_language = "システムプロンプトの言語を選んでください。このデータ根では後から変えられません [ja/en] (Enter で ja):"
+setup_ask_overwrite = "設定ファイル {path} を書き換えますか? 元のファイルは {backup} に残します [y/N]:"
+setup_written = "設定を {path} に書きました。evorag で会話を始められます。"
+setup_unchanged = "設定 {path} は今のままで使えます。"
+setup_not_written = "設定 {path} は書き換えませんでした。"
 
 [doctor]
 config = "設定: {path} (読めました)"

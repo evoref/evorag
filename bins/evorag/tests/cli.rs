@@ -338,3 +338,98 @@ fn export_writes_records_and_the_config_without_api_keys() {
     );
     assert_eq!(again.status.code(), Some(1));
 }
+
+fn evorag_raw(dir: &Path, args: &[&str], stdin: &str) -> Output {
+    use std::process::Stdio;
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let mut child = Command::new(exe)
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--data-root")
+        .arg(dir.join("data"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// 何も受け付けていないループバックのポート。
+fn closed_port() -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    drop(l);
+    url
+}
+
+/// verifies: AC-FR-510-1
+#[test]
+fn setup_without_llama_server_shows_the_steps_and_writes_nothing() {
+    let dir = TempDir::new("cli-setup-missing");
+    let url = closed_port();
+    let out = evorag_raw(dir.path(), &["setup", "--url", &url], "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("llama-server が見つかりませんでした"), "{err}");
+    assert!(err.contains("--host 127.0.0.1"), "{err}");
+    assert!(err.contains("--api-key"), "{err}");
+    assert!(!dir.path().join("config.toml").exists());
+}
+
+/// verifies: FR-510 (見つけた接続先とプロンプトの言語を設定に書く。書き換えは確かめてから)
+#[test]
+fn setup_finds_llama_server_and_writes_the_config() {
+    let dir = TempDir::new("cli-setup-found");
+    let url = fake_llama_server();
+    // プロンプトの言語を尋ねられ、en と答える。
+    let out = evorag_raw(dir.path(), &["setup", "--url", &url], "en\n");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("llama-server を見つけました"), "{err}");
+    let cfg = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(cfg.contains(&format!("url = \"{url}\"")), "{cfg}");
+    assert!(cfg.contains("language = \"en\""), "{cfg}");
+
+    // 同じなら書き換えない。
+    let out = evorag_raw(dir.path(), &["setup", "--url", &url], "");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("今のままで使えます"));
+
+    // 変わるときは尋ね、断れば書き換えない。
+    let out = evorag_raw(
+        dir.path(),
+        &["setup", "--url", &url, "--api-key-env", "MY_KEY"],
+        "n\n",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let after = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert_eq!(after, cfg);
+    // --yes なら、元を残して書き換える。
+    let out = evorag_raw(
+        dir.path(),
+        &["setup", "--url", &url, "--api-key-env", "MY_KEY", "--yes"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let after = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(after.contains("api_key_env = \"MY_KEY\""), "{after}");
+    let backups = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("config.toml.bak-")
+        })
+        .count();
+    assert_eq!(backups, 1);
+}
