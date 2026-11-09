@@ -49,6 +49,11 @@ pub struct CoreConfig {
     pub allow_unsafe_location: bool,
     /// 置き場所と空きを調べる関数 (試験で差し替える)。
     pub probe: Probe,
+    /// 今の接続先の名前 (状態の行と `/model` の表示)。
+    pub model_name: String,
+    /// `/model` で切り替える候補と、繋ぐ関数 (FR-108)。
+    pub models: Vec<ModelChoice>,
+    pub connect: Option<Connector>,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
 }
@@ -69,6 +74,16 @@ impl Probe {
         }
     }
 }
+
+/// `/model` の候補 (設定 `[[llm.chat.models]]`、07 §4.2)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub name: String,
+    pub url: String,
+}
+
+/// 接続先の URL から `LlmClient` を作る関数 (接続先の検査を含む)。
+pub type Connector = Arc<dyn Fn(&str) -> Result<Arc<dyn LlmClient>, LlmError> + Send + Sync>;
 
 /// 起動できない理由。
 #[derive(Debug, thiserror::Error)]
@@ -123,8 +138,12 @@ struct Inner {
     store: Arc<Store>,
     writer: WriterHandle,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    llm: Arc<dyn LlmClient>,
-    server: ServerInfo,
+    /// 今の接続先と、その能力 (`/model` で切り替える、FR-108)。
+    conn: std::sync::RwLock<(Arc<dyn LlmClient>, ServerInfo, String)>,
+    /// 切り替えの候補 (設定 `[[llm.chat.models]]`)。
+    models: Vec<ModelChoice>,
+    /// 候補の接続先に繋ぐ関数。
+    connect: Option<Connector>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     events: mpsc::UnboundedSender<Event>,
@@ -235,8 +254,9 @@ impl Core {
             store,
             writer: handle,
             writer_thread: Mutex::new(Some(writer_thread)),
-            llm,
-            server: server.clone(),
+            conn: std::sync::RwLock::new((llm, server.clone(), cfg.model_name)),
+            models: cfg.models,
+            connect: cfg.connect,
             clock: cfg.clock,
             ids: cfg.ids,
             events,
@@ -308,8 +328,9 @@ impl Core {
         let _ = self.commands.send(cmd);
     }
 
-    pub fn server(&self) -> &ServerInfo {
-        &self.inner.server
+    /// 今の接続先の能力。
+    pub fn server(&self) -> ServerInfo {
+        self.inner.conn().1
     }
 
     /// 照会: セッションの一覧 (更新の新しい順)。
@@ -399,6 +420,67 @@ impl Core {
         if let Some(t) = thread {
             let _ = tokio::task::spawn_blocking(move || t.join()).await;
         }
+    }
+}
+
+impl Inner {
+    /// 今の接続先と能力と名前の写し。
+    fn conn(&self) -> (Arc<dyn LlmClient>, ServerInfo, String) {
+        self.conn.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+fn model_info(inner: &Inner) -> Event {
+    let (_, server, name) = inner.conn();
+    Event::ModelInfo {
+        current: name,
+        model: server.model_name,
+        n_ctx: server.n_ctx,
+        choices: inner.models.iter().map(|m| m.name.clone()).collect(),
+    }
+}
+
+/// `/model` (FR-108): 名前が無ければ今のモデルと候補を示し、あれば候補に繋ぎ直す。
+async fn switch_model(inner: &Arc<Inner>, name: Option<String>) {
+    let Some(name) = name else {
+        emit(inner, model_info(inner));
+        return;
+    };
+    if is_running(inner) {
+        reject(inner, MessageKey::Busy);
+        return;
+    }
+    let (Some(choice), Some(connect)) =
+        (inner.models.iter().find(|m| m.name == name), &inner.connect)
+    else {
+        emit(
+            inner,
+            Event::Rejected {
+                error: Message::new(MessageKey::UnknownModel).arg("name", name),
+            },
+        );
+        return;
+    };
+    let connected = async {
+        let llm = connect(&choice.url)?;
+        llm.health().await?;
+        let server = llm.server_info().await?;
+        Ok::<_, LlmError>((llm, server))
+    }
+    .await;
+    match connected {
+        Ok((llm, server)) => {
+            *inner.conn.write().unwrap_or_else(|e| e.into_inner()) =
+                (llm, server, choice.name.clone());
+            emit(inner, model_info(inner));
+        }
+        // 繋がらなければ、今のモデルのまま理由を知らせる。
+        Err(e) => emit(
+            inner,
+            Event::Rejected {
+                error: llm_message(&e),
+            },
+        ),
     }
 }
 
@@ -496,6 +578,7 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::RenameSession { title } => rename(inner, title).await,
         Command::DeleteSession => delete(inner).await,
         Command::Rate { good, reason } => rate(inner, good, reason).await,
+        Command::Model { name } => switch_model(inner, name).await,
         _ => {}
     }
 }
@@ -842,12 +925,13 @@ async fn generate(
         Role::System,
         prompt::system_prompt(inner.language, inner.clock.now().as_millis()),
     );
-    let n_ctx = inner.server.n_ctx as usize;
+    let (llm, server, _) = inner.conn();
+    let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
     let messages = context::assemble(
-        &*inner.llm,
+        &*llm,
         &inner.tokens,
-        &inner.server.model_key,
+        &server.model_key,
         n_ctx,
         reserve,
         system,
@@ -858,7 +942,7 @@ async fn generate(
         messages,
         generation: inner.generation.clone(),
         // 応答は最初のスロット (06 §4)。
-        id_slot: (inner.server.total_slots > 1).then_some(0),
+        id_slot: (server.total_slots > 1).then_some(0),
         model: None,
         extra: inner.request_extra.clone(),
     };
@@ -867,7 +951,7 @@ async fn generate(
     let mut thinking = false;
     let outcome = tokio::select! {
         c = &mut cancel => Outcome::Interrupted(c.unwrap_or(Cancel::User)),
-        started = inner.llm.chat(req) => match started {
+        started = llm.chat(req) => match started {
             Err(e) => Outcome::Failed(e),
             Ok(mut stream) => loop {
                 tokio::select! {
@@ -916,7 +1000,7 @@ async fn generate(
     let turn = AssistantTurn {
         state,
         text,
-        model_key: Some(inner.server.model_key.clone()),
+        model_key: Some(server.model_key.clone()),
         generation: Some(GenerationRecord {
             temperature: g.temperature,
             top_p: g.top_p,

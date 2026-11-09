@@ -83,8 +83,10 @@ fn a_backup_taken_while_writing_is_consistent_and_opens_on_its_own() {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
     let store = Arc::new(open(dir.path(), clock.clone()));
     let tok = store.take_write_token().unwrap();
+    let committed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let writer = {
         let store = store.clone();
+        let committed = committed.clone();
         std::thread::spawn(move || {
             for n in 0..300 {
                 let mut tx = store.write(&tok, Durability::Immediate).unwrap();
@@ -96,10 +98,14 @@ fn a_backup_taken_while_writing_is_consistent_and_opens_on_its_own() {
                     tx.put(&mut e).unwrap();
                 }
                 tx.commit().unwrap();
+                committed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         })
     };
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // 書いている最中に退避を取る (負荷が高くても、書き始めてから取る)。
+    while committed.load(std::sync::atomic::Ordering::SeqCst) < 10 {
+        std::thread::yield_now();
+    }
     let backup = store.daily_backup(None).unwrap().unwrap();
     writer.join().unwrap();
 
@@ -108,7 +114,7 @@ fn a_backup_taken_while_writing_is_consistent_and_opens_on_its_own() {
     std::fs::copy(backup.join(DB_FILE), other.path().join(DB_FILE)).unwrap();
     let copy = open(other.path(), clock);
     let census = copy.census().unwrap();
-    let c = &census.known["sample"];
+    let c = census.known.get("sample").cloned().unwrap_or_default();
     assert_eq!(c.corrupt + c.unreadable, 0);
     assert_eq!(c.ok % 2, 0, "a transaction was split: {}", c.ok);
     let mut seen = 0;
