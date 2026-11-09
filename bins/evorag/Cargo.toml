@@ -19,7 +19,6 @@ evorag-llm = { workspace = true }
 evorag-store = { workspace = true }
 evorag-tui = { workspace = true }
 clap = { workspace = true }
-directories = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = { workspace = true }

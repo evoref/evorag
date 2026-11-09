@@ -180,26 +180,40 @@ pub struct Places {
     pub data_root: PathBuf,
 }
 
+/// 環境変数の値 (空は無いものとみなす)。
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn default_places() -> Option<Places> {
-    let b = directories::BaseDirs::new()?;
     let app = "evorag";
     if cfg!(windows) {
         // Roaming (%APPDATA%) は使わない (03 §2.1)。
-        let base = b.data_local_dir().join(app);
+        let base = env_path("LOCALAPPDATA")?.join(app);
         Some(Places {
             config_file: base.join("config").join("config.toml"),
             data_root: base.join("data"),
         })
     } else if cfg!(target_os = "macos") {
-        let base = b.data_dir().join(app);
+        let base = env_path("HOME")?
+            .join("Library")
+            .join("Application Support")
+            .join(app);
         Some(Places {
             config_file: base.join("config").join("config.toml"),
             data_root: base.join("data"),
         })
     } else {
+        let home = env_path("HOME");
+        let config =
+            env_path("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")))?;
+        let data = env_path("XDG_DATA_HOME")
+            .or_else(|| home.as_ref().map(|h| h.join(".local").join("share")))?;
         Some(Places {
-            config_file: b.config_dir().join(app).join("config.toml"),
-            data_root: b.data_dir().join(app),
+            config_file: config.join(app).join("config.toml"),
+            data_root: data.join(app),
         })
     }
 }

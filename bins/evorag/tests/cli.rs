@@ -13,7 +13,10 @@ use evorag_types::{SystemClock, UuidV7Gen};
 fn evorag(dir: &Path, config: &str) -> Output {
     let cfg = dir.join("config.toml");
     std::fs::write(&cfg, config).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_evorag"))
+    // 実行時の値を先に見る (no-network の CI は、試験を別の場所に写して走らせる)。
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    Command::new(exe)
         .arg("--config")
         .arg(&cfg)
         .arg("--data-root")
