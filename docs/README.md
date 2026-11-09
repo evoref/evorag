@@ -32,6 +32,7 @@ evorag は、手元の llama-server (llama.cpp) だけで動く、Rust 製のチ
 | [12-licensing-distribution](12-licensing-distribution.md) | ライセンス、寄稿、配布物と署名、公開前チェック、**本体の更新** | PO、全担当 |
 | [13-learning](13-learning.md) | 自己学習 (第 1 段 precept と、その後の段) | 学習の実装者 (v0.4) |
 | [14-cartridge](14-cartridge.md) | カートリッジ (v0.5) | カートリッジの実装者 |
+| [15-coding](15-coding.md) | コーディングモード (v1.0 より後の構想): ProjectMap、道具と編集、実行の隔離、利用者のファイルの保護、自己改善の第 5 段 | PO、v1.0 より後の実装者 |
 
 ## 3. 読む順序
 
@@ -63,3 +64,4 @@ evorag は、手元の llama-server (llama.cpp) だけで動く、Rust 製のチ
 | ライセンス、寄稿、配布物と署名、本体の更新 | 12 |
 | 自己学習 | 13 |
 | カートリッジ | 14 |
+| コーディングモード (ProjectMap、道具、実行の隔離、自己改善の第 5 段の中身) | 15 |
