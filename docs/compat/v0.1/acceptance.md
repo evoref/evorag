@@ -29,7 +29,7 @@ v0.1 の合格条件の組み合わせ: Windows Terminal + Microsoft IME (新・
 
 | 確かめること | 結果 | 確かめた日・版 |
 |---|---|---|
-| llama-server の無い PC で、`evorag setup` の案内どおりに最初の会話まで進める | 未 (`setup` は M1.6) | — |
+| llama-server の無い PC で、`evorag setup` の案内どおりに最初の会話まで進める | 未 (リリース候補で確かめる。案内の文言は `locales/ja.toml` の `cli.setup_guide`、手順書は `dist/README.md` §3) | — |
 
 ## 3. エラーの表示 (NFR-604)
 
@@ -41,4 +41,4 @@ v0.1 の合格条件の組み合わせ: Windows Terminal + Microsoft IME (新・
 
 | 確かめること | 結果 | 確かめた日・版 |
 |---|---|---|
-| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 未 (M1.6) | — |
+| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 未 (リリース候補で確かめる。手順書は `dist/README.md` §6.1。仮の鍵での通しの確認は #47 で済み) | — |

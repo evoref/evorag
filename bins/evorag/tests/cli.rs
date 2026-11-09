@@ -385,7 +385,7 @@ fn setup_without_llama_server_shows_the_steps_and_writes_nothing() {
     assert!(!dir.path().join("config.toml").exists());
 }
 
-/// verifies: FR-510 (見つけた接続先とプロンプトの言語を設定に書く。書き換えは確かめてから)
+/// FR-510 の補足 (見つけた接続先とプロンプトの言語を設定に書く。書き換えは確かめてから)
 #[test]
 fn setup_finds_llama_server_and_writes_the_config() {
     let dir = TempDir::new("cli-setup-found");

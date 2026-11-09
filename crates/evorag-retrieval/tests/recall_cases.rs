@@ -44,6 +44,7 @@ fn id_of(session: usize, turn: usize) -> Id {
     Id::from_bytes(b)
 }
 
+/// verifies: AC-FR-402-1
 #[test]
 fn recall_cases_reach_80_percent() {
     let text = std::fs::read_to_string(workspace().join("tests/retrieval/recall-v0.1.toml"))
