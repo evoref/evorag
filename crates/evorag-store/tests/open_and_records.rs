@@ -197,7 +197,8 @@ fn a_newer_format_that_still_allows_older_writers_stays_writable() {
 }
 
 #[test]
-fn a_database_that_needs_a_newer_reader_or_a_migration_is_not_opened() {
+fn a_database_that_needs_a_newer_reader_is_not_opened_and_one_without_a_migration_path_is_read_only()
+ {
     let dir = TempDir::new("store-too-new");
     drop(open(dir.path()));
     set_meta(dir.path(), &[(meta::FORMAT_MIN_READ, "0.5")]);
@@ -216,10 +217,16 @@ fn a_database_that_needs_a_newer_reader_or_a_migration_is_not_opened() {
             (meta::FORMAT_MIN_WRITE, "0.0"),
         ],
     );
+    // この版に 0.0 からの移行は無い。元の DB のまま、読むだけで開く (03 §12.1)。
+    let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
     assert!(matches!(
-        Store::open(opts(dir.path(), "0.0.2")),
-        Err(OpenError::MigrationRequired { .. })
+        report.read_only,
+        Some(ReadOnlyReason::MigrationFailed { .. })
     ));
+    assert_eq!(
+        store.meta(meta::FORMAT_VERSION).unwrap().as_deref(),
+        Some("0.0")
+    );
 }
 
 /// verifies: AC-FR-206-1 (= AC-NFR-303-1。`doctor` の報告は doctor のタスクで判定する)

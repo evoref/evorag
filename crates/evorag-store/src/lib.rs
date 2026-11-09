@@ -2,10 +2,13 @@
 //!
 //! 仕様: 03, 02 §4.1。redb を直接使ってよいのはこの crate だけ (02 §4.3 の R2)。
 
+pub mod backup;
 pub mod envelope;
+mod fsutil;
 pub mod key;
 pub mod lock;
 pub mod meta;
+pub mod migrate;
 pub mod relations;
 mod store;
 #[doc(hidden)]

@@ -16,6 +16,7 @@ use crate::envelope::{DecodeError, Envelope};
 use crate::key::{self, KeyBuf, OwnedPart};
 use crate::lock::{DataRootLock, LockError};
 use crate::meta;
+use crate::migrate::{self, FormatPlan};
 use crate::version::Version;
 
 /// DB のファイルの名前。
@@ -24,7 +25,7 @@ pub const DB_FILE: &str = "evorag.redb";
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
 pub const FORMAT_VERSION: &str = "0.1";
 
-type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
+pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub(crate) const META: Raw = TableDefinition::new("meta");
 pub(crate) const RECORDS: Raw = TableDefinition::new("records");
 pub(crate) const LINKS: Raw = TableDefinition::new("links");
@@ -92,6 +93,8 @@ pub struct OpenOptions {
 pub enum ReadOnlyReason {
     /// DB が、この版が書けない新しい形式の版 (`format.min_write`) で書かれている。
     NewerFormat { min_write: String },
+    /// 古い形式の DB を移行できなかった。元の DB のまま開いている (03 §12.1)。
+    MigrationFailed { reason: String },
 }
 
 /// 開いたときに分かったこと。画面と `doctor` が利用者に知らせる。
@@ -103,6 +106,10 @@ pub struct OpenReport {
     pub read_only: Option<ReadOnlyReason>,
     /// これまでに、この版より新しい版が書き込みで開いた (巻き戻し、03 §4.2 の規則 6)。
     pub newer_writer_seen: Option<String>,
+    /// 移行した (元の形式の版)。
+    pub migrated_from: Option<String>,
+    /// 移行の前に作った退避。
+    pub pre_op_backup: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,9 +124,6 @@ pub enum OpenError {
         "the database needs a newer evorag to read (format {format}, needs at least {min_read})"
     )]
     TooNew { format: String, min_read: String },
-    /// 古い形式の版。移行が要る (03 §12)。
-    #[error("the database format {found} is older than {current} and must be migrated")]
-    MigrationRequired { found: String, current: String },
     /// `meta` が読めない・形式の版が無い。
     #[error("the database metadata is unreadable: {0}")]
     BadMeta(String),
@@ -158,6 +162,8 @@ pub enum StoreError {
     BadRelation(#[from] crate::relations::BadRelation),
     #[error("database error: {0}")]
     Db(#[from] redb::Error),
+    #[error("i/o error: {0}")]
+    Io(String),
 }
 
 pub(crate) fn db<E: Into<redb::Error>>(e: E) -> StoreError {
@@ -207,6 +213,7 @@ pub struct Store {
     db: Database,
     root: PathBuf,
     version: String,
+    plan: FormatPlan,
     kinds: BTreeMap<&'static str, KindSpec>,
     read_only: Option<ReadOnlyReason>,
     clock: Arc<dyn Clock>,
@@ -288,24 +295,97 @@ fn make_private_file(_p: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn open_db(path: &Path) -> Result<Database, OpenError> {
+    Database::create(path).map_err(|e| match e {
+        redb::DatabaseError::DatabaseAlreadyOpen => OpenError::DatabaseInUse,
+        redb::DatabaseError::Storage(redb::StorageError::Io(io)) => OpenError::Io(io),
+        other => OpenError::Unreadable(other.to_string()),
+    })
+}
+
+fn read_meta_db(database: &Database) -> Result<Option<BTreeMap<String, String>>, StoreError> {
+    let rtx = database.begin_read().map_err(db)?;
+    let table = match rtx.open_table(META) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(db(e)),
+    };
+    let mut out = BTreeMap::new();
+    for item in table.iter().map_err(db)? {
+        let (k, v) = item.map_err(db)?;
+        out.insert(
+            String::from_utf8_lossy(k.value()).into_owned(),
+            String::from_utf8_lossy(v.value()).into_owned(),
+        );
+    }
+    if out.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+fn meta_version(m: &BTreeMap<String, String>, k: &str) -> Result<Version, OpenError> {
+    m.get(k)
+        .ok_or_else(|| OpenError::BadMeta(format!("missing `{k}`")))?
+        .parse()
+        .map_err(|e| OpenError::BadMeta(format!("`{k}`: {e}")))
+}
+
 impl Store {
-    /// データ根を開く。無ければ作る。
+    /// データ根を開く。無ければ作る。古い形式の DB は、この版の移行で今の形式にする。
     pub fn open(opts: OpenOptions) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_with(opts, FormatPlan::current())
+    }
+
+    /// 書く形式と移行を指定して開く (移行の試験のため)。
+    pub fn open_with(opts: OpenOptions, plan: FormatPlan) -> Result<(Self, OpenReport), OpenError> {
         create_private_dir(&opts.data_root)?;
         let lock = DataRootLock::acquire(&opts.data_root)?;
+        migrate::recover(&opts.data_root)?;
         let path = opts.data_root.join(DB_FILE);
-        let database = Database::create(&path).map_err(|e| match e {
-            redb::DatabaseError::DatabaseAlreadyOpen => OpenError::DatabaseInUse,
-            redb::DatabaseError::Storage(redb::StorageError::Io(io)) => OpenError::Io(io),
-            other => OpenError::Unreadable(other.to_string()),
-        })?;
+        let mut database = open_db(&path)?;
         make_private_file(&path)?;
 
-        let ours: Version = FORMAT_VERSION.parse().expect("valid format version");
+        let ours: Version = plan
+            .version
+            .parse()
+            .map_err(|e| OpenError::BadMeta(format!("format version: {e}")))?;
         let our_writer: Version = opts
             .evorag_version
             .parse()
             .map_err(|e| OpenError::BadMeta(format!("evorag version: {e}")))?;
+
+        let mut report = OpenReport::default();
+        let mut read_only = None;
+        let mut existing =
+            read_meta_db(&database).map_err(|e| OpenError::BadMeta(e.to_string()))?;
+        if let Some(m) = &existing {
+            let format = meta_version(m, meta::FORMAT_VERSION)?;
+            let min_read = meta_version(m, meta::FORMAT_MIN_READ)?;
+            if min_read > ours {
+                return Err(OpenError::TooNew {
+                    format: format.to_string(),
+                    min_read: min_read.to_string(),
+                });
+            }
+            if format < ours {
+                let now = opts.clock.now().as_millis();
+                match migrate::run(database, &opts.data_root, &format, &plan, now) {
+                    migrate::Outcome::Migrated { db, backup } => {
+                        database = db;
+                        report.migrated_from = Some(format.to_string());
+                        report.pre_op_backup = Some(backup);
+                        existing = read_meta_db(&database)
+                            .map_err(|e| OpenError::BadMeta(e.to_string()))?;
+                    }
+                    migrate::Outcome::Failed { db, reason } => {
+                        database = db;
+                        read_only = Some(ReadOnlyReason::MigrationFailed { reason });
+                    }
+                    migrate::Outcome::Fatal(reason) => return Err(OpenError::Unreadable(reason)),
+                }
+            }
+        }
 
         let mut kinds: BTreeMap<&'static str, KindSpec> =
             BUILTIN_KINDS.iter().map(|k| (k.name, k.clone())).collect();
@@ -315,8 +395,9 @@ impl Store {
             db: database,
             root: opts.data_root,
             version: opts.evorag_version,
+            plan,
             kinds,
-            read_only: None,
+            read_only,
             clock: opts.clock,
             ids: opts.ids,
             newer_kinds: Mutex::default(),
@@ -325,10 +406,6 @@ impl Store {
             _lock: lock,
         };
 
-        let existing = store
-            .read_meta()
-            .map_err(|e| OpenError::BadMeta(e.to_string()))?;
-        let mut report = OpenReport::default();
         let Some(existing) = existing else {
             store
                 .init()
@@ -337,29 +414,8 @@ impl Store {
             return Ok((store, report));
         };
 
-        let get = |k: &str| -> Result<Version, OpenError> {
-            existing
-                .get(k)
-                .ok_or_else(|| OpenError::BadMeta(format!("missing `{k}`")))?
-                .parse()
-                .map_err(|e| OpenError::BadMeta(format!("`{k}`: {e}")))
-        };
-        let format = get(meta::FORMAT_VERSION)?;
-        let min_read = get(meta::FORMAT_MIN_READ)?;
-        let min_write = get(meta::FORMAT_MIN_WRITE)?;
-        if min_read > ours {
-            return Err(OpenError::TooNew {
-                format: format.to_string(),
-                min_read: min_read.to_string(),
-            });
-        }
-        if format < ours {
-            return Err(OpenError::MigrationRequired {
-                found: format.to_string(),
-                current: ours.to_string(),
-            });
-        }
-        if min_write > ours {
+        let min_write = meta_version(&existing, meta::FORMAT_MIN_WRITE)?;
+        if store.read_only.is_none() && min_write > ours {
             store.read_only = Some(ReadOnlyReason::NewerFormat {
                 min_write: min_write.to_string(),
             });
@@ -409,24 +465,7 @@ impl Store {
     }
 
     fn read_meta(&self) -> Result<Option<BTreeMap<String, String>>, StoreError> {
-        let rtx = self.db.begin_read().map_err(db)?;
-        let table = match rtx.open_table(META) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(db(e)),
-        };
-        let mut out = BTreeMap::new();
-        for item in table.iter().map_err(db)? {
-            let (k, v) = item.map_err(db)?;
-            out.insert(
-                String::from_utf8_lossy(k.value()).into_owned(),
-                String::from_utf8_lossy(v.value()).into_owned(),
-            );
-        }
-        if out.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(out))
+        read_meta_db(&self.db)
     }
 
     /// 新しい DB に表と `meta` を作る (03 §3.1.1)。
@@ -442,9 +481,9 @@ impl Store {
             let root_id = self.ids.next_id().to_string();
             let writer_key = format!("{}{}", meta::WRITER_PREFIX, self.version);
             let entries: [(&str, &str); 12] = [
-                (meta::FORMAT_VERSION, FORMAT_VERSION),
-                (meta::FORMAT_MIN_READ, FORMAT_VERSION),
-                (meta::FORMAT_MIN_WRITE, FORMAT_VERSION),
+                (meta::FORMAT_VERSION, &self.plan.version),
+                (meta::FORMAT_MIN_READ, &self.plan.min_read),
+                (meta::FORMAT_MIN_WRITE, &self.plan.min_write),
                 (meta::KEY_ENCODING_VERSION, "1"),
                 (meta::DATA_ROOT_ID, &root_id),
                 (meta::CREATED_BY, &self.version),
