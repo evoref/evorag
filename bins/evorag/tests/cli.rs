@@ -433,3 +433,19 @@ fn setup_finds_llama_server_and_writes_the_config() {
         .count();
     assert_eq!(backups, 1);
 }
+
+/// verifies: AC-FR-906-1
+#[test]
+fn version_shows_the_build_and_how_it_was_installed() {
+    let dir = TempDir::new("cli-version");
+    let out = evorag_raw(dir.path(), &["--version"], "");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text.starts_with(&format!("evorag {}", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
+    for label in ["commit: ", "target: ", "rustc: ", "installed via: "] {
+        assert!(text.contains(label), "{label} in {text}");
+    }
+}

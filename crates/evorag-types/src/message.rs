@@ -128,6 +128,8 @@ message_keys! {
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// 引数: `count`、`path`、`kinds`。
     CliExported => "cli.exported",
+    /// 引数: `path`、`backup`。
+    CliConfigMigrated => "cli.config_migrated",
     /// 引数: `tried`。
     CliSetupGuide => "cli.setup_guide",
     /// 引数: `url`。
