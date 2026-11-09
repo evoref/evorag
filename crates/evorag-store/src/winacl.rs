@@ -6,7 +6,7 @@
 
 use std::ffi::c_void;
 use std::io;
-use std::path::Path;
+use std::sync::OnceLock;
 
 type Handle = *mut c_void;
 type Psid = *mut c_void;
@@ -23,6 +23,9 @@ const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const ACL_SIZE_INFORMATION: u32 = 2;
 const SE_DACL_PROTECTED: u16 = 0x1000;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const INHERIT_ONLY_ACE: u8 = 0x08;
+const FILE_PERSISTENT_ACLS: u32 = 0x8;
+const DRIVE_REMOTE: u32 = 4;
 
 #[repr(C)]
 struct SidAndAttributes {
@@ -43,6 +46,18 @@ unsafe extern "system" {
     fn GetCurrentProcess() -> Handle;
     fn CloseHandle(h: Handle) -> i32;
     fn LocalFree(p: *mut c_void) -> *mut c_void;
+    fn GetVolumePathNameW(path: *const u16, out: *mut u16, len: u32) -> i32;
+    fn GetDriveTypeW(root: *const u16) -> u32;
+    fn GetVolumeInformationW(
+        root: *const u16,
+        name: *mut u16,
+        name_len: u32,
+        serial: *mut u32,
+        max_component: *mut u32,
+        flags: *mut u32,
+        fs_name: *mut u16,
+        fs_name_len: u32,
+    ) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -124,9 +139,63 @@ impl UserSid {
     }
 }
 
+/// 今の利用者の SID (プロセスで 1 回だけ問い合わせる)。
+fn user() -> io::Result<&'static UserSid> {
+    static USER: OnceLock<Result<UserSid, i32>> = OnceLock::new();
+    match USER.get_or_init(|| UserSid::current().map_err(|e| e.raw_os_error().unwrap_or(0))) {
+        Ok(u) => Ok(u),
+        Err(code) => Err(io::Error::from_raw_os_error(*code)),
+    }
+}
+
+// SAFETY: SID の入れ物は作った後に書き換えない。読むだけなのでスレッドをまたいでよい。
+unsafe impl Sync for UserSid {}
+unsafe impl Send for UserSid {}
+
+/// ACL を付けられる置き場所か。ネットワークの置き場所 (相手の側では SID が別のアカウントに
+/// なり、作った本人が開けなくなるおそれ) と、ACL を持たないファイルシステム (FAT・exFAT。付けても
+/// 何も起きない) では付けない。
+pub fn applicable(path: &[u16]) -> bool {
+    let mut root = vec![0u16; path.len().max(4) + 1];
+    // SAFETY: path は NUL で終わる UTF-16。root は path より長い。
+    if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return false;
+    }
+    let end = root.iter().position(|&c| c == 0).unwrap_or(0);
+    let s = String::from_utf16_lossy(&root[..end]);
+    if s.starts_with(r"\\?\UNC\") || (s.starts_with(r"\\") && !s.starts_with(r"\\?\")) {
+        return false;
+    }
+    let mut flags = 0u32;
+    // SAFETY: root は NUL で終わるボリュームの根。出力は flags だけを受け取る。
+    unsafe {
+        if GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE {
+            return false;
+        }
+        if GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        ) == 0
+        {
+            return false;
+        }
+    }
+    flags & FILE_PERSISTENT_ACLS != 0
+}
+
 /// `path` に、今の利用者だけを許す保護した DACL を付ける。`dir` ならフォルダの中へ継承させる。
+/// 付けられない置き場所 ([`applicable`]) では何もしない。
 pub fn restrict(path: &[u16], dir: bool) -> io::Result<()> {
-    let user = UserSid::current()?;
+    if !applicable(path) {
+        return Ok(());
+    }
+    let user = user()?;
     let sid = user.sid();
     // SAFETY: sid は有効な SID を指す。
     let sid_len = unsafe { GetLengthSid(sid) };
@@ -172,8 +241,8 @@ pub fn restrict(path: &[u16], dir: bool) -> io::Result<()> {
 
 /// 所有者だけが使えるか (DACL の ACE が、今の利用者を許す 1 つだけで、継承を切っているか、
 /// 継承を切ったフォルダから継承しているか)。試験と doctor のため。
-pub fn is_owner_only(path: &[u16], _p: &Path) -> io::Result<bool> {
-    let user = UserSid::current()?;
+pub fn is_owner_only(path: &[u16]) -> io::Result<bool> {
+    let user = user()?;
     let mut dacl: *mut c_void = std::ptr::null_mut();
     let mut sd: *mut c_void = std::ptr::null_mut();
     // SAFETY: path は NUL で終わる UTF-16。出力のポインタはすべて有効。
@@ -215,8 +284,14 @@ pub fn is_owner_only(path: &[u16], _p: &Path) -> io::Result<bool> {
             }
             // ACE_HEADER (型 1・flags 1・大きさ 2) + mask (4) + SidStart。
             let kind = *ace.cast::<u8>();
+            let ace_flags = *ace.cast::<u8>().add(1);
+            let mask = ace.cast::<u8>().add(4).cast::<u32>().read_unaligned();
             let sid = ace.cast::<u8>().add(8).cast::<c_void>();
-            if kind != ACCESS_ALLOWED_ACE_TYPE || EqualSid(sid, user.sid()) == 0 {
+            if kind != ACCESS_ALLOWED_ACE_TYPE
+                || ace_flags & INHERIT_ONLY_ACE != 0
+                || mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS
+                || EqualSid(sid, user.sid()) == 0
+            {
                 return false;
             }
             let mut control = 0u16;

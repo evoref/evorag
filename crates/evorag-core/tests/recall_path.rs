@@ -369,5 +369,8 @@ async fn logs_never_contain_the_conversation() {
         "the log must not contain the conversation: {text}"
     );
     assert!(!text.contains("モンステラ"), "{text}");
-    assert!(evorag_store::fsutil::is_private(&log).unwrap());
+    assert!(
+        !evorag_store::fsutil::acl_applicable(&log).unwrap()
+            || evorag_store::fsutil::is_private(&log).unwrap()
+    );
 }

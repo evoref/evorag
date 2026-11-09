@@ -671,16 +671,20 @@ async fn a_new_data_root_is_created_owner_only_and_used() {
     });
     until(&mut rx, finished).await;
     core.shutdown().await;
-    let private = evorag_store::fsutil::is_private;
-    assert!(private(&root).unwrap(), "the data root is owner only");
-    assert!(private(&root.join("evorag.redb")).unwrap());
+    // ACL を持たないボリューム (FAT・exFAT) では付けない (03 §2)。
+    let private = |p: &std::path::Path| {
+        !evorag_store::fsutil::acl_applicable(p).unwrap()
+            || evorag_store::fsutil::is_private(p).unwrap()
+    };
+    assert!(private(&root), "the data root is owner only");
+    assert!(private(&root.join("evorag.redb")));
     let journal = std::fs::read_dir(root.join("journal"))
         .unwrap()
         .next()
         .unwrap()
         .unwrap()
         .path();
-    assert!(private(&journal).unwrap(), "{}", journal.display());
+    assert!(private(&journal), "{}", journal.display());
     assert!(
         file_contains(&journal, "ここに残す"),
         "the data root is used"

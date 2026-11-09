@@ -125,9 +125,12 @@ fn every_record_is_written_once_as_an_envelope() {
     assert!(!seen.contains(&broken));
 
     // 書き出しは所有者だけ (AC-NFR-503-1)。
-    let private = evorag_store::fsutil::is_private;
-    assert!(private(&out).unwrap(), "the export folder is owner only");
-    assert!(private(&out.join("note.jsonl")).unwrap(), "owner only");
+    let private = |p: &std::path::Path| {
+        !evorag_store::fsutil::acl_applicable(p).unwrap()
+            || evorag_store::fsutil::is_private(p).unwrap()
+    };
+    assert!(private(&out), "the export folder is owner only");
+    assert!(private(&out.join("note.jsonl")), "owner only");
 
     // 中身のあるフォルダには書かない。
     assert!(matches!(

@@ -404,7 +404,11 @@ fn setup_finds_llama_server_and_writes_the_config() {
     assert!(cfg.contains(&format!("url = \"{url}\"")), "{cfg}");
     assert!(cfg.contains("language = \"en\""), "{cfg}");
     // 設定は所有者だけ (AC-NFR-503-1)。
-    assert!(evorag_store::fsutil::is_private(&dir.path().join("config.toml")).unwrap());
+    let cfg_path = dir.path().join("config.toml");
+    assert!(
+        !evorag_store::fsutil::acl_applicable(&cfg_path).unwrap()
+            || evorag_store::fsutil::is_private(&cfg_path).unwrap()
+    );
 
     // 同じなら書き換えない。
     let out = evorag_raw(dir.path(), &["setup", "--url", &url], "");
