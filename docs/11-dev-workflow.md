@@ -64,7 +64,8 @@ evorag/
 
 - リポジトリ直下の `CLAUDE.md` に、エージェント向けの要約 (仕様書駆動、ブランチ運用、コミットの規約、サブエージェントに任せるときの注意) を置く。本書が正本で、`CLAUDE.md` は要約だけを持つ。
 - `.claude/settings.json` の PreToolUse hook (`.claude/hooks/guard-git.py`) が、§9.1 の運用を機械的に守らせる。
-  - 拒否: `main` / `develop` への push・force push・リモートのブランチ削除、`main` / `develop` 上の commit / merge / rebase など、`v*` タグの作成と push、`git stash`。
+  - 拒否: `main` / `develop` への push と削除、force push、`main` / `develop` 上の commit / merge / rebase など、`v*` タグの作成と push、`git stash`。
+  - 許可: 作業ブランチ (`feat/`・`fix/`・`spec/`・`chore/`・`spike/`・`agent/`) のリモートのブランチの削除 (マージ後の片付け)。それ以外の名前の削除は確認。
   - 確認: `git reset --hard` / `git clean -f` / `git restore` / `git checkout -- <path>`、`gh pr merge`。
 - hook に拒否されたら、回避せずに理由を人間に伝えて指示を待つ。
 

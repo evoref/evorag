@@ -5,6 +5,8 @@
 PR (squash) で develop に入れる。リリースは develop → main の PR (merge commit、人間) で、タグは人間が署名して付ける。
 
 - main / develop への直接 push・force push・削除を拒否
+- force push を拒否。リモートのブランチの削除は、作業ブランチ (feat/ fix/ spec/ chore/ spike/ agent/) だけ許し、
+  それ以外の名前は確認を求める
 - main / develop 上での commit / merge / rebase 等を拒否 (作業ブランチ → PR で入れる)
 - リリースタグ (v*) の作成・push を拒否 (署名付きタグは人間が付ける)
 - git stash を拒否 (作業ツリーを動かす操作)。reset --hard / clean -f / restore / checkout -- は確認を求める
@@ -20,6 +22,7 @@ import sys
 
 PROTECTED = {"main", "develop"}
 TAG_RE = re.compile(r"^(refs/tags/)?v\d")
+WORK_BRANCH_RE = re.compile(r"^(feat|fix|spec|chore|spike)/[^/].*$|^agent/[^/]+/[^/].*$")
 MUTATING = {"commit", "merge", "rebase", "cherry-pick", "revert", "am", "pull"}
 SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
 
@@ -75,7 +78,8 @@ def check_push(args, branch):
     pos = [a for a in args if not a.startswith("-")]
     if any(f in ("--all", "--mirror", "--tags") for f in flags):
         decide("deny", "push --all / --mirror / --tags は禁止です (保護ブランチとタグを巻き込むため)。")
-    force = any(f in ("-f", "--force", "--delete", "-d") or f.startswith("--force-with-lease") for f in flags)
+    force = any(f in ("-f", "--force") or f.startswith("--force-with-lease") for f in flags)
+    delete = any(f in ("--delete", "-d") for f in flags)
     refspecs = pos[1:]  # pos[0] は remote
     targets = []
     for r in refspecs:
@@ -84,7 +88,7 @@ def check_push(args, branch):
             r = r[1:]
         dst = r.split(":", 1)[1] if ":" in r else r
         if r.startswith(":"):
-            force = True
+            delete = True
         if dst == "HEAD":
             dst = branch
         targets.append(re.sub(r"^refs/heads/", "", dst))
@@ -97,7 +101,13 @@ def check_push(args, branch):
     if hit:
         decide("deny", f"{hit[0]} への直接 push は禁止です。作業ブランチ → PR で入れてください。")
     if force:
-        decide("deny", "force push と remote ブランチの削除は禁止です (作業ブランチ内の rebase 後の push は人間が行ってください)。")
+        decide("deny", "force push は禁止です (作業ブランチ内の rebase 後の push は人間が行ってください)。")
+    if delete:
+        if not refspecs:
+            decide("deny", "削除するリモートのブランチを指定してください。")
+        others = [t for t in targets if not WORK_BRANCH_RE.match(t)]
+        if others:
+            decide("ask", f"作業ブランチの名前ではないリモートのブランチ {others[0]} を削除します。よいですか?")
 
 
 def main():
