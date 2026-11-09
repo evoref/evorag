@@ -138,12 +138,3 @@ fn check(root: &Path) -> bool {
         false
     }
 }
-
-#[cfg(test)]
-mod probe {
-    #[test]
-    fn temporary_network_probe() {
-        let addr = "1.1.1.1:80".parse().unwrap();
-        let _ = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2));
-    }
-}
