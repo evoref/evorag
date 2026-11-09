@@ -9,6 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+evorag-types = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
 
 [lints]
 workspace = true

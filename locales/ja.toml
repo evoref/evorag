@@ -1,0 +1,3 @@
+# 日本語の文言カタログ (docs/07-tui-config.md §6)。
+# キーは evorag-types の MessageKey と一致させる (`cargo xtask i18n` で検査する、NFR-602)。
+# 表は入れ子にしてよく、点でつないだ名前がキーになる。値は文字列だけ。
