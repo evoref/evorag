@@ -135,7 +135,7 @@ Closes #12
 
 ### 9.4 寄稿ポリシー (DCO)
 
-- 寄稿は **DCO** (確定 (ユーザー回答)、[OQ-02](10-decisions.md#oq-02-寄稿ポリシー))。すべてのコミットに `Signed-off-by:` を付ける (`git commit -s`)。メンテナと AI エージェントのコミットも同じ。DCO の検査 (09 §6.2 の `dco` ジョブ) は最初の CI から入れる。
+- 寄稿は **DCO** (確定 (ユーザー回答)、[OQ-02](10-decisions.md#oq-02-寄稿ポリシー))。すべてのコミットに `Signed-off-by:` を付ける (`git commit -s`)。メンテナと AI エージェントのコミットも同じ。DCO の検査 (09 §6.2 の `dco` ジョブ) は最初の CI から入れる。Dependabot は署名を付けられないので、Dependabot が作ったコミットだけは検査から除く (人間がそれを squash で入れるときは、squash のコミットメッセージに `Signed-off-by:` を足す)。
 - 公開してよい著者名とメールアドレスだけを使う (リポジトリの `user.email` を設定する)。
 - 外部からの PR の受付は、受付の条件 ([12 §3](12-licensing-distribution.md#3-寄稿)) が整ってから始める。それまでは `CONTRIBUTING.md` に「まだ受け付けていない」と書く。
 

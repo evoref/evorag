@@ -10,7 +10,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "evorag"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-core",
  "evorag-tui",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-index",
  "evorag-llm",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-index"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-store",
  "evorag-types",
@@ -39,14 +39,14 @@ dependencies = [
 
 [[package]]
 name = "evorag-llm"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-types",
 ]
 
 [[package]]
 name = "evorag-memory"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-store",
  "evorag-types",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-retrieval"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-index",
  "evorag-memory",
@@ -63,14 +63,14 @@ dependencies = [
 
 [[package]]
 name = "evorag-store"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-types",
 ]
 
 [[package]]
 name = "evorag-tui"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-core",
  "evorag-types",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-types"
-version = "0.0.0"
+version = "0.0.1"
 
 [[package]]
 name = "hashbrown"
@@ -242,7 +242,7 @@ checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "evorag-types",
  "serde",
