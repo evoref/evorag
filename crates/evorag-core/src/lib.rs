@@ -387,7 +387,110 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         }
         Command::Retry => regenerate(inner, true).await,
         Command::Resend => regenerate(inner, false).await,
+        Command::RenameSession { title } => rename(inner, title).await,
+        Command::DeleteSession => delete(inner).await,
+        Command::Rate { good, reason } => rate(inner, good, reason).await,
         _ => {}
+    }
+}
+
+async fn rename(inner: &Arc<Inner>, title: String) {
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let Some(session) = read_env(inner, evorag_memory::KIND_SESSION, sid) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let Ok(ops) = writes(inner).rename_session(&session, &title) else {
+        return;
+    };
+    if let Err(e) = write(inner, ops).await {
+        emit(
+            inner,
+            Event::Rejected {
+                error: Message::new(MessageKey::ResponseNotSaved).arg("detail", e),
+            },
+        );
+        return;
+    }
+    if let Ok(rtx) = inner.store.read()
+        && let Ok(s) = evorag_memory::load_session(&rtx, sid)
+    {
+        emit(
+            inner,
+            Event::SessionRenamed {
+                session: views::session(&s),
+            },
+        );
+    }
+}
+
+async fn delete(inner: &Arc<Inner>) {
+    if is_running(inner) {
+        reject(inner, MessageKey::Busy);
+        return;
+    }
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let ops = inner.store.read().ok().and_then(|rtx| {
+        let s = evorag_memory::load_session(&rtx, sid).ok()?;
+        evorag_memory::delete_session(&rtx, &s.envelope).ok()
+    });
+    let Some(ops) = ops else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    if let Err(e) = write(inner, ops).await {
+        emit(
+            inner,
+            Event::Rejected {
+                error: Message::new(MessageKey::DeleteFailed).arg("detail", e),
+            },
+        );
+        return;
+    }
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session = None;
+    emit(inner, Event::SessionDeleted { id: sid });
+}
+
+async fn rate(inner: &Arc<Inner>, good: bool, reason: Option<String>) {
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let turns = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, sid).ok())
+        .unwrap_or_default();
+    let Some(target) = turns
+        .iter()
+        .rev()
+        .find(|t| t.body.role == TurnRole::Assistant)
+        .map(|t| t.envelope.id)
+    else {
+        reject(inner, MessageKey::NothingToRate);
+        return;
+    };
+    let kind = if good {
+        SignalKind::Good
+    } else {
+        SignalKind::Bad
+    };
+    let Ok((_, ops)) = writes(inner).signal(kind, target, reason) else {
+        return;
+    };
+    if write(inner, ops).await.is_ok() {
+        emit(inner, Event::Rated { good });
     }
 }
 

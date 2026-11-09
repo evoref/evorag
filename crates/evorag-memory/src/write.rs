@@ -221,3 +221,39 @@ impl Writes<'_> {
         ))
     }
 }
+
+/// セッションを消す操作 (04 §7、FR-309 の DB の分)。ターン、ターンを対象にした信号、関係、
+/// 副索引、セッションを 1 つの依頼で消す。ジャーナルの行と語彙の索引から消すのは、それぞれを
+/// 持つ層が足す。
+pub fn delete_session(
+    tx: &evorag_store::ReadTxn<'_>,
+    session: &Envelope,
+) -> Result<Vec<WriteOp>, crate::MemoryError> {
+    let mut ops = Vec::new();
+    for (turn, _) in tx.links_to(session.id, REL_IN_SESSION)? {
+        for (signal, _) in tx.links_to(turn, REL_TARGET)? {
+            ops.push(WriteOp::Delete {
+                kind: KIND_SIGNAL.into(),
+                id: signal,
+            });
+            ops.push(WriteOp::DeleteLinksOf(signal));
+        }
+        ops.push(WriteOp::Delete {
+            kind: KIND_TURN.into(),
+            id: turn,
+        });
+        ops.push(WriteOp::DeleteLinksOf(turn));
+    }
+    ops.push(WriteOp::DeleteLookup {
+        kind: KIND_SESSION.into(),
+        field: LOOKUP_UPDATED_AT.into(),
+        value: OwnedPart::Int(session.updated_at.as_millis()),
+        id: session.id,
+    });
+    ops.push(WriteOp::Delete {
+        kind: KIND_SESSION.into(),
+        id: session.id,
+    });
+    ops.push(WriteOp::DeleteLinksOf(session.id));
+    Ok(ops)
+}

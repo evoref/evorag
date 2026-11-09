@@ -199,3 +199,40 @@ fn signals_link_to_their_target_turn() {
     assert_eq!(body.kind, SignalKind::Bad);
     assert_eq!(body.reason.as_deref(), Some("違う"));
 }
+
+/// verifies: AC-FR-105-1 (データの層: 消したセッションは一覧から消え、ターン・信号・関係も残らない)
+#[test]
+fn deleting_a_session_removes_its_turns_signals_and_links() {
+    let dir = TempDir::new("conv-delete");
+    let env = Env::open(dir.path());
+    let (keep, ops) = env.writes().create_session("残す").unwrap();
+    env.write(ops);
+    let (gone, ops) = env.writes().create_session("消す").unwrap();
+    env.write(ops);
+    let (u, ops) = env.writes().user_turn(&env.session(gone), "q").unwrap();
+    env.write(ops);
+    let (sig, ops) = env.writes().signal(SignalKind::Good, u, None).unwrap();
+    env.write(ops);
+
+    let ops = {
+        let rtx = env.store.read().unwrap();
+        delete_session(&rtx, &env.session(gone)).unwrap()
+    };
+    env.write(ops);
+
+    let rtx = env.store.read().unwrap();
+    let titles: Vec<String> = list_sessions(&rtx, 10)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.body.title)
+        .collect();
+    assert_eq!(titles, ["残す"]);
+    assert!(rtx.get(KIND_TURN, u).unwrap().is_none());
+    assert!(rtx.get(KIND_SIGNAL, sig).unwrap().is_none());
+    assert!(rtx.links_to(gone, REL_IN_SESSION).unwrap().is_empty());
+    assert!(rtx.links_from(u, REL_IN_SESSION).unwrap().is_empty());
+    assert!(load_session(&rtx, keep).is_ok());
+    let census = env.store.census().unwrap();
+    assert_eq!(census.known[KIND_SESSION].ok, 1);
+    assert_eq!(census.known.get(KIND_TURN).map_or(0, |c| c.ok), 0);
+}

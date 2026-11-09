@@ -20,6 +20,12 @@ pub enum Command {
     Retry,
     /// 最後の発話を送り直す (失敗の後、FR-106)。
     Resend,
+    /// 開いているセッションを改名する (`/rename`)。
+    RenameSession { title: String },
+    /// 開いているセッションを消す (`/delete`。画面が確認した後に送る、FR-105)。
+    DeleteSession,
+    /// 直前の応答を評価する (`/good`、`/bad [理由]`、FR-311)。
+    Rate { good: bool, reason: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,4 +93,10 @@ pub enum Event {
     },
     /// 命令を実行できなかった (状態は変わっていない)。
     Rejected { error: Message },
+    /// セッションを改名した。
+    SessionRenamed { session: SessionView },
+    /// セッションを消した。開いているセッションは無くなる。
+    SessionDeleted { id: Id },
+    /// 評価を記録した。
+    Rated { good: bool },
 }
