@@ -4,5 +4,15 @@
 
 pub mod envelope;
 pub mod key;
+pub mod lock;
+pub mod meta;
+mod store;
+#[doc(hidden)]
+pub mod testutil;
+pub mod version;
 
 pub use envelope::{BodyError, DecodeError, Envelope};
+pub use store::{
+    Census, DB_FILE, Durability, FORMAT_VERSION, KIND_QUARANTINE, KindCount, KindSpec, OpenError,
+    OpenOptions, OpenReport, Read, ReadOnlyReason, ReadTxn, Store, StoreError, WriteTxn,
+};
