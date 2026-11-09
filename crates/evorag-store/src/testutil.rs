@@ -55,3 +55,24 @@ pub fn raw_set_meta(data_root: &Path, key: &str, value: &str) {
     }
     tx.commit().expect("commit");
 }
+
+/// 閉じた DB の記録 1 件の本体のバイトを書き換える (試験で「壊れた記録」を作るため)。
+pub fn raw_corrupt_record(data_root: &Path, kind: &str, id: evorag_types::Id) {
+    use redb::ReadableTable;
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::RECORDS).expect("records");
+        let k = crate::store::record_key(kind, id);
+        let mut v = t
+            .get(k.as_slice())
+            .expect("get")
+            .expect("record")
+            .value()
+            .to_vec();
+        let last = v.len() - 2;
+        v[last] ^= 0x20;
+        t.insert(k.as_slice(), v.as_slice()).expect("insert");
+    }
+    tx.commit().expect("commit");
+}

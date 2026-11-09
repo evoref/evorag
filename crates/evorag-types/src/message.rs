@@ -102,6 +102,40 @@ message_keys! {
     /// 引数: `from`。
     CliRestored => "cli.restored",
     CliRestoredFromJournal => "cli.restored_from_journal",
+    // `evorag doctor` と `evorag backups list` (03 §10)。
+    /// 引数: `path`。
+    DoctorConfig => "doctor.config",
+    /// 引数: `url`, `model`, `n_ctx`, `build`。
+    DoctorLlmOk => "doctor.llm_ok",
+    /// 引数: `url`, `detail`。
+    DoctorLlmNg => "doctor.llm_ng",
+    /// 引数: `path`。
+    DoctorRoot => "doctor.root",
+    DoctorDbMissing => "doctor.db_missing",
+    /// 引数: `format`, `writer`。
+    DoctorDbOk => "doctor.db_ok",
+    /// 引数: `detail`。
+    DoctorDbRepair => "doctor.db_repair",
+    /// 引数: `detail`。
+    DoctorDbBad => "doctor.db_bad",
+    /// 引数: `kind`, `count`。
+    DoctorRecords => "doctor.records",
+    /// 引数: `unreadable`, `corrupt`, `newer`。
+    DoctorProblemRecords => "doctor.problem_records",
+    /// 引数: `count`。
+    DoctorUnknownKinds => "doctor.unknown_kinds",
+    /// 引数: `count`。
+    DoctorQuarantine => "doctor.quarantine",
+    /// 引数: `files`, `lines`, `bad`, `newer`, `partial`, `pending`。
+    DoctorJournal => "doctor.journal",
+    /// 引数: `count`, `latest`。
+    DoctorBackups => "doctor.backups",
+    DoctorBackupsNone => "doctor.backups_none",
+    /// 引数: `count`, `path`。
+    DoctorBroken => "doctor.broken",
+    /// 引数: `kind`, `dir`, `seq`。
+    BackupsItem => "backups.item",
+    BackupsNone => "backups.none",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
 }

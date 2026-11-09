@@ -354,6 +354,26 @@ fn open_db(root: &Path) -> Result<Database, OpenError> {
     }
 }
 
+pub(crate) fn read_meta_db_any(
+    database: &impl ReadableDatabase,
+) -> Result<BTreeMap<String, String>, StoreError> {
+    let rtx = database.begin_read().map_err(db)?;
+    let table = match rtx.open_table(META) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(BTreeMap::new()),
+        Err(e) => return Err(db(e)),
+    };
+    let mut out = BTreeMap::new();
+    for item in table.iter().map_err(db)? {
+        let (k, v) = item.map_err(db)?;
+        out.insert(
+            String::from_utf8_lossy(k.value()).into_owned(),
+            String::from_utf8_lossy(v.value()).into_owned(),
+        );
+    }
+    Ok(out)
+}
+
 fn read_meta_db(database: &Database) -> Result<Option<BTreeMap<String, String>>, StoreError> {
     let rtx = database.begin_read().map_err(db)?;
     let table = match rtx.open_table(META) {
@@ -380,6 +400,42 @@ fn meta_version(m: &BTreeMap<String, String>, k: &str) -> Result<Version, OpenEr
         .ok_or_else(|| OpenError::BadMeta(format!("missing `{k}`")))?
         .parse()
         .map_err(|e| OpenError::BadMeta(format!("`{k}`: {e}")))
+}
+
+/// 全記録を種類ごとに数える (読み取りのトランザクションの上で)。
+pub(crate) fn census_of(
+    rtx: &redb::ReadTransaction,
+    kinds: &BTreeMap<&'static str, KindSpec>,
+) -> Result<Census, StoreError> {
+    let table = rtx.open_table(RECORDS).map_err(db)?;
+    let mut c = Census::default();
+    for item in table.iter().map_err(db)? {
+        let (k, v) = item.map_err(db)?;
+        let Some((kind, id)) = split_record_key(k.value()) else {
+            c.bad_keys += 1;
+            continue;
+        };
+        let Some(spec) = kinds.get(kind.as_str()) else {
+            *c.unknown.entry(kind).or_default() += 1;
+            continue;
+        };
+        let entry = c.known.entry(kind.clone()).or_default();
+        match classify(&kind, id, k.value(), v.value()) {
+            Read::Ok(env) if env.v > spec.current_v => entry.newer_v += 1,
+            Read::Ok(_) => entry.ok += 1,
+            Read::Newer { .. } => entry.unreadable += 1,
+            Read::Corrupt { .. } => entry.corrupt += 1,
+        }
+    }
+    Ok(c)
+}
+
+/// ストアが自分で持つ種類と、渡された種類。
+pub(crate) fn kind_map(kinds: Vec<KindSpec>) -> BTreeMap<&'static str, KindSpec> {
+    let mut m: BTreeMap<&'static str, KindSpec> =
+        BUILTIN_KINDS.iter().map(|k| (k.name, k.clone())).collect();
+    m.extend(kinds.into_iter().map(|k| (k.name, k)));
+    m
 }
 
 impl Store {
@@ -766,27 +822,7 @@ impl Store {
     /// 全記録を種類ごとに数える (03 §4.2 の規則 6、`doctor`)。
     pub fn census(&self) -> Result<Census, StoreError> {
         let rtx = self.db.begin_read().map_err(db)?;
-        let table = rtx.open_table(RECORDS).map_err(db)?;
-        let mut c = Census::default();
-        for item in table.iter().map_err(db)? {
-            let (k, v) = item.map_err(db)?;
-            let Some((kind, id)) = split_record_key(k.value()) else {
-                c.bad_keys += 1;
-                continue;
-            };
-            let Some(spec) = self.kinds.get(kind.as_str()) else {
-                *c.unknown.entry(kind).or_default() += 1;
-                continue;
-            };
-            let entry = c.known.entry(kind.clone()).or_default();
-            match classify(&kind, id, k.value(), v.value()) {
-                Read::Ok(env) if env.v > spec.current_v => entry.newer_v += 1,
-                Read::Ok(_) => entry.ok += 1,
-                Read::Newer { .. } => entry.unreadable += 1,
-                Read::Corrupt { .. } => entry.corrupt += 1,
-            }
-        }
-        Ok(c)
+        census_of(&rtx, &self.kinds)
     }
 
     fn note_read(&self, r: &Read) {

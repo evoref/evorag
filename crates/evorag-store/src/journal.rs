@@ -160,6 +160,56 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// 読むだけの走査の結果 (点検のため。切り詰めも後始末もしない)。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub files: usize,
+    pub lines: usize,
+    pub bad: usize,
+    pub newer: usize,
+    /// 書きかけの末尾のバイト数 (次の起動で切り詰める)。
+    pub partial: usize,
+    pub max_seq: u64,
+    /// `last_seq` より後の行 (次の起動で取り込む)。
+    pub pending: usize,
+}
+
+/// ジャーナルを、何も書かずに数える (`doctor`、AC-FR-207-1)。
+pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
+    let mut s = Summary::default();
+    for path in files(&root.join(JOURNAL_DIR))? {
+        s.files += 1;
+        let bytes = std::fs::read(&path)?;
+        let keep = if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+            bytes.len()
+        } else {
+            bytes.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1)
+        };
+        s.partial += bytes.len() - keep;
+        for raw in bytes[..keep].split_inclusive(|&b| b == b'\n') {
+            let l = trim_newline(raw);
+            if l.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match decode(l) {
+                Decoded::Line(line) => {
+                    s.lines += 1;
+                    s.max_seq = s.max_seq.max(line.seq);
+                    if line.seq > last_seq {
+                        s.pending += 1;
+                    }
+                }
+                Decoded::Newer(seq) => {
+                    s.newer += 1;
+                    s.max_seq = s.max_seq.max(seq.unwrap_or(0));
+                }
+                Decoded::Bad => s.bad += 1,
+            }
+        }
+    }
+    Ok(s)
+}
+
 impl Journal {
     /// 開いて読む。`last_seq` より大きい行を返す。書きかけの末尾を切り詰め、削除の後始末をする。
     pub fn open(root: &Path, last_seq: u64) -> io::Result<(Self, Scan)> {
