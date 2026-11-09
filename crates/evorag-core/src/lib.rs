@@ -81,6 +81,8 @@ enum Cancel {
 struct Running {
     cancel: Option<oneshot::Sender<Cancel>>,
     task: tokio::task::JoinHandle<()>,
+    /// 応答を書き終えた (task はまだ後始末をしていることがある。終了のときは task を待つ)。
+    done: bool,
 }
 
 #[derive(Default)]
@@ -396,7 +398,7 @@ fn is_running(inner: &Inner) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .running
         .as_ref()
-        .is_some_and(|r| !r.task.is_finished())
+        .is_some_and(|r| !r.done && !r.task.is_finished())
 }
 
 fn current_session(inner: &Inner) -> Option<Id> {
@@ -686,14 +688,24 @@ fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id) {
     let task = tokio::spawn(async move {
         generate(&worker, session, user_turn, cancel_rx).await;
     });
-    inner
+    let previous = inner
         .state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .running = Some(Running {
-        cancel: Some(cancel_tx),
-        task,
-    });
+        .running
+        .replace(Running {
+            cancel: Some(cancel_tx),
+            task,
+            done: false,
+        });
+    // 前の生成の task は終わりかけている。終了のときに待てるように残す。
+    if let Some(p) = previous {
+        inner
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(p.task);
+    }
 }
 
 /// 発話 `user_turn` までの会話 (この発話への前の応答は除く) を、LLM に送る発言の列にする。
@@ -832,11 +844,16 @@ async fn generate(
         _ => Err("the session or the utterance is gone".into()),
     };
     // 終わりのイベントを出す前に「生成中」を解く (イベントを受けてすぐ次を送っても断られないように)。
-    inner
+    // task の handle は残し、終了のときに待つ。
+    if let Some(r) = inner
         .state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .running = None;
+        .running
+        .as_mut()
+    {
+        r.done = true;
+    }
     match written
         .ok()
         .and_then(|id| read_env(inner, evorag_memory::KIND_TURN, id))
