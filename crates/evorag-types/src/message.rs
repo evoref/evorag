@@ -91,6 +91,9 @@ message_keys! {
     UiNotYet => "ui.error.not_yet",
     UiQuitHint => "ui.quit_hint",
     UiDefaultSessionTitle => "ui.default_session_title",
+    UiDraftRestored => "ui.notice.draft_restored",
+    /// 引数: `detail`。
+    UiEditorFailed => "ui.error.editor",
     // コマンドの行 (07 §5)。
     /// 引数: `url`、`detail`。
     CliLlmUnreachable => "cli.llm_unreachable",

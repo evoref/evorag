@@ -13,7 +13,9 @@ use crate::slash::{self, Slash};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     Char(char),
-    Enter { newline: bool },
+    Enter {
+        newline: bool,
+    },
     Backspace,
     Delete,
     Left,
@@ -27,6 +29,8 @@ pub enum Key {
     Esc,
     CtrlC,
     CtrlQ,
+    /// 外部のエディタで書く (07 §2.4)。
+    CtrlE,
     Paste(String),
 }
 
@@ -36,6 +40,8 @@ pub enum Action {
     Command(Command),
     /// セッションの一覧を照会して窓を開く (照会は呼び出し側がコアに行う)。
     ListSessions,
+    /// 入力欄の内容を外部のエディタで開く (端末の操作は呼び出し側)。
+    OpenEditor,
     Quit,
 }
 
@@ -264,6 +270,7 @@ impl App {
     fn on_chat_key(&mut self, key: Key) -> Vec<Action> {
         match key {
             Key::CtrlQ => vec![Action::Quit],
+            Key::CtrlE => vec![Action::OpenEditor],
             Key::CtrlC => {
                 if self.generating() {
                     vec![Action::Command(Command::Interrupt)]
@@ -576,6 +583,13 @@ mod tests {
         });
         assert_eq!(a.input.text(), "戻る");
         assert!(a.notices[0].contains("disk"));
+    }
+
+    /// FR-107: Ctrl+E で外部のエディタを開く。
+    #[test]
+    fn ctrl_e_opens_the_external_editor() {
+        let mut a = app();
+        assert_eq!(a.on_key(Key::CtrlE), vec![Action::OpenEditor]);
     }
 
     #[test]

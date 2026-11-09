@@ -57,7 +57,7 @@ confirm = "セッション「{title}」を消しますか? このセッション
 [ui.help]
 title = "ヘルプ (Esc で閉じる)"
 body = """
-Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
 
 /new [題名]      セッションを作る
 /sessions        セッションの一覧と再開
@@ -73,10 +73,12 @@ rated_good = "評価 (good) を記録しました。"
 rated_bad = "評価 (bad) を記録しました。"
 deleted = "セッションを消しました。"
 renamed = "セッションの名前を「{title}」にしました。"
+draft_restored = "前回の書きかけを入力欄に戻しました。"
 
 [ui.error]
 unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"
 not_yet = "{name} は、この版ではまだ使えません。"
+editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
 [cli]
 llm_unreachable = "llama-server ({url}) に接続できません: {detail}\nllama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"

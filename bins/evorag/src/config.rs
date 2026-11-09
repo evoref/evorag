@@ -180,6 +180,8 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
 pub struct Places {
     pub config_file: PathBuf,
     pub data_root: PathBuf,
+    /// 状態のフォルダ (下書きと外部のエディタの一時ファイル、03 §2.1)。
+    pub state_dir: PathBuf,
 }
 
 /// 環境変数の値 (空は無いものとみなす)。
@@ -197,15 +199,18 @@ pub fn default_places() -> Option<Places> {
         Some(Places {
             config_file: base.join("config").join("config.toml"),
             data_root: base.join("data"),
+            state_dir: base.join("state"),
         })
     } else if cfg!(target_os = "macos") {
         let base = env_path("HOME")?
             .join("Library")
             .join("Application Support")
             .join(app);
+        let home = env_path("HOME")?;
         Some(Places {
             config_file: base.join("config").join("config.toml"),
             data_root: base.join("data"),
+            state_dir: home.join("Library").join("Caches").join(app),
         })
     } else {
         let home = env_path("HOME");
@@ -213,9 +218,12 @@ pub fn default_places() -> Option<Places> {
             env_path("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")))?;
         let data = env_path("XDG_DATA_HOME")
             .or_else(|| home.as_ref().map(|h| h.join(".local").join("share")))?;
+        let state = env_path("XDG_STATE_HOME")
+            .or_else(|| home.as_ref().map(|h| h.join(".local").join("state")))?;
         Some(Places {
             config_file: config.join(app).join("config.toml"),
             data_root: data.join(app),
+            state_dir: state.join(app),
         })
     }
 }
