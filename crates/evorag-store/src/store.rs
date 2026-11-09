@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ciborium::Value;
@@ -150,11 +151,16 @@ pub enum StoreError {
     /// 新しい形・壊れた記録は、上書きしない (先に quarantine で扱う)。
     #[error("record {kind}/{id} cannot be read and is not overwritten")]
     Unreadable { kind: String, id: Id },
+    /// 書き込みの権利はもう渡っている (書き手は 1 つ、02 §5)。
+    #[error("the write token has already been taken")]
+    TokenTaken,
+    #[error(transparent)]
+    BadRelation(#[from] crate::relations::BadRelation),
     #[error("database error: {0}")]
     Db(#[from] redb::Error),
 }
 
-fn db<E: Into<redb::Error>>(e: E) -> StoreError {
+pub(crate) fn db<E: Into<redb::Error>>(e: E) -> StoreError {
     StoreError::Db(e.into())
 }
 
@@ -209,6 +215,8 @@ pub struct Store {
     newer_kinds: Mutex<BTreeSet<String>>,
     /// 読んだときに壊れていた記録のキー (書き込みのときに quarantine で扱う)。
     suspects: Mutex<BTreeSet<Vec<u8>>>,
+    /// 書き込みの権利 (`WriteToken`) を渡したか。1 つのストアにつき 1 つだけ (02 §5)。
+    token_issued: AtomicBool,
     // ロックは DB の後に外す (フィールドは宣言の順に落ちる)。
     _lock: DataRootLock,
 }
@@ -313,6 +321,7 @@ impl Store {
             ids: opts.ids,
             newer_kinds: Mutex::default(),
             suspects: Mutex::default(),
+            token_issued: AtomicBool::new(false),
             _lock: lock,
         };
 
@@ -497,9 +506,23 @@ impl Store {
         })
     }
 
+    /// 書き込みの権利を受け取る。1 つのストアにつき 1 回だけ渡す (2 回目からは `None`)。
+    /// 受け取るのは書き手 (`Writer`) だけにする (02 §5 の「書き込みの入口は 1 つ」)。
+    pub fn take_write_token(&self) -> Option<WriteToken> {
+        if self.token_issued.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(WriteToken { _private: () })
+        }
+    }
+
     /// 書き込みのトランザクション。会話の追記と明示の操作は `Durability::Immediate`、
     /// 作り直せる裏の処理の結果は `Durability::None` (03 §3.4)。
-    pub fn write(&self, durability: Durability) -> Result<WriteTxn<'_>, StoreError> {
+    pub fn write(
+        &self,
+        _token: &WriteToken,
+        durability: Durability,
+    ) -> Result<WriteTxn<'_>, StoreError> {
         if let Some(r) = &self.read_only {
             return Err(StoreError::ReadOnly(r.clone()));
         }
@@ -612,9 +635,15 @@ macro_rules! record_reads {
     };
 }
 
+/// 書き込みの権利 (02 §5)。`Store::take_write_token` だけが作る。複製できない。
+#[derive(Debug)]
+pub struct WriteToken {
+    _private: (),
+}
+
 pub struct ReadTxn<'s> {
-    store: &'s Store,
-    tx: redb::ReadTransaction,
+    pub(crate) store: &'s Store,
+    pub(crate) tx: redb::ReadTransaction,
 }
 
 impl ReadTxn<'_> {
@@ -622,8 +651,8 @@ impl ReadTxn<'_> {
 }
 
 pub struct WriteTxn<'s> {
-    store: &'s Store,
-    tx: redb::WriteTransaction,
+    pub(crate) store: &'s Store,
+    pub(crate) tx: redb::WriteTransaction,
 }
 
 impl WriteTxn<'_> {

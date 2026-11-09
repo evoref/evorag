@@ -8,7 +8,7 @@ use evorag_store::lock::LockError;
 use evorag_store::testutil::TempDir;
 use evorag_store::{
     DB_FILE, Durability, Envelope, KIND_QUARANTINE, KindSpec, OpenError, OpenOptions, Read,
-    ReadOnlyReason, Store, StoreError, meta,
+    ReadOnlyReason, Store, StoreError, WriteToken, meta,
 };
 use evorag_types::{Id, ManualClock, Timestamp, UuidV7Gen};
 use redb::ReadableTable;
@@ -53,8 +53,8 @@ fn new_record(store: &Store, kind: &KindSpec, text: &str) -> Envelope {
     e
 }
 
-fn put(store: &Store, e: &mut Envelope) {
-    let mut tx = store.write(Durability::Immediate).unwrap();
+fn put(store: &Store, tok: &WriteToken, e: &mut Envelope) {
+    let mut tx = store.write(tok, Durability::Immediate).unwrap();
     tx.put(e).unwrap();
     tx.commit().unwrap();
 }
@@ -89,6 +89,7 @@ fn set_meta(root: &Path, pairs: &[(&str, &str)]) {
 fn creates_and_reopens_with_the_same_meta() {
     let dir = TempDir::new("store-create");
     let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
+    let tok = store.take_write_token().unwrap();
     assert!(report.created);
     let root_id = store.meta(meta::DATA_ROOT_ID).unwrap().unwrap();
     assert_eq!(
@@ -100,7 +101,7 @@ fn creates_and_reopens_with_the_same_meta() {
         Some("none")
     );
     let mut e = new_record(&store, &SAMPLE, "こんにちは");
-    put(&store, &mut e);
+    put(&store, &tok, &mut e);
     drop(store);
 
     let (store, report) = Store::open(opts(dir.path(), "0.0.3")).unwrap();
@@ -149,8 +150,9 @@ fn a_second_open_of_the_same_data_root_is_refused_until_the_first_closes() {
 fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
     let dir = TempDir::new("store-newer");
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut e = new_record(&store, &SAMPLE, "a");
-    put(&store, &mut e);
+    put(&store, &tok, &mut e);
     drop(store);
     set_meta(
         dir.path(),
@@ -161,6 +163,7 @@ fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
     );
 
     let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
+    let tok = store.take_write_token().unwrap();
     assert_eq!(
         report.read_only,
         Some(ReadOnlyReason::NewerFormat {
@@ -168,7 +171,7 @@ fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
         })
     );
     assert!(matches!(
-        store.write(Durability::Immediate),
+        store.write(&tok, Durability::Immediate),
         Err(StoreError::ReadOnly(_))
     ));
     // 読むことはできる。開いたことも記録しない (書かない)。
@@ -188,8 +191,9 @@ fn a_newer_format_that_still_allows_older_writers_stays_writable() {
     drop(open(dir.path()));
     set_meta(dir.path(), &[(meta::FORMAT_VERSION, "0.2")]);
     let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
+    let tok = store.take_write_token().unwrap();
     assert_eq!(report.read_only, None);
-    store.write(Durability::Immediate).unwrap();
+    store.write(&tok, Durability::Immediate).unwrap();
 }
 
 #[test]
@@ -223,10 +227,11 @@ fn a_database_that_needs_a_newer_reader_or_a_migration_is_not_opened() {
 fn a_corrupted_record_is_quarantined_and_the_others_stay_readable() {
     let dir = TempDir::new("store-corrupt");
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut good = new_record(&store, &SAMPLE, "good");
     let mut bad = new_record(&store, &SAMPLE, "bad");
-    put(&store, &mut good);
-    put(&store, &mut bad);
+    put(&store, &tok, &mut good);
+    put(&store, &tok, &mut bad);
     drop(store);
 
     // 本体のバイトを 1 つ書き換える。
@@ -240,6 +245,7 @@ fn a_corrupted_record_is_quarantined_and_the_others_stay_readable() {
     });
 
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut seen = Vec::new();
     store
         .read()
@@ -260,7 +266,7 @@ fn a_corrupted_record_is_quarantined_and_the_others_stay_readable() {
     );
     assert_eq!(store.suspect_count(), 1);
 
-    let mut tx = store.write(Durability::Immediate).unwrap();
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
     assert_eq!(tx.quarantine_suspects().unwrap(), 1);
     tx.commit().unwrap();
 
@@ -311,11 +317,12 @@ fn records_of_unknown_kinds_are_counted_and_kept() {
     });
 
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut e = new_record(&store, &SAMPLE, "a");
-    put(&store, &mut e);
+    put(&store, &tok, &mut e);
     let mut unknown = new_record(&store, &SAMPLE, "b");
     unknown.kind = "from_the_future".into();
-    let mut tx = store.write(Durability::Immediate).unwrap();
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
     assert!(matches!(
         tx.put(&mut unknown),
         Err(StoreError::UnknownKind(_))
@@ -342,9 +349,10 @@ fn records_in_a_newer_v_are_not_updated_but_can_be_deleted() {
     });
 
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut overwrite = new_record(&store, &SAMPLE, "v1");
     overwrite.id = id;
-    let mut tx = store.write(Durability::Immediate).unwrap();
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
     assert!(matches!(
         tx.put(&mut overwrite),
         Err(StoreError::NewerRecord { v: 2, .. })
@@ -372,13 +380,14 @@ fn after_a_rollback_kinds_with_newer_records_only_create_when_allowed() {
     set_meta(dir.path(), &[(meta::MAX_WRITER, "0.9.0")]);
 
     let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
+    let tok = store.take_write_token().unwrap();
     assert_eq!(report.newer_writer_seen.as_deref(), Some("0.9.0"));
     // max_writer は下げない。
     assert_eq!(
         store.meta(meta::MAX_WRITER).unwrap().as_deref(),
         Some("0.9.0")
     );
-    let mut tx = store.write(Durability::Immediate).unwrap();
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
     let mut s = new_record(&store, &SAMPLE, "x");
     assert!(matches!(
         tx.put(&mut s),
@@ -393,13 +402,14 @@ fn after_a_rollback_kinds_with_newer_records_only_create_when_allowed() {
 fn background_results_written_without_durability_are_readable_after_a_clean_close() {
     let dir = TempDir::new("store-none");
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut e = new_record(&store, &SAMPLE, "bg");
-    let mut tx = store.write(Durability::None).unwrap();
+    let mut tx = store.write(&tok, Durability::None).unwrap();
     tx.put(&mut e).unwrap();
     tx.commit().unwrap();
     // 区切りの Immediate のコミット (03 §3.4)。
     store
-        .write(Durability::Immediate)
+        .write(&tok, Durability::Immediate)
         .unwrap()
         .commit()
         .unwrap();
@@ -415,9 +425,10 @@ fn background_results_written_without_durability_are_readable_after_a_clean_clos
 fn records_must_be_written_at_the_current_v() {
     let dir = TempDir::new("store-wrong-v");
     let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
     let mut e = new_record(&store, &SAMPLE, "a");
     e.v = 2;
-    let mut tx = store.write(Durability::Immediate).unwrap();
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
     assert!(matches!(
         tx.put(&mut e),
         Err(StoreError::WrongVersion {
