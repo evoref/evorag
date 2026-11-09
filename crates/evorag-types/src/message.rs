@@ -55,6 +55,47 @@ message_keys! {
     DeleteFailed => "error.delete_failed",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
+    // 画面の文言 (07 §2)。
+    UiYou => "ui.you",
+    UiAssistant => "ui.assistant",
+    UiMarkInterrupted => "ui.mark.interrupted",
+    UiMarkFailed => "ui.mark.failed",
+    UiMarkNoReply => "ui.mark.no_reply",
+    UiStatusIdle => "ui.status.idle",
+    UiStatusGenerating => "ui.status.generating",
+    /// 引数: `title`。
+    UiTitleSession => "ui.title.session",
+    UiTitleNoSession => "ui.title.no_session",
+    UiSessionsTitle => "ui.sessions.title",
+    UiSessionsEmpty => "ui.sessions.empty",
+    /// 引数: `title`。
+    UiDeleteConfirm => "ui.delete.confirm",
+    UiHelpTitle => "ui.help.title",
+    UiHelpBody => "ui.help.body",
+    UiNoticeRatedGood => "ui.notice.rated_good",
+    UiNoticeRatedBad => "ui.notice.rated_bad",
+    UiNoticeDeleted => "ui.notice.deleted",
+    /// 引数: `title`。
+    UiNoticeRenamed => "ui.notice.renamed",
+    /// 引数: `name`。
+    UiUnknownCommand => "ui.error.unknown_command",
+    /// 引数: `name`。
+    UiNotYet => "ui.error.not_yet",
+    UiQuitHint => "ui.quit_hint",
+    UiDefaultSessionTitle => "ui.default_session_title",
+    // コマンドの行 (07 §5)。
+    /// 引数: `url`、`detail`。
+    CliLlmUnreachable => "cli.llm_unreachable",
+    /// 引数: `detail`。
+    CliDataRootUnusable => "cli.data_root_unusable",
+    /// 引数: `detail`。
+    CliConfigError => "cli.config_error",
+    /// 引数: `key`。
+    CliConfigIgnored => "cli.config_ignored",
+    /// 引数: `recorded`。
+    CliPromptLanguageFixed => "cli.prompt_language_fixed",
+    /// 引数: `detail`。
+    CliError => "cli.error",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
 }

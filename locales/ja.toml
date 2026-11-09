@@ -25,3 +25,61 @@ delete_failed = "セッションを消せませんでした ({detail})。"
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
 interrupted_by_shutdown = "終了のため中断しました。受け取ったところまでを保存しました。"
+
+[ui]
+you = "あなた"
+assistant = "evorag"
+quit_hint = "もう一度 Ctrl+C で終了します。"
+default_session_title = "新しい会話"
+
+[ui.mark]
+interrupted = "(中断)"
+failed = "(失敗)"
+no_reply = "(応答なし)"
+
+[ui.status]
+idle = "待機中"
+generating = "生成中 (Esc で中断)"
+
+[ui.title]
+session = "セッション: {title}"
+no_session = "(セッションなし)"
+
+[ui.sessions]
+title = "セッション (↑↓ で選び Enter で開く、Esc で閉じる)"
+empty = "セッションはまだありません。"
+
+[ui.delete]
+confirm = "セッション「{title}」を消しますか? このセッションの会話がすべて消え、元に戻せません (自動の退避からも消します)。 y で消す / n でやめる"
+
+[ui.help]
+title = "ヘルプ (Esc で閉じる)"
+body = """
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+
+/new [題名]      セッションを作る
+/sessions        セッションの一覧と再開
+/rename <題名>   今のセッションを改名する
+/delete          今のセッションを消す (確認あり)
+/retry           直前の応答を作り直す
+/good, /bad [理由]  直前の応答を評価する
+/quit            終了
+//...            / で始まる文をそのまま送る"""
+
+[ui.notice]
+rated_good = "評価 (good) を記録しました。"
+rated_bad = "評価 (bad) を記録しました。"
+deleted = "セッションを消しました。"
+renamed = "セッションの名前を「{title}」にしました。"
+
+[ui.error]
+unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"
+not_yet = "{name} は、この版ではまだ使えません。"
+
+[cli]
+llm_unreachable = "llama-server ({url}) に接続できません: {detail}\nllama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
+data_root_unusable = "データ根を使えません: {detail}"
+config_error = "設定ファイルに誤りがあります: {detail}"
+config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
+prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
+error = "エラー: {detail}"
