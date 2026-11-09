@@ -1,0 +1,17 @@
+# テキストの改行は LF に固定する (docs/11-dev-workflow.md §1)。
+* text=auto eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# テストデータは Git の改行変換を完全に無効にする (Windows で CRLF 化されるとテストが壊れる)。
+testdata/** -text
+
+# バイナリ
+*.png binary
+*.gif binary
+*.ico binary
+*.zip binary

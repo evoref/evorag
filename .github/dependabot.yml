@@ -1,0 +1,26 @@
+# 依存の更新。週 1 回・グループ化で PR の洪水を避ける。
+# 宛先は develop (バージョン更新のみ。セキュリティ更新の PR の宛先は、GitHub の仕様で既定ブランチになる)。
+# Cargo.toml が無い間は、cargo の更新は「マニフェストが見つからない」と報告される (workspace を置くと解消する)。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns: ["*"]

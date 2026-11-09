@@ -1,0 +1,3 @@
+# 整形の設定。既定を基本にし、改行は LF に固定する (.gitattributes と一致)。
+edition = "2024"
+newline_style = "Unix"
