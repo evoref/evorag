@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 evorag-types = { workspace = true }
 evorag-store = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true
