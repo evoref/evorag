@@ -24,17 +24,26 @@ evorag/
   locales/              # 文言カタログ (ja.toml、en.toml)
   docs/                 # 仕様書 (本書群。正本)
   .cargo/config.toml    # cargo の別名、Windows の CRT の静的リンク
-  .config/nextest.toml  # cargo-nextest の profile (M0 で置く)
+  .config/nextest.toml  # cargo-nextest の profile (M1.1 で置く)
   .github/              # CI、Issue と PR のテンプレート、dependabot.yml
   .claude/              # エージェント向けの設定と hook
   deny.toml             # cargo-deny (依存のライセンス・脆弱性・取得元)
-  deps-policy.toml      # 依存規則 (02 §4.3) の入力。xtask check-deps が読む (M0 で置く)
+  deps-policy.toml      # 依存規則 (02 §4.3) の入力。xtask check-deps が読む (M1.1 で置く)
+  rust-toolchain.toml   # Rust の版の固定 (§1.1)
   rustfmt.toml / clippy.toml
   LICENSE / NOTICE / README.md / CONTRIBUTING.md / SECURITY.md / CHANGELOG.md
 ```
 
 - 改行は LF に固定する (`.gitattributes`)。試験データは `-text` で改行の変換を止める。
 - 秘密鍵 (リリースの署名鍵など) はリポジトリに置かない (`.gitignore` で `.secret/`・`*.key` などを除外。§9.7)。
+- `Cargo.lock` はリポジトリに入れる (配布物を作る bin の workspace のため)。
+
+### 1.1 Rust の版
+
+- 使う Rust の版は `rust-toolchain.toml` で 1 つに固定し、手元と CI で同じ版を使う (確定 (ユーザー回答、2026-11-09))。今の版は 1.99。
+- workspace の `rust-version` (MSRV) は、固定した版と同じにする。古い版で作れることは約束しないので、MSRV の CI のジョブは持たない。
+- 下限の理由: redb 4.5 は 1.90 以上、std の `File::try_lock` (03 §9) は 1.89 以上が要る。
+- 版を上げるときは、`rust-toolchain.toml` と `rust-version` を同じ PR (`chore:`) で上げ、CI が全部通ることを確かめる。
 
 ## 2. 仕様と実装の対応 (`spec:` / `verifies:`)
 

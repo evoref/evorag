@@ -1,0 +1,17 @@
+[package]
+name = "evorag-retrieval"
+description = "evorag: 問いの準備、候補の収集と順位付け、文脈の組み立て"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-index = { workspace = true }
+evorag-memory = { workspace = true }
+
+[lints]
+workspace = true

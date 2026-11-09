@@ -1,0 +1,15 @@
+[package]
+name = "evorag-store"
+description = "evorag: redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+
+[lints]
+workspace = true
