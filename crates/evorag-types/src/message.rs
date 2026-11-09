@@ -53,6 +53,12 @@ message_keys! {
     NothingToRate => "error.nothing_to_rate",
     /// セッションを消せなかった。引数: `detail`。
     DeleteFailed => "error.delete_failed",
+    /// 空きが足りないので裏の処理を止めた。引数: `free`、`need` (MiB)。
+    LowSpace => "notice.low_space",
+    /// 引数: `detail`。
+    CliUnsafeLocation => "cli.unsafe_location",
+    /// 引数: `detail`。
+    CliLocationWarning => "cli.location_warning",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。

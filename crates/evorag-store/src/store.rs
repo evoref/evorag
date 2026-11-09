@@ -25,6 +25,10 @@ use crate::writer::WriteOp;
 /// DB のファイルの名前。
 pub const DB_FILE: &str = "evorag.redb";
 
+/// 会話の追記のための予備のファイル (03 §8、既定 16 MiB)。
+pub const RESERVE_FILE: &str = "reserve.space";
+const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
 pub const FORMAT_VERSION: &str = "0.1";
 
@@ -561,8 +565,39 @@ impl Store {
         Ok((store, report))
     }
 
+    /// 会話の追記のための予備のファイル (03 §8)。無ければ作る (0 で埋めて、実際に場所を取る)。
+    /// 空きが足りなければ作らない。
+    fn ensure_reserve(&self) {
+        let path = self.root.join(RESERVE_FILE);
+        if path.exists() {
+            return;
+        }
+        let enough = crate::location::free_bytes(&self.root).is_some_and(|f| f > 4 * RESERVE_BYTES);
+        if !enough {
+            return;
+        }
+        let made = (|| -> std::io::Result<()> {
+            fsutil::prepare_private_file(&path)?;
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+            let zeros = vec![0u8; 1024 * 1024];
+            for _ in 0..(RESERVE_BYTES / zeros.len() as u64) {
+                std::io::Write::write_all(&mut f, &zeros)?;
+            }
+            f.sync_all()
+        })();
+        if made.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// 空きが尽きたときに、予備のファイルを消して場所を空ける (03 §8)。消したら `true`。
+    pub(crate) fn release_reserve(&self) -> bool {
+        std::fs::remove_file(self.root.join(RESERVE_FILE)).is_ok()
+    }
+
     /// ジャーナルを開き、DB にまだ無い行を取り込む (03 §6)。読むだけで開いたときは呼ばない。
     fn open_journal(&self, report: &mut OpenReport) -> Result<(), OpenError> {
+        self.ensure_reserve();
         let last: u64 = self
             .meta(meta::JOURNAL_LAST_SEQ)
             .map_err(|e| OpenError::BadMeta(e.to_string()))?

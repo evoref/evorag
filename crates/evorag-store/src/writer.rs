@@ -268,9 +268,18 @@ impl Writer {
         if !lines.is_empty() {
             let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(journal) = guard.as_mut() {
-                let seq = journal
-                    .append(self.store.clock().now(), &lines)
-                    .map_err(|e| StoreError::Journal(e.to_string()))?;
+                let now = self.store.clock().now();
+                let seq = match journal.append(now, &lines) {
+                    // 空きが尽きたら、予備のファイルを消してもう一度書く (03 §8)。
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::StorageFull
+                            && self.store.release_reserve() =>
+                    {
+                        journal.append(now, &lines)
+                    }
+                    r => r,
+                }
+                .map_err(|e| StoreError::Journal(e.to_string()))?;
                 tx.set_journal_seq(seq)?;
                 journaled = true;
             }

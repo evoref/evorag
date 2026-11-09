@@ -448,3 +448,14 @@ fn records_must_be_written_at_the_current_v() {
         })
     ));
 }
+
+/// 03 §8: 会話の追記のための予備のファイル (16 MiB) を、実際に場所を取って作る。
+#[test]
+fn a_reserve_file_is_made_when_there_is_space() {
+    let dir = TempDir::new("store-reserve");
+    let _store = open(dir.path());
+    let len = std::fs::metadata(dir.path().join(evorag_store::RESERVE_FILE))
+        .unwrap()
+        .len();
+    assert_eq!(len, 16 * 1024 * 1024);
+}

@@ -83,6 +83,8 @@ config_error = "設定ファイルに誤りがあります: {detail}"
 config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
 prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
 error = "エラー: {detail}"
+unsafe_location = "データ根か退避先が危ない置き場所です: {detail}\n同期フォルダやネットワークの上では、データが壊れることがあります。別の場所を --data-root か設定の storage.data_root で指定してください。どうしても使うときは、設定に storage.allow_unsafe_location = true を書くと警告だけになります。"
+location_warning = "置き場所の注意: {detail}"
 broken = "データベースのファイルが壊れていたので、消さずに {moved_to} へ移しました ({reason})。"
 ask_restore = "最新の退避とジャーナルから会話を戻しますか?"
 restored = "退避 {from} から戻しました。その後の会話はジャーナルから足します。"
@@ -109,3 +111,6 @@ broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要な�
 [backups]
 item = "{kind}  {dir}  (ジャーナルの連番 {seq})"
 none = "退避はありません。"
+
+[notice]
+low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"

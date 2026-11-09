@@ -178,6 +178,10 @@ impl App {
                 let m = self.catalog.key(MessageKey::UiNoticeDeleted);
                 self.notice(m);
             }
+            Event::BackgroundPaused { reason } => {
+                let m = self.catalog.message(&reason);
+                self.notice(m);
+            }
             Event::Rated { good } => {
                 let k = if good {
                     MessageKey::UiNoticeRatedGood

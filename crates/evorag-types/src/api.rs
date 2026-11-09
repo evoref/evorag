@@ -99,4 +99,6 @@ pub enum Event {
     SessionDeleted { id: Id },
     /// 評価を記録した。
     Rated { good: bool },
+    /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
+    BackgroundPaused { reason: Message },
 }
