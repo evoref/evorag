@@ -321,3 +321,53 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+/// verifies: AC-NFR-502-1
+#[tokio::test(flavor = "multi_thread")]
+async fn logs_never_contain_the_conversation() {
+    const MARKER: &str = "目印ZQ7X";
+    let dir = TempDir::new("recall-logs");
+    let logs = dir.path().join("logs");
+    let log = evorag_core::logging::init(&logs, 1_762_650_000_000).unwrap();
+    let llm = ReplayClient::from_json(&format!(
+        r#"{{
+          "props": {{"build_info": "b1-test", "model_path": "/m/test.gguf", "total_slots": 1,
+                     "default_generation_settings": {{"n_ctx": 8192}}}},
+          "models": {{"data": [{{"id": "test", "meta": {{"n_params": 1, "size": 2, "n_vocab": 3}}}}]}},
+          "chats": [
+            {{"events": [{{"delta": "{MARKER} を覚えました"}}, {{"done": {{}}}}]}},
+            {{"events": [{{"delta": "{MARKER} の話ですね"}}, {{"done": {{}}}}]}},
+            {{"events": [{{"delta": "{MARKER} 途中"}}, {{"cut": "connection reset"}}]}}
+          ]
+        }}"#
+    ))
+    .unwrap();
+    let root = dir.path().join("data");
+    let (core, mut rx) = start(&root, &llm, 9).await;
+    new_session(&core, &mut rx, &format!("{MARKER} の題")).await;
+    say(&core, &mut rx, &format!("モンステラの水やりと {MARKER}")).await;
+    new_session(&core, &mut rx, "別の話").await;
+    let fired = say(
+        &core,
+        &mut rx,
+        &format!("前のモンステラの水やりと {MARKER} の話"),
+    )
+    .await;
+    assert_eq!(fired.sources, 1, "the earlier turn was attached");
+    say(&core, &mut rx, &format!("失敗する {MARKER}")).await;
+    core.shutdown().await;
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("response"), "responses are logged: {text}");
+    assert!(
+        text.contains("decision=\"fire\"") || text.contains("decision=fire"),
+        "{text}"
+    );
+    assert!(text.contains("failed"), "{text}");
+    assert!(
+        !text.contains(MARKER),
+        "the log must not contain the conversation: {text}"
+    );
+    assert!(!text.contains("モンステラ"), "{text}");
+    assert!(evorag_store::fsutil::is_private(&log).unwrap());
+}

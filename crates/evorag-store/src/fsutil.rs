@@ -37,9 +37,20 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     imp::sync_dir(dir)
 }
 
-/// 所有者だけが読み書きできるフォルダを作る (NFR-503。Windows の ACL は setup のタスクで入れる)。
+/// 所有者だけが読み書きできるフォルダを作る (NFR-503)。
+///
+/// - Unix: 0700 (既にあったフォルダも締め直す)。
+/// - Windows: 新しく作ったときだけ、今の利用者だけを許す保護した DACL を付け、中に継承させる。
+///   既にあったフォルダ (利用者が `--data-root` で指した既存のフォルダなど) は変えない
+///   (継承を切ると、その下のすべての権限が変わるため)。
 pub fn create_private_dir(p: &Path) -> io::Result<()> {
     imp::create_private_dir(p)
+}
+
+/// 所有者だけが使えるか (Unix は group と other の権限が無い、Windows は今の利用者だけを許す
+/// ACE が 1 つ)。試験のため。
+pub fn is_private(p: &Path) -> io::Result<bool> {
+    imp::is_private(p)
 }
 
 /// 所有者だけが読み書きできるファイルにする。無ければ空のファイルを作る (中身は消さない)。
@@ -123,7 +134,12 @@ mod imp {
     }
 
     pub fn create_private_dir(p: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(p)
+        let existed = p.is_dir();
+        std::fs::create_dir_all(p)?;
+        if !existed {
+            crate::winacl::restrict(&wide(p)?, true)?;
+        }
+        Ok(())
     }
 
     pub fn prepare_private_file(p: &Path) -> io::Result<()> {
@@ -131,8 +147,12 @@ mod imp {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(p)
-            .map(drop)
+            .open(p)?;
+        crate::winacl::restrict(&wide(p)?, false)
+    }
+
+    pub fn is_private(p: &Path) -> io::Result<bool> {
+        crate::winacl::is_owner_only(&wide(p)?, p)
     }
 }
 
@@ -176,6 +196,10 @@ mod imp {
             .mode(0o600)
             .open(p)?;
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+    }
+
+    pub fn is_private(p: &Path) -> io::Result<bool> {
+        Ok(std::fs::metadata(p)?.permissions().mode() & 0o077 == 0)
     }
 }
 
@@ -231,5 +255,38 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// verifies: AC-NFR-503-1 (作ったフォルダとファイル、その中に作ったファイル)
+    #[test]
+    fn private_dirs_and_files_are_owner_only() {
+        let dir = crate::testutil::TempDir::new("private");
+        let root = dir.path().join("made").join("here");
+        create_private_dir(&root).unwrap();
+        assert!(is_private(&root).unwrap());
+        // 中に普通に作ったファイルも、継承で所有者だけになる。
+        let inner = root.join("inner.txt");
+        std::fs::write(&inner, b"x").unwrap();
+        assert!(is_private(&inner).unwrap() || cfg!(unix));
+        // 外のフォルダのファイルも、prepare_private_file で所有者だけにする。
+        let outside = dir.path().join("file.bin");
+        std::fs::write(&outside, b"y").unwrap();
+        prepare_private_file(&outside).unwrap();
+        assert!(is_private(&outside).unwrap());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"y",
+            "the content is kept"
+        );
+    }
+
+    /// Windows: 既にあったフォルダの権限は変えない (利用者のフォルダの継承を壊さない)。
+    #[cfg(windows)]
+    #[test]
+    fn existing_dirs_are_left_alone_on_windows() {
+        let dir = crate::testutil::TempDir::new("private-existing");
+        let before = is_private(dir.path()).unwrap();
+        create_private_dir(dir.path()).unwrap();
+        assert_eq!(is_private(dir.path()).unwrap(), before);
     }
 }

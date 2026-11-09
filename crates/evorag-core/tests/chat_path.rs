@@ -657,3 +657,32 @@ async fn the_model_can_be_switched_to_a_configured_choice() {
     assert!(a.requests().is_empty());
     core.shutdown().await;
 }
+
+/// verifies: AC-FR-905-1, AC-NFR-503-1 (データ根)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_data_root_is_created_owner_only_and_used() {
+    let dir = TempDir::new("core-new-root");
+    let root = dir.path().join("指定").join("data");
+    let llm = cassette(8192, OK);
+    let (core, mut rx) = start(&root, &llm).await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "ここに残す".into(),
+    });
+    until(&mut rx, finished).await;
+    core.shutdown().await;
+    let private = evorag_store::fsutil::is_private;
+    assert!(private(&root).unwrap(), "the data root is owner only");
+    assert!(private(&root.join("evorag.redb")).unwrap());
+    let journal = std::fs::read_dir(root.join("journal"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(private(&journal).unwrap(), "{}", journal.display());
+    assert!(
+        file_contains(&journal, "ここに残す"),
+        "the data root is used"
+    );
+}

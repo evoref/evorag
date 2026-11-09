@@ -404,10 +404,10 @@ note = "2026-11-09 に合 (develop 0.0.4)。リリース候補で再確認する
 id = "AC-FR-903-1"
 requirement = "FR-903"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-tui/src/app.rs::help_lists_every_command"]
 manual = ""
-note = "`/help` の試験が見当たらない。"
+note = "07 §3 の v0.1 のコマンドがすべて /help の本文に出て、読み取れること。"
 
 [[ac]]
 id = "AC-FR-904-1"
@@ -422,10 +422,10 @@ note = "verifies: の注記が無い (注記を足すこと)。設定の読み�
 id = "AC-FR-905-1"
 requirement = "FR-905"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::a_new_data_root_is_created_owner_only_and_used", "bins/evorag/tests/cli.rs::doctor_reports_without_writing_anything"]
 manual = ""
-note = "`--data-root` の試験が見当たらない (所有者だけの権限で作ることを含む)。"
+note = "コアの層で、無いフォルダを所有者だけで作って使う。CLI の層で、--data-root のフォルダを使う。"
 
 [[ac]]
 id = "AC-FR-906-1"
@@ -629,19 +629,19 @@ note = ""
 id = "AC-NFR-502-1"
 requirement = "NFR-502"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::logs_never_contain_the_conversation"]
 manual = ""
-note = "目印の文字列がログに出ないことの試験が見当たらない。"
+note = "ログ (状態のフォルダの logs/) に、会話の本文・セッション名を出さない。想起・失敗の応答を含む。"
 
 [[ac]]
 id = "AC-NFR-503-1"
 requirement = "NFR-503"
 level = "Must"
-status = "missing"
-tests = []
+status = "test"
+tests = ["crates/evorag-store/src/fsutil.rs::private_dirs_and_files_are_owner_only", "crates/evorag-core/tests/chat_path.rs::a_new_data_root_is_created_owner_only_and_used", "crates/evorag-store/tests/export.rs::every_record_is_written_once_as_an_envelope", "bins/evorag/tests/cli.rs::setup_finds_llama_server_and_writes_the_config"]
 manual = ""
-note = "権限 (ACL / 0600) の試験が見当たらない (fsutil.rs の prepare_private_file の試験は内容の保持だけ)。"
+note = "Windows は今の利用者だけを許す保護した DACL (evorag が作ったフォルダと、書くファイル)、Unix は 0700 / 0600。既にあった利用者のフォルダの ACL は変えない。"
 
 [[ac]]
 id = "AC-NFR-504-1"

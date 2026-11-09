@@ -797,4 +797,33 @@ mod tests {
         a.on_event(Event::SourcesInfo { memory: false });
         assert!(a.notices.last().unwrap().contains("添えません"));
     }
+
+    /// verifies: AC-FR-903-1 (07 §3 の v0.1 のコマンドがすべて /help に出て、使える)
+    #[test]
+    fn help_lists_every_command() {
+        let a = app();
+        let help = a.catalog.key(MessageKey::UiHelpBody);
+        for (name, example) in [
+            ("/help", "/help"),
+            ("/new", "/new 題"),
+            ("/sessions", "/sessions"),
+            ("/rename", "/rename 題"),
+            ("/delete", "/delete"),
+            ("/retry", "/retry"),
+            ("/good", "/good"),
+            ("/bad", "/bad 理由"),
+            ("/sources", "/sources off"),
+            ("/model", "/model"),
+            ("/quit", "/quit"),
+        ] {
+            assert!(help.contains(name), "{name} is missing from /help");
+            assert!(
+                !matches!(
+                    slash::parse(example),
+                    None | Some(Slash::Invalid(_) | Slash::NotYet(_))
+                ),
+                "{example} must work"
+            );
+        }
+    }
 }

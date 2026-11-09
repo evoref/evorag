@@ -79,7 +79,7 @@ fn write_records(store: &Store) -> Vec<Envelope> {
     out
 }
 
-/// verifies: AC-FR-209-1
+/// verifies: AC-FR-209-1, AC-NFR-503-1 (書き出し)
 #[test]
 fn every_record_is_written_once_as_an_envelope() {
     let dir = TempDir::new("export");
@@ -124,15 +124,10 @@ fn every_record_is_written_once_as_an_envelope() {
     assert_eq!(seen.len(), 3);
     assert!(!seen.contains(&broken));
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(out.join("note.jsonl"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o077, 0, "owner only");
-    }
+    // 書き出しは所有者だけ (AC-NFR-503-1)。
+    let private = evorag_store::fsutil::is_private;
+    assert!(private(&out).unwrap(), "the export folder is owner only");
+    assert!(private(&out.join("note.jsonl")).unwrap(), "owner only");
 
     // 中身のあるフォルダには書かない。
     assert!(matches!(
