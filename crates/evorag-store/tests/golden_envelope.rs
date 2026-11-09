@@ -14,7 +14,11 @@ use evorag_types::{Id, Timestamp};
 use serde::{Deserialize, Serialize};
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/envelope")
+    // 実行時の値を先に見る (no-network の CI は、試験を別の場所に写した作業ツリーで走らせる)。
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    dir.join("../../tests/fixtures/envelope")
 }
 
 fn bless() -> bool {
@@ -91,7 +95,7 @@ fn written_by_newer() -> Envelope {
 fn current_envelope_matches_its_fixture() {
     let e = sample();
     let k = key(e.id);
-    check_fixture("v1.key", &k);
+    check_fixture("v1-key.bin", &k);
     check_fixture("v1.value", &e.encode(&k));
     if bless() {
         return;
