@@ -103,6 +103,10 @@ broken = "データベースのファイルが壊れていたので、消さず�
 ask_restore = "最新の退避とジャーナルから会話を戻しますか?"
 restored = "退避 {from} から戻しました。その後の会話はジャーナルから足します。"
 restored_from_journal = "退避が無いので、ジャーナルだけから会話を作り直します。"
+exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました。設定は API キーを除いて config.toml に写しました。"
+export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
+export_pending = "ジャーナルに、まだデータベースに入っていない {count} 行があります。evorag を一度起動して終了してから書き出すと、それも含まれます。"
+export_not_empty = "{path} は空ではありません。空のフォルダか、まだ無いフォルダを指定してください。"
 
 [doctor]
 config = "設定: {path} (読めました)"

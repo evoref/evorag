@@ -284,14 +284,14 @@ fn kind_prefix(kind: &str) -> Vec<u8> {
     k.into_bytes()
 }
 
-fn split_record_key(k: &[u8]) -> Option<(String, Id)> {
+pub(crate) fn split_record_key(k: &[u8]) -> Option<(String, Id)> {
     match key::decode(k).ok()?.as_slice() {
         [OwnedPart::Str(kind), OwnedPart::Id(id)] => Some((kind.clone(), *id)),
         _ => None,
     }
 }
 
-fn classify(kind: &str, id: Id, k: &[u8], v: &[u8]) -> Read {
+pub(crate) fn classify(kind: &str, id: Id, k: &[u8], v: &[u8]) -> Read {
     match Envelope::decode(k, v) {
         Ok(env) if env.kind == kind && env.id == id => Read::Ok(env),
         Ok(_) => Read::Newer {

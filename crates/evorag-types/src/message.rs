@@ -126,6 +126,14 @@ message_keys! {
     /// 引数: `from`。
     CliRestored => "cli.restored",
     CliRestoredFromJournal => "cli.restored_from_journal",
+    /// 引数: `count`、`path`、`kinds`。
+    CliExported => "cli.exported",
+    /// 引数: `newer`、`corrupt`。
+    CliExportSkipped => "cli.export_skipped",
+    /// 引数: `count`。
+    CliExportPending => "cli.export_pending",
+    /// 引数: `path`。
+    CliExportNotEmpty => "cli.export_not_empty",
     // `evorag doctor` と `evorag backups list` (03 §10)。
     /// 引数: `path`。
     DoctorConfig => "doctor.config",

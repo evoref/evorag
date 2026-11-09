@@ -279,3 +279,62 @@ fn backups_list_shows_the_backups() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("daily"), "{text}");
 }
+
+/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定)
+#[test]
+fn export_writes_records_and_the_config_without_api_keys() {
+    use evorag_store::{WriteRequest, Writer};
+    let dir = TempDir::new("cli-export");
+    let root = dir.path().join("data");
+    let clock = Arc::new(SystemClock);
+    {
+        let (store, _) = Store::open(OpenOptions {
+            data_root: root.clone(),
+            evorag_version: "0.0.6".into(),
+            kinds: evorag_memory::kinds(),
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::new(clock.clone())),
+            config_file: None,
+        })
+        .unwrap();
+        let store = Arc::new(store);
+        let (w, h) = Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || w.run());
+        let writes = evorag_memory::Writes {
+            clock: &*clock,
+            ids: &**store.ids(),
+        };
+        for title in ["一つ目", "二つ目"] {
+            let (_, ops) = writes.create_session(title).unwrap();
+            h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+        }
+        h.shutdown();
+        t.join().unwrap();
+    }
+    let out = dir.path().join("out");
+    let output = evorag_with_stdin(
+        dir.path(),
+        "version = 1\n[llm.chat]\nurl = \"http://127.0.0.1:9\"\napi_key = \"do-not-export\"\n",
+        &["export", out.to_str().unwrap()],
+        "",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(stdout.contains("2 件の記録"), "{stdout}");
+    let sessions = std::fs::read_to_string(out.join("session.jsonl")).unwrap();
+    assert_eq!(sessions.lines().count(), 3, "the header and two sessions");
+    assert!(sessions.contains("二つ目"));
+    let config = std::fs::read_to_string(out.join("config.toml")).unwrap();
+    assert!(config.contains("127.0.0.1:9"));
+    assert!(!config.contains("do-not-export"), "{config}");
+
+    // 中身のあるフォルダには書かない。
+    let again = evorag_with_stdin(
+        dir.path(),
+        "version = 1\n",
+        &["export", out.to_str().unwrap()],
+        "",
+    );
+    assert_eq!(again.status.code(), Some(1));
+}
