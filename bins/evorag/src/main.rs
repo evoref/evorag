@@ -23,10 +23,27 @@ use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 
+/// `--version` (FR-906): 版・作りの情報・入れ方。
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "
+commit: ",
+    env!("EVORAG_COMMIT"),
+    "
+target: ",
+    env!("EVORAG_TARGET"),
+    "
+rustc: ",
+    env!("EVORAG_RUSTC"),
+    "
+installed via: ",
+    env!("EVORAG_CHANNEL"),
+);
+
 #[derive(Parser)]
 #[command(
     name = "evorag",
-    version,
+    version = VERSION,
     about = "Chat with a local llama-server, with long-term memory"
 )]
 struct Args {
@@ -109,10 +126,24 @@ fn main() -> ExitCode {
             &[("detail", "no home directory")],
         );
     };
-    let loaded = match config::load(&config_file) {
+    // doctor は読むだけ (設定の移行もしない)。
+    let migrate = !matches!(args.command, Some(Sub::Doctor));
+    let loaded = match config::load(&config_file, migrate) {
         Ok(l) => l,
         Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
     };
+    if let Some(b) = &loaded.migrated {
+        eprintln!(
+            "{}",
+            catalog.with(
+                MessageKey::CliConfigMigrated,
+                &[
+                    ("path", &config_file.display().to_string()),
+                    ("backup", &b.display().to_string())
+                ]
+            )
+        );
+    }
     for k in &loaded.ignored {
         eprintln!(
             "{}",

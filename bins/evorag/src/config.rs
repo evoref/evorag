@@ -95,6 +95,8 @@ pub struct Context {
 pub struct Loaded {
     pub config: Config,
     pub ignored: Vec<String>,
+    /// 古い版の設定を書き換えたときの、元のファイルの写し (03 §12.3、FR-807)。
+    pub migrated: Option<PathBuf>,
 }
 
 fn line_of(text: &str, key: &str) -> usize {
@@ -104,13 +106,40 @@ fn line_of(text: &str, key: &str) -> usize {
 }
 
 /// 読む。ファイルが無ければ既定の設定 (setup で作る、07 §5)。
-pub fn load(path: &Path) -> Result<Loaded, String> {
+///
+/// `migrate` なら、古い版の設定 (`version` の無いもの = 版 0) を、元のファイルを
+/// `config.toml.bak-v<旧版>` に写してから今の版に書き換える (03 §12.3、FR-807)。
+/// 版 0 から 1 への移行は、先頭に `version = 1` を足すだけ (コメントを残す)。
+pub fn load(path: &Path, migrate: bool) -> Result<Loaded, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let mut loaded = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    if migrate && loaded.config.version.is_none() && !text.trim().is_empty() {
+        let backup = path.with_file_name(format!(
+            "{}.bak-v0",
+            path.file_name()
+                .map_or("config.toml".into(), |n| n.to_string_lossy())
+        ));
+        let write = || -> std::io::Result<()> {
+            std::fs::copy(path, &backup)?;
+            let tmp = path.with_extension("toml.tmp");
+            std::fs::write(
+                &tmp,
+                format!(
+                    "version = {CONFIG_VERSION}
+{text}"
+                ),
+            )?;
+            std::fs::rename(&tmp, path)
+        };
+        write().map_err(|e| format!("{}: {e}", path.display()))?;
+        loaded.config.version = Some(CONFIG_VERSION);
+        loaded.migrated = Some(backup);
+    }
+    Ok(loaded)
 }
 
 pub fn parse(text: &str) -> Result<Loaded, String> {
@@ -179,7 +208,11 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
             ignored.push(format!("memory.{k}"));
         }
     }
-    Ok(Loaded { config, ignored })
+    Ok(Loaded {
+        config,
+        ignored,
+        migrated: None,
+    })
 }
 
 impl Config {
@@ -307,5 +340,44 @@ enabled = true
         assert!(e.contains("line 3"), "{e}");
         let e = parse("version = 2\n").unwrap_err();
         assert!(e.contains("line 1"), "{e}");
+    }
+
+    /// verifies: AC-FR-807-1
+    #[test]
+    fn an_old_config_is_backed_up_and_rewritten() {
+        let dir = std::env::temp_dir().join(format!("evorag-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let old = "# 自分のメモ
+[llm.chat]
+url = \"http://127.0.0.1:8081\"
+";
+        std::fs::write(&path, old).unwrap();
+
+        // 読むだけ (doctor) のときは書き換えない。
+        let l = load(&path, false).unwrap();
+        assert_eq!((l.config.version, l.migrated), (None, None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+
+        let l = load(&path, true).unwrap();
+        let backup = dir.join("config.toml.bak-v0");
+        assert_eq!(l.migrated.as_deref(), Some(backup.as_path()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            new.starts_with(
+                "version = 1
+"
+            ),
+            "{new}"
+        );
+        assert!(new.contains("# 自分のメモ"), "comments are kept");
+        assert_eq!(
+            l.config.llm.chat.url.as_deref(),
+            Some("http://127.0.0.1:8081")
+        );
+        // 2 回目は何もしない。
+        assert_eq!(load(&path, true).unwrap().migrated, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
