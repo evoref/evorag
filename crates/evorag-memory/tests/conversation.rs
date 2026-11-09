@@ -1,0 +1,201 @@
+//! 会話の層の試験 (04 §2・§3、03 §3.3)。ストアと書き手を実際に使う。
+
+use std::path::Path;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use evorag_memory::*;
+use evorag_store::testutil::TempDir;
+use evorag_store::{OpenOptions, Store, WriteRequest, Writer, WriterHandle};
+use evorag_types::{ManualClock, Timestamp, UuidV7Gen};
+
+struct Env {
+    store: Arc<Store>,
+    writer: WriterHandle,
+    thread: Option<JoinHandle<()>>,
+    clock: Arc<ManualClock>,
+    ids: Arc<UuidV7Gen>,
+}
+
+impl Env {
+    fn open(root: &Path) -> Self {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+        let ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 11));
+        let (store, _) = Store::open(OpenOptions {
+            data_root: root.to_path_buf(),
+            evorag_version: "0.0.3".into(),
+            kinds: kinds(),
+            clock: clock.clone(),
+            ids: ids.clone(),
+            config_file: None,
+        })
+        .unwrap();
+        let store = Arc::new(store);
+        let (w, writer) = Writer::new(store.clone()).unwrap();
+        let thread = Some(std::thread::spawn(move || w.run()));
+        Self {
+            store,
+            writer,
+            thread,
+            clock,
+            ids,
+        }
+    }
+
+    fn writes(&self) -> Writes<'_> {
+        Writes {
+            clock: &*self.clock,
+            ids: &*self.ids,
+        }
+    }
+
+    fn write(&self, ops: Vec<evorag_store::WriteOp>) {
+        self.writer
+            .submit_wait(WriteRequest::conversation(ops))
+            .unwrap();
+    }
+
+    fn session(&self, id: evorag_types::Id) -> evorag_store::Envelope {
+        load_session(&self.store.read().unwrap(), id)
+            .unwrap()
+            .envelope
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        self.writer.shutdown();
+        if let Some(t) = self.thread.take() {
+            t.join().unwrap();
+        }
+    }
+}
+
+fn reply(text: &str, state: TurnState) -> AssistantTurn {
+    AssistantTurn {
+        state,
+        text: text.into(),
+        model_key: Some("0123456789abcdef0123456789abcdef".into()),
+        generation: Some(GenerationRecord {
+            temperature: 0.7,
+            top_p: 0.95,
+            max_tokens: None,
+            seed: None,
+        }),
+        attached: Vec::new(),
+        error: None,
+    }
+}
+
+/// verifies: AC-FR-104-1 (データの層: 作ったセッションを開き直すと、ターンが元の順に読める)
+#[test]
+fn a_conversation_is_read_back_in_order_after_reopening() {
+    let dir = TempDir::new("conv-order");
+    let (sid, user1, user2);
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("はじめての会話").unwrap();
+        sid = id;
+        env.write(ops);
+        let (u, ops) = env
+            .writes()
+            .user_turn(&env.session(sid), "こんにちは")
+            .unwrap();
+        user1 = u;
+        env.write(ops);
+        env.clock.advance(1_000);
+        let u1 = env.store.read().unwrap().get(KIND_TURN, user1).unwrap();
+        let Some(evorag_store::Read::Ok(u1)) = u1 else {
+            panic!()
+        };
+        let (_, ops) = env
+            .writes()
+            .assistant_turn(
+                &env.session(sid),
+                &u1,
+                reply("こんにちは。", TurnState::Completed),
+            )
+            .unwrap();
+        env.write(ops);
+        let (u, ops) = env.writes().user_turn(&env.session(sid), "元気?").unwrap();
+        user2 = u;
+        env.write(ops);
+    }
+
+    let env = Env::open(dir.path());
+    let rtx = env.store.read().unwrap();
+    let turns = session_turns(&rtx, sid).unwrap();
+    let summary: Vec<(TurnRole, TurnState, &str)> = turns
+        .iter()
+        .map(|t| (t.body.role, t.body.state, t.body.text.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (TurnRole::User, TurnState::Confirmed, "こんにちは"),
+            (TurnRole::Assistant, TurnState::Completed, "こんにちは。"),
+            (TurnRole::User, TurnState::Pending, "元気?"),
+        ]
+    );
+    assert_eq!(turns[1].body.reply_to, Some(user1));
+    assert_eq!(rtx.links_to(user1, REL_REPLY_TO).unwrap().len(), 1);
+    // 応答を書いていない発話は「応答なし」として拾える (AC-FR-201-1 のデータの層)。
+    let pending = pending_user_turns(&rtx, sid).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].envelope.id, user2);
+}
+
+#[test]
+fn sessions_are_listed_newest_first_without_duplicates() {
+    let dir = TempDir::new("conv-list");
+    let env = Env::open(dir.path());
+    let (a, ops) = env.writes().create_session("A").unwrap();
+    env.write(ops);
+    env.clock.advance(10);
+    let (b, ops) = env.writes().create_session("B").unwrap();
+    env.write(ops);
+    env.clock.advance(10);
+    // A に発話すると A が先頭に来る。
+    let stale_a = env.session(a);
+    let (_, ops) = env.writes().user_turn(&stale_a, "x").unwrap();
+    env.write(ops);
+    let names = |env: &Env| -> Vec<String> {
+        list_sessions(&env.store.read().unwrap(), 10)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.body.title)
+            .collect()
+    };
+    assert_eq!(names(&env), ["A", "B"]);
+
+    // 古い封筒で付け替えても (古い副索引が残っても)、一覧に二重に出ない。
+    env.clock.advance(10);
+    let ops = env.writes().rename_session(&stale_a, "A2").unwrap();
+    env.write(ops);
+    assert_eq!(names(&env), ["A2", "B"]);
+    let _ = b;
+}
+
+/// verifies: AC-FR-311-1 (データの層: 信号は対象のターンへの関係を持つ)
+#[test]
+fn signals_link_to_their_target_turn() {
+    let dir = TempDir::new("conv-signal");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("s").unwrap();
+    env.write(ops);
+    let (u, ops) = env.writes().user_turn(&env.session(sid), "q").unwrap();
+    env.write(ops);
+    let (sig, ops) = env
+        .writes()
+        .signal(SignalKind::Bad, u, Some("違う".into()))
+        .unwrap();
+    env.write(ops);
+    let rtx = env.store.read().unwrap();
+    assert_eq!(rtx.links_to(u, REL_TARGET).unwrap()[0].0, sig);
+    let Some(evorag_store::Read::Ok(e)) = rtx.get(KIND_SIGNAL, sig).unwrap() else {
+        panic!()
+    };
+    let body: SignalBody = e.body_as().unwrap();
+    assert_eq!(body.kind, SignalKind::Bad);
+    assert_eq!(body.reason.as_deref(), Some("違う"));
+}

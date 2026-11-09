@@ -181,6 +181,8 @@ version = "0.0.2"
 dependencies = [
  "evorag-store",
  "evorag-types",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
