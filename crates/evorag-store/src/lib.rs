@@ -4,7 +4,7 @@
 
 pub mod backup;
 pub mod envelope;
-mod fsutil;
+pub mod fsutil;
 pub mod inspect;
 mod journal;
 mod json;
