@@ -1,0 +1,44 @@
+# 毎日の長い試験 (docs/09-testing-quality.md §6.1)。既定ブランチの定義で動き、develop を対象にする。
+# v0.1: 障害の注入 (任意の時点での強制終了) を 1,000 回 (リリースゲート、09 §8.2)。
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 18 * * *" # 毎日 03:17 (日本時間)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fault-injection:
+    name: fault-injection (${{ matrix.role }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: windows
+            os: windows-2025
+          - role: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: develop
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest
+      - name: kill at random points (1,000 runs)
+        env:
+          EVORAG_FAULT_RUNS: "1000"
+        run: cargo nextest run -p evorag-core --test fault_injection --locked --profile ci --no-capture
