@@ -63,6 +63,7 @@ fn fault_child() {
             evorag_version: "0.0.5".into(),
             prompt_language: PromptLanguage::Ja,
             generation: Generation::default(),
+            request_extra: Default::default(),
             reserve_for_output: None,
             backup_dir: None,
             allow_unsafe_location: true,

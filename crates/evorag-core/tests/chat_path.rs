@@ -37,6 +37,7 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         evorag_version: "0.0.3".into(),
         prompt_language: lang,
         generation: Generation::default(),
+        request_extra: Default::default(),
         reserve_for_output: None,
         backup_dir: None,
         allow_unsafe_location: false,
@@ -536,4 +537,39 @@ async fn low_space_pauses_background_work_but_the_conversation_continues() {
         !dir.path().join("backups").join("daily").exists(),
         "no backup was taken"
     );
+}
+
+/// 07 §2.2・§4.2: 思考は 1 回だけ知らせ、本文に入れない。request_extra は要求に足される。
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_is_announced_once_and_not_saved() {
+    let dir = TempDir::new("core-thinking");
+    let llm = cassette(
+        8192,
+        r#"{"events": [{"reasoning": "考え1"}, {"reasoning": "考え2"}, {"delta": "答え"}, {"done": {}}]}"#,
+    );
+    let mut cfg = config(dir.path(), PromptLanguage::Ja);
+    cfg.request_extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::json!({"enable_thinking": false}),
+    );
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "考えて".into(),
+    });
+    let events = until(&mut rx, finished).await;
+    let thinking = events
+        .iter()
+        .filter(|e| matches!(e, Event::Thinking { .. }))
+        .count();
+    assert_eq!(thinking, 1);
+    let Some(Event::ResponseFinished { turn, .. }) = events.last() else {
+        panic!()
+    };
+    assert_eq!(turn.text, "答え");
+    assert_eq!(
+        llm.requests()[0].extra["chat_template_kwargs"]["enable_thinking"],
+        false
+    );
+    core.shutdown().await;
 }

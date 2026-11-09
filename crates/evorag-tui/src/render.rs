@@ -86,6 +86,12 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     if let Some(s) = &app.streaming {
         lines.push(header(app, Role::Assistant, None, None));
+        if s.thinking && s.text.is_empty() {
+            lines.push(Line::styled(
+                format!("  {}", app.catalog.key(MessageKey::UiThinking)),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
         for l in wrap(&format!("{}▍", s.text), body_w) {
             lines.push(Line::from(format!("  {l}")));
         }
@@ -157,7 +163,9 @@ pub fn draw(app: &App, f: &mut Frame) {
         input,
     );
 
-    let state = if app.generating() {
+    let state = if app.streaming.as_ref().is_some_and(|s| s.thinking) {
+        app.catalog.key(MessageKey::UiStatusThinking)
+    } else if app.generating() {
         app.catalog.key(MessageKey::UiStatusGenerating)
     } else {
         app.catalog.key(MessageKey::UiStatusIdle)

@@ -56,7 +56,12 @@ pub struct ChatRequest {
     pub id_slot: Option<u32>,
     /// ルーターモードのときのモデルの名前。
     pub model: Option<String>,
+    /// 要求に足す JSON (設定 `llm.chat.request_extra`、07 §4.2)。evorag が決める項目は上書きしない。
+    pub extra: RequestExtra,
 }
+
+/// 要求に足す JSON の項目。
+pub type RequestExtra = serde_json::Map<String, serde_json::Value>;
 
 /// トークンの使用量 (サーバが返したときだけ)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

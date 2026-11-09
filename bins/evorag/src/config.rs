@@ -60,6 +60,8 @@ pub struct Chat {
     pub generation: GenerationConfig,
     /// v0.1 の Should (`/model`)。
     pub models: Option<Vec<toml::Table>>,
+    /// 応答の要求に足す JSON (07 §4.2)。
+    pub request_extra: Option<toml::Table>,
     /// v0.2 のキー。
     pub aux_request_extra: Option<toml::Table>,
 }
@@ -244,6 +246,8 @@ api_key_env = "KEY"
 [llm.chat.generation]
 temperature = 0.2
 max_tokens = 256
+[llm.chat.request_extra]
+chat_template_kwargs = { enable_thinking = false }
 [memory]
 enabled = true
 "#,
@@ -255,6 +259,7 @@ enabled = true
         );
         assert_eq!(l.config.llm.chat.generation.max_tokens, Some(256));
         assert_eq!(l.config.prompt.language.as_deref(), Some("en"));
+        assert!(l.config.llm.chat.request_extra.is_some());
         assert!(l.ignored.is_empty());
     }
 

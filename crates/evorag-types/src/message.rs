@@ -69,6 +69,8 @@ message_keys! {
     UiMarkNoReply => "ui.mark.no_reply",
     UiStatusIdle => "ui.status.idle",
     UiStatusGenerating => "ui.status.generating",
+    UiStatusThinking => "ui.status.thinking",
+    UiThinking => "ui.thinking",
     /// 引数: `title`。
     UiTitleSession => "ui.title.session",
     UiTitleNoSession => "ui.title.no_session",

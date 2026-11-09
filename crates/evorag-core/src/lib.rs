@@ -39,6 +39,8 @@ pub struct CoreConfig {
     /// 設定 `prompt.language`。データ根に記録が無いときだけ使う (07 §6.1)。
     pub prompt_language: PromptLanguage,
     pub generation: Generation,
+    /// 設定 `llm.chat.request_extra` (07 §4.2)。思考を切る `chat_template_kwargs` など。
+    pub request_extra: evorag_llm::RequestExtra,
     /// 設定 `context.reserve_for_output` (05 §4.1)。
     pub reserve_for_output: Option<usize>,
     /// 設定 `storage.backup_dir` (03 §7.1)。省くとデータ根の `backups/`。
@@ -129,6 +131,7 @@ struct Inner {
     state: Mutex<State>,
     tokens: TokenCache,
     generation: Generation,
+    request_extra: evorag_llm::RequestExtra,
     reserve: Option<usize>,
     language: PromptLanguage,
     backup_dir: Option<PathBuf>,
@@ -240,6 +243,7 @@ impl Core {
             state: Mutex::default(),
             tokens: TokenCache::default(),
             generation: cfg.generation,
+            request_extra: cfg.request_extra,
             reserve: cfg.reserve_for_output,
             language,
             backup_dir: cfg.backup_dir,
@@ -856,9 +860,11 @@ async fn generate(
         // 応答は最初のスロット (06 §4)。
         id_slot: (inner.server.total_slots > 1).then_some(0),
         model: None,
+        extra: inner.request_extra.clone(),
     };
 
     let mut text = String::new();
+    let mut thinking = false;
     let outcome = tokio::select! {
         c = &mut cancel => Outcome::Interrupted(c.unwrap_or(Cancel::User)),
         started = inner.llm.chat(req) => match started {
@@ -875,7 +881,13 @@ async fn generate(
                             text.push_str(&d);
                             emit(inner, Event::Token { reply_to: user_turn, text: d });
                         }
-                        Some(Ok(ChatEvent::Reasoning(_))) => {}
+                        Some(Ok(ChatEvent::Reasoning(_))) => {
+                            // 思考の本文は見せも保存もしない。考えていることだけを 1 回知らせる (07 §2.2)。
+                            if !thinking && text.is_empty() {
+                                thinking = true;
+                                emit(inner, Event::Thinking { reply_to: user_turn });
+                            }
+                        }
                         Some(Ok(ChatEvent::Done { .. })) => break Outcome::Completed,
                         Some(Err(e)) => break Outcome::Failed(e),
                         None => break Outcome::Failed(LlmError::Cut("the stream ended".into())),

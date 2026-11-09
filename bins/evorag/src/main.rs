@@ -233,12 +233,22 @@ fn main() -> ExitCode {
         };
     }
 
+    // 設定の表を JSON に写す (`chat_template_kwargs = { enable_thinking = false }` など)。
+    let request_extra: evorag_llm::RequestExtra = cfg
+        .llm
+        .chat
+        .request_extra
+        .as_ref()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
         config_file: Some(config_file.clone()),
         evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_language,
         generation: generation.clone(),
+        request_extra: request_extra.clone(),
         reserve_for_output: cfg.context.reserve_for_output,
         backup_dir: backup_dir.clone(),
         allow_unsafe_location: cfg.storage.allow_unsafe_location.unwrap_or(false),

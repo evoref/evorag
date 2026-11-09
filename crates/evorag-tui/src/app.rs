@@ -63,6 +63,8 @@ pub struct Status {
 pub struct Streaming {
     pub reply_to: Id,
     pub text: String,
+    /// モデルが思考している (本文がまだ来ていない)。
+    pub thinking: bool,
 }
 
 pub struct App {
@@ -139,11 +141,18 @@ impl App {
                 self.streaming = Some(Streaming {
                     reply_to,
                     text: String::new(),
+                    thinking: false,
                 });
             }
             Event::Token { reply_to, text } => {
                 if let Some(s) = self.streaming.as_mut().filter(|s| s.reply_to == reply_to) {
                     s.text.push_str(&text);
+                    s.thinking = false;
+                }
+            }
+            Event::Thinking { reply_to } => {
+                if let Some(s) = self.streaming.as_mut().filter(|s| s.reply_to == reply_to) {
+                    s.thinking = true;
                 }
             }
             Event::ResponseFinished { turn, notice } => {
@@ -514,6 +523,8 @@ mod tests {
             turn: turn(1, Role::User, TurnStatus::Pending, None),
         });
         a.on_event(Event::ResponseStarted { reply_to: id(1) });
+        a.on_event(Event::Thinking { reply_to: id(1) });
+        assert!(a.streaming.as_ref().unwrap().thinking, "thinking is shown");
         assert!(
             !a.has_no_reply(&a.turns[0].clone()),
             "streaming is not a missing reply"
@@ -527,6 +538,7 @@ mod tests {
             text: "にちは".into(),
         });
         assert_eq!(a.streaming.as_ref().unwrap().text, "こんにちは");
+        assert!(!a.streaming.as_ref().unwrap().thinking);
         // 生成中の Enter は送らず、入力欄に残す。
         type_text(&mut a, "次");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());

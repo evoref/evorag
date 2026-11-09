@@ -86,6 +86,8 @@ pub enum Event {
     ResponseStarted { reply_to: Id },
     /// 応答の本文の断片。
     Token { reply_to: Id, text: String },
+    /// モデルが思考している (本文の前。思考の本文は届けない、07 §2.2)。
+    Thinking { reply_to: Id },
     /// 応答が終わった (完了・中断・失敗)。`notice` は中断・失敗の理由。
     ResponseFinished {
         turn: TurnView,

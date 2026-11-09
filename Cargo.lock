@@ -565,6 +565,7 @@ dependencies = [
  "evorag-tui",
  "evorag-types",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
 ]
@@ -579,6 +580,7 @@ dependencies = [
  "evorag-retrieval",
  "evorag-store",
  "evorag-types",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
 ]
