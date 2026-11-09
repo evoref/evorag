@@ -79,8 +79,12 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Some(t.created_at.as_millis()),
             mark(app, t),
         ));
-        for l in wrap(&t.text, body_w) {
-            lines.push(Line::from(format!("  {l}")));
+        if t.role == Role::Assistant {
+            lines.extend(crate::markdown::render(&t.text, body_w, "  "));
+        } else {
+            for l in wrap(&t.text, body_w) {
+                lines.push(Line::from(format!("  {l}")));
+            }
         }
         lines.push(Line::from(""));
     }
@@ -92,9 +96,11 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 Style::new().add_modifier(Modifier::DIM),
             ));
         }
-        for l in wrap(&format!("{}▍", s.text), body_w) {
-            lines.push(Line::from(format!("  {l}")));
-        }
+        lines.extend(crate::markdown::render(
+            &format!("{}▍", s.text),
+            body_w,
+            "  ",
+        ));
         lines.push(Line::from(""));
     }
     for n in &app.notices {

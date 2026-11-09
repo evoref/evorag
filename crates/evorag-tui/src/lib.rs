@@ -5,6 +5,7 @@
 pub mod app;
 pub mod catalog;
 pub mod input;
+pub mod markdown;
 pub mod render;
 pub mod run;
 pub mod slash;
