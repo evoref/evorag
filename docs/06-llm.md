@@ -14,7 +14,7 @@
 
 ## 1. 方針
 
-- 推論は外部の llama-server (llama.cpp) に任せる。evorag は llama-server を起動・更新・管理しない (提案、[ADR-0010](10-decisions.md#adr-0010-外部の-llama-server-だけを使う))。
+- 推論は外部の llama-server (llama.cpp) に任せる。evorag は llama-server を起動・更新・管理しない (確定、[ADR-0010](10-decisions.md#adr-0010-外部の-llama-server-だけを使う))。
 - 通信は HTTP で、既定はループバックだけ (§9)。`evorag-llm` は TLS を持たない。
 - 足りない能力に応じて縮退して動く (§3)。
 
