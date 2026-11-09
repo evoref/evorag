@@ -6,6 +6,7 @@
 mod config;
 mod doctor;
 mod export;
+mod setup;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -41,6 +42,18 @@ struct Args {
 
 #[derive(clap::Subcommand)]
 enum Sub {
+    /// llama-server を探して能力を確かめ、設定ファイルを書く
+    Setup {
+        /// 接続先 (省くと、設定の llm.chat.url と 127.0.0.1:8080・8081 を探す)
+        #[arg(long)]
+        url: Option<String>,
+        /// API キーを入れた環境変数の名前 (llama-server を --api-key で起動したとき)
+        #[arg(long, value_name = "NAME")]
+        api_key_env: Option<String>,
+        /// 尋ねずに進める (プロンプトの言語は ja、設定ファイルは書き換える)
+        #[arg(long)]
+        yes: bool,
+    },
     /// 設定・接続・データ根・ジャーナル・退避を、読むだけで点検する
     Doctor,
     /// 退避の操作
@@ -190,6 +203,25 @@ fn main() -> ExitCode {
     let clock = Arc::new(SystemClock);
     let backup_dir = cfg.storage.backup_dir.clone();
 
+    if let Some(Sub::Setup {
+        url,
+        api_key_env,
+        yes,
+    }) = &args.command
+    {
+        return setup::run(
+            &catalog,
+            &config_file,
+            &cfg,
+            &data_root,
+            &rt,
+            &setup::SetupArgs {
+                url: url.clone(),
+                api_key_env: api_key_env.clone(),
+                yes: *yes,
+            },
+        );
+    }
     if let Some(Sub::Doctor) = &args.command {
         return doctor::run(
             &catalog,
