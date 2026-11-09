@@ -27,6 +27,7 @@ fn open(root: &Path) -> Arc<Store> {
         kinds: vec![SAMPLE],
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 7)),
+        config_file: None,
     })
     .unwrap();
     Arc::new(store)

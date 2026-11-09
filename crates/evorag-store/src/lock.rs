@@ -63,9 +63,13 @@ fn read_pid(data_root: &Path) -> Option<u32> {
         .ok()
 }
 
+/// 一時名に書いてから入れ替える (読み手が空のファイルを読まないように)。
 fn write_pid(data_root: &Path) -> std::io::Result<()> {
-    let mut f = File::create(data_root.join(PID_FILE))?;
-    writeln!(f, "{}", std::process::id())
+    let tmp = data_root.join(format!("{PID_FILE}.tmp"));
+    let mut f = File::create(&tmp)?;
+    writeln!(f, "{}", std::process::id())?;
+    drop(f);
+    fs::rename(&tmp, data_root.join(PID_FILE))
 }
 
 #[cfg(test)]
