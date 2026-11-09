@@ -11,8 +11,8 @@ mod write;
 
 pub use kinds::{
     GenerationRecord, JOB_PURGE_BACKUPS, JobBody, KIND_JOB, KIND_SESSION, KIND_SIGNAL, KIND_TURN,
-    REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, SessionBody, SessionState, SignalBody, SignalKind,
-    TurnBody, TurnRole, TurnState, kinds,
+    REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, RecallDecision, RecallRecord, SessionBody,
+    SessionState, SignalBody, SignalKind, TurnBody, TurnRole, TurnState, kinds,
 };
 pub use read::{
     MemoryError, Session, Turn, list_sessions, load_session, pending_user_turns, session_turns,

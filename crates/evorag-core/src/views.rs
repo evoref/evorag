@@ -13,6 +13,14 @@ pub fn session(s: &Session) -> SessionView {
     }
 }
 
+pub fn role(r: TurnRole) -> Role {
+    match r {
+        TurnRole::User => Role::User,
+        TurnRole::Assistant => Role::Assistant,
+        TurnRole::System => Role::System,
+    }
+}
+
 pub fn turn(t: &Turn) -> TurnView {
     turn_of(&t.envelope, &t.body)
 }
@@ -21,11 +29,7 @@ pub fn turn_of(e: &Envelope, b: &TurnBody) -> TurnView {
     TurnView {
         id: e.id,
         session: b.session,
-        role: match b.role {
-            TurnRole::User => Role::User,
-            TurnRole::Assistant => Role::Assistant,
-            TurnRole::System => Role::System,
-        },
+        role: role(b.role),
         status: match b.state {
             TurnState::Pending => TurnStatus::Pending,
             TurnState::Confirmed => TurnStatus::Confirmed,
@@ -37,5 +41,6 @@ pub fn turn_of(e: &Envelope, b: &TurnBody) -> TurnView {
         model_key: b.model_key.clone(),
         reply_to: b.reply_to,
         created_at: e.created_at,
+        sources: b.recall.as_ref().map_or(0, |r| r.sources.len()),
     }
 }

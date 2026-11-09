@@ -50,6 +50,7 @@ fn key_of(ev: TermEvent) -> Option<Key> {
                 KeyCode::PageUp => Key::PageUp,
                 KeyCode::PageDown => Key::PageDown,
                 KeyCode::Esc => Key::Esc,
+                KeyCode::Tab => Key::Tab,
                 _ => return None,
             })
         }

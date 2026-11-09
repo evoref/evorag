@@ -45,6 +45,7 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         model_name: "test".into(),
         models: Vec::new(),
         connect: None,
+        memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }

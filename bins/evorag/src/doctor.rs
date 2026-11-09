@@ -141,6 +141,20 @@ pub fn run(
             ("pending", &j.pending.to_string()),
         ],
     );
+    match evorag_core::inspect_index(data_root) {
+        evorag_core::IndexState::Missing => say(c, MessageKey::DoctorIndexMissing, &[]),
+        evorag_core::IndexState::Ok { segments, docs } => say(
+            c,
+            MessageKey::DoctorIndexOk,
+            &[
+                ("docs", &docs.to_string()),
+                ("segments", &segments.to_string()),
+            ],
+        ),
+        evorag_core::IndexState::NeedsRebuild(d) => {
+            say(c, MessageKey::DoctorIndexRebuild, &[("detail", &d)]);
+        }
+    }
     match report.backups.first() {
         Some(b) => say(
             c,

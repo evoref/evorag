@@ -22,6 +22,7 @@ nothing_to_retry = "作り直す発話がありません。"
 nothing_to_rate = "評価する応答がありません。"
 unknown_model = "モデルの候補「{name}」は設定にありません (設定の [[llm.chat.models]] に名前と url を書きます)。"
 delete_failed = "セッションを消せませんでした ({detail})。"
+source_not_found = "出典 [{n}] が見つかりません (消したセッションの出典かもしれません)。"
 
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
@@ -58,7 +59,7 @@ confirm = "セッション「{title}」を消しますか? このセッション
 [ui.help]
 title = "ヘルプ (Esc で閉じる)"
 body = """
-Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典の番号を選ぶ (Enter で表示) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
 
 /new [題名]      セッションを作る
 /sessions        セッションの一覧と再開
@@ -67,6 +68,7 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /retry           直前の応答を作り直す
 /good, /bad [理由]  直前の応答を評価する
 /model [名前]    使っているモデルの表示と、設定にある候補への切り替え
+/sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
 
@@ -77,6 +79,11 @@ deleted = "セッションを消しました。"
 renamed = "セッションの名前を「{title}」にしました。"
 draft_restored = "前回の書きかけを入力欄に戻しました。"
 model = "モデル: {current} ({model}、n_ctx {n_ctx})。候補: {choices}"
+sources_on = "このセッションでは、以前の会話を応答に添えます (/sources off で止めます)。"
+sources_off = "このセッションでは、以前の会話を応答に添えません (/sources on で戻します)。"
+source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
+source = "[{n}] {title} ({at})\n{excerpt}"
+no_sources = "出典の付いた応答がありません。"
 
 [ui.error]
 unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"
@@ -114,6 +121,9 @@ journal = "ジャーナル: {files} ファイル、{lines} 行 (読めない行 
 backups = "退避: {count} 個 (最新 {latest})"
 backups_none = "退避: まだありません"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
+index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
+index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
+index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"
 
 [backups]
 item = "{kind}  {dir}  (ジャーナルの連番 {seq})"

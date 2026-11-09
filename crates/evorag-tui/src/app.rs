@@ -31,6 +31,8 @@ pub enum Key {
     CtrlQ,
     /// 外部のエディタで書く (07 §2.4)。
     CtrlE,
+    /// 出典の番号を選ぶ (07 §2.5)。
+    Tab,
     Paste(String),
 }
 
@@ -85,6 +87,8 @@ pub struct App {
     pub scroll: usize,
     pub mode: Mode,
     pub status: Status,
+    /// 選んでいる出典 (応答の ID と番号、FR-110)。
+    pub source: Option<(Id, usize)>,
     ctrl_c_armed: bool,
 }
 
@@ -100,6 +104,7 @@ impl App {
             scroll: 0,
             mode: Mode::Chat,
             status,
+            source: None,
             ctrl_c_armed: false,
         }
     }
@@ -217,6 +222,48 @@ impl App {
                 );
                 self.notice(m);
             }
+            Event::SourcesInfo { memory } => {
+                let k = if memory {
+                    MessageKey::UiSourcesOn
+                } else {
+                    MessageKey::UiSourcesOff
+                };
+                let m = self.catalog.key(k);
+                self.notice(m);
+            }
+            Event::SourceDetail {
+                n,
+                title,
+                at,
+                lines,
+            } => {
+                let excerpt = lines
+                    .iter()
+                    .map(|(role, text)| {
+                        let who = match role {
+                            Role::User => self.catalog.key(MessageKey::UiYou),
+                            _ => self.catalog.key(MessageKey::UiAssistant),
+                        };
+                        let text: String = text.chars().take(300).collect();
+                        format!("  {who}: {text}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    );
+                let at = evorag_core::localtime::datetime(at.as_millis());
+                let m = self.catalog.with(
+                    MessageKey::UiSourceDetail,
+                    &[
+                        ("n", &n.to_string()),
+                        ("title", &title),
+                        ("at", &at),
+                        ("excerpt", &excerpt),
+                    ],
+                );
+                self.notice(m);
+            }
             Event::BackgroundPaused { reason } => {
                 let m = self.catalog.message(&reason);
                 self.notice(m);
@@ -291,8 +338,50 @@ impl App {
         }
     }
 
+    /// Tab: 出典の付いた最後の応答の、次の番号を選ぶ。
+    fn next_source(&mut self) {
+        let Some(t) = self
+            .turns
+            .iter()
+            .rev()
+            .find(|t| t.role == Role::Assistant && t.sources > 0)
+        else {
+            let m = self.catalog.key(MessageKey::UiNoSources);
+            self.notice(m);
+            return;
+        };
+        let n = match self.source {
+            Some((id, n)) if id == t.id => n % t.sources + 1,
+            _ => 1,
+        };
+        self.source = Some((t.id, n));
+        let m = self
+            .catalog
+            .with(MessageKey::UiSourceSelected, &[("n", &n.to_string())]);
+        self.notice(m);
+    }
+
     fn on_chat_key(&mut self, key: Key) -> Vec<Action> {
+        // 出典を選んでいる間は、Enter で表示し、Esc でやめる。ほかのキーでも選ぶのをやめる。
+        if let Some((turn, n)) = self.source.take() {
+            match key {
+                Key::Tab => {
+                    self.source = Some((turn, n));
+                    self.next_source();
+                    return Vec::new();
+                }
+                Key::Enter { newline: false } if self.input.is_empty() => {
+                    return vec![Action::Command(Command::ShowSource { turn, n })];
+                }
+                Key::Esc if !self.generating() => return Vec::new(),
+                _ => {}
+            }
+        }
         match key {
+            Key::Tab => {
+                self.next_source();
+                Vec::new()
+            }
             Key::CtrlQ => vec![Action::Quit],
             Key::CtrlE => vec![Action::OpenEditor],
             Key::CtrlC => {
@@ -425,6 +514,7 @@ impl App {
             }),
             Slash::Quit => vec![Action::Quit],
             Slash::Model(name) => c(Command::Model { name }),
+            Slash::Sources(memory) => c(Command::Sources { memory }),
             Slash::NotYet(name) => {
                 let m = self.catalog.with(MessageKey::UiNotYet, &[("name", &name)]);
                 self.notice(m);
@@ -464,6 +554,7 @@ mod tests {
             model_key: None,
             reply_to,
             created_at: Timestamp::from_millis(0),
+            sources: 0,
         }
     }
 
@@ -649,5 +740,61 @@ mod tests {
             vec![Action::Command(Command::OpenSession { id: id(9) })]
         );
         assert_eq!(a.mode, Mode::Chat);
+    }
+
+    /// verifies: AC-FR-110-1 (画面の層: Tab で番号を選び、Enter で照会し、詳細を示す)
+    #[test]
+    fn tab_selects_a_source_and_enter_shows_it() {
+        let mut a = app();
+        assert!(a.on_key(Key::Tab).is_empty());
+        assert!(a.notices.last().unwrap().contains("出典の付いた応答"));
+        let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        answer.sources = 2;
+        a.turns = vec![turn(1, Role::User, TurnStatus::Confirmed, None), answer];
+        a.on_key(Key::Tab);
+        a.on_key(Key::Tab);
+        assert_eq!(a.source, Some((id(2), 2)));
+        a.on_key(Key::Tab);
+        assert_eq!(a.source, Some((id(2), 1)), "wraps around");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ShowSource { turn: id(2), n: 1 })]
+        );
+        assert_eq!(a.source, None);
+        // Esc でやめる。ほかのキーは普通に効く。
+        a.on_key(Key::Tab);
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.source, None);
+        a.on_key(Key::Tab);
+        a.on_key(Key::Char('x'));
+        assert_eq!((a.source, a.input.text()), (None, "x"));
+
+        a.on_event(Event::SourceDetail {
+            n: 1,
+            title: "旅行の計画".into(),
+            at: Timestamp::from_millis(0),
+            lines: vec![
+                (Role::User, "宿はどこ？".into()),
+                (Role::Assistant, "町家です".into()),
+            ],
+        });
+        let shown = a.notices.last().unwrap();
+        assert!(shown.starts_with("[1] 旅行の計画 ("), "{shown}");
+        assert!(shown.contains("あなた: 宿はどこ？"), "{shown}");
+    }
+
+    /// verifies: AC-FR-409-1 (画面の層)
+    #[test]
+    fn sources_command_switches_memory() {
+        let mut a = app();
+        type_text(&mut a, "/sources off");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Sources {
+                memory: Some(false)
+            })]
+        );
+        a.on_event(Event::SourcesInfo { memory: false });
+        assert!(a.notices.last().unwrap().contains("添えません"));
     }
 }

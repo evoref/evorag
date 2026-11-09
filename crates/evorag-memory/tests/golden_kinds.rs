@@ -68,6 +68,7 @@ fn session_v1() {
             title: "見本のセッション".into(),
             mode: "chat".into(),
             state: SessionState::Active,
+            memory: Some(false),
         },
     );
 }
@@ -92,6 +93,10 @@ fn turn_v1() {
             attached: vec![id("019a6a2b-0000-7000-8000-000000000009")],
             reply_to: Some(id("019a6a2b-0000-7000-8000-000000000003")),
             error: Some("interrupted".into()),
+            recall: Some(RecallRecord {
+                decision: RecallDecision::Fire,
+                sources: vec![1],
+            }),
         },
     );
 }
