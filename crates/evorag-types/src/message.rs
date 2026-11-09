@@ -28,4 +28,50 @@ macro_rules! message_keys {
     };
 }
 
-message_keys! {}
+message_keys! {
+    /// 引数: `detail`。
+    LlmConnect => "error.llm.connect",
+    /// 引数: `status`、`detail`。
+    LlmHttp => "error.llm.http",
+    /// 引数: `detail`。
+    LlmStreamCut => "error.llm.stream_cut",
+    /// 引数: `detail`。
+    LlmServer => "error.llm.server",
+    /// 引数: `detail`。
+    LlmProtocol => "error.llm.protocol",
+    /// 発話を保存できず、送らなかった (04 §3 の 1)。引数: `detail`。
+    SendNotSaved => "error.send.not_saved",
+    /// 応答を保存できなかった。引数: `detail`。
+    ResponseNotSaved => "error.response.not_saved",
+    /// 生成中に、もう 1 つ送ろうとした。
+    Busy => "error.busy",
+    /// セッションを開いていない。
+    NoSession => "error.no_session",
+    /// 作り直す・送り直す発話が無い。
+    NothingToRetry => "error.nothing_to_retry",
+    /// 利用者が中断した。
+    Interrupted => "response.interrupted",
+    /// 終了のために中断した。
+    InterruptedByShutdown => "response.interrupted_by_shutdown",
+}
+
+/// 文言キーと引数 (02 §3 の決めごと 1)。画面がカタログで訳す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub key: MessageKey,
+    pub args: Vec<(String, String)>,
+}
+
+impl Message {
+    pub fn new(key: MessageKey) -> Self {
+        Self {
+            key,
+            args: Vec::new(),
+        }
+    }
+
+    pub fn arg(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.args.push((name.to_owned(), value.into()));
+        self
+    }
+}

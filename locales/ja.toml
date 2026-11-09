@@ -1,3 +1,25 @@
 # 日本語の文言カタログ (docs/07-tui-config.md §6)。
 # キーは evorag-types の MessageKey と一致させる (`cargo xtask i18n` で検査する、NFR-602)。
 # 表は入れ子にしてよく、点でつないだ名前がキーになる。値は文字列だけ。
+
+[error.llm]
+connect = "llama-server に接続できません ({detail})。llama-server が動いているか、設定の接続先を確かめてください。"
+http = "llama-server がエラーを返しました (HTTP {status}: {detail})。"
+stream_cut = "応答の途中で接続が切れました ({detail})。受け取ったところまでを保存しました。発話は残っているので、送り直せます。"
+server = "llama-server が生成の途中でエラーを返しました ({detail})。受け取ったところまでを保存しました。"
+protocol = "llama-server から想定と違う応答が返りました ({detail})。"
+
+[error.send]
+not_saved = "発話を保存できなかったので、送りませんでした ({detail})。入力欄に戻しました。"
+
+[error.response]
+not_saved = "応答を保存できませんでした ({detail})。"
+
+[error]
+busy = "応答を生成しています。Esc で中断してから送ってください。"
+no_session = "セッションが開いていません。"
+nothing_to_retry = "作り直す発話がありません。"
+
+[response]
+interrupted = "中断しました。受け取ったところまでを保存しました。"
+interrupted_by_shutdown = "終了のため中断しました。受け取ったところまでを保存しました。"

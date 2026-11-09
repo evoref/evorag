@@ -1,3 +1,680 @@
-//! コアの API の実装と sleep-time の進行。下の層の crate を組み立てる。
+//! コアの API の実装と、sleep-time の進行 (02 §3、§5)。下の層の crate を組み立てる。
 //!
-//! 仕様: 02 §3, 02 §5, 02 §4.1。骨格だけで、中身は後のステップ (08 §2.2) で入れる。
+//! v0.1 の M1.3 はヘッドレスのチャット経路 (04 §3):
+//! 1. 発話を、LLM に送る前にターン (応答待ち) として確定する。確定できなければ送らない。
+//! 2. 文脈を組み立てて (05 §4.1) 逐次表示で生成し、断片をイベントで届ける。
+//! 3. 応答は、完了・中断・失敗のいずれかのターンとして、受け取ったところまでの本文と理由を書く。
+//!
+//! 命令は 1 本の待ち行列で順に処理する。生成は別の task で走らせ、中断の命令で取り消す。
+//! 書き手のスレッドはここで作る (02 §4.3 の R7)。tokio の実行器の中で使う。
+
+mod context;
+mod prompt;
+mod views;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use evorag_llm::{
+    ChatEvent, ChatMessage, ChatRequest, Generation, LlmClient, LlmError, Role, ServerInfo,
+};
+use evorag_memory::{AssistantTurn, GenerationRecord, SignalKind, TurnRole, TurnState, Writes};
+use evorag_store::{
+    Envelope, OpenError, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer, WriterHandle,
+    meta,
+};
+use evorag_types::api::{Command, Event};
+use evorag_types::{Clock, Id, IdGen, Message, MessageKey};
+use tokio::sync::{mpsc, oneshot};
+
+pub use context::{TokenCache, estimate};
+pub use prompt::PromptLanguage;
+
+/// コアの設定。
+pub struct CoreConfig {
+    pub data_root: PathBuf,
+    /// `config.toml` (移行の前の退避に含める、03 §7.2)。
+    pub config_file: Option<PathBuf>,
+    pub evorag_version: String,
+    /// 設定 `prompt.language`。データ根に記録が無いときだけ使う (07 §6.1)。
+    pub prompt_language: PromptLanguage,
+    pub generation: Generation,
+    /// 設定 `context.reserve_for_output` (05 §4.1)。
+    pub reserve_for_output: Option<usize>,
+    pub clock: Arc<dyn Clock>,
+    pub ids: Arc<dyn IdGen>,
+}
+
+/// 起動できない理由。
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// chat の llama-server に繋がらない (06 §3、FR-503。TUI を開かずに案内を出す)。
+    #[error("llama-server is not reachable: {0}")]
+    LlmUnreachable(LlmError),
+    #[error(transparent)]
+    Store(#[from] OpenError),
+    #[error("the data root cannot be written: {0}")]
+    ReadOnly(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+}
+
+/// 起動して分かったこと。
+#[derive(Debug, Clone)]
+pub struct StartReport {
+    pub server: ServerInfo,
+    pub store: evorag_store::OpenReport,
+    pub prompt_language: PromptLanguage,
+    /// 設定の `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
+    pub prompt_language_mismatch: bool,
+}
+
+/// 生成の取り消しの理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cancel {
+    User,
+    Shutdown,
+}
+
+struct Running {
+    cancel: Option<oneshot::Sender<Cancel>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct State {
+    session: Option<Id>,
+    running: Option<Running>,
+}
+
+struct Inner {
+    store: Arc<Store>,
+    writer: WriterHandle,
+    writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    llm: Arc<dyn LlmClient>,
+    server: ServerInfo,
+    clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
+    events: mpsc::UnboundedSender<Event>,
+    state: Mutex<State>,
+    tokens: TokenCache,
+    generation: Generation,
+    reserve: Option<usize>,
+    language: PromptLanguage,
+    /// 命令の待ち行列を回す task と、その止め方。
+    command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
+}
+
+/// 動いているコア。
+#[derive(Clone)]
+pub struct Core {
+    inner: Arc<Inner>,
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+fn llm_message(e: &LlmError) -> Message {
+    match e {
+        LlmError::Connect(d) => Message::new(MessageKey::LlmConnect).arg("detail", d.clone()),
+        LlmError::Http { status, body } => Message::new(MessageKey::LlmHttp)
+            .arg("status", status.to_string())
+            .arg("detail", body.clone()),
+        LlmError::Cut(d) => Message::new(MessageKey::LlmStreamCut).arg("detail", d.clone()),
+        LlmError::Server(d) => Message::new(MessageKey::LlmServer).arg("detail", d.clone()),
+        other => Message::new(MessageKey::LlmProtocol).arg("detail", other.to_string()),
+    }
+}
+
+impl Core {
+    /// llama-server を確かめ (06 §3)、データ根を開き、書き手のスレッドを作る。
+    pub async fn start(
+        cfg: CoreConfig,
+        llm: Arc<dyn LlmClient>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Event>, StartReport), StartError> {
+        llm.health().await.map_err(StartError::LlmUnreachable)?;
+        let server = llm
+            .server_info()
+            .await
+            .map_err(StartError::LlmUnreachable)?;
+
+        let mut kinds = evorag_memory::kinds();
+        kinds.sort_by_key(|k| k.name);
+        let (store, open_report) = Store::open(OpenOptions {
+            data_root: cfg.data_root,
+            evorag_version: cfg.evorag_version,
+            kinds,
+            clock: cfg.clock.clone(),
+            ids: cfg.ids.clone(),
+            config_file: cfg.config_file,
+        })?;
+        if let Some(r) = store.read_only() {
+            return Err(StartError::ReadOnly(format!("{r:?}")));
+        }
+        let store = Arc::new(store);
+        let (writer, handle) =
+            Writer::new(store.clone()).map_err(|e| StartError::Storage(e.to_string()))?;
+        let writer_thread = std::thread::Builder::new()
+            .name("evorag-writer".into())
+            .spawn(move || writer.run())
+            .map_err(|e| StartError::Storage(e.to_string()))?;
+
+        // プロンプトの言語: 記録があればそれを使い、無ければ設定の値を記録する (07 §6.1)。
+        let recorded = store
+            .meta(meta::PROMPT_LANGUAGE)
+            .map_err(|e| StartError::Storage(e.to_string()))?
+            .and_then(|s| PromptLanguage::parse(&s));
+        let language = match recorded {
+            Some(l) => l,
+            None => {
+                handle
+                    .submit_wait(WriteRequest::conversation(vec![WriteOp::SetMetaOnce {
+                        key: meta::PROMPT_LANGUAGE.into(),
+                        value: cfg.prompt_language.as_str().into(),
+                    }]))
+                    .map_err(|e| StartError::Storage(e.to_string()))?;
+                cfg.prompt_language
+            }
+        };
+
+        let (events, rx) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Inner {
+            store,
+            writer: handle,
+            writer_thread: Mutex::new(Some(writer_thread)),
+            llm,
+            server: server.clone(),
+            clock: cfg.clock,
+            ids: cfg.ids,
+            events,
+            state: Mutex::default(),
+            tokens: TokenCache::default(),
+            generation: cfg.generation,
+            reserve: cfg.reserve_for_output,
+            language,
+            command_loop: Mutex::new(None),
+        });
+        let core = Self { inner, commands };
+        let worker = core.inner.clone();
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    cmd = cmd_rx.recv() => match cmd {
+                        Some(cmd) => handle_command(&worker, cmd).await,
+                        None => break,
+                    },
+                }
+            }
+        });
+        *core
+            .inner
+            .command_loop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((stop_tx, task));
+        let report = StartReport {
+            server,
+            store: open_report,
+            prompt_language: language,
+            prompt_language_mismatch: language != cfg.prompt_language,
+        };
+        Ok((core, rx, report))
+    }
+
+    /// 命令を送る。結果はイベントで届く。
+    pub fn command(&self, cmd: Command) {
+        let _ = self.commands.send(cmd);
+    }
+
+    pub fn server(&self) -> &ServerInfo {
+        &self.inner.server
+    }
+
+    /// 照会: セッションの一覧 (更新の新しい順)。
+    pub fn sessions(&self, limit: usize) -> Vec<evorag_types::api::SessionView> {
+        let Ok(rtx) = self.inner.store.read() else {
+            return Vec::new();
+        };
+        evorag_memory::list_sessions(&rtx, limit)
+            .unwrap_or_default()
+            .iter()
+            .map(views::session)
+            .collect()
+    }
+
+    /// 照会: セッションのターン (元の順)。
+    pub fn turns(&self, session: Id) -> Vec<evorag_types::api::TurnView> {
+        let Ok(rtx) = self.inner.store.read() else {
+            return Vec::new();
+        };
+        evorag_memory::session_turns(&rtx, session)
+            .unwrap_or_default()
+            .iter()
+            .map(views::turn)
+            .collect()
+    }
+
+    /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
+    pub fn tokenize_calls(&self) -> usize {
+        self.inner.tokens.calls()
+    }
+
+    /// 終了する。生成中なら中断として書き、書き手の待ち行列の会話の追記を書き切ってから戻る (02 §5)。
+    /// 戻った後、ほかに複製した `Core` が無ければ、データ根のロックも外れている。
+    pub async fn shutdown(self) {
+        // 新しい命令を受け付けない (処理中の命令は終わるまで待つ)。
+        let command_loop = self
+            .inner
+            .command_loop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((stop, task)) = command_loop {
+            let _ = stop.send(());
+            let _ = task.await;
+        }
+        let running = {
+            let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.running.take()
+        };
+        if let Some(mut r) = running {
+            if let Some(c) = r.cancel.take() {
+                let _ = c.send(Cancel::Shutdown);
+            }
+            let _ = r.task.await;
+        }
+        self.inner.writer.shutdown();
+        let thread = self
+            .inner
+            .writer_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = thread {
+            let _ = tokio::task::spawn_blocking(move || t.join()).await;
+        }
+    }
+}
+
+fn emit(inner: &Inner, ev: Event) {
+    let _ = inner.events.send(ev);
+}
+
+fn reject(inner: &Inner, key: MessageKey) {
+    emit(
+        inner,
+        Event::Rejected {
+            error: Message::new(key),
+        },
+    );
+}
+
+/// 書き手に送り、結果を待つ。
+async fn write(inner: &Inner, ops: Vec<WriteOp>) -> Result<(), String> {
+    let (tx, rx) = oneshot::channel();
+    inner
+        .writer
+        .submit(
+            WriteRequest::conversation(ops),
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+    match rx.await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("the writer stopped".into()),
+    }
+}
+
+fn read_env(inner: &Inner, kind: &str, id: Id) -> Option<Envelope> {
+    match inner.store.read().ok()?.get(kind, id).ok()? {
+        Some(Read::Ok(e)) => Some(e),
+        _ => None,
+    }
+}
+
+fn writes(inner: &Inner) -> Writes<'_> {
+    Writes {
+        clock: &*inner.clock,
+        ids: &*inner.ids,
+    }
+}
+
+fn is_running(inner: &Inner) -> bool {
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .running
+        .as_ref()
+        .is_some_and(|r| !r.task.is_finished())
+}
+
+fn current_session(inner: &Inner) -> Option<Id> {
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session
+}
+
+async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
+    match cmd {
+        Command::NewSession { title } => {
+            let Ok((id, ops)) = writes(inner).create_session(&title) else {
+                return;
+            };
+            if let Err(e) = write(inner, ops).await {
+                emit(
+                    inner,
+                    Event::Rejected {
+                        error: Message::new(MessageKey::ResponseNotSaved).arg("detail", e),
+                    },
+                );
+                return;
+            }
+            open_session(inner, id);
+        }
+        Command::OpenSession { id } => open_session(inner, id),
+        Command::Send { text } => send(inner, text).await,
+        Command::Interrupt => {
+            let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(c) = st.running.as_mut().and_then(|r| r.cancel.take()) {
+                let _ = c.send(Cancel::User);
+            }
+        }
+        Command::Retry => regenerate(inner, true).await,
+        Command::Resend => regenerate(inner, false).await,
+        _ => {}
+    }
+}
+
+fn open_session(inner: &Inner, id: Id) {
+    let Ok(rtx) = inner.store.read() else {
+        return;
+    };
+    let Ok(s) = evorag_memory::load_session(&rtx, id) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let turns = evorag_memory::session_turns(&rtx, id).unwrap_or_default();
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session = Some(id);
+    emit(
+        inner,
+        Event::SessionOpened {
+            session: views::session(&s),
+            turns: turns.iter().map(views::turn).collect(),
+        },
+    );
+}
+
+async fn send(inner: &Arc<Inner>, text: String) {
+    if is_running(inner) {
+        reject(inner, MessageKey::Busy);
+        return;
+    }
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let Some(session) = read_env(inner, evorag_memory::KIND_SESSION, sid) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    // 1. 発話を先に確定する (04 §3 の 1、FR-201)。確定できなければ送らない。
+    let (uid, ops) = match writes(inner).user_turn(&session, &text) {
+        Ok(v) => v,
+        Err(e) => {
+            emit(
+                inner,
+                Event::SendRejected {
+                    text,
+                    error: Message::new(MessageKey::SendNotSaved).arg("detail", e.to_string()),
+                },
+            );
+            return;
+        }
+    };
+    if let Err(e) = write(inner, ops).await {
+        emit(
+            inner,
+            Event::SendRejected {
+                text,
+                error: Message::new(MessageKey::SendNotSaved).arg("detail", e),
+            },
+        );
+        return;
+    }
+    let Some(user) = read_env(inner, evorag_memory::KIND_TURN, uid) else {
+        return;
+    };
+    if let Ok(t) = user.body_as::<evorag_memory::TurnBody>() {
+        emit(
+            inner,
+            Event::UserTurnSaved {
+                turn: views::turn_of(&user, &t),
+            },
+        );
+    }
+    start_generation(inner, sid, uid);
+}
+
+/// 作り直す (`retry`) か、送り直す (`resend`)。対象は最後の発話。
+async fn regenerate(inner: &Arc<Inner>, retry: bool) {
+    if is_running(inner) {
+        reject(inner, MessageKey::Busy);
+        return;
+    }
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let turns = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, sid).ok())
+        .unwrap_or_default();
+    let Some(last_user) = turns.iter().rev().find(|t| t.body.role == TurnRole::User) else {
+        reject(inner, MessageKey::NothingToRetry);
+        return;
+    };
+    let uid = last_user.envelope.id;
+    let last_answer = turns
+        .iter()
+        .rev()
+        .find(|t| t.body.reply_to == Some(uid))
+        .map(|t| t.envelope.id);
+    if retry {
+        // 前の応答を残し、再生成の信号を記録する (FR-103、13 §2)。
+        let Some(target) = last_answer else {
+            reject(inner, MessageKey::NothingToRetry);
+            return;
+        };
+        if let Ok((_, ops)) = writes(inner).signal(SignalKind::Retry, target, None) {
+            let _ = write(inner, ops).await;
+        }
+    }
+    start_generation(inner, sid, uid);
+}
+
+fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id) {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let worker = inner.clone();
+    let task = tokio::spawn(async move {
+        generate(&worker, session, user_turn, cancel_rx).await;
+    });
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .running = Some(Running {
+        cancel: Some(cancel_tx),
+        task,
+    });
+}
+
+/// 発話 `user_turn` までの会話 (この発話への前の応答は除く) を、LLM に送る発言の列にする。
+fn history(inner: &Inner, session: Id, user_turn: Id) -> Vec<ChatMessage> {
+    let turns = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for t in &turns {
+        if t.envelope.id > user_turn {
+            break;
+        }
+        let role = match t.body.role {
+            TurnRole::User => Role::User,
+            TurnRole::Assistant => Role::Assistant,
+            TurnRole::System => continue,
+        };
+        // 失敗した応答と、今作り直す発話への前の応答は送らない。
+        if t.body.state == TurnState::Failed || t.body.reply_to == Some(user_turn) {
+            continue;
+        }
+        out.push(ChatMessage::new(role, t.body.text.clone()));
+    }
+    out
+}
+
+enum Outcome {
+    Completed,
+    Interrupted(Cancel),
+    Failed(LlmError),
+}
+
+async fn generate(
+    inner: &Arc<Inner>,
+    session: Id,
+    user_turn: Id,
+    mut cancel: oneshot::Receiver<Cancel>,
+) {
+    emit(
+        inner,
+        Event::ResponseStarted {
+            reply_to: user_turn,
+        },
+    );
+    let system = ChatMessage::new(
+        Role::System,
+        prompt::system_prompt(inner.language, inner.clock.now().as_millis()),
+    );
+    let n_ctx = inner.server.n_ctx as usize;
+    let reserve = context::reserve_for_output(n_ctx, inner.reserve);
+    let messages = context::assemble(
+        &*inner.llm,
+        &inner.tokens,
+        &inner.server.model_key,
+        n_ctx,
+        reserve,
+        system,
+        history(inner, session, user_turn),
+    )
+    .await;
+    let req = ChatRequest {
+        messages,
+        generation: inner.generation.clone(),
+        // 応答は最初のスロット (06 §4)。
+        id_slot: (inner.server.total_slots > 1).then_some(0),
+        model: None,
+    };
+
+    let mut text = String::new();
+    let outcome = tokio::select! {
+        c = &mut cancel => Outcome::Interrupted(c.unwrap_or(Cancel::User)),
+        started = inner.llm.chat(req) => match started {
+            Err(e) => Outcome::Failed(e),
+            Ok(mut stream) => loop {
+                tokio::select! {
+                    c = &mut cancel => {
+                        // ストリームを落として接続を閉じる (06 §4)。
+                        drop(stream);
+                        break Outcome::Interrupted(c.unwrap_or(Cancel::User));
+                    }
+                    ev = stream.next() => match ev {
+                        Some(Ok(ChatEvent::Delta(d))) => {
+                            text.push_str(&d);
+                            emit(inner, Event::Token { reply_to: user_turn, text: d });
+                        }
+                        Some(Ok(ChatEvent::Reasoning(_))) => {}
+                        Some(Ok(ChatEvent::Done { .. })) => break Outcome::Completed,
+                        Some(Err(e)) => break Outcome::Failed(e),
+                        None => break Outcome::Failed(LlmError::Cut("the stream ended".into())),
+                    }
+                }
+            },
+        },
+    };
+
+    let (state, notice, error) = match &outcome {
+        Outcome::Completed => (TurnState::Completed, None, None),
+        Outcome::Interrupted(c) => {
+            let key = match c {
+                Cancel::User => MessageKey::Interrupted,
+                Cancel::Shutdown => MessageKey::InterruptedByShutdown,
+            };
+            (
+                TurnState::Interrupted,
+                Some(Message::new(key)),
+                Some(format!("interrupted:{c:?}").to_lowercase()),
+            )
+        }
+        Outcome::Failed(e) => (TurnState::Failed, Some(llm_message(e)), Some(e.to_string())),
+    };
+    let g = &inner.generation;
+    let turn = AssistantTurn {
+        state,
+        text,
+        model_key: Some(inner.server.model_key.clone()),
+        generation: Some(GenerationRecord {
+            temperature: g.temperature,
+            top_p: g.top_p,
+            max_tokens: g.max_tokens,
+            seed: g.seed,
+        }),
+        attached: Vec::new(),
+        error,
+    };
+    // 応答を書く。セッションと発話は読み直した最新のものを使う。
+    let session_env = read_env(inner, evorag_memory::KIND_SESSION, session);
+    let user_env = read_env(inner, evorag_memory::KIND_TURN, user_turn);
+    let written = match (session_env, user_env) {
+        (Some(s), Some(u)) => match writes(inner).assistant_turn(&s, &u, turn) {
+            Ok((id, ops)) => write(inner, ops).await.map(|()| id),
+            Err(e) => Err(e.to_string()),
+        },
+        _ => Err("the session or the utterance is gone".into()),
+    };
+    match written
+        .ok()
+        .and_then(|id| read_env(inner, evorag_memory::KIND_TURN, id))
+    {
+        Some(env) => {
+            if let Ok(t) = env.body_as::<evorag_memory::TurnBody>() {
+                emit(
+                    inner,
+                    Event::ResponseFinished {
+                        turn: views::turn_of(&env, &t),
+                        notice,
+                    },
+                );
+            }
+        }
+        None => emit(
+            inner,
+            Event::Rejected {
+                error: Message::new(MessageKey::ResponseNotSaved).arg("detail", "write failed"),
+            },
+        ),
+    }
+}

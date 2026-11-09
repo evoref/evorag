@@ -151,6 +151,8 @@ dependencies = [
  "evorag-retrieval",
  "evorag-store",
  "evorag-types",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
