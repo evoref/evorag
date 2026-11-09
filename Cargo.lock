@@ -134,7 +134,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "evorag"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-core",
  "evorag-tui",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-index",
  "evorag-llm",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-index"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-store",
  "evorag-types",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-llm"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-types",
  "reqwest",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-memory"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-store",
  "evorag-types",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-retrieval"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-index",
  "evorag-memory",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-store"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "ciborium",
  "evorag-types",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-tui"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-core",
  "evorag-types",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "evorag-types"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
 ]
@@ -1082,7 +1082,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "evorag-types",
  "serde",
