@@ -12,6 +12,12 @@ publish.workspace = true
 evorag-types = { workspace = true }
 evorag-index = { workspace = true }
 evorag-memory = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-properties = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+serde = { workspace = true }
 
 [lints]
 workspace = true
