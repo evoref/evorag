@@ -44,6 +44,7 @@
 
 - 応答は逐次表示する。Esc で中断する (FR-102)。
 - 生成中も入力欄に次の発話を書ける (送信は応答の完了か中断の後)。
+- 思考の部分を出すモデルが思考している間は、応答の欄と状態の行に「考えています」と出す。思考の本文は表示も保存もしない (応答の本文だけをターンに書く)。
 
 ### 2.3 日本語入力
 
@@ -117,6 +118,7 @@
 | `llm.chat.api_key` / `api_key_env` | 文字列 | (空) | API キー、またはそれを入れた環境変数の名前 | v0.1 |
 | `llm.chat.models` | 配列 | [] | `/model` で切り替える候補 (名前と url) | v0.1 |
 | `llm.chat.generation` | 表 | temperature 0.7 など | 生成の設定 | v0.1 |
+| `llm.chat.request_extra` | 表 | {} | 応答の要求に足す JSON (思考を切る `chat_template_kwargs = { enable_thinking = false }` など、06 §6)。evorag が決める項目 (`messages`・`stream` など) は上書きしない | v0.1 |
 | `llm.chat.aux_request_extra` | 表 | {} | 補助の呼び出しの要求に足す JSON (思考を切る `chat_template_kwargs` など、06 §6) | v0.2 |
 | `llm.embed.url` / `llm.rerank.url` | 文字列 | (空) | embed / rerank の接続先 | v0.2 |
 | `llm.allow_remote` | 真偽 | false | ループバック以外の接続先を許す (`https` が必須) | v0.1 |
