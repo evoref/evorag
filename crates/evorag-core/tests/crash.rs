@@ -55,6 +55,7 @@ fn crash_child() {
             prompt_language: PromptLanguage::Ja,
             generation: Generation::default(),
             reserve_for_output: None,
+            backup_dir: None,
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),
         };

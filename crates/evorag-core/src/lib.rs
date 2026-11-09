@@ -41,6 +41,8 @@ pub struct CoreConfig {
     pub generation: Generation,
     /// 設定 `context.reserve_for_output` (05 §4.1)。
     pub reserve_for_output: Option<usize>,
+    /// 設定 `storage.backup_dir` (03 §7.1)。省くとデータ根の `backups/`。
+    pub backup_dir: Option<PathBuf>,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
 }
@@ -101,6 +103,9 @@ struct Inner {
     generation: Generation,
     reserve: Option<usize>,
     language: PromptLanguage,
+    backup_dir: Option<PathBuf>,
+    /// 起動時の退避の task (終了のときに待つ。ストアを持ったまま戻らないように)。
+    startup_backup: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 命令の待ち行列を回す task と、その止め方。
     command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
 }
@@ -191,6 +196,8 @@ impl Core {
             generation: cfg.generation,
             reserve: cfg.reserve_for_output,
             language,
+            backup_dir: cfg.backup_dir,
+            startup_backup: Mutex::new(None),
             command_loop: Mutex::new(None),
         });
         let core = Self { inner, commands };
@@ -212,6 +219,17 @@ impl Core {
             .command_loop
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some((stop_tx, task));
+        // 自動の退避: v0.1 は起動時と終了時の空き時間に作る (03 §7.1)。会話の邪魔をしないよう裏で。
+        let store = core.inner.store.clone();
+        let dir = core.inner.backup_dir.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _ = store.daily_backup(dir.as_deref());
+        });
+        *core
+            .inner
+            .startup_backup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(task);
         let report = StartReport {
             server,
             store: open_report,
@@ -289,6 +307,19 @@ impl Core {
             }
             let _ = r.task.await;
         }
+        let startup = self
+            .inner
+            .startup_backup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = startup {
+            let _ = t.await;
+        }
+        // 今日の退避がまだなら作る (読み取りのトランザクションで写すので、書き手と並んでよい)。
+        let store = self.inner.store.clone();
+        let dir = self.inner.backup_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || store.daily_backup(dir.as_deref())).await;
         self.inner.writer.shutdown();
         let thread = self
             .inner
