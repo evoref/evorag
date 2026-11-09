@@ -151,6 +151,8 @@ pub struct Writer {
     store: Arc<Store>,
     token: WriteToken,
     shared: Arc<Shared>,
+    /// ジャーナルに書いた後でコミットに失敗した (以後は書かない)。
+    poisoned: std::cell::Cell<bool>,
 }
 
 /// 依頼を送る口。複製して配ってよい。
@@ -176,6 +178,7 @@ impl Writer {
                 store,
                 token,
                 shared: shared.clone(),
+                poisoned: std::cell::Cell::new(false),
             },
             WriterHandle { shared },
         ))
@@ -246,12 +249,12 @@ impl Writer {
     }
 
     fn apply(&self, req: &WriteRequest) -> Result<WriteOutcome, WriteError> {
-        // 先にジャーナルに書いて書き切る (03 §6)。書けなければ DB にも書かない。
-        let last_seq = self.journal(req)?;
-        let mut tx = self.store.write(&self.token, req.durability)?;
-        if let Some(seq) = last_seq {
-            tx.set_journal_seq(seq)?;
+        if self.poisoned.get() {
+            // ジャーナルに書いた後でコミットに失敗した。取り込み直すまで書かない (03 §6)。
+            return Err(StoreError::NeedsRestart.into());
         }
+        // 1. DB のトランザクションで操作を当てて、規則を確かめる (断られたらジャーナルにも書かない)。
+        let mut tx = self.store.write(&self.token, req.durability)?;
         let mut out = WriteOutcome::default();
         if self.store.suspect_count() > 0 {
             out.quarantined = tx.quarantine_suspects()?;
@@ -259,14 +262,41 @@ impl Writer {
         for op in &req.ops {
             apply_op(&mut tx, op, &mut out)?;
         }
-        tx.commit()?;
+        // 2. ジャーナルに書いて書き切る (03 §6)。書けなければ DB にも書かない。
+        let (lines, deleted) = self.journal_lines(req);
+        let mut journaled = false;
+        if !lines.is_empty() {
+            let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(journal) = guard.as_mut() {
+                let seq = journal
+                    .append(self.store.clock().now(), &lines)
+                    .map_err(|e| StoreError::Journal(e.to_string()))?;
+                tx.set_journal_seq(seq)?;
+                journaled = true;
+            }
+        }
+        // 3. コミットする。
+        if let Err(e) = tx.commit() {
+            if journaled {
+                self.poisoned.set(true);
+            }
+            return Err(e.into());
+        }
+        // 4. 削除した記録の本文の行をジャーナルから除く。失敗しても次の起動で除く。
+        if !deleted.is_empty() {
+            let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(journal) = guard.as_mut() {
+                let _ = journal.remove_ids(&deleted);
+            }
+        }
         Ok(out)
     }
 }
 
 impl Writer {
-    /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) を書く。
-    fn journal(&self, req: &WriteRequest) -> Result<Option<u64>, StoreError> {
+    /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) と、
+    /// 削除する ID。
+    fn journal_lines(&self, req: &WriteRequest) -> (Vec<LineOp>, BTreeSet<Id>) {
         let mut lines = Vec::new();
         let mut deleted = BTreeSet::new();
         for op in &req.ops {
@@ -290,19 +320,7 @@ impl Writer {
                 _ => {}
             }
         }
-        if lines.is_empty() {
-            return Ok(None);
-        }
-        let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(journal) = guard.as_mut() else {
-            return Ok(None);
-        };
-        let now = self.store.clock().now();
-        journal
-            .remove_ids(&deleted)
-            .and_then(|()| journal.append(now, &lines))
-            .map(Some)
-            .map_err(|e| StoreError::Journal(e.to_string()))
+        (lines, deleted)
     }
 }
 

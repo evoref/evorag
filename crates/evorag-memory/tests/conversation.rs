@@ -378,3 +378,63 @@ fn deleting_a_session_removes_its_text_from_the_journal() {
     assert!(!text.contains("消す題名"), "{text}");
     assert!(text.contains("\"delete\""));
 }
+
+/// 03 §6: 規則で断られた書き込みは、ジャーナルにも書かない (起動時に検査なしで当たらないように)。
+#[test]
+fn a_rejected_write_is_not_journaled() {
+    let dir = TempDir::new("conv-journal-rejected");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("s").unwrap();
+    env.write(ops);
+    let (_, mut ops) = env
+        .writes()
+        .user_turn(&env.session(sid), "断られる本文")
+        .unwrap();
+    if let evorag_store::WriteOp::Put(e) = &mut ops[0] {
+        e.v = 99; // 今の版で書けない `v`
+    }
+    assert!(
+        env.writer
+            .submit_wait(WriteRequest::conversation(ops))
+            .is_err()
+    );
+    assert!(!journal_text(dir.path()).contains("断られる本文"));
+}
+
+/// 取り込みで、上書きする記録から作った副索引を消す (一覧の副索引が重ならない)。
+#[test]
+fn rebuilding_from_the_journal_leaves_one_lookup_per_session() {
+    let dir = TempDir::new("conv-journal-lookup");
+    let sid;
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("s").unwrap();
+        sid = id;
+        env.write(ops);
+        for i in 0..3 {
+            env.clock.advance(10);
+            let ops = env
+                .writes()
+                .rename_session(&env.session(sid), &format!("s{i}"))
+                .unwrap();
+            env.write(ops);
+        }
+    }
+    std::fs::remove_file(dir.path().join(evorag_store::DB_FILE)).unwrap();
+    let env = Env::open(dir.path());
+    let rtx = env.store.read().unwrap();
+    let all = rtx
+        .lookup(
+            KIND_SESSION,
+            "updated_at",
+            &evorag_store::LookupRange::Between {
+                from: None,
+                to: None,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].id, sid);
+}

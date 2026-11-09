@@ -10,6 +10,18 @@ use serde_json::{Map, Number, Value as Json};
 use crate::envelope::Envelope;
 
 const MARK: &str = "$cbor";
+/// 封筒の既知の項目 (03 §3.2)。
+const KNOWN: [&str; 7] = [
+    "id",
+    "kind",
+    "v",
+    "created_at",
+    "updated_at",
+    "writer",
+    "body",
+];
+/// 名前が文字列でない・既知と重なる知らない項目をまとめて運ぶ項目。
+const EXTRA: &str = "$unknown";
 const SAFE: i128 = 1 << 53;
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -141,9 +153,19 @@ pub fn envelope_to_json(e: &Envelope) -> Json {
     );
     m.insert("writer".into(), Json::String(e.writer.clone()));
     m.insert("body".into(), to_json(&e.body));
-    if !e.unknown.is_empty() {
-        // 封筒の知らない項目は、元の形のまま運ぶ (03 §4.2 の規則 7)。
-        m.insert("unknown".into(), wrap(&Cbor::Map(e.unknown.clone())));
+    // 封筒の知らない項目は、同じ名前の項目として写す (03 §11、§4.2 の規則 7)。名前が文字列で
+    // ないもの・既知の名前と重なるものは、まとめて元の形のまま運ぶ。
+    let mut odd = Vec::new();
+    for (k, v) in &e.unknown {
+        match k.as_text() {
+            Some(name) if !KNOWN.contains(&name) && name != EXTRA && !m.contains_key(name) => {
+                m.insert(name.to_owned(), to_json(v));
+            }
+            _ => odd.push((k.clone(), v.clone())),
+        }
+    }
+    if !odd.is_empty() {
+        m.insert(EXTRA.into(), wrap(&Cbor::Map(odd)));
     }
     Json::Object(m)
 }
@@ -163,13 +185,21 @@ pub fn envelope_from_json(v: &Json) -> Result<Envelope, String> {
             .ok_or_else(|| format!("`{k}` is not an integer"))
     };
     let id: Id = text("id")?.parse().map_err(|e| format!("{e}"))?;
-    let unknown = match v.get("unknown") {
-        None => Vec::new(),
-        Some(u) => match from_json(u)? {
-            Cbor::Map(m) => m,
-            _ => return Err("`unknown` is not a map".into()),
-        },
-    };
+    let obj = v.as_object().ok_or("an envelope is not an object")?;
+    let mut unknown = Vec::new();
+    for (k, val) in obj {
+        if KNOWN.contains(&k.as_str()) {
+            continue;
+        }
+        if k == EXTRA {
+            match from_json(val)? {
+                Cbor::Map(m) => unknown.extend(m),
+                _ => return Err(format!("`{EXTRA}` is not a map")),
+            }
+        } else {
+            unknown.push((Cbor::Text(k.clone()), from_json(val)?));
+        }
+    }
     Ok(Envelope {
         id,
         kind: text("kind")?,

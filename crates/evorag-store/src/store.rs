@@ -20,6 +20,7 @@ use crate::lock::{DataRootLock, LockError};
 use crate::meta;
 use crate::migrate::{self, FormatPlan};
 use crate::version::Version;
+use crate::writer::WriteOp;
 
 /// DB のファイルの名前。
 pub const DB_FILE: &str = "evorag.redb";
@@ -130,6 +131,8 @@ pub struct OpenReport {
     pub journal_bad_lines: usize,
     /// 書きかけで切り詰めたジャーナルの末尾のバイト数。
     pub journal_truncated: usize,
+    /// ジャーナルの新しい版の行 (チェックサムは合うが読めない) の数。
+    pub journal_newer_lines: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +187,9 @@ pub enum StoreError {
     Db(#[from] redb::Error),
     #[error("i/o error: {0}")]
     Io(String),
+    /// ジャーナルに書いた後でコミットに失敗したので、開き直して取り込み直すまで書かない (03 §6)。
+    #[error("the database must be reopened before further writes")]
+    NeedsRestart,
     /// ジャーナルに書けなかった。DB にも書いていない (03 §6、AC-FR-202-1)。
     #[error("the journal could not be written: {0}")]
     Journal(String),
@@ -486,6 +492,7 @@ impl Store {
             .unwrap_or(0);
         let (journal, scan) = Journal::open(&self.root, last)?;
         report.journal_bad_lines = scan.bad;
+        report.journal_newer_lines = scan.newer;
         report.journal_truncated = scan.truncated;
         if let Some(last_line) = scan.lines.last() {
             let last_seq = last_line.seq;
@@ -508,21 +515,31 @@ impl Store {
     fn replay_line(&self, tx: &mut WriteTxn<'_>, op: &LineOp) -> Result<(), StoreError> {
         match op {
             LineOp::Put(env) => {
-                let newer_in_db = match tx.get(&env.kind, env.id)? {
-                    Some(Read::Ok(old)) => old.updated_at > env.updated_at,
-                    _ => false,
-                };
-                if !newer_in_db {
-                    tx.put_raw(env)?;
-                    if let Some(derive) = self.kinds.get(env.kind.as_str()).and_then(|k| k.derive) {
-                        let mut out = crate::writer::WriteOutcome::default();
-                        for op in derive(env) {
-                            crate::writer::apply_op(tx, &op, &mut out)?;
+                // 通常の書き込みと同じ規則で当てる (03 §6): 新しい `v` の記録と読めない記録は上書き
+                // しない。順序は連番で決まるので、時刻は比べない。
+                let spec = self.kinds.get(env.kind.as_str());
+                match tx.get(&env.kind, env.id)? {
+                    Some(Read::Ok(old)) => {
+                        if spec.is_some_and(|s| old.v > s.current_v) {
+                            return Ok(());
                         }
+                        self.undo_derived(tx, &old)?;
+                    }
+                    Some(Read::Newer { .. } | Read::Corrupt { .. }) => return Ok(()),
+                    None => {}
+                }
+                tx.put_raw(env)?;
+                if let Some(derive) = spec.and_then(|k| k.derive) {
+                    let mut out = crate::writer::WriteOutcome::default();
+                    for op in derive(env) {
+                        crate::writer::apply_op(tx, &op, &mut out)?;
                     }
                 }
             }
             LineOp::Delete { kind, id } => {
+                if let Some(Read::Ok(old)) = tx.get(kind, *id)? {
+                    self.undo_derived(tx, &old)?;
+                }
                 tx.delete(kind, *id)?;
                 tx.delete_links_of(*id)?;
                 tx.delete_blobs(*id)?;
@@ -531,6 +548,33 @@ impl Store {
                 Ok(()) | Err(StoreError::MetaConflict { .. } | StoreError::MetaNotWritable(_)) => {}
                 Err(e) => return Err(e),
             },
+        }
+        Ok(())
+    }
+
+    /// 記録から作った関係と副索引を消す (上書き・削除の前に)。
+    fn undo_derived(&self, tx: &mut WriteTxn<'_>, old: &Envelope) -> Result<(), StoreError> {
+        let Some(derive) = self.kinds.get(old.kind.as_str()).and_then(|k| k.derive) else {
+            return Ok(());
+        };
+        let mut out = crate::writer::WriteOutcome::default();
+        for op in derive(old) {
+            let undo = match op {
+                WriteOp::PutLink { from, rel, to, .. } => WriteOp::DeleteLink { from, rel, to },
+                WriteOp::PutLookup {
+                    kind,
+                    field,
+                    value,
+                    id,
+                } => WriteOp::DeleteLookup {
+                    kind,
+                    field,
+                    value,
+                    id,
+                },
+                _ => continue,
+            };
+            crate::writer::apply_op(tx, &undo, &mut out)?;
         }
         Ok(())
     }
