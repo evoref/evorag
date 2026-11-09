@@ -38,6 +38,9 @@ evorag-retrieval = { path = "crates/evorag-retrieval" }
 evorag-core = { path = "crates/evorag-core" }
 evorag-tui = { path = "crates/evorag-tui" }
 
+# 外部の crate (版は workspace で 1 か所に決める)。
+serde = { version = "1.0.228", features = ["derive"] }
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
