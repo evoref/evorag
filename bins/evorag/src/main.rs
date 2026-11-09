@@ -373,6 +373,10 @@ fn main() -> ExitCode {
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };
+    // ログ (02 §7)。状態のフォルダの logs/。始められなくても会話は続ける。
+    if let Some(p) = &places {
+        let _ = evorag_core::logging::init(&p.state_dir.join("logs"), clock.now().as_millis());
+    }
     let mut started = rt.block_on(Core::start(make_cfg(), llm.clone()));
     // DB のファイルが壊れていたら、退避とジャーナルから戻すかを尋ねる (03 §8、FR-205)。
     if let Err(StartError::Store(OpenError::Broken { moved_to, reason })) = &started {

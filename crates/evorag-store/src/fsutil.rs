@@ -37,9 +37,26 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     imp::sync_dir(dir)
 }
 
-/// 所有者だけが読み書きできるフォルダを作る (NFR-503。Windows の ACL は setup のタスクで入れる)。
+/// 所有者だけが読み書きできるフォルダを作る (NFR-503)。
+///
+/// - Unix: 0700 (既にあったフォルダも締め直す)。
+/// - Windows: 新しく作ったときだけ、今の利用者だけを許す保護した DACL を付け、中に継承させる。
+///   既にあったフォルダ (利用者が `--data-root` で指した既存のフォルダなど) は変えない
+///   (継承を切ると、その下のすべての権限が変わるため)。
 pub fn create_private_dir(p: &Path) -> io::Result<()> {
     imp::create_private_dir(p)
+}
+
+/// 所有者だけが使えるか (Unix は group と other の権限が無い、Windows は今の利用者だけを許す
+/// ACE が 1 つ)。試験のため。
+pub fn is_private(p: &Path) -> io::Result<bool> {
+    imp::is_private(p)
+}
+
+/// 所有者だけの権限を付けられる置き場所か。Windows は、ネットワークの置き場所と ACL を持たない
+/// ファイルシステム (FAT・exFAT) では付けない (03 §2)。Unix は常に真。
+pub fn acl_applicable(p: &Path) -> io::Result<bool> {
+    imp::acl_applicable(p)
 }
 
 /// 所有者だけが読み書きできるファイルにする。無ければ空のファイルを作る (中身は消さない)。
@@ -72,7 +89,10 @@ mod imp {
         let mut s: Vec<u16> = Vec::new();
         if let Some(Component::Prefix(pre)) = abs.components().next() {
             match pre.kind() {
-                Prefix::Verbatim(_) | Prefix::VerbatimUNC(..) | Prefix::VerbatimDisk(_) => {}
+                Prefix::Verbatim(_)
+                | Prefix::VerbatimUNC(..)
+                | Prefix::VerbatimDisk(_)
+                | Prefix::DeviceNS(_) => {}
                 Prefix::UNC(..) => {
                     // \\server\share\... → \\?\UNC\server\share\...
                     s.extend("\\\\?\\UNC".encode_utf16());
@@ -123,16 +143,49 @@ mod imp {
     }
 
     pub fn create_private_dir(p: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(p)
+        // 新しく作る段のうち、いちばん上 (ここから下は継承で所有者だけになる)。
+        let abs = std::path::absolute(p)?;
+        let top = abs
+            .ancestors()
+            .take_while(|a| !a.exists())
+            .last()
+            .map(Path::to_path_buf);
+        std::fs::create_dir_all(p)?;
+        if let Some(top) = top {
+            crate::winacl::restrict(&wide(&top)?, true)?;
+        }
+        Ok(())
     }
 
     pub fn prepare_private_file(p: &Path) -> io::Result<()> {
-        std::fs::OpenOptions::new()
+        use std::os::windows::fs::OpenOptionsExt;
+        // 新しく作るときは、ほかから開けないように (共有なしで) 開いたまま権限を付ける。
+        // 付ける前の継承した権限で、ほかのプロセスが開いておく間を作らないため
+        // (権限の変更は共有の検査を受けないので、開いたままで付けられる)。
+        match std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(false)
+            .create_new(true)
+            .share_mode(0)
             .open(p)
-            .map(drop)
+        {
+            Ok(handle) => {
+                let r = crate::winacl::restrict(&wide(p)?, false);
+                drop(handle);
+                r
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                crate::winacl::restrict(&wide(p)?, false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn is_private(p: &Path) -> io::Result<bool> {
+        crate::winacl::is_owner_only(&wide(p)?)
+    }
+
+    pub fn acl_applicable(p: &Path) -> io::Result<bool> {
+        Ok(crate::winacl::applicable(&wide(p)?))
     }
 }
 
@@ -176,6 +229,14 @@ mod imp {
             .mode(0o600)
             .open(p)?;
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+    }
+
+    pub fn is_private(p: &Path) -> io::Result<bool> {
+        Ok(std::fs::metadata(p)?.permissions().mode() & 0o077 == 0)
+    }
+
+    pub fn acl_applicable(_p: &Path) -> io::Result<bool> {
+        Ok(true)
     }
 }
 
@@ -231,5 +292,44 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// verifies: AC-NFR-503-1 (作ったフォルダとファイル、その中に作ったファイル)
+    #[test]
+    fn private_dirs_and_files_are_owner_only() {
+        let dir = crate::testutil::TempDir::new("private");
+        if !acl_applicable(dir.path()).unwrap() {
+            eprintln!("skipped: the temp folder is on a volume without ACLs");
+            return;
+        }
+        let root = dir.path().join("made").join("here");
+        create_private_dir(&root).unwrap();
+        assert!(is_private(&root).unwrap());
+        // 途中に作った段も所有者だけ (Unix の 0700 と同じ)。
+        assert!(is_private(&dir.path().join("made")).unwrap());
+        // 中に普通に作ったファイルも、継承で所有者だけになる。
+        let inner = root.join("inner.txt");
+        std::fs::write(&inner, b"x").unwrap();
+        assert!(is_private(&inner).unwrap() || cfg!(unix));
+        // 外のフォルダのファイルも、prepare_private_file で所有者だけにする。
+        let outside = dir.path().join("file.bin");
+        std::fs::write(&outside, b"y").unwrap();
+        prepare_private_file(&outside).unwrap();
+        assert!(is_private(&outside).unwrap());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"y",
+            "the content is kept"
+        );
+    }
+
+    /// Windows: 既にあったフォルダの権限は変えない (利用者のフォルダの継承を壊さない)。
+    #[cfg(windows)]
+    #[test]
+    fn existing_dirs_are_left_alone_on_windows() {
+        let dir = crate::testutil::TempDir::new("private-existing");
+        let before = is_private(dir.path()).unwrap();
+        create_private_dir(dir.path()).unwrap();
+        assert_eq!(is_private(dir.path()).unwrap(), before);
     }
 }

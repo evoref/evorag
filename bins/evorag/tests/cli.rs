@@ -188,7 +188,7 @@ fn mtime_and_len(p: &Path) -> (std::time::SystemTime, u64) {
     (m.modified().unwrap(), m.len())
 }
 
-/// verifies: AC-FR-207-1, AC-FR-206-1 (doctor が件数を報告する)
+/// verifies: AC-FR-207-1, AC-FR-206-1 (doctor が件数を報告する), AC-FR-905-1 (CLI の層)
 #[test]
 fn doctor_reports_without_writing_anything() {
     use evorag_store::{Envelope, WriteOp, WriteRequest, Writer};
@@ -263,6 +263,11 @@ fn doctor_reports_without_writing_anything() {
         assert!(text.contains("壊れた記録 1 件"), "{text}");
         // 日次と、その週の最初の日次を残す週次の 2 個。
         assert!(text.contains("退避: 2 個"), "{text}");
+        // --data-root で指したフォルダを使う (AC-FR-905-1 の CLI の層)。
+        assert!(
+            text.contains(&format!("データ根: {}", root.display())),
+            "{text}"
+        );
     }
     let after: Vec<_> = watched.iter().map(|p| mtime_and_len(p)).collect();
     assert_eq!(before, after, "doctor must not write");
@@ -385,7 +390,7 @@ fn setup_without_llama_server_shows_the_steps_and_writes_nothing() {
     assert!(!dir.path().join("config.toml").exists());
 }
 
-/// FR-510 の補足 (見つけた接続先とプロンプトの言語を設定に書く。書き換えは確かめてから)
+/// verifies: AC-NFR-503-1 (設定)。FR-510 の補足 (見つけた接続先とプロンプトの言語を設定に書く。書き換えは確かめてから)
 #[test]
 fn setup_finds_llama_server_and_writes_the_config() {
     let dir = TempDir::new("cli-setup-found");
@@ -398,6 +403,12 @@ fn setup_finds_llama_server_and_writes_the_config() {
     let cfg = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
     assert!(cfg.contains(&format!("url = \"{url}\"")), "{cfg}");
     assert!(cfg.contains("language = \"en\""), "{cfg}");
+    // 設定は所有者だけ (AC-NFR-503-1)。
+    let cfg_path = dir.path().join("config.toml");
+    assert!(
+        !evorag_store::fsutil::acl_applicable(&cfg_path).unwrap()
+            || evorag_store::fsutil::is_private(&cfg_path).unwrap()
+    );
 
     // 同じなら書き換えない。
     let out = evorag_raw(dir.path(), &["setup", "--url", &url], "");

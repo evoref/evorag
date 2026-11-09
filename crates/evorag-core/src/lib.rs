@@ -10,6 +10,7 @@
 
 mod context;
 pub mod localtime;
+pub mod logging;
 mod prompt;
 mod recall;
 mod views;
@@ -332,7 +333,16 @@ impl Core {
         let worker = core.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
             if let Some(ix) = &worker.index {
-                let _ = recall::sync(&worker.store, ix, rebuild_index);
+                let t = std::time::Instant::now();
+                match recall::sync(&worker.store, ix, rebuild_index) {
+                    Ok(()) => tracing::info!(
+                        docs = ix.snapshot().len(),
+                        rebuilt = rebuild_index,
+                        ms = t.elapsed().as_millis() as u64,
+                        "lexical index synced"
+                    ),
+                    Err(e) => tracing::warn!(error = %e.kind(), "lexical index sync failed"),
+                }
             }
             let jobs = worker
                 .store
@@ -346,13 +356,25 @@ impl Core {
             for (job, ids) in jobs {
                 purge(&worker, job, &ids);
             }
-            let _ = worker.store.daily_backup(worker.backup_dir.as_deref());
+            match worker.store.daily_backup(worker.backup_dir.as_deref()) {
+                Ok(Some(_)) => tracing::info!("daily backup written"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "daily backup failed"),
+            }
         });
         core.inner
             .background
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(task);
+        tracing::info!(
+            version = %core.inner.store.evorag_version(),
+            model_key = %server.model_key,
+            n_ctx = server.n_ctx,
+            slots = server.total_slots,
+            index = core.inner.index.is_some(),
+            "core started"
+        );
         let report = StartReport {
             server,
             store: open_report,
@@ -1055,6 +1077,18 @@ fn history(inner: &Inner, session: Id, user_turn: Id) -> Vec<ChatMessage> {
     out
 }
 
+/// ログに出す失敗の分類 (llama-server のエラーの本文は出さない)。
+fn outcome_error_kind(o: &Outcome) -> String {
+    match o {
+        Outcome::Failed(LlmError::Http { status, .. }) => format!("http {status}"),
+        Outcome::Failed(LlmError::Connect(_)) => "connect".into(),
+        Outcome::Failed(LlmError::Cut(_)) => "cut".into(),
+        Outcome::Failed(LlmError::Server(_)) => "server".into(),
+        Outcome::Failed(_) => "protocol".into(),
+        _ => String::new(),
+    }
+}
+
 enum Outcome {
     Completed,
     Interrupted(Cancel),
@@ -1073,6 +1107,13 @@ async fn generate(
             reply_to: user_turn,
         },
     );
+    let started_at = std::time::Instant::now();
+    // 応答ごとの短い追跡 ID (発話の ID の末尾、02 §7)。
+    let trace = format!("{user_turn}")
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>();
     let (llm, server, _) = inner.conn();
     let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
@@ -1154,6 +1195,26 @@ async fn generate(
         },
     };
 
+    // 本文は出さない。長さ・件数・時間・分類だけ (NFR-502)。
+    tracing::info!(
+        trace = %trace,
+        outcome = match &outcome {
+            Outcome::Completed => "completed",
+            Outcome::Interrupted(Cancel::User) => "interrupted",
+            Outcome::Interrupted(Cancel::Shutdown) => "shutdown",
+            Outcome::Failed(_) => "failed",
+        },
+        error = outcome_error_kind(&outcome),
+        decision = memory.as_ref().map_or("off", |m| match m.record.decision {
+            evorag_memory::RecallDecision::Fire => "fire",
+            evorag_memory::RecallDecision::Abstain => "abstain",
+            evorag_memory::RecallDecision::Skip => "skip",
+        }),
+        attached = memory.as_ref().map_or(0, |m| m.attached.len()),
+        reply_chars = text.chars().count(),
+        ms = started_at.elapsed().as_millis() as u64,
+        "response"
+    );
     let (state, notice, error) = match &outcome {
         Outcome::Completed => (TurnState::Completed, None, None),
         Outcome::Interrupted(c) => {

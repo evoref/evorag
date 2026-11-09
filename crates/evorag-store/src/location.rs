@@ -178,7 +178,7 @@ mod imp {
         }
         match file_system(&root).as_deref() {
             Some(fs @ ("FAT" | "FAT32" | "exFAT")) => Verdict::Warn(format!(
-                "{s} is on {fs}, which has no journaling and is weak against power loss"
+                "{s} is on {fs}, which has no journaling, is weak against power loss, and cannot keep the files private to you"
             )),
             _ => Verdict::Ok,
         }
@@ -236,7 +236,7 @@ mod imp {
             NFS | SMB | CIFS | SMB2 => Verdict::Unsafe(format!("{s} is on a network file system")),
             FUSE => Verdict::Unsafe(format!("{s} is on a FUSE file system (sync tools use it)")),
             MSDOS | EXFAT => Verdict::Warn(format!(
-                "{s} is on FAT/exFAT, which has no journaling and is weak against power loss"
+                "{s} is on FAT/exFAT, which has no journaling, is weak against power loss, and cannot keep the files private to you"
             )),
             _ => Verdict::Ok,
         }

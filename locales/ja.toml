@@ -61,6 +61,7 @@ title = "ヘルプ (Esc で閉じる)"
 body = """
 Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典の番号を選ぶ (Enter で表示) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
 
+/help            この一覧
 /new [題名]      セッションを作る
 /sessions        セッションの一覧と再開
 /rename <題名>   今のセッションを改名する

@@ -20,6 +20,8 @@ mod store;
 #[doc(hidden)]
 pub mod testutil;
 pub mod version;
+#[cfg(windows)]
+mod winacl;
 pub mod writer;
 
 pub use envelope::{BodyError, DecodeError, Envelope};
