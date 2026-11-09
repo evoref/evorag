@@ -50,6 +50,24 @@ impl DataRootLock {
         Ok(Self { _file: file, path })
     }
 
+    /// 何も書かずにロックを取る (点検のため、AC-FR-207-1)。ロックのファイルが無ければ、使っている
+    /// プロセスも無いので `None`。
+    pub fn acquire_quiet(data_root: &Path) -> Result<Option<Self>, LockError> {
+        let path = data_root.join(LOCK_FILE);
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(LockError::Io(e)),
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file, path })),
+            Err(TryLockError::WouldBlock) => Err(LockError::InUse {
+                pid: read_pid(data_root),
+            }),
+            Err(TryLockError::Error(e)) => Err(LockError::Io(e)),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

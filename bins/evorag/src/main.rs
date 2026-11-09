@@ -4,6 +4,7 @@
 //! 3 llama-server に繋がらない、4 設定の誤り (07 §5)。
 
 mod config;
+mod doctor;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,11 +40,24 @@ struct Args {
 
 #[derive(clap::Subcommand)]
 enum Sub {
+    /// 設定・接続・データ根・ジャーナル・退避を、読むだけで点検する
+    Doctor,
+    /// 退避の操作
+    Backups {
+        #[command(subcommand)]
+        action: BackupsAction,
+    },
     /// 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
         /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
         backup: PathBuf,
     },
+}
+
+#[derive(clap::Subcommand)]
+enum BackupsAction {
+    /// 退避の一覧 (新しい順)
+    List,
 }
 
 /// y / n を尋ねる。端末でなければ n。
@@ -170,6 +184,23 @@ fn main() -> ExitCode {
     let clock = Arc::new(SystemClock);
     let backup_dir = cfg.storage.backup_dir.clone();
 
+    if let Some(Sub::Doctor) = &args.command {
+        return doctor::run(
+            &catalog,
+            &config_file,
+            &data_root,
+            backup_dir.as_deref(),
+            &url,
+            &rt,
+            llm,
+        );
+    }
+    if let Some(Sub::Backups {
+        action: BackupsAction::List,
+    }) = &args.command
+    {
+        return doctor::list_backups(&catalog, &data_root, backup_dir.as_deref());
+    }
     if let Some(Sub::Restore { backup }) = &args.command {
         return match evorag_store::restore::restore(
             &data_root,

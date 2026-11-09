@@ -556,9 +556,11 @@ dependencies = [
 name = "evorag"
 version = "0.0.4"
 dependencies = [
+ "ciborium",
  "clap",
  "evorag-core",
  "evorag-llm",
+ "evorag-memory",
  "evorag-store",
  "evorag-tui",
  "evorag-types",

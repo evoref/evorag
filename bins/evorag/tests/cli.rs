@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use evorag_store::testutil::TempDir;
 use evorag_store::{OpenOptions, Store};
-use evorag_types::{SystemClock, UuidV7Gen};
+use evorag_types::{Clock, SystemClock, UuidV7Gen};
 
 fn evorag(dir: &Path, config: &str) -> Output {
     let cfg = dir.join("config.toml");
@@ -181,4 +181,101 @@ fn restore_puts_a_backup_in_place() {
     // 今の DB は先に退避されている。
     let pre = dir.path().join("data").join("backups").join("pre-op");
     assert_eq!(std::fs::read_dir(pre).unwrap().count(), 1);
+}
+
+fn mtime_and_len(p: &Path) -> (std::time::SystemTime, u64) {
+    let m = std::fs::metadata(p).unwrap();
+    (m.modified().unwrap(), m.len())
+}
+
+/// verifies: AC-FR-207-1, AC-FR-206-1 (doctor が件数を報告する)
+#[test]
+fn doctor_reports_without_writing_anything() {
+    use evorag_store::{Envelope, WriteOp, WriteRequest, Writer};
+    let dir = TempDir::new("cli-doctor");
+    let root = dir.path().join("data");
+    let clock = Arc::new(SystemClock);
+    let (bad, sid);
+    {
+        let (store, _) = Store::open(OpenOptions {
+            data_root: root.clone(),
+            evorag_version: "0.0.5".into(),
+            kinds: evorag_memory::kinds(),
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::new(clock.clone())),
+            config_file: None,
+        })
+        .unwrap();
+        let store = Arc::new(store);
+        let (w, h) = Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || w.run());
+        let writes = evorag_memory::Writes {
+            clock: &*clock,
+            ids: &**store.ids(),
+        };
+        let (s, ops) = writes.create_session("s").unwrap();
+        sid = s;
+        h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+        let (b, ops) = writes.create_session("壊す").unwrap();
+        bad = b;
+        h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+        // quarantine の記録を 1 件。
+        let mut q = Envelope::new(store.ids().next_id(), "quarantine", 1, clock.now(), "");
+        q.body = ciborium::Value::Map(vec![("reason".into(), "test".into())]);
+        h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(q)]))
+            .unwrap();
+        store.daily_backup(None).unwrap();
+        h.shutdown();
+        t.join().unwrap();
+    }
+    evorag_store::testutil::raw_corrupt_record(&root, "session", bad);
+    let _ = sid;
+
+    let journal = std::fs::read_dir(root.join("journal"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let watched = [
+        root.join("evorag.redb"),
+        journal,
+        root.join("lock"),
+        root.join("lock.pid"),
+    ];
+    let before: Vec<_> = watched.iter().map(|p| mtime_and_len(p)).collect();
+    let bytes_before = std::fs::read(&watched[0]).unwrap();
+    for _ in 0..2 {
+        let out = evorag_with_stdin(
+            dir.path(),
+            "[llm.chat]\nurl = \"http://127.0.0.1:9\"\n",
+            &["doctor"],
+            "",
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("quarantine の記録: 1 件"), "{text}");
+        assert!(text.contains("壊れた記録 1 件"), "{text}");
+        // 日次と、その週の最初の日次を残す週次の 2 個。
+        assert!(text.contains("退避: 2 個"), "{text}");
+    }
+    let after: Vec<_> = watched.iter().map(|p| mtime_and_len(p)).collect();
+    assert_eq!(before, after, "doctor must not write");
+    assert_eq!(bytes_before, std::fs::read(&watched[0]).unwrap());
+}
+
+/// FR-213: `evorag backups list`。
+#[test]
+fn backups_list_shows_the_backups() {
+    let dir = TempDir::new("cli-backups");
+    make_data_root_with_backup(&dir.path().join("data"));
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "list"], "");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("daily"), "{text}");
 }
