@@ -63,6 +63,15 @@ message_keys! {
     UnknownModel => "error.unknown_model",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
     UiModelInfo => "ui.notice.model",
+    /// 出典が見つからない。引数: `n`。
+    SourceNotFound => "error.source_not_found",
+    UiSourcesOn => "ui.notice.sources_on",
+    UiSourcesOff => "ui.notice.sources_off",
+    /// 引数: `n`。
+    UiSourceSelected => "ui.notice.source_selected",
+    /// 引数: `n`、`title`、`at`、`excerpt`。
+    UiSourceDetail => "ui.notice.source",
+    UiNoSources => "ui.notice.no_sources",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。
@@ -148,6 +157,11 @@ message_keys! {
     DoctorBackupsNone => "doctor.backups_none",
     /// 引数: `count`, `path`。
     DoctorBroken => "doctor.broken",
+    /// 引数: `docs`, `segments`。
+    DoctorIndexOk => "doctor.index_ok",
+    DoctorIndexMissing => "doctor.index_missing",
+    /// 引数: `detail`。
+    DoctorIndexRebuild => "doctor.index_rebuild",
     /// 引数: `kind`, `dir`, `seq`。
     BackupsItem => "backups.item",
     BackupsNone => "backups.none",

@@ -11,6 +11,7 @@
 mod context;
 pub mod localtime;
 mod prompt;
+mod recall;
 mod views;
 
 use std::path::PathBuf;
@@ -55,6 +56,8 @@ pub struct CoreConfig {
     /// `/model` で切り替える候補と、繋ぐ関数 (FR-108)。
     pub models: Vec<ModelChoice>,
     pub connect: Option<Connector>,
+    /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
+    pub memory_enabled: bool,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
 }
@@ -85,6 +88,31 @@ pub struct ModelChoice {
 
 /// 接続先の URL から `LlmClient` を作る関数 (接続先の検査を含む)。
 pub type Connector = Arc<dyn Fn(&str) -> Result<Arc<dyn LlmClient>, LlmError> + Send + Sync>;
+
+/// 語彙の索引の状態 (doctor、03 §10)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexState {
+    /// まだ無い (初回の起動で作る)。
+    Missing,
+    Ok {
+        segments: usize,
+        docs: u64,
+    },
+    /// 読めない・合わない (次の起動で作り直す)。
+    NeedsRebuild(String),
+}
+
+/// 語彙の索引を読むだけで調べる。
+pub fn inspect_index(data_root: &std::path::Path) -> IndexState {
+    match evorag_index::lex::LexIndex::inspect(
+        &recall::index_dir(data_root),
+        evorag_retrieval::normalize::RULES_VERSION,
+    ) {
+        Ok(None) => IndexState::Missing,
+        Ok(Some((segments, docs))) => IndexState::Ok { segments, docs },
+        Err(e) => IndexState::NeedsRebuild(e.to_string()),
+    }
+}
 
 /// 起動できない理由。
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +173,9 @@ struct Inner {
     models: Vec<ModelChoice>,
     /// 候補の接続先に繋ぐ関数。
     connect: Option<Connector>,
+    /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
+    index: Option<Arc<evorag_index::lex::LexIndex>>,
+    memory_enabled: bool,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     events: mpsc::UnboundedSender<Event>,
@@ -249,6 +280,9 @@ impl Core {
             }
         };
 
+        // 語彙の索引 (05 §2.3)。DB との突き合わせは裏で行う。
+        let (index, rebuild_index) = recall::open_index(store.data_root());
+
         let (events, rx) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
@@ -258,6 +292,8 @@ impl Core {
             conn: std::sync::RwLock::new((llm, server.clone(), cfg.model_name)),
             models: cfg.models,
             connect: cfg.connect,
+            index,
+            memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
             ids: cfg.ids,
             events,
@@ -295,6 +331,9 @@ impl Core {
         // 前の起動で終わらなかった退避の整理を続けてから、今日の退避を作る (03 §7.3)。
         let worker = core.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
+            if let Some(ix) = &worker.index {
+                let _ = recall::sync(&worker.store, ix, rebuild_index);
+            }
             let jobs = worker
                 .store
                 .read()
@@ -362,6 +401,26 @@ impl Core {
     #[doc(hidden)]
     pub fn inject_journal_failure(&self) {
         self.inner.store.fail_next_journal_append();
+    }
+
+    /// 試験のため: 裏の処理 (索引の更新・退避) が終わるまで待つ。
+    #[doc(hidden)]
+    pub async fn settle(&self) {
+        loop {
+            let tasks: Vec<_> = self
+                .inner
+                .background
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect();
+            if tasks.is_empty() {
+                return;
+            }
+            for t in tasks {
+                let _ = t.await;
+            }
+        }
     }
 
     /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
@@ -580,6 +639,8 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::DeleteSession => delete(inner).await,
         Command::Rate { good, reason } => rate(inner, good, reason).await,
         Command::Model { name } => switch_model(inner, name).await,
+        Command::Sources { memory } => sources(inner, memory).await,
+        Command::ShowSource { turn, n } => show_source(inner, turn, n),
         _ => {}
     }
 }
@@ -648,6 +709,11 @@ async fn delete(inner: &Arc<Inner>) {
             },
         );
         return;
+    }
+    // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。
+    if let Some(ix) = inner.index.clone() {
+        let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
+        let _ = tokio::task::spawn_blocking(move || ix.remove(&gone)).await;
     }
     inner
         .state
@@ -809,6 +875,7 @@ async fn send(inner: &Arc<Inner>, text: String) {
             },
         );
     }
+    index_turns(inner, vec![uid]);
     start_generation(inner, sid, uid);
 }
 
@@ -849,6 +916,90 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
         }
     }
     start_generation(inner, sid, uid);
+}
+
+/// 書いたターンを裏で索引に足す。
+fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
+    let Some(ix) = inner.index.clone() else {
+        return;
+    };
+    let store = inner.store.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _ = recall::add_turns(&store, &ix, &ids);
+    });
+    let mut bg = inner.background.lock().unwrap_or_else(|e| e.into_inner());
+    bg.retain(|t| !t.is_finished());
+    bg.push(task);
+}
+
+/// このセッションでメモリを添えるか。
+fn memory_on(inner: &Inner, session: Id) -> bool {
+    read_env(inner, evorag_memory::KIND_SESSION, session)
+        .and_then(|e| e.body_as::<evorag_memory::SessionBody>().ok())
+        .and_then(|b| b.memory)
+        .unwrap_or(inner.memory_enabled)
+}
+
+/// `/sources [on|off]` (FR-409)。
+async fn sources(inner: &Arc<Inner>, memory: Option<bool>) {
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    if let Some(on) = memory {
+        let Some(session) = read_env(inner, evorag_memory::KIND_SESSION, sid) else {
+            reject(inner, MessageKey::NoSession);
+            return;
+        };
+        let Ok(ops) = writes(inner).set_session_memory(&session, on) else {
+            return;
+        };
+        if let Err(e) = write(inner, ops).await {
+            emit(
+                inner,
+                Event::Rejected {
+                    error: Message::new(MessageKey::ResponseNotSaved).arg("detail", e),
+                },
+            );
+            return;
+        }
+    }
+    emit(
+        inner,
+        Event::SourcesInfo {
+            memory: memory_on(inner, sid),
+        },
+    );
+}
+
+/// 応答の出典の詳細 (FR-110)。
+fn show_source(inner: &Inner, turn: Id, n: usize) {
+    let found = read_env(inner, evorag_memory::KIND_TURN, turn)
+        .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
+        .and_then(|b| recall::source_turns(&inner.store, &b, n));
+    let Some(turns) = found else {
+        emit(
+            inner,
+            Event::Rejected {
+                error: Message::new(MessageKey::SourceNotFound).arg("n", n.to_string()),
+            },
+        );
+        return;
+    };
+    let title = recall::session_title(&inner.store, turns[0].body.session).unwrap_or_default();
+    let lines = turns
+        .iter()
+        .map(|t| (views::role(t.body.role), t.body.text.clone()))
+        .collect();
+    emit(
+        inner,
+        Event::SourceDetail {
+            n,
+            title,
+            at: turns[0].envelope.created_at,
+            lines,
+        },
+    );
 }
 
 fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id) {
@@ -922,13 +1073,34 @@ async fn generate(
             reply_to: user_turn,
         },
     );
-    let system = ChatMessage::new(
-        Role::System,
-        prompt::system_prompt(inner.language, inner.clock.now().as_millis()),
-    );
     let (llm, server, _) = inner.conn();
     let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
+    // 以前の会話を引く (05 §3)。このセッションでメモリを切っていれば引かない (FR-409)。
+    let memory = if memory_on(inner, session) {
+        Some(
+            recall::attach(
+                &inner.store,
+                inner.index.as_deref(),
+                inner.language,
+                &*llm,
+                &inner.tokens,
+                &server.model_key,
+                n_ctx,
+                reserve,
+                session,
+                user_turn,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let mut system_text = prompt::system_prompt(inner.language, inner.clock.now().as_millis());
+    if let Some(s) = memory.as_ref().and_then(|m| m.section.as_deref()) {
+        system_text.push_str(s);
+    }
+    let system = ChatMessage::new(Role::System, system_text);
     let messages = context::assemble(
         &*llm,
         &inner.tokens,
@@ -1008,8 +1180,12 @@ async fn generate(
             max_tokens: g.max_tokens,
             seed: g.seed,
         }),
-        attached: Vec::new(),
+        attached: memory
+            .as_ref()
+            .map(|m| m.attached.clone())
+            .unwrap_or_default(),
         error,
+        recall: memory.map(|m| m.record),
     };
     // 応答を書く。セッションと発話は読み直した最新のものを使う。
     let session_env = read_env(inner, evorag_memory::KIND_SESSION, session);
@@ -1037,6 +1213,7 @@ async fn generate(
         .and_then(|id| read_env(inner, evorag_memory::KIND_TURN, id))
     {
         Some(env) => {
+            index_turns(inner, vec![env.id]);
             if let Ok(t) = env.body_as::<evorag_memory::TurnBody>() {
                 emit(
                     inner,

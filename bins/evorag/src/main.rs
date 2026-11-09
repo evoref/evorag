@@ -291,6 +291,7 @@ fn main() -> ExitCode {
         model_name: model_name.clone(),
         models: models.clone(),
         connect: Some(connect.clone()),
+        memory_enabled: cfg.memory_enabled(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };

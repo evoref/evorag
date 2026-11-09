@@ -24,6 +24,7 @@ pub struct AssistantTurn {
     pub generation: Option<GenerationRecord>,
     pub attached: Vec<Id>,
     pub error: Option<String>,
+    pub recall: Option<RecallRecord>,
 }
 
 fn envelope<T: serde::Serialize>(
@@ -69,6 +70,7 @@ impl Writes<'_> {
                 title: title.to_owned(),
                 mode: "chat".into(),
                 state: SessionState::Active,
+                memory: None,
             },
         )?;
         Ok((
@@ -100,6 +102,21 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// このセッションでメモリを添えるかを変える (`/sources`、FR-409)。
+    pub fn set_session_memory(
+        &self,
+        session: &Envelope,
+        memory: bool,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let mut body: SessionBody = session.body_as()?;
+        body.memory = Some(memory);
+        let mut e = session.clone();
+        e.set_body(&body)?;
+        let mut ops = Vec::new();
+        touch_session(&e, self.clock.now(), &mut ops);
+        Ok(ops)
+    }
+
     /// 発話のターン (状態「応答待ち」)。LLM に送る前に書く (04 §3 の 1、FR-201)。
     pub fn user_turn(
         &self,
@@ -122,6 +139,7 @@ impl Writes<'_> {
                 attached: Vec::new(),
                 reply_to: None,
                 error: None,
+                recall: None,
             },
         )?;
         let mut ops = vec![
@@ -160,6 +178,7 @@ impl Writes<'_> {
                 attached: turn.attached,
                 reply_to: Some(user_turn.id),
                 error: turn.error,
+                recall: turn.recall,
             },
         )?;
         let mut ops = vec![

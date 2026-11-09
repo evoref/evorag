@@ -71,6 +71,7 @@ fn fault_child() {
             model_name: "test".into(),
             models: Vec::new(),
             connect: None,
+            memory_enabled: true,
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),
         };

@@ -169,11 +169,28 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         }
     }
     if let Some(m) = &config.memory {
+        if m.get("enabled").is_some_and(|v| !v.is_bool()) {
+            return Err(format!(
+                "line {}: memory.enabled must be true or false",
+                line_of(text, "enabled")
+            ));
+        }
         for k in m.keys().filter(|k| k.as_str() != "enabled") {
             ignored.push(format!("memory.{k}"));
         }
     }
     Ok(Loaded { config, ignored })
+}
+
+impl Config {
+    /// `memory.enabled` (既定は true、07 §4.2)。
+    pub fn memory_enabled(&self) -> bool {
+        self.memory
+            .as_ref()
+            .and_then(|m| m.get("enabled"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true)
+    }
 }
 
 /// 既定の置き場所 (03 §2.1)。

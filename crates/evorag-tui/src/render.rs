@@ -102,7 +102,7 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         ));
         lines.push(Line::from(""));
     }
-    for n in &app.notices {
+    for n in app.notices.iter().flat_map(|n| n.split('\n')) {
         for l in wrap(n, width) {
             lines.push(Line::styled(l, Style::new().add_modifier(Modifier::DIM)));
         }
@@ -285,6 +285,7 @@ mod tests {
                 updated_at: Timestamp::from_millis(0),
             },
             turns: vec![TurnView {
+                sources: 0,
                 id: Id::from_bytes([2; 16]),
                 session: sid,
                 role: Role::User,

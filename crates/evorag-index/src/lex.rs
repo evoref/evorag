@@ -424,6 +424,11 @@ impl LexIndex {
         Ok((index, opened))
     }
 
+    /// 読むだけで調べる (doctor)。まだ作っていなければ `None`、あれば (セグメントの数, 文書の数)。
+    pub fn inspect(dir: &Path, rules: u32) -> io::Result<Option<(usize, u64)>> {
+        Ok(Self::load(dir, rules)?.map(|s| (s.len(), s.iter().map(|x| x.docs.len() as u64).sum())))
+    }
+
     /// `CURRENT` が無ければ `None` (まだ作っていない)。
     fn load(dir: &Path, rules: u32) -> io::Result<Option<Vec<Arc<Segment>>>> {
         let current = match std::fs::read_to_string(dir.join(CURRENT)) {

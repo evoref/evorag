@@ -28,6 +28,10 @@ pub enum Command {
     Rate { good: bool, reason: Option<String> },
     /// `/model [名前]` (FR-108): 名前が無ければ今のモデルと候補を示し、あれば切り替える。
     Model { name: Option<String> },
+    /// `/sources [on|off]` (FR-409): このセッションでメモリを添えるかを示す・変える。
+    Sources { memory: Option<bool> },
+    /// 応答 `turn` の出典 `n` (1 から) の詳細を照会する (FR-110)。
+    ShowSource { turn: Id, n: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub struct TurnView {
     pub model_key: Option<String>,
     pub reply_to: Option<Id>,
     pub created_at: Timestamp,
+    /// 添えた以前の会話の出典の数 (応答の `[1]`〜`[n]`、FR-110)。
+    pub sources: usize,
 }
 
 /// イベント (コア → 画面)。順序を保つ 1 本の流れで届く (02 §3 の決めごと 4)。
@@ -103,6 +109,18 @@ pub enum Event {
     SessionDeleted { id: Id },
     /// 評価を記録した。
     Rated { good: bool },
+    /// このセッションでメモリを添えるか (`/sources` の答え)。
+    SourcesInfo { memory: bool },
+    /// 出典の詳細 (FR-110)。
+    SourceDetail {
+        n: usize,
+        /// 出典のセッションの名前。
+        title: String,
+        /// 出典の最初のターンの時刻。
+        at: Timestamp,
+        /// 出典のターン (役割と本文)。
+        lines: Vec<(Role, String)>,
+    },
     /// 今のモデルと切り替えの候補 (`/model` の答え、切り替えた後)。
     ModelInfo {
         /// 候補の名前 (設定の名前。候補から選んでいなければ接続先)。

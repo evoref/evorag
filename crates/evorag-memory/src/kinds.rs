@@ -103,6 +103,9 @@ pub struct SessionBody {
     /// v0.1 は `chat` だけ (コーディングモードは v1.0 より後、ADR-0016)。
     pub mode: String,
     pub state: SessionState,
+    /// このセッションでメモリを添えるか (`/sources`、FR-409)。無ければ設定 `memory.enabled`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +157,30 @@ pub struct TurnBody {
     pub reply_to: Option<Id>,
     /// 中断・失敗の理由 (利用者に見せる文言ではなく、分類と詳細)。
     pub error: Option<String>,
+    /// 想起の判定点と出典の区切り (応答だけ、05 §3.4・§5)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<RecallRecord>,
+}
+
+/// 判定点 (05 §3.4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallDecision {
+    /// 添えた。
+    Fire,
+    /// 候補はあったが、しきい値を超えなかった。
+    Abstain,
+    /// 索引が無くて引けなかった。
+    Skip,
+}
+
+/// 応答のときの想起の記録。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallRecord {
+    pub decision: RecallDecision,
+    /// 出典の番号の順に、`attached` の中のその出典のターンの数 (出典 n は `attached` の
+    /// 先頭から数えた n 番目の区切り)。
+    pub sources: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
