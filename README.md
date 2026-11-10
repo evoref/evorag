@@ -8,7 +8,7 @@
 
 - v0.1 (最小核) の機能は `develop` に入っています: 手元の llama-server と日本語で会話でき、会話は強制終了しても消えず、以前の会話を出典つきで思い出します。版ごとの予定は [docs/08-roadmap.md](docs/08-roadmap.md) にあります。
 - 利用者向けの手順書 (入れ方・setup・更新と巻き戻し・既知の制約) は [dist/README.md](dist/README.md) です。配布物に同梱します。
-- 配布物の署名は minisign で行い、公開鍵はリポジトリ直下の `minisign.pub` に置きます (最初のリリースで置きます)。
+- 配布物の署名は minisign で行います。公開鍵はリポジトリ直下の [`minisign.pub`](minisign.pub) で、鍵 ID は `A3B00C77E1EA828E` です。
 
 ## 仕様書
 
