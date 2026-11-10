@@ -115,6 +115,7 @@ evorag は、手元の llama-server (llama.cpp) だけで動く、チャット�
 | 設定 | `%LOCALAPPDATA%\evorag\config\config.toml` |
 | データ根 (会話の DB・ジャーナル・索引・退避) | `%LOCALAPPDATA%\evorag\data\` |
 | 入力欄の下書き | `%LOCALAPPDATA%\evorag\state\` |
+| ログ (7 日分。会話の本文・API キーは書かない) | `%LOCALAPPDATA%\evorag\state\logs\` |
 
 - 会話は、データベース (`evorag.redb`) と、別のジャーナル (`journal\`) の 2 か所に書きます。強制終了や停電の後も、確定した会話は失いません。
 - 1 日 1 回まで、起動時と終了時にデータベースの写しを `backups\daily\` に作ります (7 日分と、週ごとに 4 週分)。移行の前にも退避を作ります (`backups\pre-op\`)。

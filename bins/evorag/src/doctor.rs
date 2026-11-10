@@ -59,6 +59,9 @@ pub fn run(
     kinds.sort_by_key(|k| k.name);
     let report = match inspect(data_root, kinds, backup_dir) {
         Ok(r) => r,
+        Err(OpenError::Lock(evorag_store::lock::LockError::InUse { pid })) => {
+            return crate::data_root_in_use(c, data_root, pid);
+        }
         Err(e @ OpenError::Lock(_)) => {
             eprintln!(
                 "{}",

@@ -25,6 +25,25 @@ fn evorag(dir: &Path, config: &str) -> Output {
         .unwrap()
 }
 
+/// どの要求にも HTTP 401 (API キーの誤り) を返す、ループバックの偽の llama-server。
+fn unauthorized_llama_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut sock in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let body = r#"{"error":{"message":"Invalid API Key","type":"authentication_error","code":401}}"#;
+            let _ = write!(
+                sock,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    url
+}
+
 /// `/health`・`/props`・`/v1/models` に答える、ループバックの偽の llama-server。
 fn fake_llama_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -67,7 +86,33 @@ fn exits_with_3_and_guidance_when_llama_server_is_unreachable() {
     assert_eq!(out.status.code(), Some(3));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("evorag setup"), "{err}");
+    // 何が起きたか・データは無事か・次に何をするか (NFR-604)。
+    assert!(err.contains("無事"), "{err}");
     assert!(!dir.path().join("data").join("evorag.redb").exists());
+}
+
+/// NFR-604: API キーの誤り (HTTP 401) は、llama-server の起動ではなくキーの確かめ方を案内する。
+#[test]
+fn a_rejected_api_key_points_to_the_key_not_to_starting_the_server() {
+    let dir = TempDir::new("cli-401");
+    let url = unauthorized_llama_server();
+    let out = evorag(
+        dir.path(),
+        &format!("[llm.chat]\nurl = \"{url}\"\napi_key_env = \"EVORAG_TEST_NO_SUCH_KEY\"\n"),
+    );
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("API キー"), "{err}");
+    assert!(err.contains("401"), "{err}");
+    assert!(
+        err.contains("EVORAG_TEST_NO_SUCH_KEY"),
+        "the variable is named: {err}"
+    );
+    assert!(err.contains("無事"), "{err}");
+    assert!(
+        !err.contains("起動してから"),
+        "not told to start the server: {err}"
+    );
 }
 
 /// FR-904・07 §5: 設定の誤りは終了コード 4。
@@ -104,6 +149,11 @@ fn exits_with_2_when_the_data_root_is_in_use() {
         err.contains(&std::process::id().to_string()),
         "the pid is shown: {err}"
     );
+    // 理由は日本語で、データは無事か・次に何をするかを示す (NFR-604)。
+    assert!(err.contains("ほかの evorag"), "{err}");
+    assert!(err.contains("無事"), "{err}");
+    assert!(err.contains("終えてから"), "{err}");
+    assert!(!err.contains("in use by another"), "{err}");
 }
 
 fn evorag_with_stdin(dir: &Path, config: &str, args: &[&str], stdin: &str) -> Output {

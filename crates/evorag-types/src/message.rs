@@ -126,6 +126,10 @@ message_keys! {
     /// 引数: `from`。
     CliRestored => "cli.restored",
     CliRestoredFromJournal => "cli.restored_from_journal",
+    /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
+    CliLlmUnauthorized => "cli.llm_unauthorized",
+    /// データ根をほかの evorag が使っている。引数: `path`、`pid`。
+    CliDataRootInUse => "cli.data_root_in_use",
     /// 引数: `count`、`path`、`kinds`。
     CliExported => "cli.exported",
     /// 引数: `path`、`backup`。

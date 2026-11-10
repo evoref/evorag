@@ -92,7 +92,9 @@ not_yet = "{name} は、この版ではまだ使えません。"
 editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
 [cli]
-llm_unreachable = "llama-server ({url}) に接続できません: {detail}\nllama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
+llm_unreachable = "llama-server ({url}) に接続できません: {detail}\n会話のデータには触れていないので、無事です。llama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
+llm_unauthorized = "llama-server ({url}) が API キーを受け付けませんでした (HTTP {status})。\n会話のデータには触れていないので、無事です。llama-server は動いています。設定の llm.chat.api_key_env に書いた環境変数 ({env}) に、llama-server の --api-key と同じキーが入っているかを確かめてください。"
+data_root_in_use = "データ根 ({path}) は、ほかの evorag (pid {pid}) が使っています。\n会話のデータは無事です。先に起動した evorag を終えてから、もう一度実行してください。"
 data_root_unusable = "データ根を使えません: {detail}"
 config_error = "設定ファイルに誤りがあります: {detail}"
 config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
