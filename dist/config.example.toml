@@ -1,0 +1,60 @@
+# evorag の設定の例 (config.toml)。キーの説明は docs/07-tui-config.md §4。
+# 書かないキーは既定の値になります。`evorag setup` が最小の設定を作ります。
+#
+# 置き場所:
+#   Windows: %LOCALAPPDATA%\evorag\config\config.toml
+#   Linux:   ~/.config/evorag/config.toml
+#   macOS:   ~/Library/Application Support/evorag/config/config.toml
+version = 1
+
+[ui]
+# 画面の言語 (v0.1 は ja だけ)。
+language = "ja"
+
+[prompt]
+# システムプロンプトの言語 (ja / en)。データ根に一度記録したら変えられません。
+language = "ja"
+
+[llm]
+# ループバック (127.0.0.1) 以外の接続先を許すか。許すときは https が必要です。
+allow_remote = false
+
+[llm.chat]
+# llama-server の接続先。
+url = "http://127.0.0.1:8080"
+# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書きます。
+# (キーそのものを api_key に書くこともできますが、勧めません。)
+# api_key_env = "EVORAG_API_KEY"
+# ルーターモードのときのモデル名。
+# model = "qwen3-8b"
+
+[llm.chat.generation]
+temperature = 0.7
+top_p = 0.95
+# max_tokens = 1024
+# seed = 42
+
+# 応答の要求に足す JSON。思考するモデルの思考を切るときなど (docs/06-llm.md §6)。
+# [llm.chat.request_extra]
+# chat_template_kwargs = { enable_thinking = false }
+
+# /model で切り替える候補。
+# [[llm.chat.models]]
+# name = "small"
+# url = "http://127.0.0.1:8081"
+
+[storage]
+# データ根 (--data-root が優先)。書かなければ OS ごとの既定の場所。
+# data_root = 'D:\evorag\data'
+# 退避の置き場所。書かなければデータ根の backups\。
+# backup_dir = 'E:\evorag-backups'
+# 同期フォルダ・ネットワークドライブでも警告だけで起動する (勧めません)。
+allow_unsafe_location = false
+
+[memory]
+# 以前の会話を応答に添えるかの既定 (セッションごとに /sources で変えられます)。
+enabled = true
+
+[context]
+# 生成に残すトークン数 (既定は n_ctx の 25%、最低 1,024)。
+# reserve_for_output = 2048

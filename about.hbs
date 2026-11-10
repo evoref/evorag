@@ -1,0 +1,24 @@
+# Third-party notices
+
+evorag は次のオープンソースのソフトウェアを含みます。各ライセンスの全文と、それを使う crate を示します。
+
+This software includes the following open source components. The full text of each license and the crates that use it are listed below.
+
+{{#each overview}}
+- {{{name}}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by:
+
+{{#each used_by}}
+- [{{{crate.name}}} {{{crate.version}}}]({{#if crate.repository}}{{{crate.repository}}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

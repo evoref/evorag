@@ -1,0 +1,16 @@
+# cargo-nextest の profile (docs/11-dev-workflow.md §1、docs/09-testing-quality.md §6.2)。
+
+[profile.default]
+# 止まった試験を見つける。60 秒ごとに知らせ、5 回 (5 分) で打ち切る。
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+# CI では失敗をすべて集める。揺れを隠さないため、再試行はしない。
+fail-fast = false
+retries = 0
+failure-output = "immediate-final"
+
+# 障害の注入の長い版 (EVORAG_FAULT_RUNS=1000) は時間がかかる (09 §4)。この試験だけ上限を 60 分にする。
+[[profile.default.overrides]]
+filter = 'test(committed_turns_survive_kills_at_random_points)'
+slow-timeout = { period = "60s", terminate-after = 60 }

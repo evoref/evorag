@@ -1,0 +1,6 @@
+# 手元と CI で同じ Rust を使う (docs/11-dev-workflow.md §1.1)。
+# 版を上げるときは、Cargo.toml の workspace.package.rust-version も同じ PR で上げる。
+[toolchain]
+channel = "1.99"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,29 @@
+[package]
+name = "evorag-core"
+description = "evorag: コアの API の実装と sleep-time の進行。下の層の crate を組み立てる"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+evorag-store = { workspace = true }
+evorag-llm = { workspace = true }
+evorag-index = { workspace = true }
+evorag-memory = { workspace = true }
+evorag-retrieval = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+evorag-store = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
+
+[lints]
+workspace = true

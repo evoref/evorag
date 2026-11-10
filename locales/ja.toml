@@ -1,0 +1,157 @@
+# 日本語の文言カタログ (docs/07-tui-config.md §6)。
+# キーは evorag-types の MessageKey と一致させる (`cargo xtask i18n` で検査する、NFR-602)。
+# 表は入れ子にしてよく、点でつないだ名前がキーになる。値は文字列だけ。
+
+[error.llm]
+connect = "llama-server に接続できません ({detail})。llama-server が動いているか、設定の接続先を確かめてください。"
+http = "llama-server がエラーを返しました (HTTP {status}: {detail})。"
+stream_cut = "応答の途中で接続が切れました ({detail})。受け取ったところまでを保存しました。発話は残っているので、送り直せます。"
+server = "llama-server が生成の途中でエラーを返しました ({detail})。受け取ったところまでを保存しました。"
+protocol = "llama-server から想定と違う応答が返りました ({detail})。"
+
+[error.send]
+not_saved = "発話を保存できなかったので、送りませんでした ({detail})。入力欄に戻しました。"
+
+[error.response]
+not_saved = "応答を保存できませんでした ({detail})。"
+
+[error]
+busy = "応答を生成しています。Esc で中断してから送ってください。"
+no_session = "セッションが開いていません。"
+nothing_to_retry = "作り直す発話がありません。"
+nothing_to_rate = "評価する応答がありません。"
+unknown_model = "モデルの候補「{name}」は設定にありません (設定の [[llm.chat.models]] に名前と url を書きます)。"
+delete_failed = "セッションを消せませんでした ({detail})。"
+source_not_found = "出典 [{n}] が見つかりません (消したセッションの出典かもしれません)。"
+
+[response]
+interrupted = "中断しました。受け取ったところまでを保存しました。"
+interrupted_by_shutdown = "終了のため中断しました。受け取ったところまでを保存しました。"
+
+[ui]
+you = "あなた"
+assistant = "evorag"
+thinking = "(考えています…)"
+quit_hint = "もう一度 Ctrl+C で終了します。"
+default_session_title = "新しい会話"
+
+[ui.mark]
+interrupted = "(中断)"
+failed = "(失敗)"
+no_reply = "(応答なし)"
+
+[ui.status]
+idle = "待機中"
+generating = "生成中 (Esc で中断)"
+thinking = "考えています (Esc で中断)"
+
+[ui.title]
+session = "セッション: {title}"
+no_session = "(セッションなし)"
+
+[ui.sessions]
+title = "セッション (↑↓ で選び Enter で開く、Esc で閉じる)"
+empty = "セッションはまだありません。"
+
+[ui.delete]
+confirm = "セッション「{title}」を消しますか? このセッションの会話がすべて消え、元に戻せません (自動の退避からも消します)。 y で消す / n でやめる"
+
+[ui.help]
+title = "ヘルプ (Esc で閉じる)"
+body = """
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典の番号を選ぶ (Enter で表示) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+
+/help            この一覧
+/new [題名]      セッションを作る
+/sessions        セッションの一覧と再開
+/rename <題名>   今のセッションを改名する
+/delete          今のセッションを消す (確認あり)
+/retry           直前の応答を作り直す
+/good, /bad [理由]  直前の応答を評価する
+/model [名前]    使っているモデルの表示と、設定にある候補への切り替え
+/sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
+/quit            終了
+//...            / で始まる文をそのまま送る"""
+
+[ui.notice]
+rated_good = "評価 (good) を記録しました。"
+rated_bad = "評価 (bad) を記録しました。"
+deleted = "セッションを消しました。"
+renamed = "セッションの名前を「{title}」にしました。"
+draft_restored = "前回の書きかけを入力欄に戻しました。"
+model = "モデル: {current} ({model}、n_ctx {n_ctx})。候補: {choices}"
+sources_on = "このセッションでは、以前の会話を応答に添えます (/sources off で止めます)。"
+sources_off = "このセッションでは、以前の会話を応答に添えません (/sources on で戻します)。"
+source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
+source = "[{n}] {title} ({at})\n{excerpt}"
+no_sources = "出典の付いた応答がありません。"
+
+[ui.error]
+unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"
+not_yet = "{name} は、この版ではまだ使えません。"
+editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
+
+[cli]
+llm_unreachable = "llama-server ({url}) に接続できません: {detail}\nllama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
+data_root_unusable = "データ根を使えません: {detail}"
+config_error = "設定ファイルに誤りがあります: {detail}"
+config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
+config_migrated = "設定ファイル {path} を今の版の形に書き換えました (元のファイルは {backup} に残しました)。"
+prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
+error = "エラー: {detail}"
+unsafe_location = "データ根か退避先が危ない置き場所です: {detail}\n同期フォルダやネットワークの上では、データが壊れることがあります。別の場所を --data-root か設定の storage.data_root で指定してください。どうしても使うときは、設定に storage.allow_unsafe_location = true を書くと警告だけになります。"
+location_warning = "置き場所の注意: {detail}"
+broken = "データベースのファイルが壊れていたので、消さずに {moved_to} へ移しました ({reason})。"
+ask_restore = "最新の退避とジャーナルから会話を戻しますか?"
+restored = "退避 {from} から戻しました。その後の会話はジャーナルから足します。"
+restored_from_journal = "退避が無いので、ジャーナルだけから会話を作り直します。"
+exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました。設定は API キーを除いて config.toml に写しました。"
+export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
+export_pending = "ジャーナルに、まだデータベースに入っていない {count} 行があります。evorag を一度起動して終了してから書き出すと、それも含まれます。"
+export_not_empty = "{path} は空ではありません。空のフォルダか、まだ無いフォルダを指定してください。"
+setup_guide = """
+llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
+次の手順で llama-server を用意してから、もう一度 evorag setup を実行してください。
+
+1. llama.cpp の配布物 (https://github.com/ggml-org/llama.cpp/releases) から、お使いの PC に合う llama-server を入手します。
+2. GGUF 形式のモデルを用意します。
+3. 自分の PC の中だけで受け付けるように、API キーを付けて起動します。例:
+     llama-server -m <モデル>.gguf --host 127.0.0.1 --port 8080 -c 8192 --jinja --api-key <長いランダムな文字列>
+4. 同じ文字列を環境変数 (例: EVORAG_API_KEY) に入れてから、次を実行します:
+     evorag setup --api-key-env EVORAG_API_KEY
+   別のポートで起動したときは --url http://127.0.0.1:<ポート> を付けます。"""
+setup_needs_key = "llama-server ({url}) は API キーを求めています。キーを入れた環境変数の名前を --api-key-env で指定して、もう一度実行してください。"
+setup_found = "llama-server を見つけました: {url} (モデル {model}、n_ctx {n_ctx}、{build})"
+setup_ask_language = "システムプロンプトの言語を選んでください。このデータ根では後から変えられません [ja/en] (Enter で ja):"
+setup_ask_overwrite = "設定ファイル {path} を書き換えますか? 元のファイルは {backup} に残します [y/N]:"
+setup_written = "設定を {path} に書きました。evorag で会話を始められます。"
+setup_unchanged = "設定 {path} は今のままで使えます。"
+setup_not_written = "設定 {path} は書き換えませんでした。"
+
+[doctor]
+config = "設定: {path} (読めました)"
+llm_ok = "llama-server: {url} に接続できます (モデル {model}、n_ctx {n_ctx}、{build})"
+llm_ng = "llama-server: {url} に接続できません ({detail})"
+root = "データ根: {path}"
+db_missing = "データベース: まだありません (初回の起動で作ります)"
+db_ok = "データベース: 形式の版 {format}、最後に書いた evorag {writer}"
+db_repair = "データベース: 前回の終わり方のため、次の起動で修復します ({detail})"
+db_bad = "データベース: 開けません ({detail})。次の起動で broken/ へ移し、退避とジャーナルから戻せます"
+records = "  {kind}: {count} 件"
+problem_records = "読めない記録 {unreadable} 件、壊れた記録 {corrupt} 件 (次の書き込みで quarantine へ移します)、新しい版の記録 {newer} 件"
+unknown_kinds = "知らない種類の記録: {count} 件 (新しい版の evorag が書いたもの。消しません)"
+quarantine = "quarantine の記録: {count} 件"
+journal = "ジャーナル: {files} ファイル、{lines} 行 (読めない行 {bad}、新しい版の行 {newer}、書きかけ {partial} バイト、次の起動で取り込む行 {pending})"
+backups = "退避: {count} 個 (最新 {latest})"
+backups_none = "退避: まだありません"
+broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
+index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
+index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
+index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"
+
+[backups]
+item = "{kind}  {dir}  (ジャーナルの連番 {seq})"
+none = "退避はありません。"
+
+[notice]
+low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"

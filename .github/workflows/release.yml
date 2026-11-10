@@ -1,0 +1,87 @@
+# 配布物を作る (docs/09-testing-quality.md §6.1・§9.2、docs/12-licensing-distribution.md §5)。
+#
+# - build: 人間が main のマージコミットに付けた署名付きタグ vX.Y.Z で動く (09 §9.2 の手順 4〜6)。
+#   最初にタグを検証し (cargo xtask verify-tag: 署名、版、main のマージコミット、判定コミットとの差分)、
+#   配布物・SHA256SUMS・release.json を作り、下書きのリリースに置く。プレリリースは出さない (09 §9.1)。
+# - 署名は人間が手元で行う (秘密鍵を CI に置かない、docs/11-dev-workflow.md §9.7)。
+#   SHA256SUMS.minisig と release.json.minisig を下書きに足してから、verify を手で動かす。
+# - verify: 下書き (または公開済み) のリリースの配布物を取得し、ハッシュと署名を確かめる。
+# action はコミットの SHA で固定する (更新は Dependabot)。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "確かめるリリースのタグ (例: v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build (windows)
+    if: github.event_name == 'push'
+    runs-on: windows-2025
+    permissions:
+      contents: write # 下書きのリリースを作る
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # タグの検証に、判定コミットまでの履歴と main が要る。
+          fetch-depth: 0
+      - name: fetch main and the annotated tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --force origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+      - run: rustup toolchain install
+      - name: verify the tag (09 §9.2 step 4)
+        shell: bash
+        run: cargo xtask verify-tag "$GITHUB_REF_NAME"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about
+      - name: build the archive
+        shell: bash
+        run: cargo xtask dist --target x86_64-pc-windows-msvc --out dist-out --tag "$GITHUB_REF_NAME"
+      - name: check the archive
+        run: cargo xtask verify-release dist-out
+      - name: create a draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --draft --verify-tag \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "evorag $TAG" \
+            --notes "変更点は CHANGELOG.md、入れ方・更新と巻き戻しは同梱の README.md を見てください。署名 (.minisig) は公開の前に人間が足します。" \
+            dist-out/*.zip dist-out/SHA256SUMS dist-out/release.json
+
+  verify:
+    name: verify
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: download the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release"
+      - name: check hashes and signatures (AC-FR-801-1)
+        run: cargo xtask verify-release "$RUNNER_TEMP/release" --require-signatures

@@ -1,0 +1,18 @@
+# Cargo の設定 (リポジトリ直下に置き、配布・計測・試験のビルドで共通にする)。
+
+# xtask (リポジトリ用の作業コマンド) の crate を置いたときに使う別名。
+[alias]
+xtask = "run --package xtask --"
+
+# 依存の版の選択で、MSRV (workspace.package の rust-version) と互換の版を優先する (Cargo 1.84+)。
+[resolver]
+incompatible-rust-versions = "fallback"
+
+# Windows の C ランタイムを静的にリンクする。Visual C++ 再頒布可能パッケージの無い Windows 11 でも
+# 単一の実行ファイルで動かすため。
+# 配布ビルド・計測用ビルド・テストのビルドが同じ CRT になるよう、リポジトリ直下に置く。
+# 注意: `cargo install --git` は、この設定を読まない (cargo は設定を実行時のカレントから探すため)。
+[target.x86_64-pc-windows-msvc]
+# 実行ファイルが読み込む DLL を System32 に限る (LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800 をヘッダの DependentLoadFlags に入れる)。
+# 実行ファイルと同じフォルダや作業フォルダに置かれた DLL を、起動時のインポートで読み込まない (DLL の差し替えによる乗っ取りを防ぐ)。
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]

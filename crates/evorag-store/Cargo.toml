@@ -1,0 +1,24 @@
+[package]
+name = "evorag-store"
+description = "evorag: redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+evorag-types = { workspace = true }
+ciborium = { workspace = true }
+redb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.170"
+
+[lints]
+workspace = true

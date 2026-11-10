@@ -1,0 +1,716 @@
+# v0.1 の受入基準と、それを判定する試験・手順 (11 §2、AC-NFR-702-1)。人が保守する。
+# v0.2 で `cargo xtask trace` (verifies: と AC の突合) に置き換える (OQ-19)。
+#
+# status: test (自動の試験) / manual (手動の受入、docs/compat/0.1.0/acceptance.md) /
+#         review (レビューで確かめる) / missing (まだ対応が無い)
+
+[[ac]]
+id = "AC-FR-101-1"
+requirement = "FR-101"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::tokens_arrive_in_order_and_the_reply_is_saved_with_the_model_key", "crates/evorag-llm/tests/http_client.rs::streams_deltas_in_order"]
+manual = ""
+note = "コアの層とクライアントの層で判定する。"
+
+[[ac]]
+id = "AC-FR-102-1"
+requirement = "FR-102"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::interrupting_closes_the_connection_and_saves_the_partial_reply", "crates/evorag-llm/tests/http_client.rs::dropping_the_stream_closes_the_connection"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-103-1"
+requirement = "FR-103"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::retry_creates_a_new_reply_keeps_the_old_one_and_records_a_signal"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-104-1"
+requirement = "FR-104"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/conversation.rs::a_conversation_is_read_back_in_order_after_reopening"]
+manual = ""
+note = "データの層: 開き直しても全ターンが元の順に読める。一覧の表示は画面の層 (未判定)。"
+
+[[ac]]
+id = "AC-FR-105-1"
+requirement = "FR-105"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-memory/tests/conversation.rs::deleting_a_session_removes_its_turns_signals_and_links", "crates/evorag-tui/src/app.rs::delete_asks_for_confirmation_first"]
+manual = ""
+note = "コア・データ・画面の 3 層で判定する。"
+
+[[ac]]
+id = "AC-FR-106-1"
+requirement = "FR-106"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::a_failed_reply_keeps_the_utterance_and_can_be_resent"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-110-1"
+requirement = "FR-110"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-tui/src/app.rs::tab_selects_a_source_and_enter_shows_it"]
+manual = ""
+note = "画面の層: Tab で番号を選び Enter で詳細を出す。"
+
+[[ac]]
+id = "AC-FR-201-1"
+requirement = "FR-201"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/crash.rs", "crates/evorag-tui/src/app.rs::a_pending_utterance_after_restart_is_marked_as_no_reply"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-202-1"
+requirement = "FR-202"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::a_journal_failure_keeps_the_utterance_out_of_the_database"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-202-2"
+requirement = "FR-202"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/conversation.rs::the_conversation_is_rebuilt_from_the_journal_alone"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-203-1"
+requirement = "FR-203"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::a_second_open_of_the_same_data_root_is_refused_until_the_first_closes", "bins/evorag/tests/cli.rs::exits_with_2_when_the_data_root_is_in_use"]
+manual = ""
+note = "ストアの層で排他を、bin の層で終了コード 2 を判定する。強制終了後に lock ファイルが残る場合は未確認。"
+
+[[ac]]
+id = "AC-FR-204-1"
+requirement = "FR-204"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/daily_backup.rs::one_backup_a_day_and_only_7_daily_and_4_weekly_are_kept"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-204-2"
+requirement = "FR-204"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/daily_backup.rs::a_backup_taken_while_writing_is_consistent_and_opens_on_its_own"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-205-1"
+requirement = "FR-205"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/restore.rs::a_broken_database_is_moved_aside_and_restored_from_the_backup_and_the_journal", "bins/evorag/tests/cli.rs::a_broken_database_is_moved_aside_and_the_user_is_asked"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-206-1"
+requirement = "FR-206"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::a_corrupted_record_is_quarantined_and_the_others_stay_readable", "bins/evorag/tests/cli.rs::doctor_reports_without_writing_anything"]
+manual = ""
+note = "AC-NFR-303-1 と同じ。"
+
+[[ac]]
+id = "AC-FR-207-1"
+requirement = "FR-207"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/tests/cli.rs::doctor_reports_without_writing_anything"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-208-1"
+requirement = "FR-208"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/restore.rs::a_broken_database_is_moved_aside_and_restored_from_the_backup_and_the_journal"]
+manual = ""
+note = "`restore` コマンドそのものではなく、起動時の復元の試験で、退避とジャーナルの差分の合成を判定する。"
+
+[[ac]]
+id = "AC-FR-209-1"
+requirement = "FR-209"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/export.rs::every_record_is_written_once_as_an_envelope", "bins/evorag/tests/cli.rs::export_writes_records_and_the_config_without_api_keys"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-214-1"
+requirement = "FR-214"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/migration.rs"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-215-1"
+requirement = "FR-215"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::a_database_in_a_newer_format_opens_read_only_and_refuses_writes"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-215-2"
+requirement = "FR-215"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::records_of_unknown_kinds_are_counted_and_kept", "crates/evorag-store/tests/golden_envelope.rs"]
+manual = ""
+note = "知らない種類は open_and_records、知らない項目は golden_envelope で判定する。"
+
+[[ac]]
+id = "AC-FR-216-1"
+requirement = "FR-216"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::an_unsafe_location_is_refused_unless_allowed"]
+manual = ""
+note = "コアの層: 既定で起動を拒否し、設定で警告だけにできる。判定の規則 (03 §2.2) 自体の試験は未確認。"
+
+[[ac]]
+id = "AC-FR-217-1"
+requirement = "FR-217"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::low_space_pauses_background_work_but_the_conversation_continues"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-309-1"
+requirement = "FR-309"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart", "crates/evorag-memory/tests/conversation.rs::deleting_a_session_removes_its_turns_signals_and_links"]
+manual = ""
+note = "v0.1 の分 (ターン・ジャーナル・語彙の索引)。ジャーナルの行の消去の判定は未確認。"
+
+[[ac]]
+id = "AC-FR-311-1"
+requirement = "FR-311"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::ratings_are_recorded_against_the_last_reply", "crates/evorag-memory/tests/conversation.rs::signals_link_to_their_target_turn", "crates/evorag-core/tests/chat_path.rs::retry_creates_a_new_reply_keeps_the_old_one_and_records_a_signal"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-401-1"
+requirement = "FR-401"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-retrieval/src/normalize.rs::width_case_and_kana_differences_vanish"]
+manual = ""
+note = "verifies: の注記が無い (注記を足すこと)。正規化の単体の試験。"
+
+[[ac]]
+id = "AC-FR-402-1"
+requirement = "FR-402"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+manual = ""
+note = "recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
+
+[[ac]]
+id = "AC-FR-402-2"
+requirement = "FR-402"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-406-1"
+requirement = "FR-406"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::the_context_fits_the_budget_and_token_counts_are_cached"]
+manual = ""
+note = "verifies: の注記が無い (注記を足すこと)。n_ctx 1,100 の再生で予算に収まることを判定する。n_ctx 4,096 の事例ではない。"
+
+[[ac]]
+id = "AC-FR-407-1"
+requirement = "FR-407"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-408-1"
+requirement = "FR-408"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-409-1"
+requirement = "FR-409"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::sources_off_keeps_earlier_conversations_out", "crates/evorag-tui/src/app.rs::sources_command_switches_memory"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-501-1"
+requirement = "FR-501"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::tokens_arrive_in_order_and_the_reply_is_saved_with_the_model_key", "crates/evorag-llm/tests/http_client.rs::health_needs_no_key_and_props_sends_the_key"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-503-1"
+requirement = "FR-503"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::start_fails_when_llama_server_is_down", "bins/evorag/tests/cli.rs::exits_with_3_and_guidance_when_llama_server_is_unreachable"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-506-1"
+requirement = "FR-506"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::the_context_fits_the_budget_and_token_counts_are_cached"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-507-1"
+requirement = "FR-507"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-llm/tests/http_client.rs::server_errors_are_retried_up_to_three_times", "crates/evorag-llm/tests/http_client.rs::client_errors_are_not_retried", "crates/evorag-llm/tests/http_client.rs::connection_failures_are_retried_then_reported", "crates/evorag-llm/tests/http_client.rs::a_stream_cut_midway_is_reported_and_not_retried"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-508-1"
+requirement = "FR-508"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::tokens_arrive_in_order_and_the_reply_is_saved_with_the_model_key"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-509-1"
+requirement = "FR-509"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-llm/src/endpoint.rs::other_hosts_need_allow_remote_and_https"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-510-1"
+requirement = "FR-510"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/tests/cli.rs::setup_without_llama_server_shows_the_steps_and_writes_nothing"]
+manual = ""
+note = "自動の試験は手順の表示と、設定を書かないことを判定する。案内どおりに進める確認は AC-NFR-603-1 (手動)。"
+
+[[ac]]
+id = "AC-FR-801-1"
+requirement = "FR-801"
+level = "Must"
+status = "review"
+tests = [".github/workflows/release.yml#verify"]
+manual = "docs/compat/0.1.0/acceptance.md §4"
+note = "リリースの CI の verify ジョブ (cargo xtask verify-release) が SHA-256 と署名を検証する。同梱の手順書どおりの手動の確認は acceptance.md §4 で未。"
+
+[[ac]]
+id = "AC-FR-802-1"
+requirement = "FR-802"
+level = "Must"
+status = "review"
+tests = []
+manual = "dist/README.md (手作業の更新・巻き戻し・退避からの戻し方) をレビューする"
+note = ""
+
+[[ac]]
+id = "AC-FR-807-1"
+requirement = "FR-807"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/src/config.rs::an_old_config_is_backed_up_and_rewritten"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-901-1"
+requirement = "FR-901"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-tui/src/render.rs::draws_turns_marks_status_and_places_the_cursor_at_the_input"]
+manual = "docs/compat/0.1.0/acceptance.md §1"
+note = "verifies: の注記が無い (注記を足すこと)。状態の行の描画を判定する。"
+
+[[ac]]
+id = "AC-FR-902-1"
+requirement = "FR-902"
+level = "Must"
+status = "manual"
+tests = []
+manual = "docs/compat/0.1.0/acceptance.md §1"
+note = "2026-11-09 に合 (develop 0.0.4)。リリースのゲート (09 §9.2 の手順 3) で再確認する。"
+
+[[ac]]
+id = "AC-FR-903-1"
+requirement = "FR-903"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-tui/src/app.rs::help_lists_every_command"]
+manual = ""
+note = "07 §3 の v0.1 のコマンドがすべて /help の本文に出て、読み取れること。"
+
+[[ac]]
+id = "AC-FR-904-1"
+requirement = "FR-904"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/src/config.rs::unknown_keys_bad_types_and_ranges_are_errors_with_a_line"]
+manual = ""
+note = "verifies: の注記が無い (注記を足すこと)。設定の読み取りの単体の試験。bin が行番号つきのエラーで終わることは未確認。"
+
+[[ac]]
+id = "AC-FR-905-1"
+requirement = "FR-905"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::a_new_data_root_is_created_owner_only_and_used", "bins/evorag/tests/cli.rs::doctor_reports_without_writing_anything"]
+manual = ""
+note = "コアの層で、無いフォルダを所有者だけで作って使う。CLI の層で、--data-root のフォルダを使う。"
+
+[[ac]]
+id = "AC-FR-906-1"
+requirement = "FR-906"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/tests/cli.rs::version_shows_the_build_and_how_it_was_installed"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-907-1"
+requirement = "FR-907"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#i18n"]
+manual = ""
+note = "キー集合の検査 (cargo xtask i18n)。コアのイベントが文言キーだけを持つことの試験は未確認。"
+
+[[ac]]
+id = "AC-FR-909-1"
+requirement = "FR-909"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::the_prompt_language_is_fixed_per_data_root"]
+manual = ""
+note = "verifies: の注記が無い (注記を足すこと)。初回に記録される言語を判定するとみられる。設定 `prompt.language` の優先は未確認。"
+
+[[ac]]
+id = "AC-FR-909-2"
+requirement = "FR-909"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::the_prompt_language_is_fixed_per_data_root"]
+manual = ""
+note = "verifies: の注記が無い (注記を足すこと)。記録した言語のまま動くことを判定するとみられる。警告の表示は未確認。"
+
+[[ac]]
+id = "AC-NFR-101-1"
+requirement = "NFR-101"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_101_startup"]
+manual = ""
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 会話 1 万ターンのデータ根で、起動から最新のセッションを開くまでの中央値。"
+
+[[ac]]
+id = "AC-NFR-102-1"
+requirement = "NFR-102"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_102_send_to_request"]
+manual = ""
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 発話を保存してから llama-server へ要求を出すまでの平均 (再生のサーバ)。"
+
+[[ac]]
+id = "AC-NFR-103-1"
+requirement = "NFR-103"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-tui/tests/bench.rs::bm_103_key_to_render"]
+manual = ""
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 500 ターンの会話で、キーの処理と 1 回の描画の p95。"
+
+[[ac]]
+id = "AC-NFR-104-1"
+requirement = "NFR-104"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-tui/tests/bench.rs::bm_104_token_to_render"]
+manual = ""
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 500 ターンの会話で、トークンの処理と 1 回の描画の p95。"
+
+[[ac]]
+id = "AC-NFR-201-1"
+requirement = "NFR-201"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_201_memory"]
+manual = ""
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 最大の常駐の大きさ (データ根を作る分も含むので多めに出る)。"
+
+[[ac]]
+id = "AC-NFR-204-1"
+requirement = "NFR-204"
+level = "Must"
+status = "test"
+tests = ["xtask/src/dist.rs::dist", ".github/workflows/release.yml#build"]
+manual = ""
+note = "cargo xtask dist が、配布する実行ファイルが 30 MB を超えたら失敗する。v0.1 の手元の計測は 6.4 MB。"
+
+[[ac]]
+id = "AC-NFR-202-1"
+requirement = "NFR-202"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#deps"]
+manual = ""
+note = "cargo xtask check-deps と cargo deny。01 §5 では 202-1 / 203-1 / 704-1 の 1 行。"
+
+[[ac]]
+id = "AC-NFR-203-1"
+requirement = "NFR-203"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#deps"]
+manual = ""
+note = "cargo xtask check-deps と cargo deny。01 §5 では 202-1 / 203-1 / 704-1 の 1 行。"
+
+[[ac]]
+id = "AC-NFR-704-1"
+requirement = "NFR-704"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#deps"]
+manual = ""
+note = "cargo xtask check-deps が依存の方向の規則 (02 §4.3) を検査する。01 §5 では 202-1 / 203-1 / 704-1 の 1 行。"
+
+[[ac]]
+id = "AC-NFR-301-1"
+requirement = "NFR-301"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fault_injection.rs"]
+manual = ""
+note = "回数は EVORAG_FAULT_RUNS (既定 100)。1,000 回はリリースゲート (09 §8.2) で回す。"
+
+[[ac]]
+id = "AC-NFR-302-1"
+requirement = "NFR-302"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/restore.rs::a_broken_database_is_moved_aside_and_restored_from_the_backup_and_the_journal", "crates/evorag-memory/tests/conversation.rs::the_conversation_is_rebuilt_from_the_journal_alone"]
+manual = ""
+note = "AC-FR-205-1 と AC-FR-202-2 が通ること。"
+
+[[ac]]
+id = "AC-NFR-303-1"
+requirement = "NFR-303"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::a_corrupted_record_is_quarantined_and_the_others_stay_readable", "bins/evorag/tests/cli.rs::doctor_reports_without_writing_anything"]
+manual = ""
+note = "AC-FR-206-1 と同じ。"
+
+[[ac]]
+id = "AC-NFR-304-1"
+requirement = "NFR-304"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/golden_kinds.rs", "crates/evorag-store/tests/golden_envelope.rs"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-NFR-305-1"
+requirement = "NFR-305"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/open_and_records.rs::a_database_in_a_newer_format_opens_read_only_and_refuses_writes", "crates/evorag-store/tests/open_and_records.rs::records_of_unknown_kinds_are_counted_and_kept", "crates/evorag-store/tests/golden_envelope.rs"]
+manual = ""
+note = "AC-FR-215-1 と AC-FR-215-2 が通ること。"
+
+[[ac]]
+id = "AC-NFR-306-1"
+requirement = "NFR-306"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-index/src/lex.rs::a_bad_hash_or_other_rules_ask_for_a_rebuild", "crates/evorag-core/tests/recall_path.rs::a_lost_index_is_rebuilt_from_the_database"]
+manual = ""
+note = "ハッシュが合わない索引は起動時に捨てて DB から作り直す。v0.1 は索引の全体を作り直す (作り直しの間は想起が Skip)。"
+
+[[ac]]
+id = "AC-NFR-401-1"
+requirement = "NFR-401"
+level = "Must"
+status = "manual"
+tests = []
+manual = "docs/compat/0.1.0/acceptance.md §1〜§4 (09 §3.8)"
+note = "§2〜§4 が未なので全体は未。"
+
+[[ac]]
+id = "AC-NFR-404-1"
+requirement = "NFR-404"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#test (linux)"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-NFR-501-1"
+requirement = "NFR-501"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#no-network"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-NFR-502-1"
+requirement = "NFR-502"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::logs_never_contain_the_conversation"]
+manual = ""
+note = "ログ (状態のフォルダの logs/) に、会話の本文・セッション名を出さない。想起・失敗の応答を含む。"
+
+[[ac]]
+id = "AC-NFR-503-1"
+requirement = "NFR-503"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/src/fsutil.rs::private_dirs_and_files_are_owner_only", "crates/evorag-core/tests/chat_path.rs::a_new_data_root_is_created_owner_only_and_used", "crates/evorag-store/tests/export.rs::every_record_is_written_once_as_an_envelope", "bins/evorag/tests/cli.rs::setup_finds_llama_server_and_writes_the_config"]
+manual = ""
+note = "Windows は今の利用者・SYSTEM・Administrators だけを許す保護した DACL (evorag が作ったフォルダと、書くファイル)、Unix は 0700 / 0600。既にあった利用者のフォルダ・ネットワーク・FAT/exFAT には付けない。"
+
+[[ac]]
+id = "AC-NFR-504-1"
+requirement = "NFR-504"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/live_llm.rs::instructions_in_earlier_conversations_are_not_followed"]
+manual = ""
+note = "cargo xtask live-llm (実際の llama-server、EVORAG_LIVE_LLM_URL)。5 回のうち 4 回以上で合格 (09 §3.4)。指示の入った会話が添えられた回だけを数える。"
+
+[[ac]]
+id = "AC-NFR-506-1"
+requirement = "NFR-506"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-core/tests/chat_path.rs::deleting_a_session_purges_it_from_the_backups", "crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart"]
+manual = ""
+note = "AC-FR-105-1 と AC-FR-309-1 が通ること。削除の確認の文言が範囲を示すことの判定は未確認。"
+
+[[ac]]
+id = "AC-NFR-601-1"
+requirement = "NFR-601"
+level = "Must"
+status = "review"
+tests = [".github/workflows/ci.yml#i18n"]
+manual = "日本語の文言のレビュー (画面の文言と docs)"
+note = "01 §5 では 601-1 / 602-1 の 1 行。"
+
+[[ac]]
+id = "AC-NFR-602-1"
+requirement = "NFR-602"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#i18n"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-NFR-603-1"
+requirement = "NFR-603"
+level = "Must"
+status = "manual"
+tests = []
+manual = "docs/compat/0.1.0/acceptance.md §2"
+note = "未 (`setup` が済んだので実施できる)。"
+
+[[ac]]
+id = "AC-NFR-701-1"
+requirement = "NFR-701"
+level = "Must"
+status = "test"
+tests = [".github/workflows/nightly.yml#determinism"]
+manual = ""
+note = "毎晩、試験を 2 回流して、試験ごとの結果が同じで失敗が無いこと (Windows と Linux)。"
+
+[[ac]]
+id = "AC-NFR-702-1"
+requirement = "NFR-702"
+level = "Must"
+status = "review"
+tests = ["tests/ac-checklist.toml"]
+manual = "本ファイル"
+note = "本ファイルが v0.1 の AC を網羅していること。"
+
+[[ac]]
+id = "AC-NFR-703-1"
+requirement = "NFR-703"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#test (windows)", ".github/workflows/ci.yml#test (linux)", ".github/workflows/ci.yml#dco"]
+manual = ""
+note = ""
