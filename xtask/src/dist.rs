@@ -44,7 +44,7 @@ fn host_target() -> Result<String, String> {
         .ok_or_else(|| "rustc -vV did not show the host".into())
 }
 
-fn workspace_version(root: &Path) -> Result<String, String> {
+pub fn workspace_version(root: &Path) -> Result<String, String> {
     let text = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| e.to_string())?;
     let v: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     v.get("workspace")
@@ -76,7 +76,7 @@ struct DistArgs {
     target: String,
     out: PathBuf,
     skip_build: bool,
-    /// リリースのタグ (`v0.1.0`、`v0.1.0-rc.1`)。workspace の版と合うことを確かめる。
+    /// リリースのタグ (`v0.1.0`)。`v<workspace の版>` と同じであることを確かめる (プレリリースは出さない、09 §9.1)。
     tag: Option<String>,
 }
 
@@ -110,14 +110,12 @@ fn parse_args(root: &Path, args: &[String]) -> Result<DistArgs, String> {
 pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
     let a = parse_args(root, args)?;
     let version = workspace_version(root)?;
-    if let Some(tag) = &a.tag {
-        let release = tag.strip_prefix('v').unwrap_or(tag);
-        let release = release.split_once('-').map_or(release, |(v, _)| v);
-        if release != version {
-            return Err(format!(
-                "the tag {tag} does not match the workspace version {version}"
-            ));
-        }
+    if let Some(tag) = &a.tag
+        && !crate::verify_tag::tag_matches(tag, &version)
+    {
+        return Err(format!(
+            "the tag {tag} must be exactly v{version} (pre-releases are not used, 09 §9.1)"
+        ));
     }
     let windows = a.target.contains("windows");
     let exe = if windows { "evorag.exe" } else { "evorag" };

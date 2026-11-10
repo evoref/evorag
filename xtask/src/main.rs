@@ -6,6 +6,7 @@ mod deps;
 mod dist;
 mod i18n;
 mod metadata;
+mod verify_tag;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -19,7 +20,8 @@ commands:
   i18n                     message keys in code vs locales/*.toml (NFR-602)
   dist                     build the release archive, SHA256SUMS and release.json (12 §5)
       [--target T] [--out DIR] [--skip-build]
-  bench [--out DIR]        benchmarks BM-101..104, 201 in release (09 §5.1); results to docs/perf/v0.1
+  bench [--out DIR]        benchmarks BM-101..104, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
+  verify-tag TAG           check a release tag before building (09 §9.2 step 4)
   live-llm                 tests against a real llama-server at EVORAG_LIVE_LLM_URL (09 §3.4)
   verify-release DIR       check SHA256SUMS, release.json and the minisign signatures (AC-FR-801-1)
       [--pubkey FILE] [--require-signatures]";
@@ -38,6 +40,7 @@ fn main() -> ExitCode {
         Some("bench") => bench(&root, &args[1..]),
         Some("live-llm") => live_llm(&root),
         Some("dist") => done("dist", dist::dist(&root, &args[1..])),
+        Some("verify-tag") => done("verify-tag", verify_tag::verify_tag(&root, &args[1..])),
         Some("verify-release") => done("verify-release", dist::verify_release(&root, &args[1..])),
         Some(other) => {
             eprintln!("unknown command: {other}\n\n{USAGE}");
@@ -163,7 +166,14 @@ fn done(name: &str, r: Result<(), String>) -> bool {
 /// ベンチマーク (09 §5.1)。基準機で、release で流す。結果は docs/perf/<版>/BM-<ID>.json。
 fn bench(root: &Path, args: &[String]) -> bool {
     let out = match args {
-        [] => root.join("docs").join("perf").join("v0.1"),
+        // 記録の置き場所は docs/perf/<X.Y.Z>/ (09 §9.1)。
+        [] => match dist::workspace_version(root) {
+            Ok(v) => root.join("docs").join("perf").join(v),
+            Err(e) => {
+                eprintln!("bench: {e}");
+                return false;
+            }
+        },
         [flag, dir] if flag == "--out" => PathBuf::from(dir),
         _ => {
             eprintln!("usage: cargo xtask bench [--out DIR]");
