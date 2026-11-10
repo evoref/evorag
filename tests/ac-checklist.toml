@@ -641,7 +641,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-store/src/fsutil.rs::private_dirs_and_files_are_owner_only", "crates/evorag-core/tests/chat_path.rs::a_new_data_root_is_created_owner_only_and_used", "crates/evorag-store/tests/export.rs::every_record_is_written_once_as_an_envelope", "bins/evorag/tests/cli.rs::setup_finds_llama_server_and_writes_the_config"]
 manual = ""
-note = "Windows は今の利用者だけを許す保護した DACL (evorag が作ったフォルダと、書くファイル)、Unix は 0700 / 0600。既にあった利用者のフォルダの ACL は変えない。"
+note = "Windows は今の利用者・SYSTEM・Administrators だけを許す保護した DACL (evorag が作ったフォルダと、書くファイル)、Unix は 0700 / 0600。既にあった利用者のフォルダ・ネットワーク・FAT/exFAT には付けない。"
 
 [[ac]]
 id = "AC-NFR-504-1"
