@@ -99,8 +99,8 @@ evorag/
 
 - **版番号**: v0.1.0 のリリースまでの workspace の版は内部カウンタ `0.0.x` で、`x` はマイルストーン (08 §4) を `develop` に取り込む PR で 1 つ上げる。`0.0.x` にはタグを付けない。リリース PR で workspace の版と CHANGELOG を `0.y.z` に直す。版の比較は数値順 (`git tag --sort=version:refname`)。
 - **機能リリース** は `0.y.0` 単位、**bugfix リリース** はパッチ版 (`0.y.z` の z)。パッチ版を出せる条件は、前回のタグ以降の `develop` に `feat` が 1 件も入っていないこと。機能リリースの直後からパッチ版を出し終えるまでは `feat` の PR の merge を後回しにする。
-- **凍結**: リリース候補の判定 (09 §9.2) から昇格までは、`develop` への merge を保留する (例外は `main` → `develop` の取り込みだけ)。
-- **プレリリース** (`-rc.N` など) のタグは `develop` の先頭のコミットに付ける (人間)。
+- **凍結**: リリース手順の凍結 (09 §9.2 の手順 1) から昇格とタグ (手順 4) までは、`develop` への merge (Dependabot の PR を含む) を保留する。例外は `main` → `develop` の取り込みだけで、版上げ (手順 2) の前に限る。
+- **プレリリース** (`-rc.N` など) は出さない (09 §9.1)。
 - `dev/<版>`・`release/*`・`hotfix/*` のブランチは作らない。
 - rebase は作業ブランチ内で自由。rebase の後の push は `--force-with-lease` で行う。保護したブランチへの force push は禁止 (GitHub のブランチ保護と `.claude/settings.json` の両方で拒否)。
 - **ブランチ保護** (`main`・`develop`): PR 必須、直接 push・force push・削除の禁止、必須のステータスチェック (09 §6.2。存在するジョブだけを必須にし、ジョブを足したら加える)、管理者もバイパス不可。単独開発の間は承認必須を 0 にし、代わりにセルフレビューのチェックリストを PR に貼る。タグ `v*` はルールセットで保護する。
@@ -131,7 +131,7 @@ Closes #12
 ### 9.3 CHANGELOG とリリース
 
 - `CHANGELOG.md` は Keep a Changelog 形式で、PR ごとに Unreleased へ 1 行足す。利用者に見えない変更は `changelog: none`。
-- 版上げと CHANGELOG の確定は、`develop` に対するリリース PR (`chore(release): v0.1.0`) で、リリースゲートの判定の前に行う。`develop` → `main`・`main` → `develop` の PR は merge commit で、人間が作り、人間が merge する。
+- 版上げと CHANGELOG の確定は、`develop` に対するリリース PR (`chore(release): v0.1.0`) で、リリースゲートの判定の前に行う (09 §9.2 の手順 2)。`develop` → `main`・`main` → `develop` の PR は merge commit で、人間が作り、人間が merge する。
 - リリースの前に、リリースノートの「更新の方法」とデータの移行の有無、利用者向け README の「更新と巻き戻し」の節がその版と合っているかを確かめる (09 §8.2)。
 
 ### 9.4 寄稿ポリシー (DCO)

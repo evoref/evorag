@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 文書ID | compat/v0.1/acceptance |
+| 文書ID | compat/0.1.0/acceptance |
 | 状態 | 記録中 (v0.1 のリリースまでに埋める) |
 | 前提 | [09 §3.8](../../09-testing-quality.md#38-手動の受入) / [07 §2.3](../../07-tui-config.md#23-日本語入力) / [08 §2.2](../../08-roadmap.md#22-v01-最小核-会話保存保護語彙の想起) |
 | 正本の概念 | v0.1 の手動の受入の結果 (端末と IME、setup の案内、エラーの表示、配布物の検証) |
@@ -23,13 +23,13 @@ v0.1 の合格条件の組み合わせ: Windows Terminal + Microsoft IME (新・
 | Windows Terminal + ATOK | 同上 | 合 | 同上 |
 
 - 同じ作り (描画のたびに本当のカーソルを入力位置に置く) での技術検証の記録は `spikes/S-03/REPORT.md`。
-- リリースの候補の版で、もう一度確かめる (画面に手を入れたとき)。
+- リリースのゲート (09 §9.2 の手順 3) で、判定コミットの作りでもう一度確かめる (画面に手を入れたとき)。
 
 ## 2. setup の案内 (NFR-603、AC-NFR-603-1)
 
 | 確かめること | 結果 | 確かめた日・版 |
 |---|---|---|
-| llama-server の無い PC で、`evorag setup` の案内どおりに最初の会話まで進める | 未 (リリース候補で確かめる。案内の文言は `locales/ja.toml` の `cli.setup_guide`、手順書は `dist/README.md` §3) | — |
+| llama-server の無い PC で、`evorag setup` の案内どおりに最初の会話まで進める | 未 (ゲートで、判定コミットで `cargo xtask dist` で作った配布物で確かめる。案内の文言は `locales/ja.toml` の `cli.setup_guide`、手順書は `dist/README.md` §3) | — |
 
 ## 3. エラーの表示 (NFR-604)
 
@@ -41,4 +41,4 @@ v0.1 の合格条件の組み合わせ: Windows Terminal + Microsoft IME (新・
 
 | 確かめること | 結果 | 確かめた日・版 |
 |---|---|---|
-| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 未 (リリース候補で確かめる。手順書は `dist/README.md` §6.1。仮の鍵での通しの確認は #47 で済み) | — |
+| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 未 (ゲートで、判定コミットで `cargo xtask dist` で作った配布物に本物の鍵で署名し、手順書 `dist/README.md` §6.1 どおりに確かめる。公開した配布物の検証は 09 §9.2 の手順 10 で行い、Release のノートに書く。仮の鍵での通しの確認は #47 で済み) | — |
