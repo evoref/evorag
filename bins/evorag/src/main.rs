@@ -105,6 +105,21 @@ fn ask_yes(prompt: &str) -> bool {
     std::io::stdin().lock().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
 }
 
+/// データ根をほかの evorag が使っている (終了コード 2、NFR-604)。
+pub(crate) fn data_root_in_use(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+    pid: Option<u32>,
+) -> ExitCode {
+    let pid = pid.map_or_else(|| "?".to_owned(), |p| p.to_string());
+    fail(
+        catalog,
+        2,
+        MessageKey::CliDataRootInUse,
+        &[("path", &data_root.display().to_string()), ("pid", &pid)],
+    )
+}
+
 fn fail(catalog: &Catalog, code: u8, key: MessageKey, args: &[(&str, &str)]) -> ExitCode {
     eprintln!("{}", catalog.with(key, args).replace("\\n", "\n"));
     ExitCode::from(code)
@@ -296,6 +311,9 @@ fn main() -> ExitCode {
                 );
                 ExitCode::SUCCESS
             }
+            Err(OpenError::Lock(LockError::InUse { pid })) => {
+                data_root_in_use(&catalog, &data_root, pid)
+            }
             Err(e @ OpenError::Lock(_)) => fail(
                 &catalog,
                 2,
@@ -423,6 +441,27 @@ fn main() -> ExitCode {
     }
     let (core, events, report) = match started {
         Ok(v) => v,
+        Err(StartError::LlmUnreachable(evorag_llm::LlmError::Http { status, .. }))
+            if status == 401 || status == 403 =>
+        {
+            // llama-server は動いているが、API キーが違う・設定されていない。
+            let env = cfg
+                .llm
+                .chat
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| "(未設定)".to_owned());
+            return fail(
+                &catalog,
+                3,
+                MessageKey::CliLlmUnauthorized,
+                &[
+                    ("url", &url),
+                    ("status", &status.to_string()),
+                    ("env", &env),
+                ],
+            );
+        }
         Err(StartError::LlmUnreachable(e)) => {
             // TUI を開かずに案内を出して終わる (AC-FR-503-1)。
             return fail(
@@ -440,9 +479,11 @@ fn main() -> ExitCode {
                 &[("detail", &d)],
             );
         }
+        Err(StartError::Store(OpenError::Lock(LockError::InUse { pid }))) => {
+            return data_root_in_use(&catalog, &data_root, pid);
+        }
         Err(
-            e @ (StartError::Store(OpenError::Lock(LockError::InUse { .. }))
-            | StartError::Store(OpenError::DatabaseInUse)
+            e @ (StartError::Store(OpenError::DatabaseInUse)
             | StartError::Store(OpenError::TooNew { .. })
             | StartError::ReadOnly(_)),
         ) => {
