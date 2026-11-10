@@ -112,6 +112,7 @@ jobs:
           fetch-depth: 0
       # すべてのコミット (merge commit を除く) に Signed-off-by: がある (docs/11-dev-workflow.md §9.4)。
       # Dependabot は署名を付けられないので、Dependabot が作ったコミットだけを除く。
+      # .github/dco-exempt に理由つきで書いた、履歴を書き換えられない過去のコミットも除く。
       - name: check Signed-off-by
         env:
           EVENT: ${{ github.event_name }}
@@ -131,6 +132,10 @@ jobs:
           echo "checking $range"
           bad=0
           for c in $(git rev-list --no-merges "$range"); do
+            if grep -qx "$c" <(grep -oE '^[0-9a-f]{40}' .github/dco-exempt); then
+              echo "skip (.github/dco-exempt): $c"
+              continue
+            fi
             author=$(git log -1 --format=%ae "$c")
             if [ "$author" = "49699333+dependabot[bot]@users.noreply.github.com" ]; then
               echo "skip (dependabot): $c"
