@@ -40,15 +40,16 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 /// 所有者だけが読み書きできるフォルダを作る (NFR-503)。
 ///
 /// - Unix: 0700 (既にあったフォルダも締め直す)。
-/// - Windows: 新しく作ったときだけ、今の利用者だけを許す保護した DACL を付け、中に継承させる。
+/// - Windows: 新しく作ったときだけ、今の利用者・SYSTEM・Administrators だけを許す保護した DACL を
+///   付け、中に継承させる (03 §2)。
 ///   既にあったフォルダ (利用者が `--data-root` で指した既存のフォルダなど) は変えない
 ///   (継承を切ると、その下のすべての権限が変わるため)。
 pub fn create_private_dir(p: &Path) -> io::Result<()> {
     imp::create_private_dir(p)
 }
 
-/// 所有者だけが使えるか (Unix は group と other の権限が無い、Windows は今の利用者だけを許す
-/// ACE が 1 つ)。試験のため。
+/// ほかの一般の利用者が使えないか (Unix は group と other の権限が無い、Windows は許す相手が
+/// 今の利用者・SYSTEM・Administrators だけ)。試験のため。
 pub fn is_private(p: &Path) -> io::Result<bool> {
     imp::is_private(p)
 }
