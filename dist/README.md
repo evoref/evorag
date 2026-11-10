@@ -134,7 +134,7 @@ v0.1 には自動の更新はありません (v0.3 で入ります)。次の手�
    Get-Content .\SHA256SUMS
    ```
 
-2. [minisign](https://jedisct1.github.io/minisign/) で署名を確かめます。公開鍵は、リポジトリ直下の `minisign.pub` です。
+2. [minisign](https://jedisct1.github.io/minisign/) で署名を確かめます。公開鍵は、リポジトリ直下の `minisign.pub` です。1 行目の末尾の鍵 ID が `A3B00C77E1EA828E` であることを確かめてください。
 
    ```powershell
    minisign -Vm SHA256SUMS -p minisign.pub
