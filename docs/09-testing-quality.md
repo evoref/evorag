@@ -21,8 +21,8 @@
 | 区分 | 意味 | 実行者・頻度 | 記録 |
 |---|---|---|---|
 | T | 自動の試験 | CI (PR ごと) | CI のログ |
-| B | ベンチマーク・計測 | 基準機で、リリースの前と性能に関わる PR | `docs/perf/<版>/` |
-| M | 手動の確認 | 人間が、リリースの前 | `docs/compat/<版>/` のチェックリスト |
+| B | ベンチマーク・計測 | 基準機で、リリースの前と性能に関わる PR | `docs/perf/<X.Y.Z>/` |
+| M | 手動の確認 | 人間が、リリースの前 | `docs/compat/<X.Y.Z>/` のチェックリスト |
 | R | レビュー | PR のレビューとリリースの前 | PR の記録 |
 
 ## 3. 試験の階層
@@ -64,7 +64,7 @@
 
 ### 3.8 手動の受入
 
-- `docs/compat/<版>/acceptance.md` のチェックリストで、端末と IME の組み合わせ (07 §2.3)、setup の案内 (NFR-603)、エラーの表示 (NFR-604)、配布物の検証の手順を確かめる。
+- `docs/compat/<X.Y.Z>/acceptance.md` のチェックリストで、端末と IME の組み合わせ (07 §2.3)、setup の案内 (NFR-603)、エラーの表示 (NFR-604)、配布物の検証の手順を確かめる。
 
 ## 4. 障害の注入
 
@@ -100,7 +100,7 @@
 | BM-201 | メモリの使用量 (会話 1 万ターン) | NFR-201 |
 | BM-204 | 実行ファイルの大きさ | NFR-204 |
 
-- 結果は `docs/perf/<版>/BM-<ID>.json` に残し、前の版と比べる。
+- 結果は `docs/perf/<X.Y.Z>/BM-<ID>.json` に残し、前の版と比べる (`cargo xtask bench`)。
 
 ### 5.2 想起と検索の評価
 
@@ -120,7 +120,7 @@
 |---|---|---|
 | `ci.yml` | PR (宛先が `develop`・`main`) と、`develop`・`main` への push | §6.2 のジョブ |
 | `nightly.yml` | 毎日 (既定ブランチの定義で動き、`develop` を対象にする) | 障害の注入の長い版 (10,000 回)、proptest の件数を増やした版、`cargo audit` |
-| `release.yml` | 人間が付けたタグ `v*` | 配布物の作成、`SHA256SUMS`、署名の検証 (署名そのものは人間が手元で行う、12 §5) |
+| `release.yml` | 人間が付けたタグ `v*` と、署名の後の手動の実行 | タグの検証、配布物の作成、`SHA256SUMS`・`release.json`、署名の検証 (署名そのものは人間が手元で行う、12 §5)。手順は §9.2 |
 
 ### 6.2 `ci.yml` のジョブ (必須のチェック)
 
@@ -157,33 +157,50 @@
 
 ### 8.2 リリースのゲート
 
+ゲートは、版上げの後の `develop` の先頭 (**判定コミット**) で判定し、リリースのチェックリスト `docs/compat/<X.Y.Z>/release-checklist.md` (雛形は `docs/compat/_template/release-checklist.md`) に、判定・根拠・確認者・日付を書く。**タグの前に済む行だけ** を載せ、タグの後の結果 (配布物・タグの検証・署名の検証・公開後の検証) は GitHub Release のノートの「検証」の節に書き、リポジトリには戻さない。
+
 | 項目 | 判定 |
 |---|---|
-| Must の AC | その版の Must の AC (01 §5) がすべて合格 |
-| 障害の注入 | §4 の注入を v0.1 は 1,000 回、v0.2 以降は 10,000 回続けて失敗 0 |
+| 要件充足 | その版の Must の AC (01 §5) がすべて合格。`tests/ac-checklist.toml` に `missing` が無い |
+| データ保全 | §4 の注入を v0.1 は 1,000 回、v0.2 以降は 10,000 回続けて失敗 0 (判定コミットに対する `nightly.yml` の手動の実行)。試験を 2 回流して結果が同じ (`determinism`) |
 | 互換 | §3.6 の試験がすべて通る (v0.2 からは直前の版からの移行、v0.3 からは `update` での更新と巻き戻し、v0.5 からは形式の版 `1` 以降のすべてからの移行を含む) |
-| 性能 | §5.1 の目標を基準機で満たす |
-| 手動の受入 | §3.8 のチェックリストが完了 |
-| 文書 | 利用者向けの README・リリースノートに、既知の制約・更新と巻き戻しの手順・データの移行の有無がある |
-| 秘密 | 配布物・docs・試験データに秘密と個人情報が無い |
+| 性能 | §5.1 の目標を基準機で満たす。記録は `docs/perf/<X.Y.Z>/` |
+| 受入 | §3.8 の手動の受入のチェックリスト (`docs/compat/<X.Y.Z>/acceptance.md`) が完了 |
+| 実際の LLM | §3.4 の試験 (`cargo xtask live-llm`) が合格 (v0.1 は AC-NFR-504-1) |
+| セキュリティ | `cargo deny check advisories` がきれい。配布物・docs・試験データに秘密と個人情報が無い (12 §6 の PC-1・PC-2・PC-6) |
+| 依存 | C を含む依存 0、推移的な依存が上限以内 (`cargo xtask check-deps`) |
+| ドキュメント | 利用者向けの README (`dist/README.md`)・CHANGELOG・リリースノートに、既知の制約・更新と巻き戻しの手順・データの移行の有無がある |
+
+- 判定コミットを書いた後に入れてよい変更は、`docs/compat/<X.Y.Z>/`・`docs/perf/<X.Y.Z>/`・`tests/ac-checklist.toml` だけ (記録の許可リスト)。ほかを入れたらゲートをやり直す。
+- 基準機の型番など固有の情報は記録に書かない (11 §9.7)。
 
 ## 9. リリース手順
+
+手順の名前と番号は evoeditor の 09 §9.2 に揃える (同じ番号は同じ手順。その版で行わない手順は「行わない」と書いて番号を残す)。
 
 ### 9.1 版と頻度
 
 - 機能リリースは `0.y.0`、bugfix リリースはパッチ版 (11 §9.1)。日付ではなくゲートで出す。
-- リリース候補 (`0.y.0-rc.N`) を `develop` の先頭で作って判定し、合格したら昇格する。
+- **リリース候補 (`-rc.N` などのプレリリース) は出さない** (確定 (ユーザー回答、2026-11-10))。ゲートは版上げの後の判定コミットで行い、合格したらそのまま昇格する。
+- 記録の置き場所は、版を `X.Y.Z` (先頭の `v` なし) で書いたフォルダ: `docs/compat/<X.Y.Z>/` (リリースのチェックリスト・手動の受入) と `docs/perf/<X.Y.Z>/` (計測)。
 
 ### 9.2 手順
 
-1. **凍結**: `develop` への merge を保留する (11 §9.1)。
-2. **版上げ**: リリース PR (`chore(release): v0.y.0`) で workspace の版と CHANGELOG を確定する。
-3. **リリース候補**: 人間が `develop` の先頭に `v0.y.0-rc.N` のタグを付ける。`release.yml` が配布物を作る。
-4. **判定**: §8.2 のゲートで判定し、`docs/compat/<版>/release-checklist.md` に記録する。不合格なら直して 2 からやり直す。
-5. **署名**: 人間が手元で `SHA256SUMS` と署名つきのマニフェスト (12 §5) に minisign で署名する。
-6. **昇格**: `develop` → `main` の PR (merge commit) を人間が merge し、`main` のマージコミットに署名付きのタグ `v0.y.0` を付ける。
-7. **公開**: GitHub Releases に配布物・`SHA256SUMS`・署名を置く。
-8. **取り込み**: `main` → `develop` の PR (merge commit)。凍結を解く。
+1. **凍結**: `develop` への merge (Dependabot の PR を含む) を保留する。例外は `main` → `develop` の取り込み (パッチ版のリリースの後) だけで、版上げ (手順 2) の前に限る (11 §9.1)。
+2. **版上げ**: `develop` に対するリリース PR (`chore(release): vX.Y.Z`) で、workspace の版を `X.Y.Z` にし、CHANGELOG の Unreleased を `X.Y.Z` にする。**ゲートの前に行う** (出荷する版番号のソースで判定するため)。入れた後の `develop` の先頭の SHA を判定コミットとし、`git merge-base --is-ancestor develop <判定コミット>` と `git merge-base --is-ancestor main <判定コミット>` が真であることを確かめる (偽なら `main` を `develop` に取り込むなどして整え、手順 2 からやり直す)。
+3. **ゲート**: 判定コミットで §8.2 を行い、`docs/compat/<X.Y.Z>/release-checklist.md` (先頭に判定コミットの 40 桁の SHA) と、性能・受入の記録を埋めて `develop` に入れる (タグの前)。
+4. **昇格とタグ**: `develop` → `main` の PR を人間が作り、merge commit で入れる。`main` のマージコミットに、人間が署名付きのタグ `vX.Y.Z` を付ける。`release.yml` は最初にタグを検証する (`git verify-tag` と `.github/allowed_signers`、`main` のマージコミットを指すこと、`Cargo.toml` の版との一致、判定コミットとの差分が記録の許可リストだけであること)。昇格が終わったら凍結を解く。
+   - タグの署名鍵 (Git の SSH 署名鍵) は、minisign の鍵とは別の鍵にする (11 §9.7)。
+   - `release.yml` の失敗: publish の前 (draft のまま) なら、直して同じタグで再実行してよい。成果物の内容に関わる直しが要るときは、メンテナが draft の Release とタグを消し、直しを `develop` に入れて手順 3・4 をやり直してから、同じ版でタグを付け直す。publish した後は同じ版のタグを付け直さない (次のパッチ版で出す)。
+5. **ビルド** (`release.yml`): `cargo xtask dist` で、配布物 (v0.1 は Windows x86_64 の zip、C ランタイムは静的にリンク)・`SHA256SUMS`・`release.json` を作り、`THIRD-PARTY-NOTICES.md` を同梱する (12 §5)。
+6. **検証** (`release.yml`): 配布物の中身とハッシュ、`release.json` と `SHA256SUMS` の一致、`evorag --version` の版がタグと一致することを確かめ、draft の Release に置く。minisign の検証は署名 (手順 7) の後なので、ここでは行わず手順 9・10 で行う。
+7. **署名**: メンテナが手元 (オフラインの鍵) で `SHA256SUMS` と `release.json` に minisign で署名し (trusted comment に版と `release.json` の SHA-256、12 §5.2)、`.minisig` を draft に添付する。公開鍵はリポジトリ直下の `minisign.pub` と README に置き、リポジトリの外の経路でも公開する。
+8. **SBOM**: v0.1 では行わない (時期は未定)。
+9. **draft から publish**: 人が、署名の後の `release.yml` の検証 (`workflow_dispatch`、`cargo xtask verify-release --require-signatures`) が通ること、CHANGELOG の本文とリリースノートの「更新の方法」・データの移行の有無・README の「更新と巻き戻し」が版と合っていること、リリースのチェックリストがすべて埋まり、ノートの「検証」の節に publish の前の結果があることを確かめて、publish する。
+10. **公開後の検証**: publish した Release から (手元の成果物ではなく) 配布物・`SHA256SUMS`・`.minisig` を取得し、`dist/README.md` の手順 (`minisign -V` とハッシュ) で確かめ、結果をノートの「検証」の節に追記する (リポジトリには戻さない)。不一致なら直ちにノートの先頭に「検証に失敗したので使わない」と書き、告知を止めて原因を調べる (同じ版の成果物は差し替えず、次のパッチ版で出す)。
+11. **crates.io**: 行わない (公開の時期は v1.0 の前に決める、12 §5.1)。
+12. **パッケージ** (winget など): 行わない (時期は未定)。
+13. **告知と取り込み**: `main` → `develop` の取り込みの PR (merge commit) を人間が作る。08 の繰り越しの記録を更新する。
 
 ### 9.3 リリースの取り下げ
 

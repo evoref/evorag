@@ -1,7 +1,7 @@
 # v0.1 の受入基準と、それを判定する試験・手順 (11 §2、AC-NFR-702-1)。人が保守する。
 # v0.2 で `cargo xtask trace` (verifies: と AC の突合) に置き換える (OQ-19)。
 #
-# status: test (自動の試験) / manual (手動の受入、docs/compat/v0.1/acceptance.md) /
+# status: test (自動の試験) / manual (手動の受入、docs/compat/0.1.0/acceptance.md) /
 #         review (レビューで確かめる) / missing (まだ対応が無い)
 
 [[ac]]
@@ -361,7 +361,7 @@ requirement = "FR-801"
 level = "Must"
 status = "review"
 tests = [".github/workflows/release.yml#verify"]
-manual = "docs/compat/v0.1/acceptance.md §4"
+manual = "docs/compat/0.1.0/acceptance.md §4"
 note = "リリースの CI の verify ジョブ (cargo xtask verify-release) が SHA-256 と署名を検証する。同梱の手順書どおりの手動の確認は acceptance.md §4 で未。"
 
 [[ac]]
@@ -388,7 +388,7 @@ requirement = "FR-901"
 level = "Must"
 status = "test"
 tests = ["crates/evorag-tui/src/render.rs::draws_turns_marks_status_and_places_the_cursor_at_the_input"]
-manual = "docs/compat/v0.1/acceptance.md §1"
+manual = "docs/compat/0.1.0/acceptance.md §1"
 note = "verifies: の注記が無い (注記を足すこと)。状態の行の描画を判定する。"
 
 [[ac]]
@@ -397,8 +397,8 @@ requirement = "FR-902"
 level = "Must"
 status = "manual"
 tests = []
-manual = "docs/compat/v0.1/acceptance.md §1"
-note = "2026-11-09 に合 (develop 0.0.4)。リリース候補で再確認する。"
+manual = "docs/compat/0.1.0/acceptance.md §1"
+note = "2026-11-09 に合 (develop 0.0.4)。リリースのゲート (09 §9.2 の手順 3) で再確認する。"
 
 [[ac]]
 id = "AC-FR-903-1"
@@ -470,7 +470,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-core/tests/bench.rs::bm_101_startup"]
 manual = ""
-note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 会話 1 万ターンのデータ根で、起動から最新のセッションを開くまでの中央値。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 会話 1 万ターンのデータ根で、起動から最新のセッションを開くまでの中央値。"
 
 [[ac]]
 id = "AC-NFR-102-1"
@@ -479,7 +479,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-core/tests/bench.rs::bm_102_send_to_request"]
 manual = ""
-note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 発話を保存してから llama-server へ要求を出すまでの平均 (再生のサーバ)。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 発話を保存してから llama-server へ要求を出すまでの平均 (再生のサーバ)。"
 
 [[ac]]
 id = "AC-NFR-103-1"
@@ -488,7 +488,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-tui/tests/bench.rs::bm_103_key_to_render"]
 manual = ""
-note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 500 ターンの会話で、キーの処理と 1 回の描画の p95。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 500 ターンの会話で、キーの処理と 1 回の描画の p95。"
 
 [[ac]]
 id = "AC-NFR-104-1"
@@ -497,7 +497,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-tui/tests/bench.rs::bm_104_token_to_render"]
 manual = ""
-note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 500 ターンの会話で、トークンの処理と 1 回の描画の p95。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 500 ターンの会話で、トークンの処理と 1 回の描画の p95。"
 
 [[ac]]
 id = "AC-NFR-201-1"
@@ -506,7 +506,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-core/tests/bench.rs::bm_201_memory"]
 manual = ""
-note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/v0.1/)。 最大の常駐の大きさ (データ根を作る分も含むので多めに出る)。"
+note = "cargo xtask bench (release、基準機で流す。結果は docs/perf/0.1.0/)。 最大の常駐の大きさ (データ根を作る分も含むので多めに出る)。"
 
 [[ac]]
 id = "AC-NFR-204-1"
@@ -604,7 +604,7 @@ requirement = "NFR-401"
 level = "Must"
 status = "manual"
 tests = []
-manual = "docs/compat/v0.1/acceptance.md §1〜§4 (09 §3.8)"
+manual = "docs/compat/0.1.0/acceptance.md §1〜§4 (09 §3.8)"
 note = "§2〜§4 が未なので全体は未。"
 
 [[ac]]
@@ -685,7 +685,7 @@ requirement = "NFR-603"
 level = "Must"
 status = "manual"
 tests = []
-manual = "docs/compat/v0.1/acceptance.md §2"
+manual = "docs/compat/0.1.0/acceptance.md §2"
 note = "未 (`setup` が済んだので実施できる)。"
 
 [[ac]]
