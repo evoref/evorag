@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-10
+
+エラーの表示を直したパッチ版。データの形式は変わらないので、移行はありません。0.1.0 からは実行ファイルを置き換えるだけで更新できます (同梱の `README.md` §6)。
+
+### 修正
+
+- llama-server が API キーを受け付けないとき (HTTP 401・403)、llama-server の起動ではなく、キーを入れた環境変数の確かめ方を案内する。
+- データ根をほかの evorag が使っているとき、理由を日本語で示し、先に起動した evorag を終えるよう案内する。
+- llama-server に繋がらないとき、会話のデータが無事であることを示す。
+- 利用者向けの手順書に、ログの置き場所を書いた。
+
 ## [0.1.0] - 2026-11-10
 
 最初の版。Windows 11 (x86_64) 向け。入れ方・更新と巻き戻し・既知の制約は、配布物に同梱の `README.md` を見てください。データの形式は最初の版なので、移行はありません。
@@ -25,5 +36,6 @@
 - ログを状態のフォルダの `logs\` に書く (7 日分)。会話の本文や API キーは書かない。
 - 以前の会話の中に紛れ込ませた指示に従わないよう、引用の扱いをシステムプロンプトで指示する。
 
-[Unreleased]: https://github.com/evoref/evorag/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/evoref/evorag/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/evoref/evorag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/evoref/evorag/releases/tag/v0.1.0

@@ -73,6 +73,9 @@ jobs:
     name: verify
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    permissions:
+      # 下書きのリリースは、書き込みの権限を持つトークンからしか見えない (読むだけ。書き込みはしない)。
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

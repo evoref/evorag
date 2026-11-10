@@ -59,6 +59,11 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
             );
             return ExitCode::from(1);
         }
+        Err(ExportError::Open(evorag_store::OpenError::Lock(
+            evorag_store::lock::LockError::InUse { pid },
+        ))) => {
+            return crate::data_root_in_use(c, data_root, pid);
+        }
         Err(e @ ExportError::Open(_)) => {
             eprintln!(
                 "{}",
