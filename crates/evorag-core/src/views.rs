@@ -42,5 +42,6 @@ pub fn turn_of(e: &Envelope, b: &TurnBody) -> TurnView {
         reply_to: b.reply_to,
         created_at: e.created_at,
         sources: b.recall.as_ref().map_or(0, |r| r.sources.len()),
+        source_base: crate::recall::source_base(b) as usize,
     }
 }

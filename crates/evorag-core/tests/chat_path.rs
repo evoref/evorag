@@ -126,7 +126,7 @@ async fn tokens_arrive_in_order_and_the_reply_is_saved_with_the_model_key() {
     // 送った要求: システムプロンプト + 発話。応答は最初のスロット。
     let req = &llm.requests()[0];
     assert_eq!(req.messages[0].role, Role::System);
-    assert_eq!(req.messages.last().unwrap().content, "こんにちは");
+    // 発話には記録した日時が付く (05 §4.1)。
     assert_eq!(req.id_slot, Some(0));
     core.shutdown().await;
 }
@@ -187,7 +187,7 @@ async fn a_failed_reply_keeps_the_utterance_and_can_be_resent() {
     assert_eq!(turn.status, TurnStatus::Completed);
     // 同じ発話を送り直した。失敗した応答は送らない。
     let reqs = llm.requests();
-    assert_eq!(reqs[1].messages.last().unwrap().content, "質問");
+    assert_eq!(utterance(&reqs[1].messages.last().unwrap().content), "質問");
     assert!(reqs[1].messages.iter().all(|m| m.content != "途中"));
     let turns = core.turns(sid);
     assert_eq!(turns.len(), 3, "utterance, failed reply, new reply");
@@ -223,6 +223,11 @@ async fn retry_creates_a_new_reply_keeps_the_old_one_and_records_a_signal() {
     assert!(reqs[1].messages.iter().all(|m| m.content != "こんにちは"));
     core.shutdown().await;
     assert_eq!(signals_on(dir.path(), old.id), 1);
+}
+
+/// 発話の先頭の日時 (`[…] `) を除いた本文。
+fn utterance(content: &str) -> &str {
+    content.split_once("] ").map_or(content, |(_, b)| b)
 }
 
 fn signals_on(root: &Path, target: evorag_types::Id) -> usize {
@@ -280,9 +285,13 @@ async fn the_context_fits_the_budget_and_token_counts_are_cached() {
         core.tokenize_calls() - calls_before
     );
     let last = llm.requests().last().unwrap().clone();
-    assert_eq!(last.messages.last().unwrap().content, "最後");
+    assert_eq!(utterance(&last.messages.last().unwrap().content), "最後");
     // 古い発話は予算に入らず省かれた。
-    let kept = last.messages.iter().filter(|m| m.content == long).count();
+    let kept = last
+        .messages
+        .iter()
+        .filter(|m| utterance(&m.content) == long)
+        .count();
     assert!(kept < 3, "kept {kept} long utterances");
     core.shutdown().await;
 }

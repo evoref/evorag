@@ -73,8 +73,11 @@ pub struct TurnView {
     pub model_key: Option<String>,
     pub reply_to: Option<Id>,
     pub created_at: Timestamp,
-    /// 添えた以前の会話の出典の数 (応答の `[1]`〜`[n]`、FR-110)。
+    /// 添えた以前の会話の出典の数 (FR-110)。
     pub sources: usize,
+    /// 出典の番号の始まり (セッションの通し番号、05 §5.1)。応答の `[source_base]` から
+    /// `[source_base + sources - 1]` までが、この応答で添えた出典。
+    pub source_base: usize,
 }
 
 /// イベント (コア → 画面)。順序を保つ 1 本の流れで届く (02 §3 の決めごと 4)。

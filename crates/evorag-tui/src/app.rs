@@ -362,9 +362,12 @@ impl App {
             self.notice(m);
             return;
         };
+        // 番号はセッションの通し番号 (05 §5.1)。この応答の分だけを巡る。
+        let first = t.source_base.max(1);
+        let last = first + t.sources - 1;
         let n = match self.source {
-            Some((id, n)) if id == t.id => n % t.sources + 1,
-            _ => 1,
+            Some((id, n)) if id == t.id && n < last => n + 1,
+            _ => first,
         };
         self.source = Some((t.id, n));
         let m = self
@@ -567,6 +570,7 @@ mod tests {
             reply_to,
             created_at: Timestamp::from_millis(0),
             sources: 0,
+            source_base: 1,
         }
     }
 
