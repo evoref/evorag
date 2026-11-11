@@ -824,3 +824,30 @@ status = "test"
 tests = ["crates/evorag-core/tests/model_binding.rs::embed_and_rerank_are_recorded_and_a_different_one_is_not_used", "bins/evorag/src/config.rs::keys_of_later_versions_are_ignored_with_a_warning"]
 manual = ""
 note = "ループバック以外の接続先の拒否は、chat と同じ Endpoint の検査 (AC-FR-509-1) を使う。"
+
+[[ac]]
+id = "AC-FR-513-1"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::setup_switches_the_recorded_model_only_while_the_tui_is_closed"]
+manual = ""
+note = "DB の側 (記録の書き換え、前のモデルの履歴、切り替えた後の起動)。違いの中身と時間の目安の表示、確認が無いときは設定だけを書くことは、bin の setup で行う (対話は手動の受入で確かめる)。やり直しの job は M2.3・M2.5 で足す。"
+
+[[ac]]
+id = "AC-FR-513-2"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::the_same_model_choice_is_offered_only_when_the_values_match"]
+manual = ""
+note = "埋め込みのモデルの、ベクトルを埋め込み直して比べる確かめは、ベクトルを保存する M2.5 で足す。"
+
+[[ac]]
+id = "AC-FR-513-3"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::setup_switches_the_recorded_model_only_while_the_tui_is_closed"]
+manual = ""
+note = "TUI が動いている間はデータ根を開けない (DB の側)。先に示す文言は bin の setup。"

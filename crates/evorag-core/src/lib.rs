@@ -12,6 +12,7 @@ mod context;
 pub mod localtime;
 pub mod logging;
 mod prompt;
+pub mod rebind;
 mod recall;
 mod roles;
 mod views;
