@@ -194,6 +194,15 @@ manual = ""
 note = "知らない種類は open_and_records、知らない項目は golden_envelope で判定する。"
 
 [[ac]]
+id = "AC-FR-215-3"
+requirement = "FR-215"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/tests/conversation.rs::a_turn_this_version_cannot_read_is_counted_and_the_rest_of_the_session_opens", "crates/evorag-memory/tests/conversation.rs::unreadable_turns_and_signals_keep_their_links_when_rebuilt_from_the_journal", "crates/evorag-core/tests/chat_path.rs::a_session_with_a_turn_from_a_newer_version_still_opens", "crates/evorag-tui/src/app.rs::unreadable_turns_are_announced_when_a_session_opens"]
+manual = ""
+note = "データの層 (読み飛ばして数える、書き換えない、ジャーナルから戻しても関係を保つ)、コアの層 (件数を届ける)、画面の層 (知らせる) で判定する。"
+
+[[ac]]
 id = "AC-FR-216-1"
 requirement = "FR-216"
 level = "Must"

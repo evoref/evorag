@@ -68,13 +68,38 @@ pub fn list_sessions(tx: &ReadTxn<'_>, limit: usize) -> Result<Vec<Session>, Mem
     Ok(out)
 }
 
+/// セッションのターンと、この版では読めなかったターンの数。
+#[derive(Debug, Clone, Default)]
+pub struct SessionTurns {
+    /// 読めたターン (元の順)。
+    pub turns: Vec<Turn>,
+    /// 新しい版が書いた、この版では読めないターンの数 (03 §4.2 の規則 11)。記録は消さずに残っている。
+    pub unreadable: usize,
+}
+
 /// セッションのターンを、元の順 (ID の順 = 書いた順) に。
+///
+/// この版では読めないターンは読み飛ばし、ほかのターンを返す (03 §4.2 の規則 11)。
+/// 読めなかった数も要るときは [`session_turns_counted`] を使う。
 pub fn session_turns(tx: &ReadTxn<'_>, session: Id) -> Result<Vec<Turn>, MemoryError> {
-    let mut out = Vec::new();
+    Ok(session_turns_counted(tx, session)?.turns)
+}
+
+/// セッションのターン (元の順) と、この版では読めなかったターンの数 (AC-FR-215-3)。
+///
+/// 読めないターンは、封筒を読めないもの (新しい版の形) と、封筒は読めるが本体をこの版の型として
+/// 読めないもの (知らない列挙の値など)。どちらも読み飛ばして数えるだけで、消さず、書き換えない。
+/// 壊れた記録は数えない (書き込みのときに隔離される、03 §8)。
+pub fn session_turns_counted(tx: &ReadTxn<'_>, session: Id) -> Result<SessionTurns, MemoryError> {
+    let mut out = SessionTurns::default();
     for (id, _) in tx.links_to(session, REL_IN_SESSION)? {
-        if let Some(envelope) = ok(tx.get(KIND_TURN, id)?) {
-            let body = envelope.body_as()?;
-            out.push(Turn { envelope, body });
+        match tx.get(KIND_TURN, id)? {
+            Some(Read::Ok(envelope)) => match envelope.body_as() {
+                Ok(body) => out.turns.push(Turn { envelope, body }),
+                Err(_) => out.unreadable += 1,
+            },
+            Some(Read::Newer { .. }) => out.unreadable += 1,
+            Some(Read::Corrupt { .. }) | None => {}
         }
     }
     Ok(out)
