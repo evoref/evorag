@@ -198,6 +198,29 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// 点検の結果を書く (06 §3.3)。同じ役割・model_key・`build_info` の古い結果は消す。
+    pub fn save_probe(
+        &self,
+        old: Option<&Envelope>,
+        body: &ModelProbeBody,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let mut ops = Vec::new();
+        if let Some(o) = old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_MODEL_PROBE.into(),
+                id: o.id,
+            });
+        }
+        ops.push(WriteOp::Put(envelope(
+            self.ids.next_id(),
+            KIND_MODEL_PROBE,
+            now,
+            body,
+        )?));
+        Ok(ops)
+    }
+
     /// 発話のターン (状態「応答待ち」)。LLM に送る前に書く (04 §3 の 1、FR-201)。
     pub fn user_turn(
         &self,

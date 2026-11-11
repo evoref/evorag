@@ -44,6 +44,7 @@ no_reply = "(応答なし)"
 
 [ui.status]
 idle = "待機中"
+limited = "一部の機能を止めています (evorag doctor)"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
 
@@ -91,6 +92,7 @@ source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で
 source = "[{n}] {title} ({at})\n{excerpt}"
 no_sources = "出典の付いた応答がありません。"
 style = "答え方: 言語 {language}・長さ {length}・書式 {format} (/style で選び直せます)。"
+probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
 
 [ui.role_status]
@@ -186,6 +188,7 @@ switched = "{role} のモデルを切り替えました ({file})。"
 kept_chat = "応答のモデルは切り替えませんでした。このままでは次の起動で止まります。llama-server を {recorded} で起動し直してください。"
 kept = "{role} のモデルは切り替えませんでした。切り替えるまで、{role} を使わずに動きます。"
 needs_confirm = "モデルの切り替えには、対話での確認が要ります (--yes では切り替えません)。"
+probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
 
 [doctor]
 config = "設定: {path} (読めました)"
@@ -203,6 +206,12 @@ quarantine = "quarantine の記録: {count} 件"
 journal = "ジャーナル: {files} ファイル、{lines} 行 (読めない行 {bad}、新しい版の行 {newer}、書きかけ {partial} バイト、次の起動で取り込む行 {pending})"
 backups = "退避: {count} 個 (最新 {latest})"
 backups_none = "退避: まだありません"
+probe_chat = "モデルの点検 (chat): プロンプトの処理 {prompt} トークン/秒、生成 {gen} トークン/秒。{issues}"
+probe_no_issue = "思考を切れ、型縛りの出力も使えます。"
+probe_embed = "モデルの点検 (embed): {dims} 次元、問い 1 件の埋め込み {ms} ms"
+probe_rerank = "モデルの点検 (rerank): 往復 6 件のリランク {ms} ms"
+probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
+probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
@@ -214,3 +223,7 @@ none = "退避はありません。"
 
 [notice]
 low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"
+
+[probe]
+thinking_not_off = "補助の呼び出しで思考を切れません (設定 llm.chat.aux_request_extra を確かめてください)"
+structured_broken = "型縛りの出力が空か、型に合いません"

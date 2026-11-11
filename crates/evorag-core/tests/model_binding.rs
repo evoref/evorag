@@ -55,6 +55,8 @@ fn config_with(
         ignored_config: ignored,
         embed,
         rerank,
+        aux_request_extra: Default::default(),
+        probe_models: false,
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),

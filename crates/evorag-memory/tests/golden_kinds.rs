@@ -155,6 +155,27 @@ fn model_binding_v1() {
 }
 
 #[test]
+fn model_probe_v1() {
+    check(
+        KIND_MODEL_PROBE,
+        id("019a6a2b-0000-7000-8000-000000000008"),
+        ModelProbeBody {
+            role: ROLE_CHAT.into(),
+            model_key: "0123456789abcdef0123456789abcdef".into(),
+            build_info: "b1-138789d".into(),
+            prompt_tps: Some(812.5),
+            gen_tps: Some(41.2),
+            thinking_off: Some(true),
+            structured_ok: Some(false),
+            dims: None,
+            embed_ms: None,
+            rerank6_ms: None,
+            error: Some("speed: timed out".into()),
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,

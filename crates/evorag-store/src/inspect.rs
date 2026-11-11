@@ -4,11 +4,15 @@ use std::path::{Path, PathBuf};
 
 use redb::ReadOnlyDatabase;
 
+use crate::envelope::Envelope;
 use crate::journal;
 use crate::lock::DataRootLock;
 use crate::meta;
 use crate::restore::{self, BROKEN_DIR, BackupInfo};
-use crate::store::{Census, DB_FILE, KindSpec, OpenError, census_of, kind_map, read_meta_db_any};
+use crate::store::{
+    Census, DB_FILE, KindSpec, OpenError, census_of, classify, kind_map, read_meta_db_any,
+    split_record_key,
+};
 
 /// DB のファイルの状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +35,8 @@ pub struct Inspection {
     pub backups: Vec<BackupInfo>,
     /// `broken/` に残っている壊れた DB のファイル。
     pub broken: Vec<PathBuf>,
+    /// 読むよう頼まれた種類の、読めた記録 (種類ごと)。
+    pub collected: std::collections::BTreeMap<String, Vec<Envelope>>,
 }
 
 impl Inspection {
@@ -49,6 +55,16 @@ pub fn inspect(
     kinds: Vec<KindSpec>,
     backups: Option<&Path>,
 ) -> Result<Inspection, OpenError> {
+    inspect_collect(root, kinds, backups, &[])
+}
+
+/// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。
+pub fn inspect_collect(
+    root: &Path,
+    kinds: Vec<KindSpec>,
+    backups: Option<&Path>,
+    collect: &[&str],
+) -> Result<Inspection, OpenError> {
     let _lock = DataRootLock::acquire_quiet(root)?;
     let kinds = kind_map(kinds);
     let file = root.join(DB_FILE);
@@ -59,6 +75,7 @@ pub fn inspect(
         journal: journal::Summary::default(),
         backups: restore::list_backups(root, backups),
         broken: Vec::new(),
+        collected: Default::default(),
     };
     if file.is_file() {
         match ReadOnlyDatabase::open(&file) {
@@ -67,6 +84,7 @@ pub fn inspect(
                 out.meta = read_meta_db_any(&db).unwrap_or_default();
                 if let Ok(rtx) = redb::ReadableDatabase::begin_read(&db) {
                     out.census = census_of(&rtx, &kinds).unwrap_or_default();
+                    out.collected = collect_of(&rtx, collect);
                 }
             }
             Err(redb::DatabaseError::RepairAborted) => {
@@ -97,4 +115,32 @@ pub fn inspect(
         }
     }
     Ok(out)
+}
+
+fn collect_of(
+    rtx: &redb::ReadTransaction,
+    collect: &[&str],
+) -> std::collections::BTreeMap<String, Vec<Envelope>> {
+    let mut out = std::collections::BTreeMap::new();
+    if collect.is_empty() {
+        return out;
+    }
+    let Ok(table) = rtx.open_table(crate::store::RECORDS) else {
+        return out;
+    };
+    let Ok(iter) = redb::ReadableTable::iter(&table) else {
+        return out;
+    };
+    for (k, v) in iter.filter_map(Result::ok) {
+        let Some((kind, id)) = split_record_key(k.value()) else {
+            continue;
+        };
+        if !collect.contains(&kind.as_str()) {
+            continue;
+        }
+        if let crate::store::Read::Ok(env) = classify(&kind, id, k.value(), v.value()) {
+            out.entry(kind).or_insert_with(Vec::new).push(env);
+        }
+    }
+    out
 }

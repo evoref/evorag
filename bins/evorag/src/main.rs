@@ -338,6 +338,15 @@ fn main() -> ExitCode {
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+    // 補助の呼び出しに足す JSON (06 §6)。
+    let aux_request_extra: evorag_llm::RequestExtra = cfg
+        .llm
+        .chat
+        .aux_request_extra
+        .as_ref()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
     // v0.2 で使わなくなったキー (07 §4.2): 読んで無視し、知らせる。v0.1 の `/model` の候補は、
     // 切り替えを setup でだけ行うようにしたので使わない (ADR-0018)。
     let ignored_config = config::obsolete(&cfg);
@@ -379,6 +388,8 @@ fn main() -> ExitCode {
         ignored_config: ignored_config.clone(),
         embed: embed.clone(),
         rerank: rerank.clone(),
+        aux_request_extra: aux_request_extra.clone(),
+        probe_models: true,
         memory_enabled: cfg.memory_enabled(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
@@ -523,6 +534,10 @@ fn main() -> ExitCode {
             endpoint: url.trim_start_matches("http://").to_owned(),
             model: report.server.model_name.clone(),
             n_ctx: report.server.n_ctx,
+            // 前の点検で止めた機能 (06 §3.3)。まだ点検していなければ、点検の後に知らせが来る。
+            limited: core
+                .probe_result(evorag_memory::ROLE_CHAT)
+                .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
         },
     );
     for w in &report.location_warnings {

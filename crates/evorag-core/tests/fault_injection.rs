@@ -74,6 +74,8 @@ fn fault_child() {
             ignored_config: Vec::new(),
             embed: None,
             rerank: None,
+            aux_request_extra: Default::default(),
+            probe_models: false,
             memory_enabled: true,
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),

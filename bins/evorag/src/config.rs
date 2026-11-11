@@ -200,9 +200,6 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
             }
         }
     }
-    if config.llm.chat.aux_request_extra.is_some() {
-        ignored.push("llm.chat.aux_request_extra".to_owned());
-    }
     for (name, t) in [
         ("learning", &config.learning),
         ("update", &config.update),
