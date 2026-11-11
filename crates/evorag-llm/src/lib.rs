@@ -17,7 +17,7 @@ use std::pin::Pin;
 
 pub use endpoint::Endpoint;
 pub use http::{HttpClient, RetryPolicy};
-pub use model_key::model_key;
+pub use model_key::{file_name, model_key};
 pub use types::{
     ChatEvent, ChatMessage, ChatRequest, Generation, ModelMeta, RequestExtra, Role, ServerInfo,
     Usage,

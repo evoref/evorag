@@ -20,7 +20,8 @@ busy = "応答を生成しています。Esc で中断してから送ってく�
 no_session = "セッションが開いていません。"
 nothing_to_retry = "作り直す発話がありません。"
 nothing_to_rate = "評価する応答がありません。"
-unknown_model = "モデルの候補「{name}」は設定にありません (設定の [[llm.chat.models]] に名前と url を書きます)。"
+model_switch_in_setup = "モデルの切り替えは、evorag を閉じてから evorag setup で行います (/model は今のモデルを示すだけです)。"
+model_changed = "llama-server のモデルが、このデータ根に記録したモデルと違うので、送りませんでした (記録: {recorded}、今: {connected})。入力した文章は残してあります。記録したモデルで llama-server を起動し直すか、evorag を閉じて evorag setup で切り替えてください。"
 delete_failed = "セッションを消せませんでした ({detail})。"
 source_not_found = "出典 [{n}] が見つかりません (消したセッションの出典かもしれません)。"
 style_unknown_value = "/style {item} に「{value}」は選べません。選べる値: {choices}"
@@ -82,7 +83,7 @@ deleted = "セッションを消しました。"
 renamed = "セッションの名前を「{title}」にしました。"
 unreadable_turns = "このセッションには、この版では読めない記録が {count} 件あります (新しい版の evorag で書かれた記録)。表示していませんが、記録は残っています。"
 draft_restored = "前回の書きかけを入力欄に戻しました。"
-model = "モデル: {current} ({model}、n_ctx {n_ctx})。候補: {choices}"
+model_role = "{role}: 記録 {recorded} / 今 {connected}"
 sources_on = "このセッションでは、以前の会話を応答に添えます (/sources off で止めます)。"
 sources_off = "このセッションでは、以前の会話を応答に添えません (/sources on で戻します)。"
 source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
@@ -104,6 +105,18 @@ not_yet = "{name} は、この版ではまだ使えません。"
 editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
 [cli]
+model_mismatch = """応答のモデルが、このデータ根に記録したモデルと違います。
+  記録したモデル: {recorded}
+  繋がっているモデル: {connected}
+会話のデータには触れていないので、無事です。次のどれかを選んでください。
+  1. 記録したモデル ({recorded}) で llama-server を起動し直す。
+  2. evorag setup で切り替える (応答のモデルの切り替えでは、やり直すものはありません)。
+  3. 試すだけなら、別のデータ根を使う: evorag --data-root <別のフォルダ>{hint}"""
+model_mismatch_same_meta = """
+ファイル名だけが違い、モデルの値 (パラメータ数・大きさ・語彙数) は同じです。同じモデルの可能性が高いので、evorag setup で「同じモデルとして扱う」を選べます。"""
+model_recorded = "応答のモデル ({file}) を、このデータ根に記録しました。以後、違うモデルでは起動しません (切り替えは evorag setup で行います)。"
+model_recorded_unusual = "応答のモデル ({file}) を、このデータ根に記録しました。これまでの会話で多く使っていたモデルとは違います。違うなら、evorag を閉じて evorag setup で直せます。"
+config_obsolete = "設定の {key} は、この版では使いません (読んで無視します)。消してかまいません (v0.1 に戻す予定なら残してください)。"
 llm_unreachable = "llama-server ({url}) に接続できません: {detail}\n会話のデータには触れていないので、無事です。llama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
 llm_unauthorized = "llama-server ({url}) が API キーを受け付けませんでした (HTTP {status})。\n会話のデータには触れていないので、無事です。llama-server は動いています。設定の llm.chat.api_key_env に書いた環境変数 ({env}) に、llama-server の --api-key と同じキーが入っているかを確かめてください。"
 data_root_in_use = "データ根 ({path}) は、ほかの evorag (pid {pid}) が使っています。\n会話のデータは無事です。先に起動した evorag を終えてから、もう一度実行してください。"

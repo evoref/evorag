@@ -278,6 +278,34 @@ pub fn default_places() -> Option<Places> {
     }
 }
 
+/// v0.2 で使わなくなったキーと、その内容のハッシュ (07 §4.2・§4.1)。読んで無視し、内容が変わった
+/// ときだけ知らせる (知らせたかはデータ根に記録する)。
+pub fn obsolete(config: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(models) = &config.llm.chat.models {
+        let text = models
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(("llm.chat.models".to_owned(), fnv(&text)));
+    }
+    if let Some(t) = config.retrieval.as_ref().and_then(|r| r.get("thresholds")) {
+        out.push(("retrieval.thresholds".to_owned(), fnv(&t.to_string())));
+    }
+    out
+}
+
+/// 版をまたいで変わらないハッシュ (FNV-1a、64 ビット)。
+fn fnv(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

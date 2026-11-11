@@ -60,9 +60,15 @@ message_keys! {
     /// 引数: `detail`。
     CliLocationWarning => "cli.location_warning",
     /// 引数: `name`。
-    UnknownModel => "error.unknown_model",
+    ModelSwitchInSetup => "error.model_switch_in_setup",
+    ModelChanged => "error.model_changed",
+    CliModelMismatch => "cli.model_mismatch",
+    CliModelMismatchSameMeta => "cli.model_mismatch_same_meta",
+    CliModelRecorded => "cli.model_recorded",
+    CliModelRecordedUnusual => "cli.model_recorded_unusual",
+    CliConfigObsolete => "cli.config_obsolete",
+    UiModelRole => "ui.notice.model_role",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
-    UiModelInfo => "ui.notice.model",
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",
     StyleUnknownValue => "error.style_unknown_value",

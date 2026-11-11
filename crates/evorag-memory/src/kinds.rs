@@ -12,6 +12,14 @@ pub const KIND_SIGNAL: &str = "signal";
 pub const KIND_JOB: &str = "job";
 /// 利用者が画面から変えた、データ根の全体に効く設定 (03 §3.3、v0.2)。
 pub const KIND_SETTING: &str = "setting";
+/// 役割ごとに記録したモデル (06 §3.1、03 §3.3、v0.2)。
+pub const KIND_MODEL_BINDING: &str = "model_binding";
+/// 役割の名前 (足すだけで広げる文字列、03 §3.3)。
+pub const ROLE_CHAT: &str = "chat";
+pub const ROLE_EMBED: &str = "embed";
+pub const ROLE_RERANK: &str = "rerank";
+/// 設定の名前: 読んで無視した設定のキーと、その内容のハッシュ (同じなら 2 回目から知らせない、07 §4.1)。
+pub const SETTING_IGNORED_CONFIG: &str = "notice.ignored_config";
 /// 設定の名前: 答え方の既定 (07 §3 の `/style`)。
 pub const SETTING_ANSWER_LANGUAGE: &str = "answer.language";
 pub const SETTING_ANSWER_LENGTH: &str = "answer.length";
@@ -54,9 +62,42 @@ pub fn kinds() -> Vec<KindSpec> {
             journaled: true,
             derive: None,
         },
+        // 利用者が setup で確かめた (または最初の起動で記録した) 正本なので、ジャーナルに書く。
+        KindSpec {
+            name: KIND_MODEL_BINDING,
+            current_v: 1,
+            create_when_newer_present: true,
+            journaled: true,
+            derive: None,
+        },
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
     ]
+}
+
+/// モデルの元の値 (違いの中身を見せるため、06 §3.1)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOrigin {
+    pub model_key: String,
+    /// `/props` の `model_path` のファイル名 (フォルダを除く)。
+    pub file_name: String,
+    /// `/v1/models` の `data[0].id`。
+    pub model_name: String,
+    pub n_params: Option<u64>,
+    pub size: Option<u64>,
+    pub n_vocab: Option<u64>,
+    /// 記録したときの llama-server の `build_info`。
+    pub build_info: String,
+}
+
+/// `model_binding` の本体 (v1)。役割ごとに 1 件 (2 件以上あれば `updated_at` の新しいものを採る)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelBindingBody {
+    /// `chat`・`embed`・`rerank`。知らない役割は読んで残し、使わない (03 §3.3)。
+    pub role: String,
+    pub current: ModelOrigin,
+    /// 前に記録していたモデル (新しいものが後ろ)。前のモデルに戻したときに見分ける (06 §3.2 の 8)。
+    pub history: Vec<ModelOrigin>,
 }
 
 /// `setting` の本体 (v1)。名前ごとに 1 件 (2 件以上あれば `updated_at` の新しいものを採る、03 §3.3)。

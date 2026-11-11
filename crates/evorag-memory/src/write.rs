@@ -152,6 +152,52 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// 役割のモデルを記録する (06 §3.1)。記録があれば、前のモデルを履歴に移して書き換える。
+    pub fn bind_model(
+        &self,
+        current: &crate::read::Bindings,
+        role: &str,
+        origin: ModelOrigin,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let mut ops = Vec::new();
+        let e = match current.by_role.get(role) {
+            Some(b) => {
+                let mut body = b.body.clone();
+                if body.current.model_key != origin.model_key {
+                    body.history.push(body.current.clone());
+                }
+                body.current = origin;
+                let mut e = b.envelope.clone();
+                e.set_body(&body)?;
+                e.updated_at = now;
+                e
+            }
+            None => envelope(
+                self.ids.next_id(),
+                KIND_MODEL_BINDING,
+                now,
+                &ModelBindingBody {
+                    role: role.to_owned(),
+                    current: origin,
+                    history: Vec::new(),
+                },
+            )?,
+        };
+        ops.push(WriteOp::Put(e));
+        for d in &current.duplicates {
+            if d.body_as::<ModelBindingBody>()
+                .is_ok_and(|b| b.role == role)
+            {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_MODEL_BINDING.into(),
+                    id: d.id,
+                });
+            }
+        }
+        Ok(ops)
+    }
+
     /// 発話のターン (状態「応答待ち」)。LLM に送る前に書く (04 §3 の 1、FR-201)。
     pub fn user_turn(
         &self,

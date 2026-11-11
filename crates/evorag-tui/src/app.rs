@@ -219,29 +219,27 @@ impl App {
                 let m = self.catalog.key(MessageKey::UiNoticeDeleted);
                 self.notice(m);
             }
-            Event::ModelInfo {
-                current,
-                model,
-                n_ctx,
-                choices,
-            } => {
-                self.status.model.clone_from(&model);
+            Event::ModelInfo { roles, n_ctx } => {
                 self.status.n_ctx = n_ctx;
-                let choices = if choices.is_empty() {
-                    "-".to_owned()
-                } else {
-                    choices.join(", ")
+                // 役割ごとに「記録 / 今」を示す (ファイル名と model_key の先頭、06 §3.1)。
+                let show = |m: &Option<(String, String)>| match m {
+                    Some((file, key)) => format!("{file} ({})", &key[..key.len().min(8)]),
+                    None => "-".to_owned(),
                 };
-                let m = self.catalog.with(
-                    MessageKey::UiModelInfo,
-                    &[
-                        ("current", &current),
-                        ("model", &model),
-                        ("n_ctx", &n_ctx.to_string()),
-                        ("choices", &choices),
-                    ],
-                );
-                self.notice(m);
+                let lines: Vec<String> = roles
+                    .iter()
+                    .map(|r| {
+                        self.catalog.with(
+                            MessageKey::UiModelRole,
+                            &[
+                                ("role", &r.role),
+                                ("recorded", &show(&r.recorded)),
+                                ("connected", &show(&r.connected)),
+                            ],
+                        )
+                    })
+                    .collect();
+                self.notice(lines.join("\n"));
             }
             Event::SourcesInfo { memory } => {
                 let k = if memory {
