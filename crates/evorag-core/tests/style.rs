@@ -44,6 +44,8 @@ async fn start(root: &Path, llm: &ReplayClient, seed: u64) -> (Core, UnboundedRe
         ignored_config: Vec::new(),
         embed: None,
         rerank: None,
+        aux_request_extra: Default::default(),
+        probe_models: false,
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),

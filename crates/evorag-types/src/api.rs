@@ -198,6 +198,14 @@ pub enum Event {
     /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
     /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
     StyleInfo { values: [String; 3], changed: bool },
+    /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。
+    ProbeIssues {
+        role: String,
+        /// 思考を切れない。
+        thinking_not_off: bool,
+        /// 型縛りの出力が空、または型に合わない (型縛りの補助の呼び出しを止める)。
+        structured_broken: bool,
+    },
     /// embed・rerank の役割の状態が変わった (繋がった、記録と違った、記録した、06 §3)。
     RoleChanged {
         info: ModelRoleInfo,

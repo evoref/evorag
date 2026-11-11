@@ -30,6 +30,7 @@ fn app() -> App {
             endpoint: "127.0.0.1:8080".into(),
             model: "bench".into(),
             n_ctx: 8192,
+            limited: false,
         },
     );
     let turns = (0..TURNS)

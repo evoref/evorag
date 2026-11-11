@@ -117,6 +117,31 @@ impl DataRootModels {
     }
 }
 
+impl DataRootModels {
+    /// その役割・model_key・`build_info` の点検の結果が、もう保存してあるか (06 §3.3)。
+    pub fn probed(&self, role: &str, model_key: &str, build_info: &str) -> bool {
+        self.store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_probe(&r, role, model_key, build_info).ok())
+            .flatten()
+            .is_some()
+    }
+
+    /// 点検の結果を保存する。
+    pub fn save_probe(&self, body: &evorag_memory::ModelProbeBody) -> Result<(), String> {
+        let w = Writes {
+            clock: &*self.clock,
+            ids: &*self.ids,
+        };
+        let ops = w.save_probe(None, body).map_err(|e| e.to_string())?;
+        self.handle
+            .submit_wait(WriteRequest::conversation(ops))
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Drop for DataRootModels {
     fn drop(&mut self) {
         self.handle.shutdown();

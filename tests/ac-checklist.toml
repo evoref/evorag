@@ -851,3 +851,12 @@ status = "test"
 tests = ["crates/evorag-core/tests/rebind.rs::setup_switches_the_recorded_model_only_while_the_tui_is_closed"]
 manual = ""
 note = "TUI が動いている間はデータ根を開けない (DB の側)。先に示す文言は bin の setup。"
+
+[[ac]]
+id = "AC-FR-514-1"
+requirement = "FR-514"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/probe.rs::the_chat_probe_checks_structured_output_thinking_and_speed", "crates/evorag-core/tests/probe.rs::the_embed_and_rerank_probes_measure_dims_and_time", "crates/evorag-core/tests/probe.rs::the_core_probes_once_per_model_and_reports_issues"]
+manual = ""
+note = "点検・保存・同じモデルでは繰り返さないこと・使えない機能の知らせ。状態の行の印と doctor の表示は bin と TUI。型縛りの補助の呼び出し (ノートの鍵など) は M2.3 から入るので、止める側はそこで probe_result を見る。rerank の締切 (rerank_slow) は M2.5。"
