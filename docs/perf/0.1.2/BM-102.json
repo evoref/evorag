@@ -1,0 +1,11 @@
+{
+  "mean_ms": 7.182576666666667,
+  "p95_ms": 9.4155,
+  "sends": 30,
+  "target_mean_ms": 100,
+  "id": "BM-102",
+  "turns": 10000,
+  "evorag": "0.1.2",
+  "target": "x86_64",
+  "os": "windows"
+}
