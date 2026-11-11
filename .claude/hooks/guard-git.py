@@ -11,7 +11,7 @@ PR (squash) で develop に入れる。リリースは develop → main の PR (
 - main / develop 上での commit / merge / rebase 等を拒否 (作業ブランチ → PR で入れる)
 - リリースタグ (v*) の作成・push を拒否 (署名付きタグは人間が付ける)
 - git stash を拒否 (作業ツリーを動かす操作)。reset --hard / clean -f / restore / checkout -- は確認を求める
-- gh pr merge は確認を求める (merge は人間)
+- gh pr merge は確認を求める (merge するかどうかは人間が決める。実行は指示を受けたエージェント、docs/11 §9.1)
 
 標準入力の JSON から tool_input.command を読み、deny / ask のときだけ JSON を出力する。
 """
@@ -133,7 +133,7 @@ def main():
             cwd = resolve(cwd, m.group(1))
             continue
         if re.match(r"^gh\s+pr\s+merge\b", seg):
-            decide("ask", "PR の merge は人間が行います。実行してよいか確認してください。")
+            decide("ask", "PR の merge は人間が決めます。この PR を入れてよいか確認してください。")
         sub, args, dash_c = git_args(seg)
         if sub is None:
             continue

@@ -90,13 +90,20 @@ evorag/
 
 | ブランチ | 用途 | 規則 |
 |---|---|---|
-| `main` | リリース専用。リリースした版だけが入り、各リリースのマージコミットにタグ (`v0.1.0` 等) が付く。v0.1.0 のリリースまでは初期コミット (`LICENSE`・`README.md`・`.gitignore`) のまま変えない | 直接 push・force push・削除の禁止。PR は `develop` (リリース) からだけ受け、merge は人間 (merge commit)。タグは人間が署名して付ける |
+| `main` | リリース専用。リリースした版だけが入り、各リリースのマージコミットにタグ (`v0.1.0` 等) が付く。v0.1.0 のリリースまでは初期コミット (`LICENSE`・`README.md`・`.gitignore`) のまま変えない | 直接 push・force push・削除の禁止。PR は `develop` (リリース) からだけ受け、merge は人間の指示で行う (merge commit、下の「merge の実行」)。タグは人間が署名して付ける |
 | `develop` | 開発の本線。作業ブランチの取り込み先で、リリースの起点。v0.1.0 のリリースまでは既定ブランチにする。Dependabot のバージョン更新の宛先 | 直接 push・force push・削除の禁止。PR は作業ブランチ (squash)・Dependabot (squash)・`main` (リリース後の取り込み、merge commit) からだけ受け、必須の CI を通す |
 | `<種別>/<crate>-<短い説明>` | 作業ブランチ。種別は `feat` / `fix` / `spec` (docs) / `chore` / `spike`。`develop` から作り、PR の宛先は `develop` | 例: `feat/evorag-store-envelope`、`spec/05-retrieval-budget`。エージェントは `agent/<名前>/<Issue 番号>-<短い説明>`。merge 後に消す |
 | `spike/S-nn` | 技術検証 (08 §3) | `spikes/S-nn/` 以下のみ。merge せず `REPORT.md` だけを `spec/` ブランチで取り込む |
 
 **流れ**: 作業ブランチ → PR (squash) → `develop` → リリース時に PR (merge commit) → `main` → 人間がマージコミットに署名付きタグを付けて GitHub Releases に公開 (09 §9) → `main` を `develop` に取り込む (PR、merge commit)。
 
+- **merge の実行** (確定 (ユーザー回答、2026-11-11)): PR を入れるかどうかは人間が決め、PR ごとに指示する。実行は、指示を受けたエージェントが `gh pr merge` で行う (人間が自分で同じコマンドを打ってもよい)。GitHub の画面など、ほかの方法では入れない。
+  - 作業の PR は `gh pr merge <番号> --squash`、`develop` ↔ `main` の PR は `gh pr merge <番号> --merge`。コマンドの squash は、件名が PR の題、本文が元のコミットのメッセージになり、`Signed-off-by:` が残る。
+  - ほかの方法をやめた理由: `gh pr merge` 以外の方法で squash したコミットのメッセージが「Merge pull request #N …」に置き換わり、`Signed-off-by:` が落ちることが 3 回あった (#70・#76・#78、08 §6)。3 回とも、merge commit で入れた PR の直後の squash だった。
+  - `--delete-branch` は付けない (手元の作業ツリーを `develop` に切り替えるため)。作業ブランチは、入れた後に別に消す。
+  - 入れた後に、取り込んだコミットのメッセージに `Signed-off-by:` があることと、`develop` の push の CI が通ることを確かめる。落ちていたら、次の作業の前に直す。
+  - hook は `gh pr merge` のたびに確認を出す (§4)。人間が承認しなければ入らない。
+  - タグの作成と push、配布物の署名、Release の公開は、人間だけが行う。
 - **版番号**: v0.1.0 のリリースまでの workspace の版は内部カウンタ `0.0.x` で、`x` はマイルストーン (08 §4) を `develop` に取り込む PR で 1 つ上げる。`0.0.x` にはタグを付けない。リリース PR で workspace の版と CHANGELOG を `0.y.z` に直す。版の比較は数値順 (`git tag --sort=version:refname`)。
 - **機能リリース** は `0.y.0` 単位、**bugfix リリース** はパッチ版 (`0.y.z` の z)。パッチ版を出せる条件は、前回のタグ以降の `develop` に `feat` が 1 件も入っていないこと。機能リリースの直後からパッチ版を出し終えるまでは `feat` の PR の merge を後回しにする。
 - **凍結**: リリース手順の凍結 (09 §9.2 の手順 1) から昇格とタグ (手順 4) までは、`develop` への merge (Dependabot の PR を含む) を保留する。例外は `main` → `develop` の取り込みだけで、版上げ (手順 2) の前に限る。
@@ -131,7 +138,7 @@ Closes #12
 ### 9.3 CHANGELOG とリリース
 
 - `CHANGELOG.md` は Keep a Changelog 形式で、PR ごとに Unreleased へ 1 行足す。利用者に見えない変更は `changelog: none`。
-- 版上げと CHANGELOG の確定は、`develop` に対するリリース PR (`chore(release): v0.1.0`) で、リリースゲートの判定の前に行う (09 §9.2 の手順 2)。`develop` → `main`・`main` → `develop` の PR は merge commit で、人間が作り、人間が merge する。
+- 版上げと CHANGELOG の確定は、`develop` に対するリリース PR (`chore(release): v0.1.0`) で、リリースゲートの判定の前に行う (09 §9.2 の手順 2)。`develop` → `main`・`main` → `develop` の PR は merge commit で、人間が作り、人間の指示で merge する (§9.1 の「merge の実行」)。
 - リリースの前に、リリースノートの「更新の方法」とデータの移行の有無、利用者向け README の「更新と巻き戻し」の節がその版と合っているかを確かめる (09 §8.2)。
 - **リポジトリの README** は、英語版 (`README.md`) を表に置き、冒頭に日本語版 (`README.ja.md`) へのリンクを置く (日本語版の冒頭にも英語版へのリンクを置く)。日本語版を正とし、2 つを同じ PR で直す。
   - **版を上げるたびに直す** (機能リリースとパッチ版の両方)。リリース PR (09 §9.2 の手順 2) で、冒頭の「最新の版」(版と日付、配布物の対象の OS) と「状況」の節 (その版で届いたもの、次の版の予定) を、その版に合わせる。
@@ -139,7 +146,7 @@ Closes #12
 
 ### 9.4 寄稿ポリシー (DCO)
 
-- 寄稿は **DCO** (確定 (ユーザー回答)、[OQ-02](10-decisions.md#oq-02-寄稿ポリシー))。すべてのコミットに `Signed-off-by:` を付ける (`git commit -s`)。メンテナと AI エージェントのコミットも同じ。DCO の検査 (09 §6.2 の `dco` ジョブ) は最初の CI から入れる。Dependabot は署名を付けられないので、Dependabot が作ったコミットだけは検査から除く (人間がそれを squash で入れるときは、squash のコミットメッセージに `Signed-off-by:` を足す)。 ほかに、履歴を書き換えられない過去のコミットで、中身が DCO の表明つきのものは、`.github/dco-exempt` に理由つきで書いて除く (v0.1.0 の前に GitHub が作った `6b93267` だけ、08 §6)。
+- 寄稿は **DCO** (確定 (ユーザー回答)、[OQ-02](10-decisions.md#oq-02-寄稿ポリシー))。すべてのコミットに `Signed-off-by:` を付ける (`git commit -s`)。メンテナと AI エージェントのコミットも同じ。DCO の検査 (09 §6.2 の `dco` ジョブ) は最初の CI から入れる。Dependabot は署名を付けられないので、Dependabot が作ったコミットだけは検査から除く (人間がそれを squash で入れるときは、squash のコミットメッセージに `Signed-off-by:` を足す)。 ほかに、履歴を書き換えられない過去のコミットで、中身が DCO の表明つきのものは、`.github/dco-exempt` に理由つきで書いて除く (v0.1.0 の前に GitHub が作った `6b93267` と、squash で `Signed-off-by:` が落ちた `02e4b3e`・`1d716e7`・`185e52e`、08 §6)。squash は `gh pr merge --squash` で行う (§9.1 の「merge の実行」)。
 - 公開してよい著者名とメールアドレスだけを使う (リポジトリの `user.email` を設定する)。
 - 外部からの PR の受付は、受付の条件 ([12 §3](12-licensing-distribution.md#3-寄稿)) が整ってから始める。それまでは `CONTRIBUTING.md` に「まだ受け付けていない」と書く。
 
