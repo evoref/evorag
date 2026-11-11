@@ -30,7 +30,12 @@ pub const RESERVE_FILE: &str = "reserve.space";
 const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
-pub const FORMAT_VERSION: &str = "0.1";
+pub const FORMAT_VERSION: &str = "0.2";
+
+/// この形式の DB を読み書きするのに要る、evorag が知る形式の版の下限 (`format.min_read`・
+/// `format.min_write`、03 §3.1.1)。0.2 は 0.1 に種類と任意の項目を足しただけなので、0.1 のまま
+/// にし、v0.1.2 に戻しても読み書きできるようにする (03 §12.1)。
+pub const FORMAT_MIN: &str = "0.1";
 
 pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub(crate) const META: Raw = TableDefinition::new("meta");

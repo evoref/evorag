@@ -18,7 +18,9 @@ use crate::backup;
 use crate::envelope::{DecodeError, Envelope};
 use crate::fsutil;
 use crate::meta;
-use crate::store::{BLOBS, DB_FILE, FORMAT_VERSION, LINKS, LOOKUP, META, RECORDS, Raw, TABLES};
+use crate::store::{
+    BLOBS, DB_FILE, FORMAT_MIN, FORMAT_VERSION, LINKS, LOOKUP, META, RECORDS, Raw, TABLES,
+};
 use crate::version::Version;
 
 /// 移行の関数。`ctx` を通して、元の DB を読み、移行先に書く。
@@ -40,8 +42,23 @@ impl std::fmt::Debug for Migration {
     }
 }
 
-/// この版の evorag が持つ移行 (v0.1 は最初の形式なので無い)。
-pub const MIGRATIONS: &[Migration] = &[];
+/// この版の evorag が持つ移行 (v0.1〜v0.4 は直前の版の分だけ、03 §12.1)。
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    from: "0.1",
+    to: "0.2",
+    run: copy_all,
+    counts_change: &[],
+}];
+
+/// 0.1 → 0.2: 種類と任意の項目を足すだけなので、記録は書き換えずに表をそのまま写す (03 §12.1)。
+/// 新しい種類 (`setting` など) は書いたときに増える。古い版の索引の片付けや派生の記録の作り直しは、
+/// 移行ではなく、開いた後の突き合わせで行う (03 §4.2 の規則 12)。
+fn copy_all(ctx: &mut MigrationCtx<'_>) -> Result<(), String> {
+    for t in Table::ALL {
+        ctx.copy_table(t)?;
+    }
+    Ok(())
+}
 
 /// この evorag が書く形式と、持っている移行。
 #[derive(Debug, Clone)]
@@ -56,8 +73,8 @@ impl FormatPlan {
     pub fn current() -> Self {
         Self {
             version: FORMAT_VERSION.to_owned(),
-            min_read: FORMAT_VERSION.to_owned(),
-            min_write: FORMAT_VERSION.to_owned(),
+            min_read: FORMAT_MIN.to_owned(),
+            min_write: FORMAT_MIN.to_owned(),
             migrations: MIGRATIONS.to_vec(),
         }
     }
