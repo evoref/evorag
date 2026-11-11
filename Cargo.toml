@@ -18,7 +18,7 @@ members = [
 
 [workspace.package]
 # v0.1.0 のリリースまでは内部カウンタ 0.0.x (docs/11-dev-workflow.md §9.1)。
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # rust-toolchain.toml の版と同じにする (docs/11-dev-workflow.md §1.1)。
 rust-version = "1.99"
