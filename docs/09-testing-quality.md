@@ -187,7 +187,7 @@
 ### 9.2 手順
 
 1. **凍結**: `develop` への merge (Dependabot の PR を含む) を保留する。例外は `main` → `develop` の取り込み (パッチ版のリリースの後) だけで、版上げ (手順 2) の前に限る (11 §9.1)。
-2. **版上げ**: `develop` に対するリリース PR (`chore(release): vX.Y.Z`) で、workspace の版を `X.Y.Z` にし、CHANGELOG の Unreleased を `X.Y.Z` にし、リポジトリの README (`README.md` と `README.ja.md`) の「最新の版」と「状況」をその版に直す (パッチ版を含む、11 §9.3)。**ゲートの前に行う** (出荷する版番号のソースで判定するため)。入れた後の `develop` の先頭の SHA を判定コミットとし、`git merge-base --is-ancestor develop <判定コミット>` と `git merge-base --is-ancestor main <判定コミット>` が真であることを確かめる (偽なら `main` を `develop` に取り込むなどして整え、手順 2 からやり直す)。
+2. **版上げ**: `develop` に対するリリース PR (`chore(release): vX.Y.Z`) で、workspace の版を `X.Y.Z` にし、CHANGELOG の Unreleased を `X.Y.Z` にし、リポジトリの README (`README.md` と `README.ja.md`) の「最新の版」と「状況」をその版に直す (パッチ版を含む、11 §9.3)。**ゲートの前に行う** (出荷する版番号のソースで判定するため)。リリース PR を作る前に、`develop` の先頭の push の CI (`dco` を含む) が通っていることを確かめる (落ちたまま進めると、`develop` → `main` の PR で止まり、判定コミットを改めることになる。08 §6 の v0.1.2)。入れた後の `develop` の先頭の SHA を判定コミットとし、`git merge-base --is-ancestor develop <判定コミット>` と `git merge-base --is-ancestor main <判定コミット>` が真であることを確かめる (偽なら `main` を `develop` に取り込むなどして整え、手順 2 からやり直す)。
 3. **ゲート**: 判定コミットで §8.2 を行い、`docs/compat/<X.Y.Z>/release-checklist.md` (先頭に判定コミットの 40 桁の SHA) と、性能・受入の記録を埋めて `develop` に入れる (タグの前)。
 4. **昇格とタグ**: `develop` → `main` の PR を人間が作り、merge commit で入れる。`main` のマージコミットに、人間が署名付きのタグ `vX.Y.Z` を付ける。`release.yml` は最初にタグを検証する (`git verify-tag` と `.github/allowed_signers`、`main` のマージコミットを指すこと、`Cargo.toml` の版との一致、判定コミットとの差分が記録の許可リストだけであること)。昇格が終わったら凍結を解く。
    - タグの署名鍵 (Git の SSH 署名鍵) は、minisign の鍵とは別の鍵にする (11 §9.7)。

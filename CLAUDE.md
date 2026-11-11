@@ -12,7 +12,8 @@
 - 作業ブランチは **`develop` から作る**。種別は `feat/` `fix/` `spec/` (docs) `chore/` `spike/`。名前は `<種別>/<crate>-<短い説明>` (例: `feat/evorag-store-envelope`、`spec/05-retrieval-budget`)。エージェントの作業は `agent/<名前>/<Issue 番号>-<短い説明>`。
 - **1 タスク = 1 作業ブランチ = 1 PR**。PR は `develop` 宛て、squash で入れる。マージ後に作業ブランチを削除する。rebase は作業ブランチ内でだけ自由。
 - `dev/<版>`、`release/*`、`hotfix/*` ブランチは使わない。
-- merge は人間が行う。`gh pr merge` は実行前に確認が出る。
+- merge するかどうかは人間が決め、PR ごとに指示する。実行は、指示を受けた私が `gh pr merge` で行う (作業の PR は `--squash`、`develop` ↔ `main` の PR は `--merge`。`--delete-branch` は付けない)。指示の無い PR は入れない。`gh pr merge` は実行前に確認が出る。
+- 入れた後に、取り込んだコミットに `Signed-off-by:` があることと、`develop` の CI が通ることを確かめる ([docs/11 §9.1](docs/11-dev-workflow.md#91-ブランチ) の「merge の実行」)。
 
 ## リリースと版
 
