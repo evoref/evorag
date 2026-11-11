@@ -15,7 +15,8 @@ pub use kinds::{
     SessionState, SignalBody, SignalKind, TurnBody, TurnRole, TurnState, kinds,
 };
 pub use read::{
-    MemoryError, Session, Turn, list_sessions, load_session, pending_user_turns, session_turns,
+    MemoryError, Session, SessionTurns, Turn, list_sessions, load_session, pending_user_turns,
+    session_turns, session_turns_counted,
 };
 pub use write::{
     AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,

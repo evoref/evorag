@@ -5,3 +5,9 @@
 # Signed-off-by: が無いが、中身の 6deabef は DCO の表明つき。develop は保護されていて
 # 履歴を書き換えられない。v0.1.0 では、このコミットのために #58・#60 で検査を飛ばした (08 §6)。
 6b93267cfab7cfc5df5972e5a134a00429ccdc04
+#
+# GitHub が PR #70 をスカッシュで取り込んだときに作ったコミット (親は 1 つ、committer は GitHub)。
+# メッセージが「Merge pull request #70 …」に置き換わり、Signed-off-by: が落ちた。
+# 中身 (ツリー) は、DCO の表明つきの 8d61254 と同じ。develop は保護されていて履歴を書き換えられない。
+# v0.1.2 の develop → main の PR (#73) で見つかった。
+02e4b3e787685fbf253262f443f99c741191fcce

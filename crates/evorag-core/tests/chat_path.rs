@@ -690,3 +690,85 @@ async fn a_new_data_root_is_created_owner_only_and_used() {
         "the data root is used"
     );
 }
+
+/// 新しい版が書いたターンを模して、ストアに直接書く。本体の `role` が、この版の知らない値。
+fn write_turn_from_a_newer_version(root: &Path, session: evorag_types::Id) {
+    use evorag_types::{Clock, IdGen};
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_010_000)));
+    let ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 99));
+    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.3".into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: ids.clone(),
+        config_file: None,
+    })
+    .unwrap();
+    let store = Arc::new(store);
+    let (w, writer) = evorag_store::Writer::new(store.clone()).unwrap();
+    let thread = std::thread::spawn(move || w.run());
+    let id = ids.next_id();
+    let mut e = evorag_store::Envelope::new(id, evorag_memory::KIND_TURN, 1, clock.now(), "");
+    e.set_body(&serde_json::json!({
+        "session": session.to_string(),
+        "role": "tool",
+        "state": "completed",
+        "text": "新しい版の記録",
+        "model_key": null,
+        "generation": null,
+        "attached": [],
+        "reply_to": null,
+        "error": null,
+    }))
+    .unwrap();
+    writer
+        .submit_wait(evorag_store::WriteRequest::conversation(vec![
+            evorag_store::WriteOp::Put(e),
+            evorag_store::WriteOp::PutLink {
+                from: id,
+                rel: evorag_memory::REL_IN_SESSION.into(),
+                to: session,
+                attrs: Vec::new(),
+            },
+        ]))
+        .unwrap();
+    writer.shutdown();
+    thread.join().unwrap();
+}
+
+/// verifies: AC-FR-215-3 (コアの層: 読めないターンがあってもセッションを開き、件数を知らせる)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_with_a_turn_from_a_newer_version_still_opens() {
+    let dir = TempDir::new("core-unreadable-turn");
+    let llm = cassette(8192, HELLO);
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    core.command(Command::NewSession {
+        title: "試験".into(),
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let Some(Event::SessionOpened { session, .. }) = ev.last() else {
+        panic!()
+    };
+    let sid = session.id;
+    core.command(Command::Send { text: "一".into() });
+    until(&mut rx, finished).await;
+    core.shutdown().await;
+
+    write_turn_from_a_newer_version(dir.path(), sid);
+
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    core.command(Command::OpenSession { id: sid });
+    let ev = until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let Some(Event::SessionOpened {
+        turns, unreadable, ..
+    }) = ev.last()
+    else {
+        panic!()
+    };
+    let texts: Vec<&str> = turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, ["一", "こんにちは"], "the readable turns are shown");
+    assert_eq!(*unreadable, 1);
+    assert_eq!(core.turns(sid).len(), 2);
+    core.shutdown().await;
+}

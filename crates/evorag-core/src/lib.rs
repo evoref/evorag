@@ -834,7 +834,8 @@ fn open_session(inner: &Inner, id: Id) {
         reject(inner, MessageKey::NoSession);
         return;
     };
-    let turns = evorag_memory::session_turns(&rtx, id).unwrap_or_default();
+    // この版では読めないターンは読み飛ばし、件数を画面に知らせる (03 §4.2 の規則 11)。
+    let read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
     inner
         .state
         .lock()
@@ -844,7 +845,8 @@ fn open_session(inner: &Inner, id: Id) {
         inner,
         Event::SessionOpened {
             session: views::session(&s),
-            turns: turns.iter().map(views::turn).collect(),
+            turns: read.turns.iter().map(views::turn).collect(),
+            unreadable: read.unreadable,
         },
     );
 }

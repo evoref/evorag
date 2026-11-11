@@ -98,6 +98,8 @@ message_keys! {
     UiNoticeDeleted => "ui.notice.deleted",
     /// 引数: `title`。
     UiNoticeRenamed => "ui.notice.renamed",
+    /// 引数: `count`。
+    UiNoticeUnreadableTurns => "ui.notice.unreadable_turns",
     /// 引数: `name`。
     UiUnknownCommand => "ui.error.unknown_command",
     /// 引数: `name`。

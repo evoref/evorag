@@ -85,6 +85,9 @@ pub enum Event {
     SessionOpened {
         session: SessionView,
         turns: Vec<TurnView>,
+        /// この版では読めなかったターンの数 (新しい版が書いた記録。消さずに残っている、
+        /// 03 §4.2 の規則 11)。`turns` には入らない。
+        unreadable: usize,
     },
     /// 発話を保存した (この後で LLM に送る)。
     UserTurnSaved { turn: TurnView },

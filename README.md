@@ -1,36 +1,79 @@
 # evorag
 
-手元の llama-server (llama.cpp) だけで動く、Rust 製のチャットと長期メモリのツールです。会話は PC の外に出しません。以前の会話と、そこから覚えた事実を出典つきで応答に添え、評価と訂正から少しずつ良くなります (モデルの重みは学習しません)。
+English | [日本語](README.ja.md)
 
-> **開発中です。まだ配布物はありません。** 最初の版 (v0.1) は Windows 11 向けで、リリースの準備をしています。
+A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. Later versions will remember facts about you and improve from your ratings and corrections. It never trains model weights.
 
-## 状況
+> **The latest release is v0.1.2 (2026-11-11).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
 
-- v0.1 (最小核) の機能は `develop` に入っています: 手元の llama-server と日本語で会話でき、会話は強制終了しても消えず、以前の会話を出典つきで思い出します。版ごとの予定は [docs/08-roadmap.md](docs/08-roadmap.md) にあります。
-- 利用者向けの手順書 (入れ方・setup・更新と巻き戻し・既知の制約) は [dist/README.md](dist/README.md) です。配布物に同梱します。
-- 配布物の署名は minisign で行います。公開鍵はリポジトリ直下の [`minisign.pub`](minisign.pub) で、鍵 ID は `A3B00C77E1EA828E` です。
+## Status
 
-## 仕様書
+- **v0.1 (minimal core)** was released as v0.1.0 on 2026-11-10. v0.1.1, released the same day, fixed error messages. v0.1.2 (2026-11-11) lets v0.1 open sessions that contain records written by a newer version.
+  - It runs in Windows Terminal on Windows 11. The user interface is in Japanese.
+  - It chats with a local llama-server, showing the answer as it is generated. You can interrupt and regenerate.
+  - Conversations are kept as sessions. They are written to a database and a journal, so they survive a forced exit. A backup is taken once a day, and `evorag restore` brings one back.
+  - It finds related remarks in earlier conversations (a lexical index) and attaches them to the answer with source numbers.
+  - Linux and macOS are not supported yet.
+- **v0.2** is being specified. It shortens the wait before an answer starts, uses a reranker to stop unrelated memories from being attached, adds embeddings and vector search, organizes conversations while you are away, and adds Linux support.
 
-仕様書は [docs/](docs/README.md) にあります。**作業中の版として公開しています**。内容は変わることがあり、「提案中」と書かれた事項は未確定です。
+The plan for each version up to v0.6 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
 
-- 入口: [docs/README.md](docs/README.md)
-- 決定記録 (ADR) と未決事項 (OQ): [docs/10-decisions.md](docs/10-decisions.md)
-- ロードマップ: [docs/08-roadmap.md](docs/08-roadmap.md)
+The storage format may change until v0.5. Each version migrates data from the version just before it, so update one version at a time.
 
-`main` はリリースした版の仕様だけを持ちます。開発中の版は `develop` の `docs/` です。
+Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Japanese).
 
-## ブランチ
+## Requirements
 
-- `main`: リリース専用です。リリースした版だけが入ります。
-- `develop`: 開発の本線です。作業ブランチから PR で入れます。
+evorag does not include a model or an inference engine. You need a running llama-server from [llama.cpp](https://github.com/ggml-org/llama.cpp) and a chat model in GGUF format. `evorag setup` finds the server, checks what it can do, and writes the configuration.
 
-詳細は [docs/11-dev-workflow.md](docs/11-dev-workflow.md) の §9.1 を参照してください。
+By default evorag connects only to a llama-server on the same PC (loopback).
 
-## 貢献について
+## Verifying downloads
 
-**外部からの Pull Request は、まだ受け付けていません。** バグ報告や意見は Issues で歓迎します。脆弱性は公開の Issue に書かず、[SECURITY.md](SECURITY.md) の窓口に報告してください。貢献の方針は [CONTRIBUTING.md](CONTRIBUTING.md) にあります。
+Each release has a `SHA256SUMS` file signed with minisign (`SHA256SUMS.minisig`). The public key is below. It is the same as [minisign.pub](minisign.pub) in this repository; compare the two before you trust it.
 
-## ライセンス
+```text
+untrusted comment: minisign public key A3B00C77E1EA828E
+RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
+```
 
-[Apache License 2.0](LICENSE) です。帰属表示は [NOTICE](NOTICE) を参照してください。
+```sh
+minisign -Vm SHA256SUMS -P RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
+```
+
+The full steps are in the bundled README.
+
+## Specification
+
+The specification is in [docs/](docs/README.md) and is written in Japanese.
+
+**It is published as a work in progress.** It may change, and items marked "提案中" (proposed) are not yet decided.
+
+The specification of a released version is the `docs/` of that version's tag (or of `main`). The version in development is the `docs/` of `develop`.
+
+- Entry point: [docs/README.md](docs/README.md)
+- Decision records (ADR) and open questions (OQ): [docs/10-decisions.md](docs/10-decisions.md)
+- Roadmap: [docs/08-roadmap.md](docs/08-roadmap.md)
+
+## Branches
+
+- `main`: releases only. Only released versions are merged here.
+- `develop`: the main line of development. Changes come in from work branches through pull requests.
+
+See §9.1 of [docs/11-dev-workflow.md](docs/11-dev-workflow.md) for details.
+
+## Contributing
+
+**Pull requests from outside the project are not accepted yet.** Bug reports and feedback are welcome in Issues.
+
+Do not report vulnerabilities in public issues; use the contact in [SECURITY.md](SECURITY.md).
+
+The contribution policy is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attributions.
+
+---
+
+The Japanese version ([README.ja.md](README.ja.md)) is authoritative. If the two differ, the Japanese version applies.
