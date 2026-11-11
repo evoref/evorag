@@ -27,8 +27,9 @@
 
 | 確かめること | 結果 | 確かめた日・版 |
 |---|---|---|
-| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 未 | |
+| `SHA256SUMS` と minisign の署名を、同梱の手順書どおりに確かめられる | 合 | 2026-11-11、0.1.2 (判定コミット 04fa77c7、`cargo xtask dist` で作り本物の鍵で署名した配布物)、利用者が確認 |
 
+- `cargo xtask verify-release target\dist --require-signatures` も合格 (trusted comment: `evorag 0.1.2 release.json sha256 fd3885d1…`)。`evorag --version` は `0.1.2` / `commit: 04fa77c7beb0` / `installed via: zip`。
 - 公開した配布物の検証は、09 §9.2 の手順 10 で行い、Release のノートに書く。
 
 ## 5. v0.1.1 からの更新と、セッションを開くこと (AC-FR-215-3)
