@@ -45,7 +45,7 @@
   - `v*` タグの作成と push
   - `git stash` (作業ツリーを動かし、改行コードや未追跡の変更を壊しやすいため)
   - `git reset --hard` / `git clean -f` / `git restore` / `git checkout -- <path>` (確認が出る)
-  - `gh pr merge` (確認)
+  - `gh pr merge` (確認。利用者が手元に `.claude/auto-merge-squash` を置いたときは、`gh pr merge <番号> --squash` の形だけ確認を省く)
 - GitHub のブランチ保護 (`main` と `develop`) も併用する。
 - hook に拒否されたら、回避せずに理由を人間に伝えて指示を待つ。
 - hook はコマンドの文字列を見て判定するので、heredoc や文字列の中の `git ...` にも反応する。文書を書くときは Write / Edit を使う。

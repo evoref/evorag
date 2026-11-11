@@ -33,3 +33,6 @@ rustc-ice-*.txt
 
 # xtask gen-corpus の生成物 (コミットしない。docs/09 §4)
 /testdata/generated/
+
+# gh pr merge --squash の確認を省く印 (利用者が手元で置く。.claude/hooks/guard-git.py、docs/11 §4)
+/.claude/auto-merge-squash
