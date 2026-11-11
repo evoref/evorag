@@ -165,6 +165,28 @@ setup_written = "設定を {path} に書きました。evorag で会話を始め
 setup_unchanged = "設定 {path} は今のままで使えます。"
 setup_not_written = "設定 {path} は書き換えませんでした。"
 
+[cli.setup]
+tui_running = "evorag が動いています (このデータ根を使っています)。設定ファイルだけを書けます。モデルの記録を書き換えるには、evorag を閉じてから evorag setup を実行し直してください。"
+role_found = "{role}: {url} で {file} が動いています。"
+role_missing = """{role} の llama-server が見つかりません (勧める構成。無くても動きます)。起動の例:
+  {example}"""
+embed_example = "llama-server -m <埋め込みのモデル>.gguf --embedding --pooling last --host 127.0.0.1 --port 8081 --api-key <キー>"
+rerank_example = "llama-server -m <リランカー>.gguf --reranking --host 127.0.0.1 --port 8082 --api-key <キー>"
+extra_chat = "{url} は応答用 (chat) の llama-server のようです (v0.1 の /model の候補だったかもしれません)。v0.2 では使いません。"
+model_recorded = "{role} のモデル ({file}) を、このデータ根に記録しました。"
+model_diff = """{role} のモデルが、このデータ根の記録と違います。
+  記録: {recorded}
+  今:   {connected}"""
+redo_chat = "応答のモデルの切り替えでは、やり直すものはありません。"
+redo_embed = "埋め込みのモデルを切り替えると、ベクトルの索引を作り直します。作り直しは裏で、操作していない間だけ進みます。その間は語彙の検索とリランクで答えます。"
+redo_rerank = "リランカーを切り替えると、しきい値を同梱の事例で求め直します。"
+ask_same = "ファイル名だけが違い、モデルの値は同じです。同じモデルとして扱いますか (記録だけを直し、作り直しをしません)? [y/N]"
+ask_switch = "{role} のモデルを、今のモデルに切り替えますか? [y/N]"
+switched = "{role} のモデルを切り替えました ({file})。"
+kept_chat = "応答のモデルは切り替えませんでした。このままでは次の起動で止まります。llama-server を {recorded} で起動し直してください。"
+kept = "{role} のモデルは切り替えませんでした。切り替えるまで、{role} を使わずに動きます。"
+needs_confirm = "モデルの切り替えには、対話での確認が要ります (--yes では切り替えません)。"
+
 [doctor]
 config = "設定: {path} (読めました)"
 llm_ok = "llama-server: {url} に接続できます (モデル {model}、n_ctx {n_ctx}、{build})"
