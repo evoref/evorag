@@ -121,6 +121,18 @@ fn signal_v1() {
 }
 
 #[test]
+fn setting_v1() {
+    check(
+        KIND_SETTING,
+        id("019a6a2b-0000-7000-8000-000000000006"),
+        SettingBody {
+            name: SETTING_ANSWER_LENGTH.into(),
+            value: "short".into(),
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,

@@ -8,6 +8,17 @@
 
 use std::collections::BTreeMap;
 
+use evorag_types::api::StyleItem;
+
+/// 項目を保存する設定の名前 (03 §3.3 の `setting`)。
+pub fn setting_name(item: StyleItem) -> &'static str {
+    match item {
+        StyleItem::Language => evorag_memory::SETTING_ANSWER_LANGUAGE,
+        StyleItem::Length => evorag_memory::SETTING_ANSWER_LENGTH,
+        StyleItem::Format => evorag_memory::SETTING_ANSWER_FORMAT,
+    }
+}
+
 /// プロンプトの言語。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptLanguage {
@@ -98,6 +109,59 @@ impl AnswerFormat {
 }
 
 impl AnswerDefaults {
+    /// 保存した設定から読む。知らない値 (新しい版で足した値) は `Auto` として扱う (07 §3)。
+    pub fn from_settings(s: &evorag_memory::Settings) -> Self {
+        let get = |name: &str| s.by_name.get(name).map(|v| v.body.value.as_str());
+        let mut d = Self::default();
+        for item in StyleItem::ALL {
+            if let Some(v) = get(setting_name(item)) {
+                // 知らない値は Auto のまま (set が断る)。
+                d.set(item, v);
+            }
+        }
+        d
+    }
+
+    /// 1 つの項目を変える。知らない値なら何も変えずに `false`。
+    pub fn set(&mut self, item: StyleItem, value: &str) -> bool {
+        match item {
+            StyleItem::Language => {
+                self.language = match value {
+                    "auto" => AnswerLanguage::Auto,
+                    "ja" => AnswerLanguage::Ja,
+                    "en" => AnswerLanguage::En,
+                    _ => return false,
+                }
+            }
+            StyleItem::Length => {
+                self.length = match value {
+                    "auto" => AnswerLength::Auto,
+                    "short" => AnswerLength::Short,
+                    "long" => AnswerLength::Long,
+                    _ => return false,
+                }
+            }
+            StyleItem::Format => {
+                self.format = match value {
+                    "auto" => AnswerFormat::Auto,
+                    "plain" => AnswerFormat::Plain,
+                    "structured" => AnswerFormat::Structured,
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+
+    /// `StyleItem::ALL` の順の値。
+    pub fn values(&self) -> [String; 3] {
+        [
+            self.language.as_str().to_owned(),
+            self.length.as_str().to_owned(),
+            self.format.as_str().to_owned(),
+        ]
+    }
+
     /// ターンの観測値に残す形 (05 §3.6)。
     pub fn record(&self) -> BTreeMap<String, String> {
         [

@@ -761,3 +761,12 @@ status = "test"
 tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
 manual = ""
 note = "v0.2 の並べ方では、添えないときは今の発話に引用が付かない。"
+
+[[ac]]
+id = "AC-FR-111-1"
+requirement = "FR-111"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/style.rs::a_chosen_style_takes_effect_at_once_and_survives_a_restart_and_a_lost_database", "crates/evorag-core/tests/style.rs::an_unknown_stored_value_reads_as_auto", "crates/evorag-tui/src/app.rs::style_opens_a_picker_and_sends_only_the_changed_items"]
+manual = ""
+note = "コアの層 (次の要求の既定の文、データ根とジャーナルの記録、知らない値は auto) と画面の層 (選ぶ窓、変えた項目だけ送る、知らせ) で判定する。"

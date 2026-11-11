@@ -1,7 +1,7 @@
 //! 描画 (07 §2.1)。描画のたびに、端末の本当のカーソルを入力欄の入力位置に置く (07 §2.3)。
 
 use evorag_types::MessageKey;
-use evorag_types::api::{Role, TurnStatus, TurnView};
+use evorag_types::api::{Role, StyleItem, TurnStatus, TurnView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -211,6 +211,50 @@ pub fn draw(app: &App, f: &mut Frame) {
                 )
                 .wrap(Wrap { trim: false })
                 .block(Block::new().borders(Borders::ALL)),
+                r,
+            );
+        }
+        Mode::Style { row, choice, .. } => {
+            let r = centered(area, 72, 9);
+            f.render_widget(Clear, r);
+            let labels = [
+                MessageKey::UiStyleLanguage,
+                MessageKey::UiStyleLength,
+                MessageKey::UiStyleFormat,
+            ];
+            let mut lines: Vec<Line> = StyleItem::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let values = item
+                        .choices()
+                        .iter()
+                        .enumerate()
+                        .map(|(j, v)| {
+                            if j == choice[i] {
+                                format!("[{v}]")
+                            } else {
+                                format!(" {v} ")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let text = format!(" {}: {values}", app.catalog.key(labels[i]));
+                    if i == *row {
+                        Line::styled(text, Style::new().add_modifier(Modifier::REVERSED))
+                    } else {
+                        Line::raw(text)
+                    }
+                })
+                .collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(app.catalog.key(MessageKey::UiStyleHint)));
+            f.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .title(app.catalog.key(MessageKey::UiStyleTitle)),
+                ),
                 r,
             );
         }

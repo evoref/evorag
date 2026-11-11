@@ -1,5 +1,7 @@
 //! スラッシュコマンドの読み取り (07 §3)。後の版のコマンドも名前は予約し、別の意味で使わない。
 
+use evorag_types::api::StyleItem;
+
 /// 読み取ったコマンド。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slash {
@@ -15,6 +17,8 @@ pub enum Slash {
     Model(Option<String>),
     /// `/sources [on|off]`。
     Sources(Option<bool>),
+    /// `/style [<項目> <値>]` (07 §3)。値はコアが確かめる。
+    Style(Option<(StyleItem, String)>),
     /// 名前は予約してあるが、この版ではまだ使えない (`/sources`・`/model`・`/memory` など)。
     NotYet(String),
     /// 知らないコマンド・引数の誤り。
@@ -50,6 +54,16 @@ pub fn parse(input: &str) -> Option<Slash> {
         ("sources", None) => Slash::Sources(None),
         ("sources", Some("on")) => Slash::Sources(Some(true)),
         ("sources", Some("off")) => Slash::Sources(Some(false)),
+        ("style", None) => Slash::Style(None),
+        ("style", Some(a)) => match a.split_once(char::is_whitespace) {
+            Some((item, value)) if !value.trim().contains(char::is_whitespace) => {
+                match StyleItem::parse(item) {
+                    Some(item) => Slash::Style(Some((item, value.trim().to_owned()))),
+                    None => Slash::Invalid("/style".into()),
+                }
+            }
+            _ => Slash::Invalid("/style".into()),
+        },
         (n, _) if RESERVED.contains(&n) => Slash::NotYet(format!("/{n}")),
         _ => Slash::Invalid(format!("/{name}")),
     })
@@ -92,6 +106,24 @@ mod tests {
         assert_eq!(parse("/sources"), Some(Slash::Sources(None)));
         assert_eq!(parse("/sources off"), Some(Slash::Sources(Some(false))));
         assert_eq!(parse("/sources x"), Some(Slash::Invalid("/sources".into())));
+        assert_eq!(parse("/style"), Some(Slash::Style(None)));
+        assert_eq!(
+            parse("/style length  short"),
+            Some(Slash::Style(Some((StyleItem::Length, "short".into()))))
+        );
+        // 値はコアが確かめる。項目の名前と引数の数はここで確かめる。
+        assert_eq!(
+            parse("/style format odd"),
+            Some(Slash::Style(Some((StyleItem::Format, "odd".into()))))
+        );
+        assert_eq!(
+            parse("/style color red"),
+            Some(Slash::Invalid("/style".into()))
+        );
+        assert_eq!(
+            parse("/style language"),
+            Some(Slash::Invalid("/style".into()))
+        );
         assert_eq!(
             parse("/frobnicate"),
             Some(Slash::Invalid("/frobnicate".into()))

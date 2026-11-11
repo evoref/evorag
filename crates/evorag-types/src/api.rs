@@ -30,8 +30,45 @@ pub enum Command {
     Model { name: Option<String> },
     /// `/sources [on|off]` (FR-409): このセッションでメモリを添えるかを示す・変える。
     Sources { memory: Option<bool> },
-    /// 応答 `turn` の出典 `n` (1 から) の詳細を照会する (FR-110)。
+    /// 応答 `turn` の出典 `n` (セッションの通し番号) の詳細を照会する (FR-110)。
     ShowSource { turn: Id, n: usize },
+    /// `/style` (FR-111、07 §3): `set` が無ければ今の答え方の既定を示し、あれば 1 つを変える。
+    /// 値は `auto` などの名前で渡し、コアが確かめる。
+    Style { set: Option<(StyleItem, String)> },
+}
+
+/// 答え方の既定の項目 (07 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleItem {
+    Language,
+    Length,
+    Format,
+}
+
+impl StyleItem {
+    pub const ALL: [StyleItem; 3] = [StyleItem::Language, StyleItem::Length, StyleItem::Format];
+
+    /// `/style <項目>` の名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StyleItem::Language => "language",
+            StyleItem::Length => "length",
+            StyleItem::Format => "format",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|i| i.as_str() == s)
+    }
+
+    /// 選べる値 (先頭が既定の `auto`)。
+    pub fn choices(self) -> &'static [&'static str] {
+        match self {
+            StyleItem::Language => &["auto", "ja", "en"],
+            StyleItem::Length => &["auto", "short", "long"],
+            StyleItem::Format => &["auto", "plain", "structured"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,4 +175,7 @@ pub enum Event {
     },
     /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
     BackgroundPaused { reason: Message },
+    /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
+    /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
+    StyleInfo { values: [String; 3], changed: bool },
 }
