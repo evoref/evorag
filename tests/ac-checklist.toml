@@ -794,9 +794,9 @@ id = "AC-FR-512-2"
 requirement = "FR-512"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::recording_a_model_unlike_the_usual_one_is_flagged"]
+tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::recording_a_model_unlike_the_usual_one_is_flagged", "crates/evorag-core/tests/model_binding.rs::embed_and_rerank_are_recorded_and_a_different_one_is_not_used", "crates/evorag-core/tests/model_binding.rs::a_role_that_was_down_at_start_is_used_once_it_comes_up"]
 manual = ""
-note = "embed・rerank の記録は M2.2 の後の PR で足す。"
+note = "embed・rerank の記録と、後から繋がった役割の記録も判定する。"
 
 [[ac]]
 id = "AC-FR-512-3"
@@ -815,3 +815,12 @@ status = "test"
 tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::ignored_config_keys_are_announced_once_per_content"]
 manual = ""
 note = ""
+
+[[ac]]
+id = "AC-FR-502-1"
+requirement = "FR-502"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::embed_and_rerank_are_recorded_and_a_different_one_is_not_used", "bins/evorag/src/config.rs::keys_of_later_versions_are_ignored_with_a_warning"]
+manual = ""
+note = "ループバック以外の接続先の拒否は、chat と同じ Endpoint の検査 (AC-FR-509-1) を使う。"

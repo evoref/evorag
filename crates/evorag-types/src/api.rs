@@ -97,6 +97,20 @@ pub struct ModelRoleInfo {
     pub role: String,
     pub recorded: Option<(String, String)>,
     pub connected: Option<(String, String)>,
+    pub status: RoleStatus,
+}
+
+/// 役割の状態 (06 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleStatus {
+    /// 設定していない (その役割は無いものとして縮退する)。
+    Unset,
+    /// 繋がらない。繋がるまで使わず、ときどき試す (06 §3 の表)。
+    Waiting,
+    /// 記録と同じモデルで、使える。
+    Ready,
+    /// 記録と違うモデル。使わない (`evorag setup` で切り替える)。
+    Mismatch,
 }
 
 /// 読み取り用のセッション。
@@ -184,4 +198,10 @@ pub enum Event {
     /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
     /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
     StyleInfo { values: [String; 3], changed: bool },
+    /// embed・rerank の役割の状態が変わった (繋がった、記録と違った、記録した、06 §3)。
+    RoleChanged {
+        info: ModelRoleInfo,
+        /// この変化でモデルを初めて記録した。
+        recorded_now: bool,
+    },
 }

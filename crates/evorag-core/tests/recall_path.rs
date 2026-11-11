@@ -43,6 +43,8 @@ fn config(root: &Path, seed: u64) -> CoreConfig {
         probe: evorag_core::Probe::system(),
         model_name: "test".into(),
         ignored_config: Vec::new(),
+        embed: None,
+        rerank: None,
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),

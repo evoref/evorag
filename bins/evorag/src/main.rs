@@ -341,6 +341,28 @@ fn main() -> ExitCode {
     // v0.2 で使わなくなったキー (07 §4.2): 読んで無視し、知らせる。v0.1 の `/model` の候補は、
     // 切り替えを setup でだけ行うようにしたので使わない (ADR-0018)。
     let ignored_config = config::obsolete(&cfg);
+    // embed と rerank の役割 (06 §2)。接続先の誤り (ループバック以外など) は設定の誤りとして止める。
+    let mut aux: Vec<Option<Arc<dyn evorag_llm::LlmClient>>> = Vec::new();
+    for role in ["embed", "rerank"] {
+        let client = match cfg.role(role) {
+            None => None,
+            Some(r) => match Endpoint::new(&r.url, r.api_key, cfg.llm.allow_remote)
+                .and_then(|e| HttpClient::new(e, RetryPolicy::default()))
+            {
+                Ok(c) => Some(Arc::new(c) as Arc<dyn evorag_llm::LlmClient>),
+                Err(e) => {
+                    return fail(
+                        &catalog,
+                        4,
+                        MessageKey::CliConfigError,
+                        &[("detail", &format!("llm.{role}: {e}"))],
+                    );
+                }
+            },
+        };
+        aux.push(client);
+    }
+    let (embed, rerank) = (aux[0].clone(), aux[1].clone());
     let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
@@ -355,6 +377,8 @@ fn main() -> ExitCode {
         probe: evorag_core::Probe::system(),
         model_name: model_name.clone(),
         ignored_config: ignored_config.clone(),
+        embed: embed.clone(),
+        rerank: rerank.clone(),
         memory_enabled: cfg.memory_enabled(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
@@ -516,6 +540,25 @@ fn main() -> ExitCode {
         let file = evorag_llm::file_name(&report.server.model_path).to_owned();
         let m = app.catalog.with(key, &[("file", &file)]);
         app.notices.push(m);
+    }
+    for role in &report.recorded_roles {
+        let file = report
+            .roles
+            .iter()
+            .find(|r| &r.role == role)
+            .and_then(|r| r.connected.as_ref())
+            .map(|c| c.0.clone())
+            .unwrap_or_default();
+        let m = app.catalog.with(
+            MessageKey::CliRoleRecorded,
+            &[("role", role), ("file", &file)],
+        );
+        app.notices.push(m);
+    }
+    for r in &report.roles {
+        if let Some(m) = evorag_tui::app::role_notice(&app.catalog, r) {
+            app.notices.push(m);
+        }
     }
     for key in &report.ignored_config {
         let m = app

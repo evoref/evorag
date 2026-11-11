@@ -186,6 +186,59 @@ pub(crate) fn chat_body(req: &ChatRequest) -> Value {
     body
 }
 
+/// `/v1/embeddings` の応答から、入力の順のベクトルを取り出す (`data[].index` で並べ直す)。
+pub(crate) fn parse_embeddings(v: &Value, n: usize) -> Result<Vec<Vec<f32>>, LlmError> {
+    let bad = |m: &str| LlmError::Protocol(format!("/v1/embeddings: {m}"));
+    let data = v
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("missing data"))?;
+    let mut out = vec![Vec::new(); n];
+    for (i, d) in data.iter().enumerate() {
+        let index = d
+            .get("index")
+            .and_then(Value::as_u64)
+            .map_or(i, |x| x as usize);
+        let e = d
+            .get("embedding")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("missing embedding"))?;
+        let vec: Option<Vec<f32>> = e.iter().map(|x| x.as_f64().map(|f| f as f32)).collect();
+        *out.get_mut(index)
+            .ok_or_else(|| bad("index out of range"))? =
+            vec.ok_or_else(|| bad("non-numeric embedding"))?;
+    }
+    if out.iter().any(Vec::is_empty) {
+        return Err(bad("some inputs have no embedding"));
+    }
+    Ok(out)
+}
+
+/// `/v1/rerank` の応答から、文書の順の生のスコアを取り出す (`results[].index` で並べ直す)。
+pub(crate) fn parse_rerank(v: &Value, n: usize) -> Result<Vec<f32>, LlmError> {
+    let bad = |m: &str| LlmError::Protocol(format!("/v1/rerank: {m}"));
+    let results = v
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("missing results"))?;
+    let mut out = vec![None; n];
+    for r in results {
+        let index = r
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| bad("missing index"))? as usize;
+        let score = r
+            .get("relevance_score")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| bad("missing relevance_score"))?;
+        *out.get_mut(index)
+            .ok_or_else(|| bad("index out of range"))? = Some(score as f32);
+    }
+    out.into_iter()
+        .map(|s| s.ok_or_else(|| bad("some documents have no score")))
+        .collect()
+}
+
 impl LlmClient for HttpClient {
     fn health(&self) -> BoxFuture<'_, Result<(), LlmError>> {
         Box::pin(async move {
@@ -213,6 +266,31 @@ impl LlmClient for HttpClient {
                 .and_then(Value::as_array)
                 .map(Vec::len)
                 .ok_or_else(|| LlmError::Protocol("missing tokens in /tokenize".into()))
+        })
+    }
+
+    fn embed<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, LlmError>> {
+        Box::pin(async move {
+            let v = self
+                .json(|| self.post("/v1/embeddings").json(&json!({"input": inputs})))
+                .await?;
+            parse_embeddings(&v, inputs.len())
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<f32>, LlmError>> {
+        Box::pin(async move {
+            let v = self
+                .json(|| {
+                    self.post("/v1/rerank")
+                        .json(&json!({"query": query, "documents": documents}))
+                })
+                .await?;
+            parse_rerank(&v, documents.len())
         })
     }
 
@@ -268,6 +346,29 @@ impl ChatStream for HttpChatStream {
 mod tests {
     use super::*;
     use crate::types::{ChatMessage, Generation, Role};
+
+    #[test]
+    fn embeddings_and_rerank_results_are_put_back_in_input_order() {
+        let v = json!({"data": [
+            {"index": 1, "embedding": [0.5, 0.5]},
+            {"index": 0, "embedding": [1.0, 0.0]}
+        ]});
+        assert_eq!(
+            parse_embeddings(&v, 2).unwrap(),
+            [vec![1.0, 0.0], vec![0.5, 0.5]]
+        );
+        assert!(
+            parse_embeddings(&v, 3).is_err(),
+            "a missing input is an error"
+        );
+        let r = json!({"results": [
+            {"index": 2, "relevance_score": -10.9},
+            {"index": 0, "relevance_score": -5.06},
+            {"index": 1, "relevance_score": -10.92}
+        ]});
+        assert_eq!(parse_rerank(&r, 3).unwrap(), [-5.06, -10.92, -10.9]);
+        assert!(parse_rerank(&json!({"results": []}), 1).is_err());
+    }
 
     #[test]
     fn server_info_is_read_from_props_and_models() {
