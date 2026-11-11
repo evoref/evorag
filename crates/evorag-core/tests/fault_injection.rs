@@ -72,6 +72,8 @@ fn fault_child() {
             probe: Probe::system(),
             model_name: "test".into(),
             ignored_config: Vec::new(),
+            embed: None,
+            rerank: None,
             memory_enabled: true,
             clock: clock.clone(),
             ids: Arc::new(UuidV7Gen::new(clock)),

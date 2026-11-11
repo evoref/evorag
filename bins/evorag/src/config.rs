@@ -179,11 +179,26 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         ));
     }
     let mut ignored = Vec::new();
-    if config.llm.embed.is_some() {
-        ignored.push("llm.embed".to_owned());
-    }
-    if config.llm.rerank.is_some() {
-        ignored.push("llm.rerank".to_owned());
+    for (name, t) in [
+        ("llm.embed", &config.llm.embed),
+        ("llm.rerank", &config.llm.rerank),
+    ] {
+        if let Some(t) = t {
+            for k in ["url", "model", "api_key", "api_key_env"] {
+                if t.get(k).is_some_and(|v| !v.is_str()) {
+                    return Err(format!(
+                        "line {}: {name}.{k} must be a string",
+                        line_of(text, k)
+                    ));
+                }
+            }
+            for k in t
+                .keys()
+                .filter(|k| !["url", "model", "api_key", "api_key_env"].contains(&k.as_str()))
+            {
+                ignored.push(format!("{name}.{k}"));
+            }
+        }
     }
     if config.llm.chat.aux_request_extra.is_some() {
         ignored.push("llm.chat.aux_request_extra".to_owned());
@@ -278,6 +293,26 @@ pub fn default_places() -> Option<Places> {
     }
 }
 
+/// embed・rerank の役割の接続先の設定 (07 §4.2)。`url` が無ければ、その役割は無い。
+pub struct RoleConfig {
+    pub url: String,
+    pub api_key: Option<String>,
+}
+
+impl Config {
+    pub fn role(&self, role: &str) -> Option<RoleConfig> {
+        let t = match role {
+            "embed" => self.llm.embed.as_ref()?,
+            "rerank" => self.llm.rerank.as_ref()?,
+            _ => return None,
+        };
+        let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+        let url = s("url").filter(|u| !u.trim().is_empty())?;
+        let api_key = s("api_key").or_else(|| s("api_key_env").and_then(|v| std::env::var(v).ok()));
+        Some(RoleConfig { url, api_key })
+    }
+}
+
 /// v0.2 で使わなくなったキーと、その内容のハッシュ (07 §4.2・§4.1)。読んで無視し、内容が変わった
 /// ときだけ知らせる (知らせたかはデータ根に記録する)。
 pub fn obsolete(config: &Config) -> Vec<(String, String)> {
@@ -351,10 +386,27 @@ enabled = true
 
     #[test]
     fn keys_of_later_versions_are_ignored_with_a_warning() {
+        // v0.2 から llm.embed の url は使う。知らないキーだけを警告して無視する。
+        let l = parse(
+            "[llm.embed]\nurl = \"http://127.0.0.1:8081\"\nfuture = 1\n[memory]\nsleep_time = true\n",
+        )
+        .unwrap();
+        assert_eq!(l.ignored, ["llm.embed.future", "memory.sleep_time"]);
+        let r = l.config.role("embed").unwrap();
+        assert_eq!(r.url, "http://127.0.0.1:8081");
+        assert!(l.config.role("rerank").is_none());
+    }
+
+    /// verifies: AC-FR-108-2 (使わなくなったキーを見つける)
+    #[test]
+    fn obsolete_keys_are_found_with_a_stable_hash() {
         let l =
-            parse("[llm.embed]\nurl = \"http://127.0.0.1:8081\"\n[memory]\nsleep_time = true\n")
-                .unwrap();
-        assert_eq!(l.ignored, ["llm.embed", "memory.sleep_time"]);
+            parse("[[llm.chat.models]]\nname = \"a\"\nurl = \"http://127.0.0.1:8081\"\n").unwrap();
+        let o = obsolete(&l.config);
+        assert_eq!(o.len(), 1);
+        assert_eq!(o[0].0, "llm.chat.models");
+        assert_eq!(o, obsolete(&l.config));
+        assert!(obsolete(&parse("").unwrap().config).is_empty());
     }
 
     /// FR-904: 読めないキー・型の誤り・範囲外の値は、行番号つきのエラー。

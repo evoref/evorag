@@ -64,4 +64,27 @@ pub trait LlmClient: Send + Sync {
     fn count_tokens<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<usize, LlmError>>;
     /// `/v1/chat/completions` を逐次表示で始める。接続の失敗と 5xx は始まる前だけ再試行する。
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>>;
+    /// `/v1/embeddings` (embed の役割、06 §2、v0.2)。入力の順に、1 つずつのベクトルを返す。
+    /// 既定は「使えない」(chat のサーバは 501 で断る、S-02)。
+    fn embed<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, LlmError>> {
+        let _ = inputs;
+        Box::pin(async { Err(not_supported("embeddings")) })
+    }
+    /// `/v1/rerank` (rerank の役割、06 §2、v0.2)。文書の順に、生のスコアを返す (0〜1 に写さない、S-02)。
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<f32>, LlmError>> {
+        let _ = (query, documents);
+        Box::pin(async { Err(not_supported("rerank")) })
+    }
+}
+
+/// 役割に合わないサーバへの要求 (llama-server の 501 と同じに扱う)。
+fn not_supported(what: &str) -> LlmError {
+    LlmError::Http {
+        status: 501,
+        body: format!("{what} is not supported by this server"),
+    }
 }

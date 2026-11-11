@@ -68,6 +68,14 @@ message_keys! {
     CliModelRecordedUnusual => "cli.model_recorded_unusual",
     CliConfigObsolete => "cli.config_obsolete",
     UiModelRole => "ui.notice.model_role",
+    CliRoleRecorded => "cli.role_recorded",
+    CliRoleMismatch => "cli.role_mismatch",
+    CliRoleWaiting => "cli.role_waiting",
+    UiRoleReady => "ui.notice.role_ready",
+    UiRoleStatusUnset => "ui.role_status.unset",
+    UiRoleStatusWaiting => "ui.role_status.waiting",
+    UiRoleStatusReady => "ui.role_status.ready",
+    UiRoleStatusMismatch => "ui.role_status.mismatch",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",

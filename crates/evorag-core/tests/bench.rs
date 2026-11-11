@@ -167,6 +167,8 @@ fn config(root: &Path) -> CoreConfig {
         probe: evorag_core::Probe::system(),
         model_name: "bench".into(),
         ignored_config: Vec::new(),
+        embed: None,
+        rerank: None,
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock)),

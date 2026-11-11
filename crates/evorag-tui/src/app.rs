@@ -2,7 +2,9 @@
 //!
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
-use evorag_types::api::{Command, Event, Role, SessionView, StyleItem, TurnStatus, TurnView};
+use evorag_types::api::{
+    Command, Event, ModelRoleInfo, Role, RoleStatus, SessionView, StyleItem, TurnStatus, TurnView,
+};
 use evorag_types::{Id, MessageKey};
 
 use crate::catalog::Catalog;
@@ -45,6 +47,33 @@ pub enum Action {
     /// 入力欄の内容を外部のエディタで開く (端末の操作は呼び出し側)。
     OpenEditor,
     Quit,
+}
+
+/// 役割の状態の名前の文言キー。
+fn status_key(s: RoleStatus) -> MessageKey {
+    match s {
+        RoleStatus::Unset => MessageKey::UiRoleStatusUnset,
+        RoleStatus::Waiting => MessageKey::UiRoleStatusWaiting,
+        RoleStatus::Ready => MessageKey::UiRoleStatusReady,
+        RoleStatus::Mismatch => MessageKey::UiRoleStatusMismatch,
+    }
+}
+
+/// embed・rerank の役割が、使えない理由の知らせ (繋がらない、記録と違う、06 §3)。使えれば `None`。
+pub fn role_notice(catalog: &Catalog, r: &ModelRoleInfo) -> Option<String> {
+    let file = |m: &Option<(String, String)>| m.as_ref().map(|c| c.0.clone()).unwrap_or_default();
+    match r.status {
+        RoleStatus::Waiting => Some(catalog.with(MessageKey::CliRoleWaiting, &[("role", &r.role)])),
+        RoleStatus::Mismatch => Some(catalog.with(
+            MessageKey::CliRoleMismatch,
+            &[
+                ("role", &r.role),
+                ("recorded", &file(&r.recorded)),
+                ("connected", &file(&r.connected)),
+            ],
+        )),
+        RoleStatus::Unset | RoleStatus::Ready => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,17 +258,41 @@ impl App {
                 let lines: Vec<String> = roles
                     .iter()
                     .map(|r| {
+                        let status = self.catalog.key(status_key(r.status));
                         self.catalog.with(
                             MessageKey::UiModelRole,
                             &[
                                 ("role", &r.role),
                                 ("recorded", &show(&r.recorded)),
                                 ("connected", &show(&r.connected)),
+                                ("status", &status),
                             ],
                         )
                     })
                     .collect();
                 self.notice(lines.join("\n"));
+            }
+            Event::RoleChanged { info, recorded_now } => {
+                let file = info
+                    .connected
+                    .as_ref()
+                    .map(|c| c.0.clone())
+                    .unwrap_or_default();
+                let m = match info.status {
+                    RoleStatus::Ready if recorded_now => self.catalog.with(
+                        MessageKey::CliRoleRecorded,
+                        &[("role", &info.role), ("file", &file)],
+                    ),
+                    RoleStatus::Ready => self.catalog.with(
+                        MessageKey::UiRoleReady,
+                        &[("role", &info.role), ("file", &file)],
+                    ),
+                    _ => match role_notice(&self.catalog, &info) {
+                        Some(m) => m,
+                        None => return,
+                    },
+                };
+                self.notice(m);
             }
             Event::SourcesInfo { memory } => {
                 let k = if memory {

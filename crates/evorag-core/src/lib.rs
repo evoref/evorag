@@ -13,6 +13,7 @@ pub mod localtime;
 pub mod logging;
 mod prompt;
 mod recall;
+mod roles;
 mod views;
 
 use std::path::PathBuf;
@@ -57,6 +58,9 @@ pub struct CoreConfig {
     /// 読んで無視した設定のキーと、その内容のハッシュ (`llm.chat.models` など、07 §4.1)。
     /// 同じ内容を前に知らせていれば、知らせない。
     pub ignored_config: Vec<(String, String)>,
+    /// embed と rerank の役割の llama-server (設定 `llm.embed`・`llm.rerank`、06 §2)。無ければ `None`。
+    pub embed: Option<Arc<dyn LlmClient>>,
+    pub rerank: Option<Arc<dyn LlmClient>>,
     /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
     pub memory_enabled: bool,
     pub clock: Arc<dyn Clock>,
@@ -164,6 +168,10 @@ pub struct StartReport {
     pub chat_model_recorded: Option<bool>,
     /// 知らせる、読んで無視した設定のキー (07 §4.1)。
     pub ignored_config: Vec<String>,
+    /// embed と rerank の役割の状態 (06 §3)。
+    pub roles: Vec<evorag_types::api::ModelRoleInfo>,
+    /// この起動でモデルを初めて記録した役割 (embed・rerank)。
+    pub recorded_roles: Vec<String>,
 }
 
 /// 生成の取り消しの理由。
@@ -194,6 +202,10 @@ struct Inner {
     conn: std::sync::RwLock<(Arc<dyn LlmClient>, ServerInfo, String)>,
     /// 記録した応答のモデル (06 §3.1)。送る前に、繋がっているモデルと照合する。
     chat_model: evorag_memory::ModelOrigin,
+    /// embed と rerank の役割 (06 §3)。
+    aux: Mutex<Vec<roles::AuxRole>>,
+    /// 繋がらない役割を試し直す task (終了のときに止める)。
+    aux_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
@@ -344,6 +356,43 @@ impl Core {
         let ignored_config =
             ignored_config_notices(&store, &handle, &cfg.ignored_config, &*cfg.clock, &*cfg.ids);
 
+        // embed と rerank の役割 (06 §3)。記録と違えば使わず、繋がらなければ後で試す。
+        let mut aux = vec![
+            roles::AuxRole::new(evorag_memory::ROLE_EMBED, cfg.embed.clone(), &bindings),
+            roles::AuxRole::new(evorag_memory::ROLE_RERANK, cfg.rerank.clone(), &bindings),
+        ];
+        let mut recorded_roles = Vec::new();
+        for a in &mut aux {
+            let Some(client) = a.client.clone() else {
+                continue;
+            };
+            match roles::check(&*client, a.recorded.as_ref()).await {
+                roles::Checked::Waiting => a.state = roles::RoleState::Waiting,
+                roles::Checked::Mismatch(o) => a.state = roles::RoleState::Mismatch(o),
+                roles::Checked::Ready { origin, record } => {
+                    if record {
+                        let w = Writes {
+                            clock: &*cfg.clock,
+                            ids: &*cfg.ids,
+                        };
+                        let ops = w
+                            .bind_model(&bindings, a.role, origin.clone())
+                            .map_err(|e| StartError::Storage(e.to_string()))?;
+                        handle
+                            .submit_wait(WriteRequest::conversation(ops))
+                            .map_err(|e| StartError::Storage(e.to_string()))?;
+                        a.recorded = Some(origin.clone());
+                        recorded_roles.push(a.role.to_owned());
+                    }
+                    a.state = roles::RoleState::Ready(origin);
+                }
+            }
+        }
+        let waiting = aux
+            .iter()
+            .any(|a| matches!(a.state, roles::RoleState::Waiting));
+        let role_infos: Vec<_> = aux.iter().map(roles::AuxRole::info).collect();
+
         // 答え方の既定 (07 §3)。読めなければ既定 (すべて auto)。
         let answer = store
             .read()
@@ -363,6 +412,8 @@ impl Core {
             writer_thread: Mutex::new(Some(writer_thread)),
             conn: std::sync::RwLock::new((llm, server.clone(), cfg.model_name)),
             chat_model: recorded_chat.unwrap_or(connected),
+            aux: Mutex::new(aux),
+            aux_task: Mutex::new(None),
             index,
             memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
@@ -454,7 +505,25 @@ impl Core {
             location_warnings,
             chat_model_recorded,
             ignored_config,
+            roles: role_infos,
+            recorded_roles,
         };
+        if waiting {
+            let worker = core.inner.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(roles::RETRY).await;
+                    if !recheck_roles(&worker).await {
+                        break;
+                    }
+                }
+            });
+            *core
+                .inner
+                .aux_task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(task);
+        }
         Ok((core, rx, report))
     }
 
@@ -523,6 +592,24 @@ impl Core {
         self.inner.tokens.calls()
     }
 
+    /// embed・rerank の役割が使える (記録と同じモデルに繋がっている) か (06 §3)。
+    pub fn role_ready(&self, role: &str) -> bool {
+        self.inner
+            .aux
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|a| a.role == role)
+            .and_then(roles::AuxRole::ready_client)
+            .is_some()
+    }
+
+    /// 試験のため: 繋がらない役割を、待たずに今すぐ試し直す (06 §3)。まだ繋がらない役割があれば `true`。
+    #[doc(hidden)]
+    pub async fn recheck_roles(&self) -> bool {
+        recheck_roles(&self.inner).await
+    }
+
     /// 終了する。生成中なら中断として書き、書き手の待ち行列の会話の追記を書き切ってから戻る (02 §5)。
     /// 戻った後、ほかに複製した `Core` が無ければ、データ根のロックも外れている。
     pub async fn shutdown(self) {
@@ -536,6 +623,15 @@ impl Core {
         if let Some((stop, task)) = command_loop {
             let _ = stop.send(());
             let _ = task.await;
+        }
+        if let Some(t) = self
+            .inner
+            .aux_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            t.abort();
         }
         let running = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -638,6 +734,71 @@ fn ignored_config_notices(
     fresh
 }
 
+/// 繋がらない役割を試し直す (06 §3)。繋がったら記録と照合し、記録が無ければ記録する。
+/// まだ繋がらない役割があれば `true`。
+async fn recheck_roles(inner: &Arc<Inner>) -> bool {
+    let waiting: Vec<(
+        usize,
+        Arc<dyn LlmClient>,
+        Option<evorag_memory::ModelOrigin>,
+    )> = inner
+        .aux
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a.state, roles::RoleState::Waiting))
+        .filter_map(|(i, a)| Some((i, a.client.clone()?, a.recorded.clone())))
+        .collect();
+    let mut still = false;
+    for (i, client, recorded) in waiting {
+        let checked = roles::check(&*client, recorded.as_ref()).await;
+        let mut recorded_now = false;
+        let state = match checked {
+            roles::Checked::Waiting => {
+                still = true;
+                continue;
+            }
+            roles::Checked::Mismatch(o) => roles::RoleState::Mismatch(o),
+            roles::Checked::Ready { origin, record } => {
+                if record {
+                    let role = inner.aux.lock().unwrap_or_else(|e| e.into_inner())[i].role;
+                    let bindings = inner
+                        .store
+                        .read()
+                        .ok()
+                        .and_then(|r| evorag_memory::load_bindings(&r).ok())
+                        .unwrap_or_default();
+                    let ops = writes(inner).bind_model(&bindings, role, origin.clone());
+                    let written = match ops {
+                        Ok(ops) => write(inner, ops).await.is_ok(),
+                        Err(_) => false,
+                    };
+                    if !written {
+                        // 記録できなければ、使わずに次の機会に試す。
+                        still = true;
+                        continue;
+                    }
+                    recorded_now = true;
+                }
+                roles::RoleState::Ready(origin)
+            }
+        };
+        let info = {
+            let mut aux = inner.aux.lock().unwrap_or_else(|e| e.into_inner());
+            if let roles::RoleState::Ready(o) = &state
+                && recorded_now
+            {
+                aux[i].recorded = Some(o.clone());
+            }
+            aux[i].state = state;
+            aux[i].info()
+        };
+        emit(inner, Event::RoleChanged { info, recorded_now });
+    }
+    still
+}
+
 fn role_info(
     role: &str,
     recorded: Option<&evorag_memory::ModelOrigin>,
@@ -647,6 +808,7 @@ fn role_info(
         role: role.to_owned(),
         recorded: recorded.map(|o| (o.file_name.clone(), o.model_key.clone())),
         connected: connected.map(|o| (o.file_name.clone(), o.model_key.clone())),
+        status: evorag_types::api::RoleStatus::Ready,
     }
 }
 
@@ -662,11 +824,20 @@ fn show_model(inner: &Inner, name: Option<String>) {
     emit(
         inner,
         Event::ModelInfo {
-            roles: vec![role_info(
+            roles: std::iter::once(role_info(
                 evorag_memory::ROLE_CHAT,
                 Some(&inner.chat_model),
                 Some(&connected),
-            )],
+            ))
+            .chain(
+                inner
+                    .aux
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(roles::AuxRole::info),
+            )
+            .collect(),
             n_ctx: server.n_ctx,
         },
     );
