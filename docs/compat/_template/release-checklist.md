@@ -25,7 +25,7 @@
 | 実際の LLM | 09 §8.2・§3.4。`EVORAG_LIVE_LLM_URL=… cargo xtask live-llm` が合格 (使ったモデルの名前を根拠に書く) | | | | |
 | セキュリティ | 09 §8.2。`cargo deny check advisories` がきれい。12 §6 の PC-1・PC-2・PC-6 | | | | |
 | 依存 | 09 §8.2。`cargo xtask check-deps` (C を含む依存 0、推移的な依存が上限以内) | | | | |
-| ドキュメント | 09 §8.2。`dist/README.md`・CHANGELOG・リリースノートに、既知の制約・更新と巻き戻し・データの移行の有無がある | | | | |
+| ドキュメント | 09 §8.2。`dist/README.md`・CHANGELOG・リリースノートに、既知の制約・更新と巻き戻し・データの移行の有無がある。リポジトリの `README.md` と `README.ja.md` の「最新の版」と「状況」がこの版と合っている | | | | |
 
 ## 所見・例外
 

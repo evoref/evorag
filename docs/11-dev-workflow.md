@@ -31,7 +31,7 @@ evorag/
   deps-policy.toml      # 依存規則 (02 §4.3) の入力。xtask check-deps が読む (M1.1 で置く)
   rust-toolchain.toml   # Rust の版の固定 (§1.1)
   rustfmt.toml / clippy.toml
-  LICENSE / NOTICE / README.md / CONTRIBUTING.md / SECURITY.md / CHANGELOG.md
+  LICENSE / NOTICE / README.md (英語) / README.ja.md (日本語、正) / CONTRIBUTING.md / SECURITY.md / CHANGELOG.md
 ```
 
 - 改行は LF に固定する (`.gitattributes`)。試験データは `-text` で改行の変換を止める。
@@ -133,6 +133,9 @@ Closes #12
 - `CHANGELOG.md` は Keep a Changelog 形式で、PR ごとに Unreleased へ 1 行足す。利用者に見えない変更は `changelog: none`。
 - 版上げと CHANGELOG の確定は、`develop` に対するリリース PR (`chore(release): v0.1.0`) で、リリースゲートの判定の前に行う (09 §9.2 の手順 2)。`develop` → `main`・`main` → `develop` の PR は merge commit で、人間が作り、人間が merge する。
 - リリースの前に、リリースノートの「更新の方法」とデータの移行の有無、利用者向け README の「更新と巻き戻し」の節がその版と合っているかを確かめる (09 §8.2)。
+- **リポジトリの README** は、英語版 (`README.md`) を表に置き、冒頭に日本語版 (`README.ja.md`) へのリンクを置く (日本語版の冒頭にも英語版へのリンクを置く)。日本語版を正とし、2 つを同じ PR で直す。
+  - **版を上げるたびに直す** (機能リリースとパッチ版の両方)。リリース PR (09 §9.2 の手順 2) で、冒頭の「最新の版」(版と日付、配布物の対象の OS) と「状況」の節 (その版で届いたもの、次の版の予定) を、その版に合わせる。
+  - 版の間でも、README に書いてあること (対応する OS、必要なもの、公開鍵、ブランチ、寄稿の受付) を変える PR は、同じ PR で README を直す。
 
 ### 9.4 寄稿ポリシー (DCO)
 
