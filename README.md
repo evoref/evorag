@@ -4,17 +4,16 @@ English | [日本語](README.ja.md)
 
 A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. Later versions will remember facts about you and improve from your ratings and corrections. It never trains model weights.
 
-> **The latest release is v0.1.1 (2026-11-10).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
+> **The latest release is v0.1.2 (2026-11-11).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
 
 ## Status
 
-- **v0.1 (minimal core)** was released as v0.1.0 on 2026-11-10. v0.1.1, released the same day, fixed error messages.
+- **v0.1 (minimal core)** was released as v0.1.0 on 2026-11-10. v0.1.1, released the same day, fixed error messages. v0.1.2 (2026-11-11) lets v0.1 open sessions that contain records written by a newer version.
   - It runs in Windows Terminal on Windows 11. The user interface is in Japanese.
   - It chats with a local llama-server, showing the answer as it is generated. You can interrupt and regenerate.
   - Conversations are kept as sessions. They are written to a database and a journal, so they survive a forced exit. A backup is taken once a day, and `evorag restore` brings one back.
   - It finds related remarks in earlier conversations (a lexical index) and attaches them to the answer with source numbers.
   - Linux and macOS are not supported yet.
-- **v0.1.2** is the next patch release. It lets v0.1 open sessions that contain records written by a newer version.
 - **v0.2** is being specified. It shortens the wait before an answer starts, uses a reranker to stop unrelated memories from being attached, adds embeddings and vector search, organizes conversations while you are away, and adds Linux support.
 
 The plan for each version up to v0.6 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
