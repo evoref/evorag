@@ -146,7 +146,7 @@
 | `llm.chat.request_extra` | 表 | {} | 応答の要求に足す JSON (思考を切る `chat_template_kwargs = { enable_thinking = false }` など、06 §6)。evorag が決める項目 (`messages`・`stream` など) は上書きしない | v0.1 |
 | `llm.chat.aux_request_extra` | 表 | {} | 補助の呼び出しの要求に足す JSON (思考を切る `chat_template_kwargs` など、06 §6) | v0.2 |
 | `llm.embed.url` / `llm.rerank.url` | 文字列 | (空) | embed / rerank の接続先。空なら、その役割は無いものとして縮退する (05 §3.5) | v0.2 |
-| `llm.embed.model` / `llm.rerank.model` | 文字列 | (空) | ルーターモードのときのモデル名 (S-15 の後、06 §2) | v0.2 (Should) |
+| `llm.embed.model` / `llm.rerank.model` | 文字列 | (空) | ルーターモードのときのモデル名 (プリセットの節の名前、06 §2) | v0.2 (Should) |
 | `llm.embed.api_key` / `api_key_env`、`llm.rerank.api_key` / `api_key_env` | 文字列 | (空) | API キー、またはそれを入れた環境変数の名前 | v0.2 |
 | `llm.allow_remote` | 真偽 | false | ループバック以外の接続先を許す (`https` が必須) | v0.1 |
 | `storage.data_root` | 文字列 | (OS ごとの既定) | データ根 (`--data-root` が優先) | v0.1 |
