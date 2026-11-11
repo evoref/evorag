@@ -20,6 +20,7 @@
 - bugfix リリースはパッチ版 (`0.y.z` の `z`)。経路は `fix/…` → `develop` → `main` (タグ) だけ。出せる条件は、前回のタグ以降の `develop` に `feat` が 1 件も入っていないこと。
 - v0.1.0 のリリースまでの `0.0.x` は内部カウンタ (マイルストーンを develop に取り込む PR で +1、タグなし)。
 - 版ごとの範囲は [docs/08-roadmap.md](docs/08-roadmap.md)。
+- 版を上げる PR (パッチ版を含む) では、リポジトリの README も直す。英語版 `README.md` が表、日本語版 `README.ja.md` が正で、2 つを同じ PR で直す ([docs/11 §9.3](docs/11-dev-workflow.md#93-changelog-とリリース))。
 
 ## コミット
 
