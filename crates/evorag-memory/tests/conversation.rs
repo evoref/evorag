@@ -439,3 +439,198 @@ fn rebuilding_from_the_journal_leaves_one_lookup_per_session() {
     assert_eq!(all.len(), 1, "{all:?}");
     assert_eq!(all[0].id, sid);
 }
+
+/// 新しい版が書いたターンを模した本体。`role` に、この版が知らない値を持つ (03 §4.2 の規則 11)。
+#[derive(serde::Serialize)]
+struct FutureTurn {
+    session: evorag_types::Id,
+    role: &'static str,
+    state: &'static str,
+    text: String,
+    model_key: Option<String>,
+    generation: Option<GenerationRecord>,
+    attached: Vec<evorag_types::Id>,
+    reply_to: Option<evorag_types::Id>,
+    error: Option<String>,
+    /// この版が知らない項目。
+    plan: Vec<String>,
+}
+
+/// 新しい版が書いた信号を模した本体。`kind` に、この版が知らない値を持つ。
+#[derive(serde::Serialize)]
+struct FutureSignal {
+    kind: &'static str,
+    target: evorag_types::Id,
+    reason: Option<String>,
+}
+
+/// この版では本体を読めないターンを書く。封筒と関係は、今の版と同じ形にする。
+fn write_future_turn(
+    env: &Env,
+    sid: evorag_types::Id,
+    reply_to: Option<evorag_types::Id>,
+) -> evorag_store::Envelope {
+    use evorag_types::{Clock, IdGen};
+    let id = env.ids.next_id();
+    let mut e = evorag_store::Envelope::new(id, KIND_TURN, 1, env.clock.now(), "");
+    e.set_body(&FutureTurn {
+        session: sid,
+        role: "tool",
+        state: "completed",
+        text: "新しい版の記録".into(),
+        model_key: None,
+        generation: None,
+        attached: Vec::new(),
+        reply_to,
+        error: None,
+        plan: vec!["step".into()],
+    })
+    .unwrap();
+    let mut ops = vec![
+        evorag_store::WriteOp::Put(e.clone()),
+        evorag_store::WriteOp::PutLink {
+            from: id,
+            rel: REL_IN_SESSION.into(),
+            to: sid,
+            attrs: Vec::new(),
+        },
+    ];
+    if let Some(u) = reply_to {
+        ops.push(evorag_store::WriteOp::PutLink {
+            from: id,
+            rel: REL_REPLY_TO.into(),
+            to: u,
+            attrs: Vec::new(),
+        });
+    }
+    env.write(ops);
+    e
+}
+
+fn stored_body(env: &Env, kind: &str, id: evorag_types::Id) -> evorag_store::Envelope {
+    match env.store.read().unwrap().get(kind, id).unwrap() {
+        Some(evorag_store::Read::Ok(e)) => e,
+        other => panic!("expected a readable envelope, got {other:?}"),
+    }
+}
+
+/// verifies: AC-FR-215-3 (データの層: 読めないターンを読み飛ばして数え、ほかのターンを読む。
+/// 読めないターンは書き換えず、セッションを消すときは一緒に消す)
+#[test]
+fn a_turn_this_version_cannot_read_is_counted_and_the_rest_of_the_session_opens() {
+    let dir = TempDir::new("conv-unreadable-turn");
+    let (sid, future);
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("s").unwrap();
+        sid = id;
+        env.write(ops);
+        let (u1, ops) = env.writes().user_turn(&env.session(sid), "一").unwrap();
+        env.write(ops);
+        env.clock.advance(1_000);
+        future = write_future_turn(&env, sid, Some(u1));
+        env.clock.advance(1_000);
+        let (_, ops) = env.writes().user_turn(&env.session(sid), "二").unwrap();
+        env.write(ops);
+    }
+
+    let env = Env::open(dir.path());
+    {
+        let rtx = env.store.read().unwrap();
+        let read = session_turns_counted(&rtx, sid).unwrap();
+        let texts: Vec<&str> = read.turns.iter().map(|t| t.body.text.as_str()).collect();
+        assert_eq!(texts, ["一", "二"], "the other turns are still read");
+        assert_eq!(read.unreadable, 1);
+        assert_eq!(session_turns(&rtx, sid).unwrap().len(), 2);
+        assert_eq!(pending_user_turns(&rtx, sid).unwrap().len(), 2);
+    }
+
+    // 会話を続けても、読めないターンは元のまま残る (消さない、書き換えない)。
+    let stored = stored_body(&env, KIND_TURN, future.id);
+    assert_eq!(stored.body, future.body);
+    env.clock.advance(1_000);
+    let (u3, ops) = env.writes().user_turn(&env.session(sid), "三").unwrap();
+    env.write(ops);
+    let u3 = stored_body(&env, KIND_TURN, u3);
+    let (_, ops) = env
+        .writes()
+        .assistant_turn(&env.session(sid), &u3, reply("はい", TurnState::Completed))
+        .unwrap();
+    env.write(ops);
+    assert_eq!(stored_body(&env, KIND_TURN, future.id), stored);
+    {
+        let rtx = env.store.read().unwrap();
+        let read = session_turns_counted(&rtx, sid).unwrap();
+        assert_eq!(read.turns.len(), 4);
+        assert_eq!(read.unreadable, 1);
+    }
+
+    // セッションを消すと、読めないターンも一緒に消える (FR-309)。
+    let ops = {
+        let rtx = env.store.read().unwrap();
+        delete_session(&rtx, &env.session(sid)).unwrap()
+    };
+    env.write(ops);
+    let rtx = env.store.read().unwrap();
+    assert!(rtx.get(KIND_TURN, future.id).unwrap().is_none());
+    assert!(rtx.links_to(sid, REL_IN_SESSION).unwrap().is_empty());
+}
+
+/// verifies: AC-FR-215-3 (ジャーナルから戻した後も、読めないターンと信号が関係を保つ)
+#[test]
+fn unreadable_turns_and_signals_keep_their_links_when_rebuilt_from_the_journal() {
+    use evorag_types::{Clock, IdGen};
+    let dir = TempDir::new("conv-unreadable-journal");
+    let (sid, u1, future, signal);
+    {
+        let env = Env::open(dir.path());
+        let (id, ops) = env.writes().create_session("s").unwrap();
+        sid = id;
+        env.write(ops);
+        let (u, ops) = env.writes().user_turn(&env.session(sid), "一").unwrap();
+        u1 = u;
+        env.write(ops);
+        env.clock.advance(1_000);
+        future = write_future_turn(&env, sid, Some(u1));
+
+        // この版が知らない種類の値を持つ信号。
+        signal = env.ids.next_id();
+        let mut e = evorag_store::Envelope::new(signal, KIND_SIGNAL, 1, env.clock.now(), "");
+        e.set_body(&FutureSignal {
+            kind: "irrelevant",
+            target: u1,
+            reason: None,
+        })
+        .unwrap();
+        env.write(vec![
+            evorag_store::WriteOp::Put(e),
+            evorag_store::WriteOp::PutLink {
+                from: signal,
+                rel: REL_TARGET.into(),
+                to: u1,
+                attrs: Vec::new(),
+            },
+        ]);
+    }
+    std::fs::remove_file(dir.path().join(evorag_store::DB_FILE)).unwrap();
+
+    let env = Env::open(dir.path());
+    assert_eq!(stored_body(&env, KIND_TURN, future.id).body, future.body);
+    let rtx = env.store.read().unwrap();
+    let in_session: Vec<_> = rtx
+        .links_to(sid, REL_IN_SESSION)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        in_session,
+        [u1, future.id],
+        "the unreadable turn stays in its session"
+    );
+    assert_eq!(rtx.links_to(u1, REL_REPLY_TO).unwrap()[0].0, future.id);
+    assert_eq!(rtx.links_to(u1, REL_TARGET).unwrap()[0].0, signal);
+    let read = session_turns_counted(&rtx, sid).unwrap();
+    assert_eq!(read.turns.len(), 1);
+    assert_eq!(read.unreadable, 1);
+}

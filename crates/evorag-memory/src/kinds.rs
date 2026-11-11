@@ -72,8 +72,25 @@ fn derive_session(e: &Envelope) -> Vec<WriteOp> {
     }]
 }
 
+/// ターンの本体のうち、関係を作るのに要る項目だけ (03 §4.2 の規則 11)。
+///
+/// 本体の全体 (`TurnBody`) では読まない。新しい版が書いた、この版では読めない値 (知らない列挙の値など)
+/// を含むターンでも、セッションとの関係を失わないようにする。
+#[derive(Deserialize)]
+struct TurnLinks {
+    session: Id,
+    #[serde(default)]
+    reply_to: Option<Id>,
+}
+
+/// 信号の本体のうち、関係を作るのに要る項目だけ (03 §4.2 の規則 11)。
+#[derive(Deserialize)]
+struct SignalLinks {
+    target: Id,
+}
+
 fn derive_turn(e: &Envelope) -> Vec<WriteOp> {
-    let Ok(b) = e.body_as::<TurnBody>() else {
+    let Ok(b) = e.body_as::<TurnLinks>() else {
         return Vec::new();
     };
     let mut ops = vec![link(e.id, REL_IN_SESSION, b.session)];
@@ -84,7 +101,7 @@ fn derive_turn(e: &Envelope) -> Vec<WriteOp> {
 }
 
 fn derive_signal(e: &Envelope) -> Vec<WriteOp> {
-    match e.body_as::<SignalBody>() {
+    match e.body_as::<SignalLinks>() {
         Ok(b) => vec![link(e.id, REL_TARGET, b.target)],
         Err(_) => Vec::new(),
     }

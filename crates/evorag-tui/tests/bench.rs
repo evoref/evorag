@@ -59,6 +59,7 @@ fn app() -> App {
             updated_at: Timestamp::from_millis(0),
         },
         turns,
+        unreadable: 0,
     });
     a
 }

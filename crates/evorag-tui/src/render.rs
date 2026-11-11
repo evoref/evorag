@@ -296,6 +296,7 @@ mod tests {
                 reply_to: None,
                 created_at: Timestamp::from_millis(36_000_000),
             }],
+            unreadable: 0,
         });
         for c in "あい".chars() {
             app.on_key(Key::Char(c));

@@ -130,11 +130,23 @@ impl App {
     /// コアのイベントを受ける。
     pub fn on_event(&mut self, ev: Event) {
         match ev {
-            Event::SessionOpened { session, turns } => {
+            Event::SessionOpened {
+                session,
+                turns,
+                unreadable,
+            } => {
                 self.session = Some(session);
                 self.turns = turns;
                 self.streaming = None;
                 self.scroll = 0;
+                // 新しい版が書いた、この版では読めない記録 (03 §4.2 の規則 11)。
+                if unreadable > 0 {
+                    let m = self.catalog.with(
+                        MessageKey::UiNoticeUnreadableTurns,
+                        &[("count", &unreadable.to_string())],
+                    );
+                    self.notice(m);
+                }
             }
             Event::UserTurnSaved { turn } => {
                 self.turns.push(turn);
@@ -598,6 +610,7 @@ mod tests {
         a.on_event(Event::SessionOpened {
             session: session(),
             turns: vec![],
+            unreadable: 0,
         });
         type_text(&mut a, "一");
         a.on_key(Key::Enter { newline: true });
@@ -621,6 +634,7 @@ mod tests {
         a.on_event(Event::SessionOpened {
             session: session(),
             turns: vec![],
+            unreadable: 0,
         });
         type_text(&mut a, "/delete");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());
@@ -641,6 +655,7 @@ mod tests {
         a.on_event(Event::SessionOpened {
             session: session(),
             turns: vec![],
+            unreadable: 0,
         });
         a.on_event(Event::UserTurnSaved {
             turn: turn(1, Role::User, TurnStatus::Pending, None),
@@ -686,8 +701,33 @@ mod tests {
         a.on_event(Event::SessionOpened {
             session: session(),
             turns: vec![turn(1, Role::User, TurnStatus::Pending, None)],
+            unreadable: 0,
         });
         assert!(a.has_no_reply(&a.turns[0].clone()));
+    }
+
+    /// verifies: AC-FR-215-3 (画面の層: 読めなかった件数を知らせる)
+    #[test]
+    fn unreadable_turns_are_announced_when_a_session_opens() {
+        let mut a = app();
+        a.on_event(Event::SessionOpened {
+            session: session(),
+            turns: vec![turn(1, Role::User, TurnStatus::Pending, None)],
+            unreadable: 2,
+        });
+        assert_eq!(a.turns.len(), 1, "the readable turns are still shown");
+        let shown = a.notices.last().unwrap();
+        assert!(shown.contains("2 件"), "{shown}");
+        assert!(shown.contains("記録は残っています"), "{shown}");
+
+        // 読めない記録が無ければ、何も知らせない。
+        let mut b = app();
+        b.on_event(Event::SessionOpened {
+            session: session(),
+            turns: vec![],
+            unreadable: 0,
+        });
+        assert!(b.notices.is_empty());
     }
 
     #[test]
