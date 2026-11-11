@@ -25,6 +25,7 @@ pub struct AssistantTurn {
     pub attached: Vec<Id>,
     pub error: Option<String>,
     pub recall: Option<RecallRecord>,
+    pub obs: Option<TurnObs>,
 }
 
 fn envelope<T: serde::Serialize>(
@@ -140,6 +141,7 @@ impl Writes<'_> {
                 reply_to: None,
                 error: None,
                 recall: None,
+                obs: None,
             },
         )?;
         let mut ops = vec![
@@ -179,6 +181,7 @@ impl Writes<'_> {
                 reply_to: Some(user_turn.id),
                 error: turn.error,
                 recall: turn.recall,
+                obs: turn.obs,
             },
         )?;
         let mut ops = vec![

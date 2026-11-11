@@ -59,7 +59,29 @@ pub fn hhmm(ms: i64) -> String {
     }
 }
 
-/// `YYYY-MM-DD HH:MM (UTC+09:00)` (システムプロンプトの今の日時)。分からなければ `… UTC`。
+/// 発話の先頭に付ける日時 (05 §4.1): `[2026-11-12 (木) 10:02 +09:00]`。`ja` でなければ曜日を英語の
+/// 略号にする。ずれが分からなければ `UTC` と書く。
+pub fn stamp(ms: i64, ja: bool) -> String {
+    const JA: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
+    const EN: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let off = offset(ms);
+    let local = ms + i64::from(off.unwrap_or(0)) * 1000;
+    let (y, mo, d, h, mi) = civil(local);
+    // 1970-01-01 は木曜日。
+    let wd = (local.div_euclid(86_400_000) + 4).rem_euclid(7) as usize;
+    let w = if ja { JA[wd] } else { EN[wd] };
+    let zone = match off {
+        Some(o) => {
+            let sign = if o < 0 { '-' } else { '+' };
+            let a = o.abs();
+            format!("{sign}{:02}:{:02}", a / 3600, a / 60 % 60)
+        }
+        None => "UTC".to_owned(),
+    };
+    format!("[{y:04}-{mo:02}-{d:02} ({w}) {h:02}:{mi:02} {zone}]")
+}
+
+/// `YYYY-MM-DD HH:MM (UTC+09:00)` (引用の出典の日時)。分からなければ `… UTC`。
 pub fn datetime(ms: i64) -> String {
     match offset(ms) {
         Some(off) => {

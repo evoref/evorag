@@ -31,7 +31,7 @@ use evorag_types::{Clock, Id, IdGen, Message, MessageKey};
 use tokio::sync::{mpsc, oneshot};
 
 pub use context::{TokenCache, estimate};
-pub use prompt::PromptLanguage;
+pub use prompt::{AnswerDefaults, AnswerFormat, AnswerLanguage, AnswerLength, PromptLanguage};
 
 /// コアの設定。
 pub struct CoreConfig {
@@ -1052,31 +1052,80 @@ fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id) {
     }
 }
 
-/// 発話 `user_turn` までの会話 (この発話への前の応答は除く) を、LLM に送る発言の列にする。
-fn history(inner: &Inner, session: Id, user_turn: Id) -> Vec<ChatMessage> {
+/// LLM に送る会話 (05 §4.1)。
+struct Conversation {
+    /// 発話 `user_turn` より前の発言 (失敗した応答と、この発話への前の応答は除く)。
+    past: Vec<context::Past>,
+    /// 今の発話の本文と、記録した時刻。
+    current: Option<(String, i64)>,
+    /// 前のターンが履歴を始めた位置 (05 §4.2)。
+    from: Option<Id>,
+    /// 次に振る出典の番号 (05 §5.1)。
+    next_source: u32,
+}
+
+/// 発話の先頭に、記録した時刻から作った日時を付ける (05 §4.1。後のターンでも同じ文字列になる)。
+fn stamped(lang: PromptLanguage, at_ms: i64, text: &str) -> String {
+    format!("{} {text}", prompt::stamp(lang, at_ms))
+}
+
+fn conversation(inner: &Inner, session: Id, user_turn: Id) -> Conversation {
     let turns = inner
         .store
         .read()
         .ok()
         .and_then(|r| evorag_memory::session_turns(&r, session).ok())
         .unwrap_or_default();
-    let mut out = Vec::new();
+    let mut c = Conversation {
+        past: Vec::new(),
+        current: None,
+        from: None,
+        next_source: recall::next_source_number(&turns),
+    };
     for t in &turns {
-        if t.envelope.id > user_turn {
+        let id = t.envelope.id;
+        if id > user_turn {
             break;
         }
-        let role = match t.body.role {
-            TurnRole::User => Role::User,
-            TurnRole::Assistant => Role::Assistant,
-            TurnRole::System => continue,
-        };
-        // 失敗した応答と、今作り直す発話への前の応答は送らない。
-        if t.body.state == TurnState::Failed || t.body.reply_to == Some(user_turn) {
+        if id == user_turn {
+            c.current = Some((t.body.text.clone(), t.envelope.created_at.as_millis()));
             continue;
         }
-        out.push(ChatMessage::new(role, t.body.text.clone()));
+        // 今作り直す発話への前の応答は、履歴にも位置の引き継ぎにも使わない。
+        if t.body.reply_to == Some(user_turn) {
+            continue;
+        }
+        if let Some(f) = t.body.obs.as_ref().and_then(|o| o.history_from) {
+            c.from = Some(f);
+        }
+        let (role, exchange, content) = match t.body.role {
+            TurnRole::User => (
+                Role::User,
+                id,
+                stamped(
+                    inner.language,
+                    t.envelope.created_at.as_millis(),
+                    &t.body.text,
+                ),
+            ),
+            TurnRole::Assistant => (
+                Role::Assistant,
+                t.body.reply_to.unwrap_or(id),
+                t.body.text.clone(),
+            ),
+            TurnRole::System => continue,
+        };
+        // 失敗した応答は送らない。
+        if t.body.state == TurnState::Failed {
+            continue;
+        }
+        c.past.push(context::Past {
+            turn: id,
+            exchange,
+            message: ChatMessage::new(role, content),
+        });
     }
-    out
+    c
 }
 
 /// ログに出す失敗の分類 (llama-server のエラーの本文は出さない)。
@@ -1119,6 +1168,7 @@ async fn generate(
     let (llm, server, _) = inner.conn();
     let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
+    let conv = conversation(inner, session, user_turn);
     // 以前の会話を引く (05 §3)。このセッションでメモリを切っていれば引かない (FR-409)。
     let memory = if memory_on(inner, session) {
         Some(
@@ -1133,29 +1183,48 @@ async fn generate(
                 reserve,
                 session,
                 user_turn,
+                conv.next_source,
             )
             .await,
         )
     } else {
         None
     };
-    let mut system_text = prompt::system_prompt(inner.language, inner.clock.now().as_millis());
-    if let Some(s) = memory.as_ref().and_then(|m| m.section.as_deref()) {
-        system_text.push_str(s);
-    }
-    let system = ChatMessage::new(Role::System, system_text);
-    let messages = context::assemble(
+    // システムプロンプトは凍結の核と選べる既定だけ。日時と引用は今の発話の側に置く (ADR-0017)。
+    let defaults = prompt::AnswerDefaults::default();
+    let system = ChatMessage::new(
+        Role::System,
+        prompt::system_prompt(inner.language, &defaults),
+    );
+    let quote = memory.as_ref().and_then(|m| m.quote.clone());
+    let (text, at) = conv
+        .current
+        .clone()
+        .unwrap_or_else(|| (String::new(), inner.clock.now().as_millis()));
+    let mut current = quote.clone().unwrap_or_default();
+    current.push_str(&stamped(inner.language, at, &text));
+    let assembled = context::assemble(
         &*llm,
         &inner.tokens,
         &server.model_key,
         n_ctx,
         reserve,
         system,
-        history(inner, session, user_turn),
+        conv.past,
+        (user_turn, ChatMessage::new(Role::User, current)),
+        conv.from,
     )
     .await;
+    let obs = evorag_memory::TurnObs {
+        source_base: Some(conv.next_source),
+        history_from: Some(assembled.history_from),
+        recall_position: quote
+            .is_some()
+            .then(|| evorag_memory::RECALL_BEFORE_UTTERANCE.to_owned()),
+        answer: defaults.record(),
+    };
     let req = ChatRequest {
-        messages,
+        messages: assembled.messages,
         generation: inner.generation.clone(),
         // 応答は最初のスロット (06 §4)。
         id_slot: (server.total_slots > 1).then_some(0),
@@ -1249,6 +1318,7 @@ async fn generate(
             .unwrap_or_default(),
         error,
         recall: memory.map(|m| m.record),
+        obs: Some(obs),
     };
     // 応答を書く。セッションと発話は読み直した最新のものを使う。
     let session_env = read_env(inner, evorag_memory::KIND_SESSION, session);

@@ -97,6 +97,7 @@ fn build_root(root: &Path) {
                         attached: Vec::new(),
                         error: None,
                         recall: None,
+                        obs: None,
                     },
                 )
                 .unwrap();

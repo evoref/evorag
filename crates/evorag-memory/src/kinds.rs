@@ -177,7 +177,31 @@ pub struct TurnBody {
     /// 想起の判定点と出典の区切り (応答だけ、05 §3.4・§5)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall: Option<RecallRecord>,
+    /// 後から作り直せない観測値 (応答だけ、v0.2、05 §3.6)。判定点 (`recall`) の中には足さない
+    /// (古い版が判定点を書き戻しても落ちないように、本体の最上位に置く、03 §3.3)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obs: Option<TurnObs>,
 }
+
+/// 応答のターンの観測値 (05 §3.6)。項目はすべて任意で、足すだけにする。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnObs {
+    /// このセッションの出典の通し番号の始まり (05 §5.1)。無いターン (v0.1) は 1 から。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_base: Option<u32>,
+    /// 履歴に入れた最も古いターン (05 §4.2)。次のターンは、ここから履歴を組み立てる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_from: Option<Id>,
+    /// 想起の引用を添えた位置 (`before_utterance`)。添えなかったら無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_position: Option<String>,
+    /// 選んでいた答え方の既定 (`language`・`length`・`format` → 値、07 §3)。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub answer: std::collections::BTreeMap<String, String>,
+}
+
+/// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1)。
+pub const RECALL_BEFORE_UTTERANCE: &str = "before_utterance";
 
 /// 判定点 (05 §3.4)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

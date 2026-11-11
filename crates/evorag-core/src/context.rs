@@ -1,7 +1,10 @@
-//! 文脈の組み立て (05 §4.1)。v0.1 の M1.3 は、システムプロンプトと直近の会話だけ。
+//! 文脈の組み立て (05 §4.1・§4.2)。
 //!
 //! - 予算 = `n_ctx` − 生成に残す量 (既定 `max(1024, n_ctx の 25%)`)。
-//! - 直近の会話は、新しいものから入れ、入らない古いものを省く。
+//! - 並べ方: システムプロンプト (凍結の核と選べる既定) → 履歴 → 今の発話 (引用・日時・本文)。
+//!   前のターンの要求と先頭が一致するように組み立てる (ADR-0017)。
+//! - 古い発言は、履歴が予算を超えたら、予算の 6 割になるまで往復の単位でまとめて省く。省いた位置は
+//!   次のターンに引き継ぎ、予算を超えるまで動かさない (1 往復ずつ省くと、省くたびに全体を処理し直す)。
 //! - トークンの数は `/tokenize` で数え、本文のハッシュと model_key でキャッシュする (06 §8、FR-506)。
 //!   数えられないときは文字数から見積もり (日本語 1 文字 = 1、英数字 4 文字 = 1)、予算を 2 割減らす。
 
@@ -10,6 +13,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
 use evorag_llm::{ChatMessage, LlmClient};
+use evorag_types::Id;
 
 /// 1 つの発言に足す、役割や区切りのぶんの見込み (トークン)。
 const PER_MESSAGE_OVERHEAD: usize = 8;
@@ -68,8 +72,26 @@ pub fn reserve_for_output(n_ctx: usize, configured: Option<usize>) -> usize {
     configured.unwrap_or_else(|| (n_ctx / 4).max(1024))
 }
 
-/// システムプロンプトと、直近の会話 (古い順) から、予算に入る発言の列を作る。
-/// 最後の発言 (今の発話) は必ず入れる。
+/// 履歴の 1 つの発言。
+pub struct Past {
+    /// このターンの ID。
+    pub turn: Id,
+    /// 往復の ID (発話のターンの ID。応答なら、その発話)。省くときは往復ごとに省く。
+    pub exchange: Id,
+    pub message: ChatMessage,
+}
+
+/// 組み立てた要求の発言の列と、履歴に入れた最も古いターン。
+pub struct Assembled {
+    pub messages: Vec<ChatMessage>,
+    /// 次のターンが履歴を始める位置 (05 §4.2)。応答のターンの観測値に残す。
+    pub history_from: Id,
+}
+
+/// システムプロンプト・履歴 (古い順)・今の発話から、予算に入る発言の列を作る。
+///
+/// `from` は前のターンが履歴を始めた位置 (無ければセッションの最初から)。今の発話は必ず入れる。
+#[allow(clippy::too_many_arguments)]
 pub async fn assemble(
     llm: &dyn LlmClient,
     cache: &TokenCache,
@@ -77,8 +99,10 @@ pub async fn assemble(
     n_ctx: usize,
     reserve: usize,
     system: ChatMessage,
-    history: Vec<ChatMessage>,
-) -> Vec<ChatMessage> {
+    past: Vec<Past>,
+    current: (Id, ChatMessage),
+    from: Option<Id>,
+) -> Assembled {
     let mut exact = true;
     let mut count = async |text: &str| match cache.count(llm, model_key, text).await {
         Some(n) => n,
@@ -88,28 +112,44 @@ pub async fn assemble(
         }
     };
     let system_cost = count(&system.content).await + PER_MESSAGE_OVERHEAD;
-    let mut costs = Vec::with_capacity(history.len());
-    for m in &history {
-        costs.push(count(&m.content).await + PER_MESSAGE_OVERHEAD);
+    let current_cost = count(&current.1.content).await + PER_MESSAGE_OVERHEAD;
+    // 前のターンが省いた位置より前は数えもしない。
+    let start = from.map_or(0, |f| {
+        past.iter().position(|p| p.turn >= f).unwrap_or(past.len())
+    });
+    let mut costs = Vec::with_capacity(past.len() - start);
+    for p in &past[start..] {
+        costs.push(count(&p.message.content).await + PER_MESSAGE_OVERHEAD);
     }
     let mut budget = n_ctx.saturating_sub(reserve);
     if !exact {
         budget = budget * 4 / 5;
     }
-    let mut left = budget.saturating_sub(system_cost);
-    let mut keep = 0;
-    for (i, c) in costs.iter().enumerate().rev() {
-        if *c > left && i + 1 != costs.len() {
-            break;
+    let history_budget = budget.saturating_sub(system_cost + current_cost);
+    let mut total: usize = costs.iter().sum();
+    let mut keep = start;
+    if total > history_budget {
+        // 予算の 6 割になるまで、往復ごとにまとめて省く。
+        let target = history_budget * 6 / 10;
+        let mut i = 0;
+        while i < costs.len() && total > target {
+            let ex = past[start + i].exchange;
+            while i < costs.len() && past[start + i].exchange == ex {
+                total -= costs[i];
+                i += 1;
+            }
         }
-        left = left.saturating_sub(*c);
-        keep += 1;
+        keep = start + i;
     }
-    let start = history.len() - keep;
-    let mut out = Vec::with_capacity(keep + 1);
-    out.push(system);
-    out.extend(history.into_iter().skip(start));
-    out
+    let history_from = past.get(keep).map_or(current.0, |p| p.turn);
+    let mut messages = Vec::with_capacity(past.len() - keep + 2);
+    messages.push(system);
+    messages.extend(past.into_iter().skip(keep).map(|p| p.message));
+    messages.push(current.1);
+    Assembled {
+        messages,
+        history_from,
+    }
 }
 
 #[cfg(test)]

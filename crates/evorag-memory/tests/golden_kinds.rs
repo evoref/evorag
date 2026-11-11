@@ -97,6 +97,12 @@ fn turn_v1() {
                 decision: RecallDecision::Fire,
                 sources: vec![1],
             }),
+            obs: Some(TurnObs {
+                source_base: Some(3),
+                history_from: Some(id("019a6a2b-0000-7000-8000-000000000003")),
+                recall_position: Some(RECALL_BEFORE_UTTERANCE.into()),
+                answer: [("language".to_owned(), "auto".to_owned())].into(),
+            }),
         },
     );
 }

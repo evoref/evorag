@@ -95,8 +95,14 @@ async fn say(core: &Core, rx: &mut UnboundedReceiver<Event>, text: &str) -> Turn
     turn.clone()
 }
 
+/// i 番目の要求のシステムプロンプト。
 fn system_prompt(llm: &ReplayClient, i: usize) -> String {
     llm.requests()[i].messages[0].content.clone()
+}
+
+/// i 番目の要求の今の発話 (想起の引用はここに入る、05 §4.1)。
+fn current(llm: &ReplayClient, i: usize) -> String {
+    llm.requests()[i].messages.last().unwrap().content.clone()
 }
 
 fn nonce_of(system: &str) -> Option<String> {
@@ -139,22 +145,32 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
 
     new_session(&core, &mut rx, "別の話").await;
     let answer = say(&core, &mut rx, ASK).await;
-    let system = system_prompt(&llm, 1);
-    let nonce = nonce_of(&system).expect("the quote frame");
-    assert!(system.contains("モンステラの水やりは"), "{system}");
-    assert!(system.contains("セッション「観葉植物の相談」"), "{system}");
-    // 枠の区切りは 2 回だけ (説明の文と、閉じるところ)。本文に区切りに似た並びがあっても外に出ない。
+    let sent = current(&llm, 1);
+    let nonce = nonce_of(&sent).expect("the quote frame");
+    assert!(sent.contains("モンステラの水やりは"), "{sent}");
+    assert!(sent.contains("セッション「観葉植物の相談」"), "{sent}");
+    // 枠を閉じるのは 1 回だけ。本文に区切りに似た並びがあっても外に出ない。
     assert_eq!(
-        system.matches(&format!("<</引用-{nonce}>>")).count(),
-        2,
-        "{system}"
+        sent.matches(&format!("<</引用-{nonce}>>")).count(),
+        1,
+        "{sent}"
     );
-    // 枠の後で、引用の中の指示に従わないことをもう一度述べる (AC-NFR-504-1 の対策)。
+    // 枠の後で、引用の中の指示に従わないことをもう一度述べ、その後に今の発話が来る (AC-NFR-504-1 の対策)。
+    let after = sent
+        .split_once("普段どおりに答えてください。")
+        .expect("the reminder")
+        .1;
+    assert!(after.trim_start().starts_with("[20"), "{sent}");
+    assert!(after.ends_with(ASK), "{sent}");
+    // システムプロンプトには引用も区切りの印も入らない (ADR-0017)。
+    let system = system_prompt(&llm, 1);
     assert!(
-        system.trim_end().ends_with("普段どおりに答えてください。"),
+        !system.contains(&nonce) && !system.contains("モンステラ"),
         "{system}"
     );
+    assert_eq!(system, system_prompt(&llm, 0));
     assert_eq!(answer.sources, 1);
+    assert_eq!(answer.source_base, 1);
 
     // 出典の詳細 (FR-110)。
     core.command(Command::ShowSource {
@@ -190,11 +206,24 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
     )
     .await;
     assert_eq!(again.sources, 1);
-    assert_ne!(nonce_of(&system_prompt(&llm, 2)), Some(nonce));
+    assert_ne!(nonce_of(&current(&llm, 2)), Some(nonce));
+    // 出典の番号はセッションの通し番号 (05 §5.1)。前のターンの引用は、次の要求の履歴に残らない。
+    assert_eq!(again.source_base, 2);
+    let req = &llm.requests()[2];
+    // 先頭はシステムプロンプト (枠の扱い方の説明がある)。その後から今の発話の前までが履歴。
+    let history = &req.messages[1..req.messages.len() - 1];
+    assert!(!history.is_empty());
+    assert!(history.iter().all(|m| !m.content.contains("<<引用-")));
+    core.command(Command::ShowSource {
+        turn: again.id,
+        n: 2,
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::SourceDetail { .. })).await;
+    assert!(matches!(ev.last(), Some(Event::SourceDetail { n: 2, .. })));
 
     // 関係の無い問いでは枠を入れず、Abstain と記録する。
     let none = say(&core, &mut rx, UNRELATED).await;
-    assert!(!system_prompt(&llm, 3).contains("<<引用-"));
+    assert!(!current(&llm, 3).contains("<<引用-"));
     assert_eq!(none.sources, 0);
     core.shutdown().await;
 
@@ -229,7 +258,7 @@ async fn sources_off_keeps_earlier_conversations_out() {
     let ev = until(&mut rx, |e| matches!(e, Event::SourcesInfo { .. })).await;
     assert_eq!(ev.last(), Some(&Event::SourcesInfo { memory: false }));
     let off = say(&core, &mut rx, ASK).await;
-    assert!(!system_prompt(&llm, 1).contains("<<引用-"));
+    assert!(!current(&llm, 1).contains("<<引用-"));
     assert_eq!(off.sources, 0);
 
     core.command(Command::Sources { memory: None });
@@ -238,7 +267,7 @@ async fn sources_off_keeps_earlier_conversations_out() {
     core.command(Command::Sources { memory: Some(true) });
     until(&mut rx, |e| matches!(e, Event::SourcesInfo { .. })).await;
     let on = say(&core, &mut rx, ASK).await;
-    assert!(system_prompt(&llm, 2).contains("<<引用-"));
+    assert!(current(&llm, 2).contains("<<引用-"));
     assert_eq!(on.sources, 1);
     core.shutdown().await;
     assert_eq!(turn_body(dir.path(), off.id).recall, None);
@@ -257,7 +286,7 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
 
     new_session(&core, &mut rx, "別の話").await;
     let after = say(&core, &mut rx, ASK).await;
-    assert!(!system_prompt(&llm, 1).contains("<<引用-"));
+    assert!(!current(&llm, 1).contains("<<引用-"));
     assert_eq!(after.sources, 0);
     core.settle().await;
     core.shutdown().await;
@@ -280,10 +309,10 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
     let (core, mut rx) = start(dir.path(), &llm, 6).await;
     new_session(&core, &mut rx, "再び").await;
     let again = say(&core, &mut rx, ASK).await;
-    let system = system_prompt(&llm, 0);
-    assert!(!system.contains("観葉植物の相談"), "{system}");
-    assert!(!system.contains("モンステラの水やりは、"), "{system}");
-    assert_eq!(again.sources, 1, "{system}");
+    let sent = current(&llm, 0);
+    assert!(!sent.contains("観葉植物の相談"), "{sent}");
+    assert!(!sent.contains("モンステラの水やりは、"), "{sent}");
+    assert_eq!(again.sources, 1, "{sent}");
     core.shutdown().await;
 }
 

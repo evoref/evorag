@@ -723,3 +723,41 @@ status = "test"
 tests = [".github/workflows/ci.yml#test (windows)", ".github/workflows/ci.yml#test (linux)", ".github/workflows/ci.yml#dco"]
 manual = ""
 note = ""
+
+# v0.2 (01 §5.5)。M2.1 から足していく。
+
+[[ac]]
+id = "AC-FR-414-1"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::consecutive_requests_share_their_prefix_even_after_a_recall"]
+manual = ""
+note = "想起を添えたターンの次の要求を含めて、前の要求の今の発話までが次の要求の先頭と一致する (引用は外れる)。"
+
+[[ac]]
+id = "AC-FR-414-2"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::old_turns_are_dropped_in_bulk_and_the_cut_stays_put"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-414-3"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::consecutive_requests_share_their_prefix_even_after_a_recall"]
+manual = ""
+note = "時計を進めても、前の発話の日時が変わらない。"
+
+[[ac]]
+id = "AC-FR-402-4"
+requirement = "FR-402"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+manual = ""
+note = "v0.2 の並べ方では、添えないときは今の発話に引用が付かない。"
