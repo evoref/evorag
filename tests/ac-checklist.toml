@@ -770,3 +770,12 @@ status = "test"
 tests = ["crates/evorag-core/tests/style.rs::a_chosen_style_takes_effect_at_once_and_survives_a_restart_and_a_lost_database", "crates/evorag-core/tests/style.rs::an_unknown_stored_value_reads_as_auto", "crates/evorag-tui/src/app.rs::style_opens_a_picker_and_sends_only_the_changed_items"]
 manual = ""
 note = "コアの層 (次の要求の既定の文、データ根とジャーナルの記録、知らない値は auto) と画面の層 (選ぶ窓、変えた項目だけ送る、知らせ) で判定する。"
+
+[[ac]]
+id = "AC-NFR-307-1"
+requirement = "NFR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/format_0_2.rs::a_v0_1_database_is_backed_up_and_moved_to_0_2_and_v0_1_can_still_write_to_it"]
+manual = ""
+note = "ストアの層。配布物どうしの行き来 (v0.1.2 と v0.2) は、リリースの受入で確かめる (09 §3.6)。"
