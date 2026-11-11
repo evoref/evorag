@@ -186,6 +186,8 @@ struct Inner {
     request_extra: evorag_llm::RequestExtra,
     reserve: Option<usize>,
     language: PromptLanguage,
+    /// 答え方の既定 (07 §3 の `/style`)。データ根の `setting` から読み、選び直したらすぐ効かせる。
+    answer: Mutex<prompt::AnswerDefaults>,
     backup_dir: Option<PathBuf>,
     probe: Probe,
     /// 裏で走らせている退避・退避の整理の task (終了のときに待つ。ストアを持ったまま戻らないように)。
@@ -281,6 +283,14 @@ impl Core {
             }
         };
 
+        // 答え方の既定 (07 §3)。読めなければ既定 (すべて auto)。
+        let answer = store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_settings(&r).ok())
+            .map(|s| prompt::AnswerDefaults::from_settings(&s))
+            .unwrap_or_default();
+
         // 語彙の索引 (05 §2.3)。DB との突き合わせは裏で行う。
         let (index, rebuild_index) = recall::open_index(store.data_root());
 
@@ -304,6 +314,7 @@ impl Core {
             request_extra: cfg.request_extra,
             reserve: cfg.reserve_for_output,
             language,
+            answer: Mutex::new(answer),
             backup_dir: cfg.backup_dir,
             probe: cfg.probe,
             background: Mutex::new(Vec::new()),
@@ -663,6 +674,7 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::Model { name } => switch_model(inner, name).await,
         Command::Sources { memory } => sources(inner, memory).await,
         Command::ShowSource { turn, n } => show_source(inner, turn, n),
+        Command::Style { set } => style(inner, set).await,
         _ => {}
     }
 }
@@ -996,6 +1008,63 @@ async fn sources(inner: &Arc<Inner>, memory: Option<bool>) {
     );
 }
 
+/// `/style` (FR-111、07 §3)。変えたら、データ根 (とジャーナル) に記録し、次の発話から効かせる。
+async fn style(inner: &Arc<Inner>, set: Option<(evorag_types::api::StyleItem, String)>) {
+    let mut changed = false;
+    if let Some((item, value)) = set {
+        let mut next = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
+        if !next.set(item, &value) {
+            emit(
+                inner,
+                Event::Rejected {
+                    error: Message::new(MessageKey::StyleUnknownValue)
+                        .arg("item", item.as_str())
+                        .arg("value", value)
+                        .arg("choices", item.choices().join(", ")),
+                },
+            );
+            return;
+        }
+        let current = inner
+            .store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_settings(&r).ok())
+            .unwrap_or_default();
+        let ops = match writes(inner).set_setting(&current, prompt::setting_name(item), &value) {
+            Ok(ops) => ops,
+            Err(e) => {
+                emit(
+                    inner,
+                    Event::Rejected {
+                        error: Message::new(MessageKey::ResponseNotSaved)
+                            .arg("detail", e.to_string()),
+                    },
+                );
+                return;
+            }
+        };
+        if let Err(e) = write(inner, ops).await {
+            emit(
+                inner,
+                Event::Rejected {
+                    error: Message::new(MessageKey::ResponseNotSaved).arg("detail", e),
+                },
+            );
+            return;
+        }
+        let mut cur = inner.answer.lock().unwrap_or_else(|e| e.into_inner());
+        changed = *cur != next;
+        *cur = next;
+    }
+    let values = inner
+        .answer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values();
+    emit(inner, Event::StyleInfo { values, changed });
+}
+
 /// 応答の出典の詳細 (FR-110)。
 fn show_source(inner: &Inner, turn: Id, n: usize) {
     let found = read_env(inner, evorag_memory::KIND_TURN, turn)
@@ -1191,7 +1260,7 @@ async fn generate(
         None
     };
     // システムプロンプトは凍結の核と選べる既定だけ。日時と引用は今の発話の側に置く (ADR-0017)。
-    let defaults = prompt::AnswerDefaults::default();
+    let defaults = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
     let system = ChatMessage::new(
         Role::System,
         prompt::system_prompt(inner.language, &defaults),

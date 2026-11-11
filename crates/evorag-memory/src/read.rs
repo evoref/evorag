@@ -112,3 +112,44 @@ pub fn pending_user_turns(tx: &ReadTxn<'_>, session: Id) -> Result<Vec<Turn>, Me
         .filter(|t| t.body.role == TurnRole::User && t.body.state == TurnState::Pending)
         .collect())
 }
+
+/// 読んだ設定 (`setting`)。
+#[derive(Debug, Clone)]
+pub struct Setting {
+    pub envelope: Envelope,
+    pub body: SettingBody,
+}
+
+/// 設定を名前ごとに読む。同じ名前が 2 件以上あれば `updated_at` の新しいものを採り、残りは
+/// `duplicates` に入れる (書くときに消す、03 §3.3)。
+#[derive(Debug, Default)]
+pub struct Settings {
+    pub by_name: std::collections::BTreeMap<String, Setting>,
+    pub duplicates: Vec<Envelope>,
+}
+
+pub fn load_settings(tx: &ReadTxn<'_>) -> Result<Settings, MemoryError> {
+    let mut out = Settings::default();
+    tx.for_each(KIND_SETTING, |r| {
+        if let Read::Ok(envelope) = r
+            && let Ok(body) = envelope.body_as::<SettingBody>()
+        {
+            let s = Setting { envelope, body };
+            match out.by_name.remove(&s.body.name) {
+                Some(old) if old.envelope.updated_at > s.envelope.updated_at => {
+                    out.duplicates.push(s.envelope);
+                    out.by_name.insert(old.body.name.clone(), old);
+                }
+                Some(old) => {
+                    out.duplicates.push(old.envelope);
+                    out.by_name.insert(s.body.name.clone(), s);
+                }
+                None => {
+                    out.by_name.insert(s.body.name.clone(), s);
+                }
+            }
+        }
+        true
+    })?;
+    Ok(out)
+}

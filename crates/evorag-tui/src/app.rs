@@ -2,7 +2,7 @@
 //!
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
-use evorag_types::api::{Command, Event, Role, SessionView, TurnStatus, TurnView};
+use evorag_types::api::{Command, Event, Role, SessionView, StyleItem, TurnStatus, TurnView};
 use evorag_types::{Id, MessageKey};
 
 use crate::catalog::Catalog;
@@ -56,6 +56,12 @@ pub enum Mode {
     },
     ConfirmDelete,
     Help,
+    /// 答え方の既定を選ぶ窓 (07 §3 の `/style`)。`choice` は項目ごとの値の位置。
+    Style {
+        row: usize,
+        choice: [usize; 3],
+        initial: [usize; 3],
+    },
 }
 
 /// 状態の行に出す接続の情報。
@@ -89,6 +95,8 @@ pub struct App {
     pub status: Status,
     /// 選んでいる出典 (応答の ID と番号、FR-110)。
     pub source: Option<(Id, usize)>,
+    /// 次の答え方の既定の知らせで、選ぶ窓を開く (`/style` を値なしで打った)。
+    style_picker: bool,
     ctrl_c_armed: bool,
 }
 
@@ -105,6 +113,7 @@ impl App {
             mode: Mode::Chat,
             status,
             source: None,
+            style_picker: false,
             ctrl_c_armed: false,
         }
     }
@@ -276,6 +285,38 @@ impl App {
                 );
                 self.notice(m);
             }
+            Event::StyleInfo { values, changed } => {
+                if std::mem::take(&mut self.style_picker) {
+                    let mut choice = [0; 3];
+                    for (i, item) in StyleItem::ALL.into_iter().enumerate() {
+                        // 知らない値 (新しい版で足した値) は auto (先頭) として扱う。
+                        choice[i] = item
+                            .choices()
+                            .iter()
+                            .position(|c| *c == values[i])
+                            .unwrap_or(0);
+                    }
+                    self.mode = Mode::Style {
+                        row: 0,
+                        choice,
+                        initial: choice,
+                    };
+                    return;
+                }
+                if changed {
+                    let m = self.catalog.key(MessageKey::UiStyleChanged);
+                    self.notice(m);
+                }
+                let m = self.catalog.with(
+                    MessageKey::UiStyleInfo,
+                    &[
+                        ("language", &values[0]),
+                        ("length", &values[1]),
+                        ("format", &values[2]),
+                    ],
+                );
+                self.notice(m);
+            }
             Event::BackgroundPaused { reason } => {
                 let m = self.catalog.message(&reason);
                 self.notice(m);
@@ -307,6 +348,55 @@ impl App {
             Mode::Help => {
                 if matches!(key, Key::Esc | Key::Enter { .. } | Key::Char('q')) {
                     self.mode = Mode::Chat;
+                }
+                Vec::new()
+            }
+            Mode::Style {
+                row,
+                mut choice,
+                initial,
+            } => {
+                let n = |i: usize| StyleItem::ALL[i].choices().len();
+                match key {
+                    Key::Esc => self.mode = Mode::Chat,
+                    Key::Up | Key::Down => {
+                        let row = if key == Key::Up {
+                            row.saturating_sub(1)
+                        } else {
+                            (row + 1).min(2)
+                        };
+                        self.mode = Mode::Style {
+                            row,
+                            choice,
+                            initial,
+                        };
+                    }
+                    Key::Left | Key::Right => {
+                        choice[row] = if key == Key::Left {
+                            (choice[row] + n(row) - 1) % n(row)
+                        } else {
+                            (choice[row] + 1) % n(row)
+                        };
+                        self.mode = Mode::Style {
+                            row,
+                            choice,
+                            initial,
+                        };
+                    }
+                    Key::Enter { newline: false } => {
+                        self.mode = Mode::Chat;
+                        // 変えた項目だけを送る。
+                        return (0..3)
+                            .filter(|&i| choice[i] != initial[i])
+                            .map(|i| {
+                                let item = StyleItem::ALL[i];
+                                Action::Command(Command::Style {
+                                    set: Some((item, item.choices()[choice[i]].to_owned())),
+                                })
+                            })
+                            .collect();
+                    }
+                    _ => {}
                 }
                 Vec::new()
             }
@@ -530,6 +620,10 @@ impl App {
             Slash::Quit => vec![Action::Quit],
             Slash::Model(name) => c(Command::Model { name }),
             Slash::Sources(memory) => c(Command::Sources { memory }),
+            Slash::Style(set) => {
+                self.style_picker = set.is_none();
+                c(Command::Style { set })
+            }
             Slash::NotYet(name) => {
                 let m = self.catalog.with(MessageKey::UiNotYet, &[("name", &name)]);
                 self.notice(m);
@@ -842,6 +936,58 @@ mod tests {
         assert!(a.notices.last().unwrap().contains("添えません"));
     }
 
+    /// verifies: AC-FR-111-1 (画面の層)
+    #[test]
+    fn style_opens_a_picker_and_sends_only_the_changed_items() {
+        let mut a = app();
+        type_text(&mut a, "/style");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style { set: None })]
+        );
+        // 知らない値 (新しい版で足した値) は auto として選び始める。
+        a.on_event(Event::StyleInfo {
+            values: ["ja".into(), "auto".into(), "odd".into()],
+            changed: false,
+        });
+        assert!(matches!(a.mode, Mode::Style { row: 0, .. }));
+        a.on_key(Key::Down);
+        a.on_key(Key::Right);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style {
+                set: Some((StyleItem::Length, "short".into()))
+            })]
+        );
+        assert_eq!(a.mode, Mode::Chat);
+        // 変えた後の知らせ: すべてのセッションに効くことと、次の応答が少し遅いこと。
+        a.on_event(Event::StyleInfo {
+            values: ["ja".into(), "short".into(), "auto".into()],
+            changed: true,
+        });
+        let n = a.notices.join("\n");
+        assert!(n.contains("すべてのセッションに効きます"), "{n}");
+        assert!(n.contains("長さ short"), "{n}");
+
+        // 値を付けて打てば、窓を開かずに送る。Esc で窓を閉じると何も送らない。
+        type_text(&mut a, "/style language en");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style {
+                set: Some((StyleItem::Language, "en".into()))
+            })]
+        );
+        type_text(&mut a, "/style");
+        a.on_key(Key::Enter { newline: false });
+        a.on_event(Event::StyleInfo {
+            values: ["en".into(), "short".into(), "auto".into()],
+            changed: false,
+        });
+        a.on_key(Key::Right);
+        assert_eq!(a.on_key(Key::Esc), Vec::new());
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
     /// verifies: AC-FR-903-1 (07 §3 の v0.1 のコマンドがすべて /help に出て、使える)
     #[test]
     fn help_lists_every_command() {
@@ -857,6 +1003,7 @@ mod tests {
             ("/good", "/good"),
             ("/bad", "/bad 理由"),
             ("/sources", "/sources off"),
+            ("/style", "/style length short"),
             ("/model", "/model"),
             ("/quit", "/quit"),
         ] {

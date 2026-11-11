@@ -10,6 +10,12 @@ pub const KIND_TURN: &str = "turn";
 pub const KIND_SIGNAL: &str = "signal";
 /// 裏の処理の手順の進み具合 (03 §3.3)。
 pub const KIND_JOB: &str = "job";
+/// 利用者が画面から変えた、データ根の全体に効く設定 (03 §3.3、v0.2)。
+pub const KIND_SETTING: &str = "setting";
+/// 設定の名前: 答え方の既定 (07 §3 の `/style`)。
+pub const SETTING_ANSWER_LANGUAGE: &str = "answer.language";
+pub const SETTING_ANSWER_LENGTH: &str = "answer.length";
+pub const SETTING_ANSWER_FORMAT: &str = "answer.format";
 /// job の手順: 消した記録を退避から除く (03 §7.3)。
 pub const JOB_PURGE_BACKUPS: &str = "purge_backups";
 
@@ -40,9 +46,26 @@ pub fn kinds() -> Vec<KindSpec> {
         append(KIND_SESSION, derive_session),
         append(KIND_TURN, derive_turn),
         append(KIND_SIGNAL, derive_signal),
+        // 利用者の明示の操作なのでジャーナルに書く。関係も副索引も持たない (件数が少ないので全部読む)。
+        KindSpec {
+            name: KIND_SETTING,
+            current_v: 1,
+            create_when_newer_present: true,
+            journaled: true,
+            derive: None,
+        },
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
     ]
+}
+
+/// `setting` の本体 (v1)。名前ごとに 1 件 (2 件以上あれば `updated_at` の新しいものを採る、03 §3.3)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingBody {
+    /// 設定の名前 (`answer.language` など)。
+    pub name: String,
+    /// 値。知らない値の読み方は、名前ごとに決める (答え方の既定は `auto`、07 §3)。
+    pub value: String,
 }
 
 /// `job` の本体 (v1)。

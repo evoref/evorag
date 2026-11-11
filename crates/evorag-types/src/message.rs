@@ -65,6 +65,14 @@ message_keys! {
     UiModelInfo => "ui.notice.model",
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",
+    StyleUnknownValue => "error.style_unknown_value",
+    UiStyleInfo => "ui.notice.style",
+    UiStyleChanged => "ui.notice.style_changed",
+    UiStyleTitle => "ui.style.title",
+    UiStyleLanguage => "ui.style.language",
+    UiStyleLength => "ui.style.length",
+    UiStyleFormat => "ui.style.format",
+    UiStyleHint => "ui.style.hint",
     UiSourcesOn => "ui.notice.sources_on",
     UiSourcesOff => "ui.notice.sources_off",
     /// 引数: `n`。

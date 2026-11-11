@@ -118,6 +118,40 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// 設定を書く (03 §3.3 の `setting`)。同じ名前の記録があれば上書きし、重複していれば消す。
+    pub fn set_setting(
+        &self,
+        current: &crate::read::Settings,
+        name: &str,
+        value: &str,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let body = SettingBody {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        };
+        let mut ops = Vec::new();
+        let e = match current.by_name.get(name) {
+            Some(s) => {
+                let mut e = s.envelope.clone();
+                e.set_body(&body)?;
+                e.updated_at = now;
+                e
+            }
+            None => envelope(self.ids.next_id(), KIND_SETTING, now, &body)?,
+        };
+        ops.push(WriteOp::Put(e));
+        for d in &current.duplicates {
+            if d.body_as::<SettingBody>().is_ok_and(|b| b.name == name) {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_SETTING.into(),
+                    id: d.id,
+                });
+            }
+        }
+        Ok(ops)
+    }
+
     /// 発話のターン (状態「応答待ち」)。LLM に送る前に書く (04 §3 の 1、FR-201)。
     pub fn user_turn(
         &self,
