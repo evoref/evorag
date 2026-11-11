@@ -338,40 +338,9 @@ fn main() -> ExitCode {
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    // `/model` の候補 (07 §4.2 の `llm.chat.models`: 名前と url)。
-    let mut models = Vec::new();
-    for t in cfg.llm.chat.models.iter().flatten() {
-        let (Some(name), Some(url)) = (
-            t.get("name").and_then(|v| v.as_str()),
-            t.get("url").and_then(|v| v.as_str()),
-        ) else {
-            return fail(
-                &catalog,
-                4,
-                MessageKey::CliConfigError,
-                &[("detail", "each [[llm.chat.models]] needs name and url")],
-            );
-        };
-        models.push(evorag_core::ModelChoice {
-            name: name.to_owned(),
-            url: url.to_owned(),
-        });
-    }
-    let (key_for_switch, allow_remote) = (
-        cfg.llm.chat.api_key.clone().or_else(|| {
-            cfg.llm
-                .chat
-                .api_key_env
-                .as_ref()
-                .and_then(|v| std::env::var(v).ok())
-        }),
-        cfg.llm.allow_remote,
-    );
-    let connect: evorag_core::Connector = Arc::new(move |u: &str| {
-        let endpoint = Endpoint::new(u, key_for_switch.clone(), allow_remote)?;
-        let c = HttpClient::new(endpoint, RetryPolicy::default())?;
-        Ok(Arc::new(c) as Arc<dyn evorag_llm::LlmClient>)
-    });
+    // v0.2 で使わなくなったキー (07 §4.2): 読んで無視し、知らせる。v0.1 の `/model` の候補は、
+    // 切り替えを setup でだけ行うようにしたので使わない (ADR-0018)。
+    let ignored_config = config::obsolete(&cfg);
     let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
@@ -385,8 +354,7 @@ fn main() -> ExitCode {
         allow_unsafe_location: cfg.storage.allow_unsafe_location.unwrap_or(false),
         probe: evorag_core::Probe::system(),
         model_name: model_name.clone(),
-        models: models.clone(),
-        connect: Some(connect.clone()),
+        ignored_config: ignored_config.clone(),
         memory_enabled: cfg.memory_enabled(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
@@ -471,6 +439,27 @@ fn main() -> ExitCode {
                 &[("url", &url), ("detail", &e.to_string())],
             );
         }
+        Err(StartError::ModelMismatch {
+            recorded,
+            connected,
+        }) => {
+            // 画面を開かずに、違いと取れる手を示して終わる (06 §3、終了コード 6)。
+            let hint = if evorag_core::same_meta(&recorded, &connected) {
+                catalog.key(MessageKey::CliModelMismatchSameMeta)
+            } else {
+                String::new()
+            };
+            return fail(
+                &catalog,
+                6,
+                MessageKey::CliModelMismatch,
+                &[
+                    ("recorded", &recorded.file_name),
+                    ("connected", &connected.file_name),
+                    ("hint", &hint),
+                ],
+            );
+        }
         Err(StartError::UnsafeLocation(d)) => {
             return fail(
                 &catalog,
@@ -516,6 +505,22 @@ fn main() -> ExitCode {
         let m = app
             .catalog
             .with(MessageKey::CliLocationWarning, &[("detail", w)]);
+        app.notices.push(m);
+    }
+    if let Some(unusual) = report.chat_model_recorded {
+        let key = if unusual {
+            MessageKey::CliModelRecordedUnusual
+        } else {
+            MessageKey::CliModelRecorded
+        };
+        let file = evorag_llm::file_name(&report.server.model_path).to_owned();
+        let m = app.catalog.with(key, &[("file", &file)]);
+        app.notices.push(m);
+    }
+    for key in &report.ignored_config {
+        let m = app
+            .catalog
+            .with(MessageKey::CliConfigObsolete, &[("key", key)]);
         app.notices.push(m);
     }
     if report.prompt_language_mismatch {

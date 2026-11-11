@@ -90,6 +90,15 @@ pub enum TurnStatus {
     Failed,
 }
 
+/// 1 つの役割の、記録したモデルと繋がっているモデル (ファイル名と model_key、06 §3.1)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRoleInfo {
+    /// `chat`・`embed`・`rerank`。
+    pub role: String,
+    pub recorded: Option<(String, String)>,
+    pub connected: Option<(String, String)>,
+}
+
 /// 読み取り用のセッション。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
@@ -164,14 +173,11 @@ pub enum Event {
         /// 出典のターン (役割と本文)。
         lines: Vec<(Role, String)>,
     },
-    /// 今のモデルと切り替えの候補 (`/model` の答え、切り替えた後)。
+    /// 役割ごとの、記録したモデルと繋がっているモデル (`/model` の答え、v0.2 は表示だけ、FR-108)。
     ModelInfo {
-        /// 候補の名前 (設定の名前。候補から選んでいなければ接続先)。
-        current: String,
-        /// llama-server が返したモデルの名前。
-        model: String,
+        roles: Vec<ModelRoleInfo>,
+        /// 応答のモデルのスロットごとの文脈の長さ。
         n_ctx: u32,
-        choices: Vec<String>,
     },
     /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
     BackgroundPaused { reason: Message },

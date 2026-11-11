@@ -38,10 +38,8 @@ top_p = 0.95
 # [llm.chat.request_extra]
 # chat_template_kwargs = { enable_thinking = false }
 
-# /model で切り替える候補。
-# [[llm.chat.models]]
-# name = "small"
-# url = "http://127.0.0.1:8081"
+# v0.1 の [[llm.chat.models]] (/model で切り替える候補) は、v0.2 から使いません。
+# 応答のモデルはデータ根に記録し、切り替えは evorag setup で行います。
 
 [storage]
 # データ根 (--data-root が優先)。書かなければ OS ごとの既定の場所。

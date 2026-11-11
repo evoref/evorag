@@ -54,9 +54,9 @@ pub struct CoreConfig {
     pub probe: Probe,
     /// 今の接続先の名前 (状態の行と `/model` の表示)。
     pub model_name: String,
-    /// `/model` で切り替える候補と、繋ぐ関数 (FR-108)。
-    pub models: Vec<ModelChoice>,
-    pub connect: Option<Connector>,
+    /// 読んで無視した設定のキーと、その内容のハッシュ (`llm.chat.models` など、07 §4.1)。
+    /// 同じ内容を前に知らせていれば、知らせない。
+    pub ignored_config: Vec<(String, String)>,
     /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
     pub memory_enabled: bool,
     pub clock: Arc<dyn Clock>,
@@ -80,15 +80,26 @@ impl Probe {
     }
 }
 
-/// `/model` の候補 (設定 `[[llm.chat.models]]`、07 §4.2)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelChoice {
-    pub name: String,
-    pub url: String,
+/// 繋がっているモデルの元の値 (06 §3.1)。
+pub fn origin(server: &ServerInfo) -> evorag_memory::ModelOrigin {
+    evorag_memory::ModelOrigin {
+        model_key: server.model_key.clone(),
+        file_name: evorag_llm::file_name(&server.model_path).to_owned(),
+        model_name: server.model_name.clone(),
+        n_params: server.meta.n_params,
+        size: server.meta.size,
+        n_vocab: server.meta.n_vocab,
+        build_info: server.build_info.clone(),
+    }
 }
 
-/// 接続先の URL から `LlmClient` を作る関数 (接続先の検査を含む)。
-pub type Connector = Arc<dyn Fn(&str) -> Result<Arc<dyn LlmClient>, LlmError> + Send + Sync>;
+/// ファイル名だけが違い、`meta` の値がすべて同じか (同じモデルの可能性が高い、06 §3)。
+pub fn same_meta(a: &evorag_memory::ModelOrigin, b: &evorag_memory::ModelOrigin) -> bool {
+    a.n_params.is_some()
+        && a.size.is_some()
+        && a.n_vocab.is_some()
+        && (a.n_params, a.size, a.n_vocab) == (b.n_params, b.size, b.n_vocab)
+}
 
 /// 語彙の索引の状態 (doctor、03 §10)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +141,12 @@ pub enum StartError {
     UnsafeLocation(String),
     #[error("storage error: {0}")]
     Storage(String),
+    /// 応答のモデルが、データ根に記録したモデルと違う (06 §3、FR-512)。画面を開かずに案内を出す。
+    #[error("the chat model differs from the recorded one ({} != {})", connected.model_key, recorded.model_key)]
+    ModelMismatch {
+        recorded: Box<evorag_memory::ModelOrigin>,
+        connected: Box<evorag_memory::ModelOrigin>,
+    },
 }
 
 /// 起動して分かったこと。
@@ -142,6 +159,11 @@ pub struct StartReport {
     pub prompt_language_mismatch: bool,
     /// 置き場所の注意 (FAT / exFAT、または設定で許した危ない置き場所)。
     pub location_warnings: Vec<String>,
+    /// この起動で、応答のモデルを初めて記録した (06 §3.1)。`Some(true)` は、過去の応答で最も
+    /// 多く使われたモデルと違う (たまたま試しのモデルで起動したかもしれない)。
+    pub chat_model_recorded: Option<bool>,
+    /// 知らせる、読んで無視した設定のキー (07 §4.1)。
+    pub ignored_config: Vec<String>,
 }
 
 /// 生成の取り消しの理由。
@@ -168,12 +190,10 @@ struct Inner {
     store: Arc<Store>,
     writer: WriterHandle,
     writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// 今の接続先と、その能力 (`/model` で切り替える、FR-108)。
+    /// 今の接続先と、その能力と名前。
     conn: std::sync::RwLock<(Arc<dyn LlmClient>, ServerInfo, String)>,
-    /// 切り替えの候補 (設定 `[[llm.chat.models]]`)。
-    models: Vec<ModelChoice>,
-    /// 候補の接続先に繋ぐ関数。
-    connect: Option<Connector>,
+    /// 記録した応答のモデル (06 §3.1)。送る前に、繋がっているモデルと照合する。
+    chat_model: evorag_memory::ModelOrigin,
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
@@ -258,6 +278,26 @@ impl Core {
             return Err(StartError::ReadOnly(format!("{r:?}")));
         }
         let store = Arc::new(store);
+
+        // 応答のモデルを、記録と照合する (06 §3.1)。違えば、何も書かずに止める。
+        let connected = origin(&server);
+        let bindings = store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_bindings(&r).ok())
+            .unwrap_or_default();
+        let recorded_chat = bindings
+            .by_role
+            .get(evorag_memory::ROLE_CHAT)
+            .map(|b| b.body.current.clone());
+        if let Some(r) = &recorded_chat
+            && r.model_key != connected.model_key
+        {
+            return Err(StartError::ModelMismatch {
+                recorded: Box::new(r.clone()),
+                connected: Box::new(connected),
+            });
+        }
         let (writer, handle) =
             Writer::new(store.clone()).map_err(|e| StartError::Storage(e.to_string()))?;
         let writer_thread = std::thread::Builder::new()
@@ -283,6 +323,27 @@ impl Core {
             }
         };
 
+        // 記録が無ければ (新しいデータ根、v0.1 のデータ根)、繋がっているモデルを記録する (06 §3.1)。
+        let mut chat_model_recorded = None;
+        if recorded_chat.is_none() {
+            let unusual = most_used_model_key(&store).is_some_and(|k| k != connected.model_key);
+            let w = Writes {
+                clock: &*cfg.clock,
+                ids: &*cfg.ids,
+            };
+            let ops = w
+                .bind_model(&bindings, evorag_memory::ROLE_CHAT, connected.clone())
+                .map_err(|e| StartError::Storage(e.to_string()))?;
+            handle
+                .submit_wait(WriteRequest::conversation(ops))
+                .map_err(|e| StartError::Storage(e.to_string()))?;
+            chat_model_recorded = Some(unusual);
+        }
+
+        // 読んで無視した設定 (07 §4.1)。同じ内容を前に知らせていれば、知らせない。
+        let ignored_config =
+            ignored_config_notices(&store, &handle, &cfg.ignored_config, &*cfg.clock, &*cfg.ids);
+
         // 答え方の既定 (07 §3)。読めなければ既定 (すべて auto)。
         let answer = store
             .read()
@@ -301,8 +362,7 @@ impl Core {
             writer: handle,
             writer_thread: Mutex::new(Some(writer_thread)),
             conn: std::sync::RwLock::new((llm, server.clone(), cfg.model_name)),
-            models: cfg.models,
-            connect: cfg.connect,
+            chat_model: recorded_chat.unwrap_or(connected),
             index,
             memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
@@ -392,6 +452,8 @@ impl Core {
             prompt_language: language,
             prompt_language_mismatch: language != cfg.prompt_language,
             location_warnings,
+            chat_model_recorded,
+            ignored_config,
         };
         Ok((core, rx, report))
     }
@@ -523,58 +585,109 @@ impl Inner {
     }
 }
 
-fn model_info(inner: &Inner) -> Event {
-    let (_, server, name) = inner.conn();
-    Event::ModelInfo {
-        current: name,
-        model: server.model_name,
-        n_ctx: server.n_ctx,
-        choices: inner.models.iter().map(|m| m.name.clone()).collect(),
+/// 過去の応答で最も多く使われたモデル (記録の無いデータ根で、初めて記録するときに比べる、06 §3.1)。
+fn most_used_model_key(store: &Store) -> Option<String> {
+    let rtx = store.read().ok()?;
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let _ = rtx.for_each(evorag_memory::KIND_TURN, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<evorag_memory::TurnBody>()
+            && let Some(k) = b.model_key
+        {
+            *counts.entry(k).or_default() += 1;
+        }
+        true
+    });
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k)
+}
+
+/// 読んで無視した設定のうち、前に知らせていない (内容が変わった) キー。知らせたことを記録する。
+fn ignored_config_notices(
+    store: &Store,
+    handle: &evorag_store::WriterHandle,
+    ignored: &[(String, String)],
+    clock: &dyn Clock,
+    ids: &dyn IdGen,
+) -> Vec<String> {
+    let current = store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::load_settings(&r).ok())
+        .unwrap_or_default();
+    let seen = current
+        .by_name
+        .get(evorag_memory::SETTING_IGNORED_CONFIG)
+        .map(|s| s.body.value.clone())
+        .unwrap_or_default();
+    let value = ignored
+        .iter()
+        .map(|(k, h)| format!("{k}={h}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let fresh: Vec<String> = ignored
+        .iter()
+        .filter(|(k, h)| !seen.split(';').any(|e| e == format!("{k}={h}")))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if value != seen && !(value.is_empty() && seen.is_empty()) {
+        let w = Writes { clock, ids };
+        if let Ok(ops) = w.set_setting(&current, evorag_memory::SETTING_IGNORED_CONFIG, &value) {
+            let _ = handle.submit_wait(WriteRequest::conversation(ops));
+        }
+    }
+    fresh
+}
+
+fn role_info(
+    role: &str,
+    recorded: Option<&evorag_memory::ModelOrigin>,
+    connected: Option<&evorag_memory::ModelOrigin>,
+) -> evorag_types::api::ModelRoleInfo {
+    evorag_types::api::ModelRoleInfo {
+        role: role.to_owned(),
+        recorded: recorded.map(|o| (o.file_name.clone(), o.model_key.clone())),
+        connected: connected.map(|o| (o.file_name.clone(), o.model_key.clone())),
     }
 }
 
-/// `/model` (FR-108): 名前が無ければ今のモデルと候補を示し、あれば候補に繋ぎ直す。
-async fn switch_model(inner: &Arc<Inner>, name: Option<String>) {
-    let Some(name) = name else {
-        emit(inner, model_info(inner));
+/// `/model` (FR-108、v0.2): 役割ごとに、記録したモデルと繋がっているモデルを示すだけ。切り替えは
+/// `evorag setup` で行う (ADR-0018)。名前を付けて打たれたら、そのことを示す。
+fn show_model(inner: &Inner, name: Option<String>) {
+    if name.is_some() {
+        reject(inner, MessageKey::ModelSwitchInSetup);
         return;
+    }
+    let (_, server, _) = inner.conn();
+    let connected = origin(&server);
+    emit(
+        inner,
+        Event::ModelInfo {
+            roles: vec![role_info(
+                evorag_memory::ROLE_CHAT,
+                Some(&inner.chat_model),
+                Some(&connected),
+            )],
+            n_ctx: server.n_ctx,
+        },
+    );
+}
+
+/// 送る前に、繋がっている応答のモデルが記録と同じかを確かめる (06 §3、AC-FR-512-3)。
+/// 起動中に llama-server が別のモデルで起動し直されたときに気づく。繋がらなければ確かめない
+/// (送れば、繋がらないことが失敗として記録される)。
+async fn check_chat_model(inner: &Inner) -> Result<(), Message> {
+    let (llm, _, name) = inner.conn();
+    let Ok(server) = llm.server_info().await else {
+        return Ok(());
     };
-    if is_running(inner) {
-        reject(inner, MessageKey::Busy);
-        return;
+    if server.model_key != inner.chat_model.model_key {
+        let connected = origin(&server);
+        return Err(Message::new(MessageKey::ModelChanged)
+            .arg("recorded", inner.chat_model.file_name.clone())
+            .arg("connected", connected.file_name));
     }
-    let (Some(choice), Some(connect)) =
-        (inner.models.iter().find(|m| m.name == name), &inner.connect)
-    else {
-        emit(
-            inner,
-            Event::Rejected {
-                error: Message::new(MessageKey::UnknownModel).arg("name", name),
-            },
-        );
-        return;
-    };
-    let connected = async {
-        let llm = connect(&choice.url)?;
-        llm.health().await?;
-        let server = llm.server_info().await?;
-        Ok::<_, LlmError>((llm, server))
-    }
-    .await;
-    match connected {
-        Ok((llm, server)) => {
-            *inner.conn.write().unwrap_or_else(|e| e.into_inner()) =
-                (llm, server, choice.name.clone());
-            emit(inner, model_info(inner));
-        }
-        // 繋がらなければ、今のモデルのまま理由を知らせる。
-        Err(e) => emit(
-            inner,
-            Event::Rejected {
-                error: llm_message(&e),
-            },
-        ),
-    }
+    *inner.conn.write().unwrap_or_else(|e| e.into_inner()) = (llm, server, name);
+    Ok(())
 }
 
 fn emit(inner: &Inner, ev: Event) {
@@ -671,7 +784,7 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::RenameSession { title } => rename(inner, title).await,
         Command::DeleteSession => delete(inner).await,
         Command::Rate { good, reason } => rate(inner, good, reason).await,
-        Command::Model { name } => switch_model(inner, name).await,
+        Command::Model { name } => show_model(inner, name),
         Command::Sources { memory } => sources(inner, memory).await,
         Command::ShowSource { turn, n } => show_source(inner, turn, n),
         Command::Style { set } => style(inner, set).await,
@@ -876,6 +989,11 @@ async fn send(inner: &Arc<Inner>, text: String) {
         reject(inner, MessageKey::NoSession);
         return;
     };
+    // 0. 応答のモデルが記録と違えば送らない。発話は入力欄に戻す (06 §3)。
+    if let Err(error) = check_chat_model(inner).await {
+        emit(inner, Event::SendRejected { text, error });
+        return;
+    }
     // 1. 発話を先に確定する (04 §3 の 1、FR-201)。確定できなければ送らない。
     let (uid, ops) = match writes(inner).user_turn(&session, &text) {
         Ok(v) => v,

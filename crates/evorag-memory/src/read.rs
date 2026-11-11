@@ -153,3 +153,44 @@ pub fn load_settings(tx: &ReadTxn<'_>) -> Result<Settings, MemoryError> {
     })?;
     Ok(out)
 }
+
+/// 記録したモデル (`model_binding`)。
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub envelope: Envelope,
+    pub body: ModelBindingBody,
+}
+
+/// 役割ごとの記録したモデル。同じ役割が 2 件以上あれば `updated_at` の新しいものを採り、残りは
+/// `duplicates` に入れる (書くときに消す、03 §3.3)。
+#[derive(Debug, Default)]
+pub struct Bindings {
+    pub by_role: std::collections::BTreeMap<String, Binding>,
+    pub duplicates: Vec<Envelope>,
+}
+
+pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
+    let mut out = Bindings::default();
+    tx.for_each(KIND_MODEL_BINDING, |r| {
+        if let Read::Ok(envelope) = r
+            && let Ok(body) = envelope.body_as::<ModelBindingBody>()
+        {
+            let b = Binding { envelope, body };
+            match out.by_role.remove(&b.body.role) {
+                Some(old) if old.envelope.updated_at > b.envelope.updated_at => {
+                    out.duplicates.push(b.envelope);
+                    out.by_role.insert(old.body.role.clone(), old);
+                }
+                Some(old) => {
+                    out.duplicates.push(old.envelope);
+                    out.by_role.insert(b.body.role.clone(), b);
+                }
+                None => {
+                    out.by_role.insert(b.body.role.clone(), b);
+                }
+            }
+        }
+        true
+    })?;
+    Ok(out)
+}

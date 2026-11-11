@@ -779,3 +779,39 @@ status = "test"
 tests = ["crates/evorag-store/tests/format_0_2.rs::a_v0_1_database_is_backed_up_and_moved_to_0_2_and_v0_1_can_still_write_to_it"]
 manual = ""
 note = "ストアの層。配布物どうしの行き来 (v0.1.2 と v0.2) は、リリースの受入で確かめる (09 §3.6)。"
+
+[[ac]]
+id = "AC-FR-512-1"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::a_different_chat_model_stops_the_start_and_says_whether_it_may_be_the_same"]
+manual = ""
+note = "コアの層 (起動を止め、記録を書き換えない、同じモデルの可能性を見分ける)。終了コード 6 と案内は bin で出す。"
+
+[[ac]]
+id = "AC-FR-512-2"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::recording_a_model_unlike_the_usual_one_is_flagged"]
+manual = ""
+note = "embed・rerank の記録は M2.2 の後の PR で足す。"
+
+[[ac]]
+id = "AC-FR-512-3"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::a_model_swapped_while_running_is_noticed_before_sending"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-108-2"
+requirement = "FR-108"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::ignored_config_keys_are_announced_once_per_content"]
+manual = ""
+note = ""

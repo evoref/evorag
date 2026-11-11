@@ -133,6 +133,28 @@ fn setting_v1() {
 }
 
 #[test]
+fn model_binding_v1() {
+    let origin = |key: &str, file: &str| ModelOrigin {
+        model_key: key.into(),
+        file_name: file.into(),
+        model_name: "qwen".into(),
+        n_params: Some(8_953_803_264),
+        size: Some(5_669_554_176),
+        n_vocab: Some(248_320),
+        build_info: "b1-138789d".into(),
+    };
+    check(
+        KIND_MODEL_BINDING,
+        id("019a6a2b-0000-7000-8000-000000000007"),
+        ModelBindingBody {
+            role: ROLE_CHAT.into(),
+            current: origin("0123456789abcdef0123456789abcdef", "qwen-b.gguf"),
+            history: vec![origin("fedcba9876543210fedcba9876543210", "qwen-a.gguf")],
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,
