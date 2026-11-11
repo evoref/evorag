@@ -67,6 +67,7 @@ evorag/
   - 拒否: `main` / `develop` への push と削除、force push (`--force`・`-f`・`+refspec`)、`main` / `develop` 上の commit / merge / rebase など、`v*` タグの作成と push、`git stash`。
   - 許可: 作業ブランチ (`feat/`・`fix/`・`spec/`・`chore/`・`spike/`・`agent/`) への `--force-with-lease` (作業ブランチの中の rebase の後の push)、作業ブランチのリモートのブランチの削除 (マージ後の片付け)。それ以外の名前の削除は確認。
   - 確認: `git reset --hard` / `git clean -f` / `git restore` / `git checkout -- <path>`、`gh pr merge`。
+  - `gh pr merge` の確認を省く印: 利用者が手元に `.claude/auto-merge-squash` (コミットしない、`.gitignore` 済み) を置くと、`gh pr merge <番号> --squash` の形だけ確認を省く (merge を続けてエージェントに任せる間、2026-11-12 の利用者の指示)。`--merge` (`develop` ↔ `main`) やほかの指定を含む命令は、いつも確認する。任せるのをやめるときは、ファイルを消す。
 - hook に拒否されたら、回避せずに理由を人間に伝えて指示を待つ。
 
 ## 5. 決定的な試験

@@ -11,7 +11,9 @@ PR (squash) で develop に入れる。リリースは develop → main の PR (
 - main / develop 上での commit / merge / rebase 等を拒否 (作業ブランチ → PR で入れる)
 - リリースタグ (v*) の作成・push を拒否 (署名付きタグは人間が付ける)
 - git stash を拒否 (作業ツリーを動かす操作)。reset --hard / clean -f / restore / checkout -- は確認を求める
-- gh pr merge は確認を求める (merge するかどうかは人間が決める。実行は指示を受けたエージェント、docs/11 §9.1)
+- gh pr merge は確認を求める (merge するかどうかは人間が決める。実行は指示を受けたエージェント、docs/11 §9.1)。
+  ただし、利用者が手元に .claude/auto-merge-squash (コミットしない) を置いたときは、作業の PR の
+  `gh pr merge <番号> --squash` だけ確認を省く (merge を続けて任せる間の手間を省くため)。
 
 標準入力の JSON から tool_input.command を読み、deny / ask のときだけ JSON を出力する。
 """
@@ -117,6 +119,20 @@ def check_push(args, branch):
             decide("ask", f"作業ブランチの名前ではないリモートのブランチ {others[0]} を削除します。よいですか?")
 
 
+AUTO_MERGE_FILE = os.path.join(".claude", "auto-merge-squash")
+# 確認を省くのは、`gh pr merge <番号> --squash` の形だけ。ほかの指定を含めば、いつも確認する。
+
+
+def auto_merge_allowed(seg, cwd):
+    """利用者が印のファイルを置いていて、作業の PR の squash の merge だけを頼む命令か。"""
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or cwd or os.getcwd()
+    if not os.path.isfile(os.path.join(root, AUTO_MERGE_FILE)):
+        return False
+    words = seg.split()[3:]
+    rest = [w for w in words if w != "--squash"]
+    return len(words) == 2 and len(rest) == 1 and rest[0].isdigit()
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -133,6 +149,8 @@ def main():
             cwd = resolve(cwd, m.group(1))
             continue
         if re.match(r"^gh\s+pr\s+merge\b", seg):
+            if auto_merge_allowed(seg, cwd):
+                continue
             decide("ask", "PR の merge は人間が決めます。この PR を入れてよいか確認してください。")
         sub, args, dash_c = git_args(seg)
         if sub is None:
