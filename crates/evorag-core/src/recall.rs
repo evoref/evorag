@@ -16,7 +16,8 @@ use std::sync::Arc;
 use evorag_index::lex::{LexIndex, Opened};
 use evorag_llm::LlmClient;
 use evorag_memory::{
-    KIND_SESSION, KIND_TURN, RecallDecision, RecallRecord, Turn, TurnBody, TurnRole, TurnState,
+    ChunkBody, KIND_CHUNK, KIND_SESSION, KIND_TURN, RecallDecision, RecallRecord, Turn, TurnBody,
+    TurnRole, TurnState,
 };
 use evorag_retrieval::doc_input;
 use evorag_retrieval::recall::{Decision, RecallConfig, recall};
@@ -31,13 +32,18 @@ const MEMORY_BUDGET: usize = 800;
 /// 引用する 1 ターンの本文の上限 (文字)。
 const EXCERPT_CHARS: usize = 400;
 
-/// 索引の置き場所 (05 §2.3)。
+/// 索引の置き場所 (05 §2.3)。v0.2 はチャンクを単位にした `chunk-lex/`。
 pub fn index_dir(data_root: &std::path::Path) -> std::path::PathBuf {
-    data_root.join("index").join("memory").join("lex")
+    data_root.join("index").join("memory").join("chunk-lex")
 }
 
-/// 索引を開く。開けなければ `None` (想起は Skip になる)。
+/// 索引を開く。開けなければ `None` (想起は Skip になる)。v0.1 の索引 (`lex/`) は使わないので消す
+/// (05 §2.3。v0.1.2 に戻すと、v0.1.2 が作り直す)。
 pub fn open_index(data_root: &std::path::Path) -> (Option<Arc<LexIndex>>, bool) {
+    let old = data_root.join("index").join("memory").join("lex");
+    if old.is_dir() {
+        let _ = std::fs::remove_dir_all(&old);
+    }
     match LexIndex::open(
         &index_dir(data_root),
         evorag_retrieval::normalize::RULES_VERSION,
@@ -48,66 +54,116 @@ pub fn open_index(data_root: &std::path::Path) -> (Option<Arc<LexIndex>>, bool) 
 }
 
 /// 索引に入れるターンか (本文があり、失敗していない)。
-fn indexable(b: &TurnBody) -> bool {
+pub(crate) fn indexable(b: &TurnBody) -> bool {
     !b.text.trim().is_empty() && b.state != TurnState::Failed && b.role != TurnRole::System
 }
 
-/// 起動時: DB と突き合わせる。`rebuild` なら作り直す。
-pub fn sync(store: &Store, index: &LexIndex, rebuild: bool) -> std::io::Result<()> {
-    let Ok(rtx) = store.read() else {
-        return Ok(());
+/// ターンの本文から、チャンクの本体を作る (05 §2.4)。
+pub(crate) fn chunk_bodies(turn: Id, b: &TurnBody) -> Vec<ChunkBody> {
+    evorag_retrieval::chunk::split(&b.text)
+        .into_iter()
+        .map(|s| ChunkBody {
+            turn,
+            session: b.session,
+            start: s.start as u32,
+            end: s.end as u32,
+            rules: evorag_retrieval::chunk::CHUNK_RULES_VERSION,
+        })
+        .collect()
+}
+
+/// チャンクを索引の 1 件にする。
+pub(crate) fn chunk_doc(id: Id, c: &ChunkBody, text: &str) -> evorag_index::lex::DocInput {
+    let span = evorag_retrieval::chunk::Span {
+        start: c.start as usize,
+        end: c.end as usize,
     };
-    let mut turns: Vec<(Id, TurnBody)> = Vec::new();
+    doc_input(id, c.session, &evorag_retrieval::chunk::slice(text, span))
+}
+
+/// 起動時の突き合わせの計画 (DB を読むだけ)。
+#[derive(Default)]
+pub(crate) struct SyncPlan {
+    /// 元のターンが無い・区切り方の版が古いチャンク (消す)。
+    pub delete: Vec<Id>,
+    /// チャンクの無いターンの、新しいチャンク。
+    pub create: Vec<ChunkBody>,
+    /// 残すチャンクの、索引の 1 件。
+    pub keep: Vec<evorag_index::lex::DocInput>,
+    /// ターンの本文 (新しいチャンクの索引の 1 件を作るため)。
+    pub texts: HashMap<Id, String>,
+}
+
+/// DB のターンとチャンクを突き合わせる (05 §2.3。古い版が消したターンのチャンクも、ここで片付ける)。
+pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
+    let Ok(rtx) = store.read() else {
+        return SyncPlan::default();
+    };
+    let mut turns: HashMap<Id, TurnBody> = HashMap::new();
     let _ = rtx.for_each(KIND_TURN, |r| {
         if let Read::Ok(e) = r
             && let Ok(b) = e.body_as::<TurnBody>()
             && indexable(&b)
         {
-            turns.push((e.id, b));
+            turns.insert(e.id, b);
+        }
+        true
+    });
+    let mut chunks: Vec<(Id, ChunkBody)> = Vec::new();
+    let _ = rtx.for_each(KIND_CHUNK, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<ChunkBody>()
+        {
+            chunks.push((e.id, b));
         }
         true
     });
     drop(rtx);
-    if rebuild {
-        return index.replace_all(
-            turns
-                .iter()
-                .map(|(id, b)| doc_input(*id, b.session, &b.text))
-                .collect(),
-        );
-    }
-    let have = index.snapshot().ids();
-    let db: HashSet<Id> = turns.iter().map(|(id, _)| *id).collect();
-    let extra: HashSet<Id> = have.difference(&db).copied().collect();
-    if !extra.is_empty() {
-        index.remove(&extra)?;
-    }
-    let missing: Vec<_> = turns
-        .iter()
-        .filter(|(id, _)| !have.contains(id))
-        .map(|(id, b)| doc_input(*id, b.session, &b.text))
-        .collect();
-    index.add(missing)
-}
-
-/// 書いたターンを索引に足す。
-pub fn add_turns(store: &Store, index: &LexIndex, ids: &[Id]) -> std::io::Result<()> {
-    let Ok(rtx) = store.read() else {
-        return Ok(());
-    };
-    let mut docs = Vec::new();
-    for id in ids {
-        if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id)
-            && let Ok(b) = e.body_as::<TurnBody>()
-            && indexable(&b)
-        {
-            docs.push(doc_input(e.id, b.session, &b.text));
+    let mut plan = SyncPlan::default();
+    let mut covered: HashSet<Id> = HashSet::new();
+    for (id, c) in chunks {
+        match turns.get(&c.turn) {
+            Some(t) if c.rules == evorag_retrieval::chunk::CHUNK_RULES_VERSION => {
+                covered.insert(c.turn);
+                plan.keep.push(chunk_doc(id, &c, &t.text));
+            }
+            _ => plan.delete.push(id),
         }
     }
-    drop(rtx);
-    index.add(docs)
+    for (id, t) in &turns {
+        if !covered.contains(id) {
+            plan.create.extend(chunk_bodies(*id, t));
+        }
+    }
+    plan.texts = turns.into_iter().map(|(id, t)| (id, t.text)).collect();
+    plan
 }
 
+/// 語彙の当たり (チャンク) を、ターンの当たりにまとめる。ターンの値は、そのチャンクの最も良い値
+/// (05 §2.4。並びはチャンクの値の順なので、最初に出たものを残す)。
+fn turn_hits(
+    store: &Store,
+    hits: &[evorag_retrieval::recall::Hit],
+) -> Vec<evorag_retrieval::recall::Hit> {
+    let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for h in hits {
+        let turn = match rtx.get(KIND_CHUNK, h.id) {
+            Ok(Some(Read::Ok(e))) => match e.body_as::<ChunkBody>() {
+                Ok(c) => c.turn,
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        if seen.insert(turn) {
+            out.push(evorag_retrieval::recall::Hit { id: turn, ..*h });
+        }
+    }
+    out
+}
 /// 文脈に添えるもの。
 pub struct Attached {
     /// 今の発話の直前に置く引用の枠 (添えるものが無ければ `None`)。
@@ -412,7 +468,7 @@ async fn select(
     };
     let snap = index.snapshot();
     // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。
-    let r = recall(
+    let mut r = recall(
         &snap,
         &query,
         previous.as_deref(),
@@ -423,6 +479,9 @@ async fn select(
         obs.degraded = vec![evorag_memory::DEGRADED_NO_INDEX.to_owned()];
         return none(RecallDecision::Skip, obs);
     }
+    // 索引の単位はチャンク。ターンにまとめる (05 §2.4)。
+    r.hits = turn_hits(store, &r.hits);
+    r.candidates = turn_hits(store, &r.candidates);
     let lexical = |obs: RecallObs| {
         if r.decision == Decision::Abstain {
             none(RecallDecision::Abstain, obs)

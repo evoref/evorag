@@ -6,6 +6,9 @@ use evorag_types::{Clock, Id, IdGen, Timestamp};
 
 use crate::kinds::*;
 
+/// 書いたチャンク (ID と本体)。
+pub type Chunk = (Id, ChunkBody);
+
 /// 書き込みの操作を組み立てる。
 ///
 /// セッションの封筒を受け取る関数には、読み直した最新の封筒を渡す (一覧の副索引を付け替えるため。
@@ -325,6 +328,36 @@ impl Writes<'_> {
     }
 
     /// 信号 (評価・再生成、13 §2、FR-311)。
+    /// ターンのチャンクを書く (05 §2.4)。前のチャンク `old` は消す。返すのは新しいチャンクの ID と本体。
+    pub fn chunks(
+        &self,
+        old: &[Id],
+        bodies: &[ChunkBody],
+    ) -> Result<(Vec<Chunk>, Vec<WriteOp>), BodyError> {
+        let mut ops = Vec::new();
+        for id in old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_CHUNK.into(),
+                id: *id,
+            });
+            ops.push(WriteOp::DeleteLinksOf(*id));
+        }
+        let now = self.clock.now();
+        let mut made = Vec::new();
+        for b in bodies {
+            let id = self.ids.next_id();
+            ops.push(WriteOp::Put(envelope(id, KIND_CHUNK, now, b)?));
+            ops.push(WriteOp::PutLink {
+                from: id,
+                rel: REL_CHUNK_OF.into(),
+                to: b.turn,
+                attrs: Vec::new(),
+            });
+            made.push((id, *b));
+        }
+        Ok((made, ops))
+    }
+
     /// 想起への操作を記録する (05 §5.2)。
     pub fn recall_feedback(
         &self,
@@ -411,6 +444,14 @@ pub fn delete_session(
                 id: signal,
             });
             ops.push(WriteOp::DeleteLinksOf(signal));
+        }
+        // チャンクは元のターンと一緒に消す (出典の無い派生の記録、03 §4.2 の規則 12)。
+        for (c, _) in tx.links_to(turn, REL_CHUNK_OF)? {
+            ops.push(WriteOp::Delete {
+                kind: KIND_CHUNK.into(),
+                id: c,
+            });
+            ops.push(WriteOp::DeleteLinksOf(c));
         }
         // 想起への操作は、問いの応答と対象の往復のどちらが消えても消す (出典の無い派生の記録、03 §4.2 の規則 12)。
         for rel in [REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET] {

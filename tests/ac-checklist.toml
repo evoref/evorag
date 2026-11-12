@@ -252,9 +252,9 @@ id = "AC-FR-402-1"
 requirement = "FR-402"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used"]
+tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used", "crates/evorag-core/tests/recall_path.rs::long_turns_are_chunked_and_recalled_through_any_chunk"]
 manual = ""
-note = "v0.2 はリランクで選ぶ経路 (rerank_recall) と、リランカーが無いときの v0.1 の規則 (recall_path・recall_cases)。recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
+note = "v0.2 は索引の単位がチャンク (recall_path の長いターンの試験)。v0.2 はリランクで選ぶ経路 (rerank_recall) と、リランカーが無いときの v0.1 の規則 (recall_path・recall_cases)。recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
 
 [[ac]]
 id = "AC-FR-402-2"

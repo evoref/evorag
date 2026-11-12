@@ -561,36 +561,29 @@ impl Core {
         // 自動の退避: v0.1 は起動時と終了時の空き時間に作る (03 §7.1)。会話の邪魔をしないよう裏で。
         // 前の起動で終わらなかった退避の整理を続けてから、今日の退避を作る (03 §7.3)。
         let worker = core.inner.clone();
-        let task = tokio::task::spawn_blocking(move || {
-            if let Some(ix) = &worker.index {
-                let t = std::time::Instant::now();
-                match recall::sync(&worker.store, ix, rebuild_index) {
-                    Ok(()) => tracing::info!(
-                        docs = ix.snapshot().len(),
-                        rebuilt = rebuild_index,
-                        ms = t.elapsed().as_millis() as u64,
-                        "lexical index synced"
-                    ),
-                    Err(e) => tracing::warn!(error = %e.kind(), "lexical index sync failed"),
+        let task = tokio::spawn(async move {
+            // チャンクと語彙の索引を DB と突き合わせる (05 §2.3・§2.4)。
+            sync_chunks(&worker, rebuild_index).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                let jobs = worker
+                    .store
+                    .read()
+                    .ok()
+                    .and_then(|r| evorag_memory::pending_purge_jobs(&r).ok())
+                    .unwrap_or_default();
+                if !enough_space(&worker) {
+                    return;
                 }
-            }
-            let jobs = worker
-                .store
-                .read()
-                .ok()
-                .and_then(|r| evorag_memory::pending_purge_jobs(&r).ok())
-                .unwrap_or_default();
-            if !enough_space(&worker) {
-                return;
-            }
-            for (job, ids) in jobs {
-                purge(&worker, job, &ids);
-            }
-            match worker.store.daily_backup(worker.backup_dir.as_deref()) {
-                Ok(Some(_)) => tracing::info!("daily backup written"),
-                Ok(None) => {}
-                Err(e) => tracing::warn!(error = %e, "daily backup failed"),
-            }
+                for (job, ids) in jobs {
+                    purge(&worker, job, &ids);
+                }
+                match worker.store.daily_backup(worker.backup_dir.as_deref()) {
+                    Ok(Some(_)) => tracing::info!("daily backup written"),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "daily backup failed"),
+                }
+            })
+            .await;
         });
         core.inner
             .background
@@ -1776,18 +1769,120 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
     start_generation(inner, sid, uid, Vec::new());
 }
 
-/// 書いたターンを裏で索引に足す。
+/// 書いたターンを裏でチャンクに分け、チャンクを記録して語彙の索引に足す (05 §2.3・§2.4)。
 fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
-    let Some(ix) = inner.index.clone() else {
+    if inner.index.is_none() {
         return;
-    };
-    let store = inner.store.clone();
-    let task = tokio::task::spawn_blocking(move || {
-        let _ = recall::add_turns(&store, &ix, &ids);
-    });
+    }
+    let worker = inner.clone();
+    let task = tokio::spawn(async move { chunk_turns(&worker, &ids).await });
     let mut bg = inner.background.lock().unwrap_or_else(|e| e.into_inner());
     bg.retain(|t| !t.is_finished());
     bg.push(task);
+}
+
+/// ターンのチャンクを作り直して記録し、語彙の索引を入れ替える。前と同じ区切りなら何もしない。
+async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
+    let Some(ix) = inner.index.clone() else {
+        return;
+    };
+    for &id in ids {
+        let Some((body, old)) = inner.store.read().ok().and_then(|r| {
+            let e = match r.get(evorag_memory::KIND_TURN, id).ok()?? {
+                evorag_store::Read::Ok(e) => e,
+                _ => return None,
+            };
+            let b = e.body_as::<evorag_memory::TurnBody>().ok()?;
+            let old = evorag_memory::chunks_of(&r, id).ok()?;
+            Some((b, old))
+        }) else {
+            continue;
+        };
+        let new = if recall::indexable(&body) {
+            recall::chunk_bodies(id, &body)
+        } else {
+            Vec::new()
+        };
+        let same = old.len() == new.len() && old.iter().zip(&new).all(|((_, a), b)| a == b);
+        if same {
+            continue;
+        }
+        let old_ids: Vec<Id> = old.iter().map(|(i, _)| *i).collect();
+        let Ok((made, ops)) = writes(inner).chunks(&old_ids, &new) else {
+            continue;
+        };
+        if write(inner, ops).await.is_err() {
+            continue;
+        }
+        let docs: Vec<_> = made
+            .iter()
+            .map(|(cid, c)| recall::chunk_doc(*cid, c, &body.text))
+            .collect();
+        let ix2 = ix.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if !old_ids.is_empty() {
+                ix2.remove(&old_ids.into_iter().collect())?;
+            }
+            ix2.add(docs)
+        })
+        .await;
+    }
+}
+
+/// 起動時: チャンクと語彙の索引を DB と突き合わせる。チャンクの無いターンにはチャンクを作り、元の
+/// ターンが無いチャンク (古い版が消したターンなど、03 §4.2 の規則 12) は消す。`rebuild` なら索引を作り直す。
+async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) {
+    let Some(ix) = inner.index.clone() else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let store = inner.store.clone();
+    let Ok(plan) = tokio::task::spawn_blocking(move || recall::sync_plan(&store)).await else {
+        return;
+    };
+    let mut docs = plan.keep;
+    let deleted = plan.delete.len();
+    let created = plan.create.len();
+    if !plan.delete.is_empty() || !plan.create.is_empty() {
+        let Ok((made, ops)) = writes(inner).chunks(&plan.delete, &plan.create) else {
+            return;
+        };
+        if write(inner, ops).await.is_err() {
+            tracing::warn!("chunks not written");
+            return;
+        }
+        docs.extend(made.iter().filter_map(|(cid, c)| {
+            plan.texts
+                .get(&c.turn)
+                .map(|t| recall::chunk_doc(*cid, c, t))
+        }));
+    }
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
+        if rebuild {
+            ix.replace_all(docs)?;
+        } else {
+            let have = ix.snapshot().ids();
+            let want: std::collections::HashSet<Id> = docs.iter().map(|d| d.id).collect();
+            let extra: std::collections::HashSet<Id> = have.difference(&want).copied().collect();
+            if !extra.is_empty() {
+                ix.remove(&extra)?;
+            }
+            ix.add(docs.into_iter().filter(|d| !have.contains(&d.id)).collect())?;
+        }
+        Ok(ix.snapshot().len() as usize)
+    })
+    .await;
+    match result {
+        Ok(Ok(n)) => tracing::info!(
+            docs = n,
+            created,
+            deleted,
+            rebuilt = rebuild,
+            ms = started.elapsed().as_millis() as u64,
+            "lexical index synced"
+        ),
+        _ => tracing::warn!("lexical index sync failed"),
+    }
 }
 
 /// このセッションでメモリを添えるか。

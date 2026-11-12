@@ -196,6 +196,20 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
 }
 
 /// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+/// ターンのチャンク (05 §2.4)。
+pub fn chunks_of(tx: &ReadTxn<'_>, turn: Id) -> Result<Vec<(Id, ChunkBody)>, MemoryError> {
+    let mut out = Vec::new();
+    for (id, _) in tx.links_to(turn, REL_CHUNK_OF)? {
+        if let Some(Read::Ok(e)) = tx.get(KIND_CHUNK, id)?
+            && let Ok(b) = e.body_as::<ChunkBody>()
+        {
+            out.push((id, b));
+        }
+    }
+    out.sort_by_key(|(_, b)| b.start);
+    Ok(out)
+}
+
 /// 応答のターンへの、想起への操作 (05 §5.2)。
 pub fn feedback_for_answer(
     tx: &ReadTxn<'_>,

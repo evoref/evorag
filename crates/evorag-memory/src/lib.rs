@@ -10,20 +10,20 @@ mod read;
 mod write;
 
 pub use kinds::{
-    DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK, DEGRADED_NO_THRESHOLD,
+    ChunkBody, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK, DEGRADED_NO_THRESHOLD,
     DEGRADED_RERANK_DEADLINE, DEGRADED_RERANK_ERROR, DEGRADED_RERANK_SLOW, FEEDBACK_ATTACH,
-    FEEDBACK_IRRELEVANT, GenerationRecord, JOB_PURGE_BACKUPS, JobBody, KIND_JOB,
+    FEEDBACK_IRRELEVANT, GenerationRecord, JOB_PURGE_BACKUPS, JobBody, KIND_CHUNK, KIND_JOB,
     KIND_MODEL_BINDING, KIND_MODEL_PROBE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_SETTING,
     KIND_SIGNAL, KIND_THRESHOLD, KIND_TURN, METHOD_BUNDLED, ModelBindingBody, ModelOrigin,
-    ModelProbeBody, RECALL_BEFORE_UTTERANCE, REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET,
-    REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, ROLE_CHAT, ROLE_EMBED, ROLE_RERANK, RecallDecision,
-    RecallFeedbackBody, RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE,
-    SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody,
-    SignalBody, SignalKind, TARGET_CONVERSATION, ThresholdBody, TurnBody, TurnObs, TurnRole,
-    TurnState, kinds,
+    ModelProbeBody, RECALL_BEFORE_UTTERANCE, REL_CHUNK_OF, REL_FEEDBACK_ANSWER,
+    REL_FEEDBACK_TARGET, REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, ROLE_CHAT, ROLE_EMBED,
+    ROLE_RERANK, RecallDecision, RecallFeedbackBody, RecallRecord, Reranked, SETTING_ANSWER_FORMAT,
+    SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody,
+    SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION, ThresholdBody,
+    TurnBody, TurnObs, TurnRole, TurnState, kinds,
 };
 pub use read::{
-    Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn,
+    Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, chunks_of,
     feedback_for_answer, list_sessions, load_bindings, load_probe, load_session, load_settings,
     load_threshold, pending_user_turns, session_turns, session_turns_counted,
 };

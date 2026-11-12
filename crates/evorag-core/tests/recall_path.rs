@@ -296,7 +296,7 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
     core.shutdown().await;
 
     // 索引のファイルにも、消したターンの ID が残らない。
-    let index = dir.path().join("index").join("memory").join("lex");
+    let index = dir.path().join("index").join("memory").join("chunk-lex");
     let needle = planted.id.as_bytes().to_vec();
     for e in walk(&index) {
         let b = std::fs::read(&e).unwrap();
@@ -331,7 +331,7 @@ async fn a_lost_index_is_rebuilt_from_the_database() {
     say(&core, &mut rx, PLANT).await;
     core.shutdown().await;
 
-    let index = dir.path().join("index").join("memory").join("lex");
+    let index = dir.path().join("index").join("memory").join("chunk-lex");
     // ハッシュが合わないセグメントは捨てて作り直す。
     for e in walk(&index) {
         if e.ends_with("lex.bin") {
@@ -346,6 +346,74 @@ async fn a_lost_index_is_rebuilt_from_the_database() {
     core.shutdown().await;
 }
 
+fn chunks(root: &Path) -> Vec<evorag_memory::ChunkBody> {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
+    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.6".into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+        config_file: None,
+    })
+    .unwrap();
+    let rtx = store.read().unwrap();
+    let mut out = Vec::new();
+    rtx.for_each(evorag_memory::KIND_CHUNK, |r| {
+        if let Read::Ok(e) = r {
+            out.push(e.body_as().unwrap());
+        }
+        true
+    })
+    .unwrap();
+    out
+}
+
+/// verifies: AC-FR-402-1 (v0.2: 索引の単位はチャンク。長いターンの後ろのチャンクで当たっても、そのターンを添える)
+#[tokio::test(flavor = "multi_thread")]
+async fn long_turns_are_chunked_and_recalled_through_any_chunk() {
+    let dir = TempDir::new("recall-chunks");
+    // v0.1 の索引 (`lex/`) は使わず、最初の起動で消す (05 §2.3)。
+    let old = dir.path().join("index").join("memory").join("lex");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("CURRENT"), b"v0.1").unwrap();
+    let llm = cassette(3);
+    let (core, mut rx) = start(dir.path(), &llm, 11).await;
+    assert!(!old.exists());
+    new_session(&core, &mut rx, "長い相談").await;
+    let filler = "車の点検の予定を、来月の連休の前に入れておきたい。".repeat(20);
+    let long = format!("{filler}\n\n{PLANT}");
+    let first = say(&core, &mut rx, &long).await;
+    new_session(&core, &mut rx, "別の話").await;
+    let answer = say(&core, &mut rx, ASK).await;
+    assert_eq!(answer.sources, 1);
+    core.shutdown().await;
+    let user = first.reply_to.unwrap();
+    let of_user: Vec<_> = chunks(dir.path())
+        .into_iter()
+        .filter(|c| c.turn == user)
+        .collect();
+    assert!(of_user.len() >= 2, "{of_user:?}");
+    assert!(turn_body(dir.path(), answer.id).attached.contains(&user));
+    assert!(
+        dir.path()
+            .join("index")
+            .join("memory")
+            .join("chunk-lex")
+            .is_dir()
+    );
+
+    // セッションを消すと、そのターンのチャンクも消える (03 §4.2 の規則 12)。
+    let llm = cassette(0);
+    let (core, mut rx) = start(dir.path(), &llm, 12).await;
+    core.command(Command::OpenSession { id: first.session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.shutdown().await;
+    assert!(chunks(dir.path()).iter().all(|c| c.turn != user));
+}
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir).unwrap().flatten() {

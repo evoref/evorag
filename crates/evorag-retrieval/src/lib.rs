@@ -3,6 +3,7 @@
 //! 仕様: 05, 02 §4.1。v0.1 は語彙の索引による想起 ([`recall`]) と、その正規化 ([`normalize`])。
 
 pub mod calibrate;
+pub mod chunk;
 pub mod normalize;
 pub mod recall;
 
