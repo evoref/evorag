@@ -245,6 +245,22 @@ fn embedding_v1() {
             session: id("019a6a2b-0000-7000-8000-000000000001"),
             model_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
             dim: 1024,
+            key: None,
+        },
+    );
+}
+
+#[test]
+fn note_v1() {
+    check(
+        KIND_NOTE,
+        id("019a6a2b-0000-7000-8000-000000000010"),
+        NoteBody {
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            exchanges: vec![id("019a6a2b-0000-7000-8000-000000000002")],
+            keys: vec!["観葉植物の水やり".into(), "モンステラ".into()],
+            model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
+            rules: 1,
         },
     );
 }

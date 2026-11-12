@@ -35,8 +35,8 @@ pub fn issues(p: &ModelProbeBody) -> Vec<ProbeIssue> {
 }
 
 #[derive(Default)]
-struct Collected {
-    text: String,
+pub(crate) struct Collected {
+    pub(crate) text: String,
     reasoning: bool,
     usage: Option<evorag_llm::Usage>,
     /// 最初の断片までの時間 (プロンプトの処理の時間とみなす)。
@@ -44,7 +44,7 @@ struct Collected {
     elapsed: Duration,
 }
 
-async fn run_chat(llm: &dyn LlmClient, req: ChatRequest) -> Result<Collected, String> {
+pub(crate) async fn run_chat(llm: &dyn LlmClient, req: ChatRequest) -> Result<Collected, String> {
     let started = Instant::now();
     let fut = async {
         let mut stream = llm.chat(req).await.map_err(|e| e.to_string())?;

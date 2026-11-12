@@ -41,19 +41,45 @@ pub const REL_EMBEDDING_OF: &str = "embedding_of";
 pub const KIND_EMBEDDING: &str = "embedding";
 /// 埋め込みの単位: チャンク。
 pub const UNIT_CHUNK: &str = "chunk";
+/// 埋め込みの単位: ノートの検索の鍵 (04 §2)。`target` はノート、`key` は鍵の位置。
+pub const UNIT_KEY: &str = "key";
 
 /// `embedding` の本体 (v1)。出典の ID を本体にも持つ (03 §4.2 の規則 12)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingBody {
-    /// 対象の記録 (チャンク)。
+    /// 対象の記録 (チャンクかノート)。
     pub target: Id,
-    /// 単位 (`chunk`、後の版で `key`)。知らない値は読んで残し、使わない。
+    /// 単位 (`chunk`・`key`)。知らない値は読んで残し、使わない。
     pub unit: String,
     /// 対象のセッション (今のセッションを候補から除くため)。
     pub session: Id,
     /// 埋め込みのモデルの model_key。
     pub model_key: String,
     pub dim: u32,
+    /// 単位 `key` のときの鍵の位置 (0 から、04 §2)。チャンクでは書かない (v1 の後から足した項目なので、
+    /// 前からあるチャンクの埋め込みの保存形を変えない)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<u32>,
+}
+
+/// 関係: ノート → 出典の往復の発話のターン (04 §2)。
+pub const REL_NOTE_OF: &str = "note_of";
+
+/// 話題の検索の鍵 (04 §2、v0.2)。作り直せる派生の記録なので、ジャーナルに書かない。
+pub const KIND_NOTE: &str = "note";
+
+/// `note` の本体 (v1)。出典の往復の発話のターンの ID を本体にも持つ (03 §4.2 の規則 12)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteBody {
+    pub session: Id,
+    /// 区切りの往復 (各往復の利用者の発話のターンの ID、古い順)。
+    pub exchanges: Vec<Id>,
+    /// 検索の鍵 (検査を通ったもの、8 個まで)。空なら索引の項目を作らない。
+    pub keys: Vec<String>,
+    /// 鍵を作った応答のモデルの model_key。
+    pub model_key: String,
+    /// 区切りと鍵の作り方の版 (04 §2)。変われば作り直す。
+    pub rules: u32,
 }
 
 /// 関係: チャンク → 元のターン (05 §2.4)。
@@ -147,6 +173,8 @@ pub fn kinds() -> Vec<KindSpec> {
         KindSpec::new(KIND_CHUNK, 1),
         // 埋め込みは作り直せる派生の記録 (05 §2.2)。
         KindSpec::new(KIND_EMBEDDING, 1),
+        // ノートは作り直せる派生の記録 (04 §2)。関係は書くときに足す。
+        KindSpec::new(KIND_NOTE, 1),
         // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。

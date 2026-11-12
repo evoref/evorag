@@ -6,6 +6,7 @@
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
 mod kinds;
+mod note;
 mod read;
 mod write;
 
@@ -13,15 +14,19 @@ pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
     DEGRADED_NO_THRESHOLD, DEGRADED_RERANK_DEADLINE, DEGRADED_RERANK_ERROR, DEGRADED_RERANK_SLOW,
     EmbeddingBody, FEEDBACK_ATTACH, FEEDBACK_IRRELEVANT, GenerationRecord, JOB_PURGE_BACKUPS,
-    JobBody, KIND_CHUNK, KIND_EMBEDDING, KIND_JOB, KIND_MODEL_BINDING, KIND_MODEL_PROBE,
+    JobBody, KIND_CHUNK, KIND_EMBEDDING, KIND_JOB, KIND_MODEL_BINDING, KIND_MODEL_PROBE, KIND_NOTE,
     KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_SETTING, KIND_SIGNAL, KIND_THRESHOLD, KIND_TURN,
-    METHOD_BUNDLED, ModelBindingBody, ModelOrigin, ModelProbeBody, RECALL_BEFORE_UTTERANCE,
-    REL_CHUNK_OF, REL_EMBEDDING_OF, REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET, REL_IN_SESSION,
-    REL_REPLY_TO, REL_TARGET, ROLE_CHAT, ROLE_EMBED, ROLE_RERANK, RecallDecision,
-    RecallFeedbackBody, RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE,
-    SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody,
-    SignalBody, SignalKind, TARGET_CONVERSATION, ThresholdBody, TurnBody, TurnObs, TurnRole,
-    TurnState, UNIT_CHUNK, kinds,
+    METHOD_BUNDLED, ModelBindingBody, ModelOrigin, ModelProbeBody, NoteBody,
+    RECALL_BEFORE_UTTERANCE, REL_CHUNK_OF, REL_EMBEDDING_OF, REL_FEEDBACK_ANSWER,
+    REL_FEEDBACK_TARGET, REL_IN_SESSION, REL_NOTE_OF, REL_REPLY_TO, REL_TARGET, ROLE_CHAT,
+    ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallFeedbackBody, RecallRecord, Reranked,
+    SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG,
+    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION,
+    ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, kinds,
+};
+pub use note::{
+    NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
+    SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, sanitize_keys, segments,
 };
 pub use read::{
     Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, chunks_of,

@@ -86,6 +86,33 @@ pub trait LlmClient: Send + Sync {
         let _ = (query, documents);
         Box::pin(async { Err(not_supported("rerank")) })
     }
+    /// `/slots` (06 §4)。スロットごとに処理中か。使えないサーバ (`--no-slots`) はエラー。
+    fn slots(&self) -> BoxFuture<'_, Result<Vec<SlotState>, LlmError>> {
+        Box::pin(async { Err(not_supported("slots")) })
+    }
+}
+
+/// スロットの状態 (`/slots` の 1 件)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotState {
+    pub id: u32,
+    pub is_processing: bool,
+}
+
+/// `/slots` の答えを読む。
+pub fn parse_slots(v: &serde_json::Value) -> Result<Vec<SlotState>, LlmError> {
+    let bad = || LlmError::Protocol("unexpected /slots response".into());
+    v.as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|s| {
+            Some(SlotState {
+                id: u32::try_from(s.get("id")?.as_u64()?).ok()?,
+                is_processing: s.get("is_processing")?.as_bool()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(bad)
 }
 
 /// 役割に合わないサーバへの要求 (llama-server の 501 と同じに扱う)。
