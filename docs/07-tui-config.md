@@ -139,7 +139,7 @@
 | `ui.language` | 文字列 | `"ja"` | UI の言語 (`ja`、v0.3 から `en`)。いつでも変えられる | v0.1 |
 | `prompt.language` | 文字列 | (空。初回の起動時に決める) | システムプロンプトと補助の呼び出しの言語 (`ja`、`en`)。データ根に記録した後は変えられない (§6.1) | v0.1 |
 | `llm.chat.url` | 文字列 | `"http://127.0.0.1:8080"` | chat の接続先 | v0.1 |
-| `llm.chat.model` | 文字列 | (空) | ルーターモードのときのモデル名 | v0.1 |
+| `llm.chat.model` | 文字列 | (空) | ルーターモードのときのモデル名 (プリセットの節の名前、06 §2)。ルーターでない llama-server には送らない | v0.1 |
 | `llm.chat.api_key` / `api_key_env` | 文字列 | (空) | API キー、またはそれを入れた環境変数の名前 | v0.1 |
 | `llm.chat.models` | 配列 | [] | v0.1: `/model` で切り替える候補 (名前と url)。v0.2 から読んで無視し、起動時に通知を出す (切り替えは `evorag setup`、06 §2) | v0.1 (v0.2 で廃止) |
 | `llm.chat.generation` | 表 | temperature 0.7 など | 生成の設定 | v0.1 |

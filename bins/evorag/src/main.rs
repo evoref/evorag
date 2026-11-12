@@ -203,8 +203,9 @@ fn main() -> ExitCode {
             );
         }
     };
+    // ルーターモードでは、設定の llm.chat.model をすべての要求に付ける (06 §2)。
     let llm = match HttpClient::new(endpoint, RetryPolicy::default()) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(c.with_model(cfg.llm.chat.model.clone())),
         Err(e) => {
             return fail(
                 &catalog,
@@ -358,7 +359,7 @@ fn main() -> ExitCode {
             Some(r) => match Endpoint::new(&r.url, r.api_key, cfg.llm.allow_remote)
                 .and_then(|e| HttpClient::new(e, RetryPolicy::default()))
             {
-                Ok(c) => Some(Arc::new(c) as Arc<dyn evorag_llm::LlmClient>),
+                Ok(c) => Some(Arc::new(c.with_model(r.model)) as Arc<dyn evorag_llm::LlmClient>),
                 Err(e) => {
                     return fail(
                         &catalog,
@@ -463,6 +464,23 @@ fn main() -> ExitCode {
                     ("status", &status.to_string()),
                     ("env", &env),
                 ],
+            );
+        }
+        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterNeedsModel { models })) => {
+            // ルーターモードの llama-server に、名前を付けずに繋いだ (06 §2)。
+            return fail(
+                &catalog,
+                4,
+                MessageKey::CliRouterNeedsModel,
+                &[("url", &url), ("models", &models.join(", "))],
+            );
+        }
+        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterModel { model, detail })) => {
+            return fail(
+                &catalog,
+                3,
+                MessageKey::CliRouterModel,
+                &[("url", &url), ("model", &model), ("detail", &detail)],
             );
         }
         Err(StartError::LlmUnreachable(e)) => {

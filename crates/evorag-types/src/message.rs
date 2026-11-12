@@ -90,6 +90,10 @@ message_keys! {
     CliSetupProbing => "cli.setup.probing",
     CliRoleMismatch => "cli.role_mismatch",
     CliRoleWaiting => "cli.role_waiting",
+    /// 引数: `url`, `models`。
+    CliRouterNeedsModel => "cli.router_needs_model",
+    /// 引数: `url`, `model`, `detail`。
+    CliRouterModel => "cli.router_model",
     UiRoleReady => "ui.notice.role_ready",
     UiRoleStatusUnset => "ui.role_status.unset",
     UiRoleStatusWaiting => "ui.role_status.waiting",
