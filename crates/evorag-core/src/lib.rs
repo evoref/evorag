@@ -244,6 +244,8 @@ struct Inner {
     /// チャンクと索引を変える処理の鍵 (起動時の突き合わせ、チャンクの作り直し、削除、ベクトルの索引を
     /// 開く、埋め込みの保存。互いの間に入り込まないように、embedding.rs の冒頭)。
     index_lock: tokio::sync::Mutex<()>,
+    /// 問いの埋め込みのキャッシュ (05 §3.1 の 4)。
+    query_cache: Arc<recall::QueryCache>,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -536,6 +538,7 @@ impl Core {
             vectors_opened: Mutex::new(None),
             index_lock: tokio::sync::Mutex::new(()),
             embed_skip: Mutex::new(std::collections::HashSet::new()),
+            query_cache: Arc::new(recall::QueryCache::default()),
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
@@ -1097,6 +1100,22 @@ impl Inner {
             (roles::RoleState::Ready(o), Some(c)) => Some((c, o.model_key.clone())),
             _ => None,
         }
+    }
+
+    /// ベクトルの候補を引く用意 (05 §3.2)。埋め込みのモデルが使え、その索引を開いていて、作り直しの途中で
+    /// なければ。
+    fn vector_query(&self) -> Option<recall::VectorQuery> {
+        let (client, key) = embedding::embedder(self)?;
+        let (k, index) = embedding::current(self)?;
+        if k != key || embedding::rebuilding(self).is_some() {
+            return None;
+        }
+        Some(recall::VectorQuery {
+            client,
+            key,
+            index,
+            cache: self.query_cache.clone(),
+        })
     }
 
     /// 応答の経路のリランクの使い方 (05 §3.4・§3.5)。点検で測った往復 6 件の時間が締切を超えるときは
@@ -2496,6 +2515,7 @@ async fn generate(
                 user_turn,
                 conv.next_source,
                 &inner.rerank_mode(),
+                inner.vector_query().as_ref(),
                 &extra,
             )
             .await,

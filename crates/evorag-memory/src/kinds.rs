@@ -436,6 +436,7 @@ pub struct Reranked {
 pub const DEGRADED_NO_EMBED: &str = "no_embed";
 pub const DEGRADED_NO_RERANK: &str = "no_rerank";
 pub const DEGRADED_RERANK_SLOW: &str = "rerank_slow";
+pub const DEGRADED_EMBED_DEADLINE: &str = "embed_deadline";
 pub const DEGRADED_RERANK_DEADLINE: &str = "rerank_deadline";
 pub const DEGRADED_RERANK_ERROR: &str = "rerank_error";
 pub const DEGRADED_NO_THRESHOLD: &str = "no_threshold";
