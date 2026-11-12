@@ -687,6 +687,10 @@ pub fn run(
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+    let rerank_use = usable_roles
+        .iter()
+        .find(|(r, _, _)| *r == "rerank")
+        .map(|(_, o, c)| (o.model_key.clone(), Arc::clone(c)));
     for (role, o, client) in usable_roles {
         if models.probed(role, &o.model_key, &o.build_info) {
             continue;
@@ -713,6 +717,62 @@ pub fn run(
         }
         if let Err(e) = models.save_probe(&body) {
             say(MessageKey::CliError, &[("detail", &e)]);
+        }
+    }
+
+    // 6. リランカーのしきい値を、同梱の事例で求める (05 §3.7、FR-413)。今の事例で求めた記録が
+    //    あれば行わない (前のリランカーに戻したときは、その記録を使う)。
+    if let Some((key, client)) = rerank_use {
+        let lang = models.prompt_language().unwrap_or_else(|| "ja".to_owned());
+        let prev = models.threshold(&key);
+        if !prev
+            .as_ref()
+            .is_some_and(|b| evorag_core::calibration::is_current(b, &lang))
+        {
+            let version = prev.map_or(1, |b| b.version + 1);
+            let mut progress = |done: usize, total: usize| {
+                if done.is_multiple_of(10) || done == total {
+                    say(
+                        MessageKey::CliSetupCalibrating,
+                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                    );
+                }
+            };
+            let result = rt.block_on(evorag_core::calibration::calibrate(
+                &*client,
+                &key,
+                &lang,
+                version,
+                &mut progress,
+            ));
+            match result {
+                Ok(body) => {
+                    let stat = |k: &str| body.stats.get(k).copied().unwrap_or(0).to_string();
+                    let counts = [
+                        ("rank_ok", stat("rank_ok")),
+                        ("rank_n", stat("rank_n")),
+                        ("value_ok", stat("value_ok")),
+                        ("value_n", stat("value_n")),
+                    ];
+                    let mut args: Vec<(&str, &str)> =
+                        counts.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    let (thr, band) = (
+                        format!("{:.2}", body.threshold.unwrap_or(f64::NAN)),
+                        format!("{:.2}", body.band_low.unwrap_or(f64::NAN)),
+                    );
+                    if body.passed {
+                        args.push(("threshold", &thr));
+                        args.push(("band", &band));
+                        say(MessageKey::CliSetupCalibrated, &args);
+                    } else {
+                        say(MessageKey::CliSetupCalibrationFailed, &args);
+                    }
+                    if let Err(e) = models.save_threshold(&body) {
+                        say(MessageKey::CliError, &[("detail", &e)]);
+                    }
+                }
+                Err(e) => say(MessageKey::CliError, &[("detail", &e.to_string())]),
+            }
         }
     }
     ExitCode::SUCCESS

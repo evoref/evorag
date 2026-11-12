@@ -72,6 +72,8 @@ pub fn kinds() -> Vec<KindSpec> {
         },
         // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_MODEL_PROBE, 1),
+        // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
+        KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
     ]
@@ -103,6 +105,32 @@ pub struct ModelProbeBody {
     pub rerank6_ms: Option<u32>,
     /// 点検が失敗した理由 (利用者に見せる文言ではない)。
     pub error: Option<String>,
+}
+
+/// リランクのしきい値と帯の下限 (05 §3.7、v0.2)。
+pub const KIND_THRESHOLD: &str = "threshold";
+/// しきい値の対象の種類: 以前の会話 (05 §3.4)。足すだけで広げる文字列。
+pub const TARGET_CONVERSATION: &str = "conversation";
+/// 求めた方法: 同梱の事例 (05 §3.7)。v0.4 から `signals`。
+pub const METHOD_BUNDLED: &str = "bundled";
+
+/// `threshold` の本体 (v1)。リランカーの model_key と対象の種類ごとに、版を上げて足していく
+/// (前の版を残し、巻き戻せる)。採用した時刻は封筒の作成時刻。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThresholdBody {
+    pub reranker_key: String,
+    pub target: String,
+    pub version: u32,
+    pub method: String,
+    /// 使った同梱の事例 (`ja-1` など)。変わったら求め直す。
+    pub cases: String,
+    /// 合否 (05 §3.7)。落ちたときも記録し (値は使わない)、起動のたびに求め直さない。
+    pub passed: bool,
+    pub threshold: Option<f64>,
+    pub band_low: Option<f64>,
+    /// 数えた値 (`rank_ok`・`rank_n`・`value_ok` など。足すだけで広げる)。
+    #[serde(default)]
+    pub stats: std::collections::BTreeMap<String, u32>,
 }
 
 /// モデルの元の値 (違いの中身を見せるため、06 §3.1)。

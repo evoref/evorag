@@ -177,6 +177,25 @@ fn model_probe_v1() {
 }
 
 #[test]
+fn threshold_v1() {
+    check(
+        KIND_THRESHOLD,
+        id("019a6a2b-0000-7000-8000-000000000009"),
+        ThresholdBody {
+            reranker_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
+            target: TARGET_CONVERSATION.into(),
+            version: 2,
+            method: METHOD_BUNDLED.into(),
+            cases: "ja-1".into(),
+            passed: true,
+            threshold: Some(-4.09),
+            band_low: Some(-5.52),
+            stats: [("rank_ok".to_owned(), 33), ("rank_n".to_owned(), 36)].into(),
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,

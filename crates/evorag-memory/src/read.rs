@@ -196,6 +196,27 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
 }
 
 /// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+/// リランカーと対象の種類の、いちばん新しい版のしきい値の記録 (05 §3.7)。
+pub fn load_threshold(
+    tx: &ReadTxn<'_>,
+    reranker_key: &str,
+    target: &str,
+) -> Result<Option<(Envelope, ThresholdBody)>, MemoryError> {
+    let mut best: Option<(Envelope, ThresholdBody)> = None;
+    tx.for_each(KIND_THRESHOLD, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<ThresholdBody>()
+            && b.reranker_key == reranker_key
+            && b.target == target
+            && best.as_ref().is_none_or(|(_, old)| old.version < b.version)
+        {
+            best = Some((e, b));
+        }
+        true
+    })?;
+    Ok(best)
+}
+
 pub fn load_probe(
     tx: &ReadTxn<'_>,
     role: &str,

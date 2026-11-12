@@ -626,6 +626,7 @@ name = "evorag-retrieval"
 version = "0.1.2"
 dependencies = [
  "evorag-index",
+ "evorag-llm",
  "evorag-memory",
  "evorag-types",
  "serde",

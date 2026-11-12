@@ -3,7 +3,8 @@
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
 use evorag_types::api::{
-    Command, Event, ModelRoleInfo, Role, RoleStatus, SessionView, StyleItem, TurnStatus, TurnView,
+    Command, Event, ModelRoleInfo, RecallState, Role, RoleStatus, SessionView, StyleItem,
+    TurnStatus, TurnView,
 };
 use evorag_types::{Id, MessageKey};
 
@@ -101,6 +102,8 @@ pub struct Status {
     pub n_ctx: u32,
     /// モデルの点検で、使えない機能を止めた (06 §3.3)。
     pub limited: bool,
+    /// 想起の状態 (07 §2.1。v0.1 のコアは送らない)。
+    pub recall: Option<RecallState>,
 }
 
 /// 生成中の応答。
@@ -295,6 +298,21 @@ impl App {
                     },
                 };
                 self.notice(m);
+            }
+            Event::RecallStatus { state } => {
+                let before = self.status.recall.replace(state);
+                // 較正が終わったときだけ知らせる (状態の行は常に今の状態を出す)。
+                if let Some(RecallState::CandidatesOnly {
+                    calibrating: true, ..
+                }) = before
+                {
+                    let k = match state {
+                        RecallState::Standard => MessageKey::UiCalibrated,
+                        _ => MessageKey::UiCalibrationFailed,
+                    };
+                    let m = self.catalog.key(k);
+                    self.notice(m);
+                }
             }
             Event::ProbeIssues {
                 role,
