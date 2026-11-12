@@ -17,16 +17,18 @@ pub enum Slash {
     Model(Option<String>),
     /// `/sources [on|off]`。
     Sources(Option<bool>),
+    /// `/memory` (FR-310)。
+    Memory,
     /// `/style [<項目> <値>]` (07 §3)。値はコアが確かめる。
     Style(Option<(StyleItem, String)>),
-    /// 名前は予約してあるが、この版ではまだ使えない (`/sources`・`/model`・`/memory` など)。
+    /// 名前は予約してあるが、この版ではまだ使えない (`/forget`・`/private`・`/precepts`)。
     NotYet(String),
     /// 知らないコマンド・引数の誤り。
     Invalid(String),
 }
 
 /// 後の版で入るコマンド (07 §3)。
-const RESERVED: &[&str] = &["memory", "forget", "private", "precepts"];
+const RESERVED: &[&str] = &["forget", "private", "precepts"];
 
 /// `/` で始まる入力を読む。`/` で始まらなければ `None` (普通の発話)。
 /// `//` で始めると、先頭の `/` を 1 つ取った普通の発話として送る。
@@ -54,6 +56,7 @@ pub fn parse(input: &str) -> Option<Slash> {
         ("sources", None) => Slash::Sources(None),
         ("sources", Some("on")) => Slash::Sources(Some(true)),
         ("sources", Some("off")) => Slash::Sources(Some(false)),
+        ("memory", None) => Slash::Memory,
         ("style", None) => Slash::Style(None),
         ("style", Some(a)) => match a.split_once(char::is_whitespace) {
             Some((item, value)) if !value.trim().contains(char::is_whitespace) => {
@@ -102,7 +105,9 @@ mod tests {
     fn reserved_unknown_and_wrong_arguments() {
         assert_eq!(parse("/model"), Some(Slash::Model(None)));
         assert_eq!(parse("/model big"), Some(Slash::Model(Some("big".into()))));
-        assert_eq!(parse("/memory"), Some(Slash::NotYet("/memory".into())));
+        assert_eq!(parse("/precepts"), Some(Slash::NotYet("/precepts".into())));
+        assert_eq!(parse("/memory"), Some(Slash::Memory));
+        assert_eq!(parse("/forget 1"), Some(Slash::NotYet("/forget".into())));
         assert_eq!(parse("/sources"), Some(Slash::Sources(None)));
         assert_eq!(parse("/sources off"), Some(Slash::Sources(Some(false))));
         assert_eq!(parse("/sources x"), Some(Slash::Invalid("/sources".into())));

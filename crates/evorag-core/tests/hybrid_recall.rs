@@ -287,3 +287,44 @@ async fn a_late_query_embedding_falls_back_to_lexical_candidates() {
     let obs = r.answer.obs.unwrap();
     assert_eq!(obs.degraded, ["embed_deadline"]);
 }
+
+/// `/memory` で、直前の応答に添えた往復と出典の番号、帯 (または下)、リランクの値としきい値との差、
+/// 縮退の理由が出る。
+/// verifies: AC-FR-310-1
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_shows_what_the_last_answer_used() {
+    use evorag_types::api::MemoryPlace;
+    let (sp, sc) = (score(PLANT), score(CAR));
+    let dir = TempDir::new("hybrid-memory");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let llm = chat(3);
+    // 埋め込みは無い (縮退の理由 no_embed が出る)。
+    let (core, mut rx, _) = Core::start(config(dir.path(), Some(reranker())), Arc::new(llm))
+        .await
+        .unwrap();
+    core.settle().await;
+    session(&core, &mut rx, "観葉植物").await;
+    let plant = say(&core, &mut rx, PLANT).await.reply_to.unwrap();
+    session(&core, &mut rx, "車").await;
+    let car = say(&core, &mut rx, CAR).await.reply_to.unwrap();
+    session(&core, &mut rx, "今日").await;
+    let answer = say(&core, &mut rx, ASK).await;
+    core.command(Command::Memory);
+    let ev = until(&mut rx, |e| matches!(e, Event::MemoryInfo { .. })).await;
+    core.shutdown().await;
+    let Some(Event::MemoryInfo { report }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(report.answer, Some(answer.id));
+    let p = report.items.iter().find(|i| i.target == plant).unwrap();
+    assert_eq!(p.place, MemoryPlace::Attached);
+    assert_eq!(p.n, Some(1));
+    assert_eq!(p.title, "観葉植物");
+    assert!(p.delta_milli.unwrap() > 0, "{p:?}");
+    let c = report.items.iter().find(|i| i.target == car).unwrap();
+    assert_eq!(c.place, MemoryPlace::Band);
+    assert!(c.delta_milli.unwrap() < 0, "{c:?}");
+    assert_eq!(report.degraded, ["no_embed"]);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].n, 1);
+}

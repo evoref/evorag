@@ -147,6 +147,32 @@ message_keys! {
     /// 引数: `n`、`title`、`at`、`excerpt`。
     UiSourceDetail => "ui.notice.source",
     UiNoSources => "ui.notice.no_sources",
+    /// `/memory` (FR-310)。
+    UiMemoryHeader => "ui.memory.header",
+    UiMemoryNoAnswer => "ui.memory.no_answer",
+    UiMemoryNothing => "ui.memory.nothing",
+    /// 引数: `n`・`title`・`head`・`score`。
+    UiMemoryAttached => "ui.memory.attached",
+    /// 引数: `title`・`head`・`score`。
+    UiMemoryBand => "ui.memory.band",
+    UiMemoryBelow => "ui.memory.below",
+    /// 引数: `delta`・`raw`。
+    UiMemoryScore => "ui.memory.score",
+    /// 引数: `raw`。
+    UiMemoryScoreRaw => "ui.memory.score_raw",
+    UiMemorySources => "ui.memory.sources",
+    /// 引数: `n`・`title`・`head`。
+    UiMemorySource => "ui.memory.source",
+    UiMemoryDegradedNoEmbed => "ui.memory.degraded_no_embed",
+    UiMemoryDegradedEmbedDeadline => "ui.memory.degraded_embed_deadline",
+    UiMemoryDegradedNoRerank => "ui.memory.degraded_no_rerank",
+    UiMemoryDegradedRerankSlow => "ui.memory.degraded_rerank_slow",
+    UiMemoryDegradedRerankDeadline => "ui.memory.degraded_rerank_deadline",
+    UiMemoryDegradedRerankError => "ui.memory.degraded_rerank_error",
+    UiMemoryDegradedNoThreshold => "ui.memory.degraded_no_threshold",
+    UiMemoryDegradedNoIndex => "ui.memory.degraded_no_index",
+    /// 引数: `reason`。
+    UiMemoryDegradedOther => "ui.memory.degraded_other",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。
