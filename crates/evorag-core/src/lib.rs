@@ -791,6 +791,21 @@ impl Core {
         panic!("precompute did not settle within 10 seconds");
     }
 
+    /// 評価のため (09 §5.2): セッション `session` で `query` を問うたときの、リランクの前の上位 `limit` 往復
+    /// (各往復のターンの ID)。
+    #[doc(hidden)]
+    pub async fn eval_exchanges(&self, session: Id, query: &str, limit: usize) -> Vec<Vec<Id>> {
+        recall::eval_exchanges(
+            &self.inner.store,
+            self.inner.index.as_deref(),
+            session,
+            query,
+            self.inner.vector_query().as_ref(),
+            limit,
+        )
+        .await
+    }
+
     /// 試験のため: ターンの本体 (添えたもの・観測値を見る)。
     #[doc(hidden)]
     pub fn turn_body(&self, turn: Id) -> Option<evorag_memory::TurnBody> {
