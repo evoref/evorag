@@ -118,6 +118,22 @@ message_keys! {
     BandUnknown => "error.band_unknown",
     FeedbackNotSaved => "error.feedback_not_saved",
     UiStyleInfo => "ui.notice.style",
+    /// 引数: `title`。
+    UiBandSelected => "ui.notice.band_selected",
+    UiIrrelevantMarked => "ui.notice.irrelevant_marked",
+    UiIrrelevantCleared => "ui.notice.irrelevant_cleared",
+    UiBandRelated => "ui.band.related",
+    UiBandNearby => "ui.band.nearby",
+    /// 引数: `title`, `at`, `head`。
+    UiBandItem => "ui.band.item",
+    UiBandMarked => "ui.band.marked",
+    /// 引数: `title`, `at`, `excerpt`。
+    UiBandDetail => "ui.band.detail",
+    /// 引数: `n`。
+    UiDetailSource => "ui.band.detail_source",
+    UiActionAttach => "ui.band.action_attach",
+    UiActionIrrelevant => "ui.band.action_irrelevant",
+    UiActionIrrelevantUndo => "ui.band.action_irrelevant_undo",
     UiStyleChanged => "ui.notice.style_changed",
     UiStyleTitle => "ui.style.title",
     UiStyleLanguage => "ui.style.language",

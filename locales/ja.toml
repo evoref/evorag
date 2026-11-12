@@ -70,7 +70,7 @@ confirm = "セッション「{title}」を消しますか? このセッション
 [ui.help]
 title = "ヘルプ (Esc で閉じる)"
 body = """
-Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典の番号を選ぶ (Enter で表示) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典と関係しそうな記録を選ぶ (Enter で詳細。詳細で a 添えて作り直す・x 無関係の印) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
 
 /help            この一覧
 /new [題名]      セッションを作る
@@ -98,12 +98,26 @@ sources_on = "このセッションでは、以前の会話を応答に添えま
 sources_off = "このセッションでは、以前の会話を応答に添えません (/sources on で戻します)。"
 source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
 source = "[{n}] {title} ({at})\n{excerpt}"
-no_sources = "出典の付いた応答がありません。"
+no_sources = "出典や関係しそうな記録の付いた応答がありません。"
+band_selected = "関係しそうな記録「{title}」を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
+irrelevant_marked = "「無関係」の印を記録しました。今の版では、想起の判定は変わりません (後の版で調整に使います)。もう一度選ぶと取り消せます。"
+irrelevant_cleared = "「無関係」の印を取り消しました。"
 style = "答え方: 言語 {language}・長さ {length}・書式 {format} (/style で選び直せます)。"
 calibrated = "リランカーの較正が終わりました。以前の会話を、関係が高いと判断したときに自動で添えます。"
 calibration_failed = "リランカーが較正の基準に届かなかったので、以前の会話は自動では添えず、候補として示します。別のリランカーを evorag setup で選べます。"
 probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
+
+[ui.band]
+related = "関係しそうな記録 (この応答には使っていません)"
+nearby = "近い記録 (自動では添えていません)"
+item = "・{title} {at}「{head}」"
+marked = " [無関係]"
+detail = "{title} ({at})\n{excerpt}"
+detail_source = "出典 [{n}]"
+action_attach = "a  この記録を添えて、直前の応答を作り直す"
+action_irrelevant = "x  この問いには関係が無い (無関係の印を付ける)"
+action_irrelevant_undo = "x  無関係の印を取り消す"
 
 [ui.role_status]
 unset = "未設定"
