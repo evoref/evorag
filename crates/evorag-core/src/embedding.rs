@@ -250,6 +250,9 @@ pub(crate) async fn run(inner: &Arc<Inner>) {
         return;
     };
     loop {
+        // 前の回の保存 (落とされない task) が終わるまで待つ。終わる前に足りない分を数えると、
+        // 保存中のチャンクをもう一度埋め込んでしまう。鍵は保存の task に渡し、終わるまで持たせる。
+        let gate = inner.embed_gate.clone().lock_owned().await;
         let (gap, _) = missing(inner, &key);
         if gap.is_empty() {
             return;
@@ -271,7 +274,12 @@ pub(crate) async fn run(inner: &Arc<Inner>) {
         // 記録と索引への反映は、落とされない task で行う。
         let worker = inner.clone();
         let key2 = key.clone();
-        let saved = tokio::spawn(async move { save(&worker, &key2, items, vectors).await }).await;
+        let saved = tokio::spawn(async move {
+            let ok = save(&worker, &key2, items, vectors).await;
+            drop(gate);
+            ok
+        })
+        .await;
         if !matches!(saved, Ok(true)) {
             return;
         }

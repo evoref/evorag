@@ -241,6 +241,8 @@ struct Inner {
     vectors: Mutex<Option<embedding::Vectors>>,
     /// ベクトルの索引を DB と突き合わせ終えた埋め込みのモデル (それまでは埋め込みの手順を動かさない)。
     vectors_opened: Mutex<Option<String>>,
+    /// 埋め込みの保存の鍵 (保存が終わるまで、次の回の埋め込みを始めない)。
+    embed_gate: Arc<tokio::sync::Mutex<()>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
     backoff: Mutex<std::collections::HashMap<sleep::Step, std::time::Instant>>,
     /// 途中まで済んだ較正 (リランカーの model_key と、済んだ問いの結果)。裏の処理で落とされたら続きから。
@@ -529,6 +531,7 @@ impl Core {
             calib_progress: Mutex::new(None),
             vectors: Mutex::new(None),
             vectors_opened: Mutex::new(None),
+            embed_gate: Arc::new(tokio::sync::Mutex::new(())),
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
