@@ -791,10 +791,25 @@ impl Core {
         panic!("precompute did not settle within 10 seconds");
     }
 
+    /// 試験のため: ターンの本体 (添えたもの・観測値を見る)。
+    #[doc(hidden)]
+    pub fn turn_body(&self, turn: Id) -> Option<evorag_memory::TurnBody> {
+        read_env(&self.inner, evorag_memory::KIND_TURN, turn)
+            .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
+    }
+
     /// 試験のため: 裏の処理の要る手順が無くなるまで待つ (10 秒で終わらなければ panic する)。
     #[doc(hidden)]
     pub async fn settle_background(&self) {
-        for _ in 0..500 {
+        self.settle_background_within(std::time::Duration::from_secs(10))
+            .await;
+    }
+
+    /// 試験のため: 裏の処理の要る手順が無くなるまで、`limit` まで待つ (実際のサーバを使う試験)。
+    #[doc(hidden)]
+    pub async fn settle_background_within(&self, limit: std::time::Duration) {
+        let rounds = (limit.as_millis() / 20).max(1);
+        for _ in 0..rounds {
             if !sleep::pending(&self.inner)
                 && !self.inner.working.load(std::sync::atomic::Ordering::SeqCst)
             {
@@ -803,7 +818,7 @@ impl Core {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!(
-            "background work did not settle within 10 seconds: {:?}",
+            "background work did not settle within {limit:?}: {:?}",
             sleep::pending_steps(&self.inner)
         );
     }

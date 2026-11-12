@@ -5,6 +5,9 @@
 //! `<そこ>/BM-<ID>.json` に書く (docs/perf/<版>/、09 §5.1)。
 //!
 //! verifies: AC-NFR-101-1, AC-NFR-102-1, AC-NFR-201-1
+//!
+//! v0.2 の BM-102 (問いの埋め込みとリランクを含める) は、実際の埋め込みとリランカーの llama-server を
+//! `EVORAG_BENCH_EMBED_URL`・`EVORAG_BENCH_RERANK_URL` で渡したときだけ測る。
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -131,7 +134,10 @@ impl LlmClient for Timed {
         self.inner.count_tokens(text)
     }
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
-        self.calls.lock().unwrap().push(Instant::now());
+        // 次のターンの分を先に処理させる 1 トークンの要求 (05 §4.5) は、応答の要求ではないので数えない。
+        if req.generation.max_tokens != Some(1) {
+            self.calls.lock().unwrap().push(Instant::now());
+        }
         self.inner.chat(req)
     }
 }
@@ -359,4 +365,95 @@ async fn bm_201_memory() {
         serde_json::json!({"peak_rss_mb": mb, "target_mb": 300}),
     );
     assert!(mb <= 300.0, "peak memory {mb:.0} MB > 300 MB");
+}
+
+/// BM-102 の v0.2 (NFR-102、AC-NFR-102-2): 問いの埋め込みとリランクを含めて、発話を保存してから
+/// llama-server へ要求を出すまでに足す時間。平均 500 ms 以内。実際の埋め込みとリランカーの llama-server
+/// (`EVORAG_BENCH_EMBED_URL`・`EVORAG_BENCH_RERANK_URL`) が要る。無ければ知らせて終わる。
+/// verifies: AC-NFR-102-2
+#[ignore = "benchmark: run with cargo xtask bench"]
+#[tokio::test(flavor = "multi_thread")]
+async fn bm_102_send_to_request_with_embed_and_rerank() {
+    let (Ok(embed), Ok(rerank)) = (
+        std::env::var("EVORAG_BENCH_EMBED_URL"),
+        std::env::var("EVORAG_BENCH_RERANK_URL"),
+    ) else {
+        eprintln!(
+            "BM-102 (v0.2): set EVORAG_BENCH_EMBED_URL and EVORAG_BENCH_RERANK_URL to measure (skipped)"
+        );
+        return;
+    };
+    let client = |url: &str| -> Arc<dyn LlmClient> {
+        Arc::new(
+            evorag_llm::HttpClient::new(
+                evorag_llm::Endpoint::new(url, None, false).unwrap(),
+                evorag_llm::RetryPolicy::default(),
+            )
+            .unwrap(),
+        )
+    };
+    let dir = TempDir::new("bm102v2");
+    prepared(dir.path()).await;
+    // しきい値を同梱の事例で求めて記録する (05 §3.7)。
+    let rr = client(&rerank);
+    let key = rr.server_info().await.unwrap().model_key;
+    let done = Mutex::new(Vec::new());
+    let body = evorag_core::calibration::calibrate(&*rr, &key, "ja", 1, &done, &mut |_, _| {})
+        .await
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    evorag_core::rebind::DataRootModels::open(
+        dir.path(),
+        env!("CARGO_PKG_VERSION"),
+        clock.clone(),
+        Arc::new(UuidV7Gen::new(clock)),
+    )
+    .unwrap()
+    .save_threshold(&body)
+    .unwrap();
+
+    const SENDS: usize = 30;
+    let l = llm(SENDS);
+    let mut cfg = config(dir.path());
+    cfg.embed = Some(client(&embed));
+    cfg.rerank = Some(rr);
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(l.clone())).await.unwrap();
+    core.settle().await;
+    // 1 万ターンのチャンクの埋め込みを作り終えるのを待つ。
+    let t = Instant::now();
+    core.settle_background_within(Duration::from_secs(3600))
+        .await;
+    let embed_s = t.elapsed().as_secs_f64();
+    core.command(Command::NewSession {
+        title: "測る".into(),
+    });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let mut added = Vec::new();
+    for i in 0..SENDS {
+        core.command(Command::Send {
+            text: format!(
+                "前に話した{}のこと、もう一度教えて ({i})",
+                TOPICS[i % TOPICS.len()]
+            ),
+        });
+        until(&mut rx, |e| matches!(e, Event::UserTurnSaved { .. })).await;
+        let saved = Instant::now();
+        until(&mut rx, |e| matches!(e, Event::ResponseFinished { .. })).await;
+        let called = *l.calls.lock().unwrap().last().unwrap();
+        added.push(called.saturating_duration_since(saved).as_secs_f64() * 1000.0);
+        core.settle().await;
+    }
+    core.shutdown().await;
+    let mean = added.iter().sum::<f64>() / added.len() as f64;
+    let mut sorted = added.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    record(
+        "BM-102-v0.2",
+        serde_json::json!({
+            "mean_ms": mean, "p95_ms": p95, "sends": SENDS, "target_mean_ms": 500,
+            "embed_all_s": embed_s, "embed_url": embed, "rerank_url": rerank,
+        }),
+    );
+    assert!(mean <= 500.0, "send to request {mean:.1} ms > 500 ms");
 }

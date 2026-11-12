@@ -22,7 +22,9 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 evorag-store = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
 
