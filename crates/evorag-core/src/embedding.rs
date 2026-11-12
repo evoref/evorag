@@ -4,11 +4,15 @@
 //!   今と前の世代だけを残す。
 //! - 裏の処理の手順: 語彙の索引にあってベクトルの索引に無いチャンクを、32 件ずつ埋め込み、記録
 //!   (`embedding`、ベクトルは `blobs`) と索引に足す。進み具合は状態 (索引にある ID) から求めるので、
-//!   止めても強制終了しても、次の機会に続きから作る (job は書かない)。
-//! - 記録と索引への反映は、落とされない task で行う (記録だけが残って、同じチャンクを 2 度埋め込まないため)。
-//! - 起動時と役割が繋がったときに、索引を DB の記録と突き合わせる (壊れていれば作り直す)。
+//!   止めても強制終了しても、次の機会に続きから作る (job は書かない)。1 回の手順は数回分で区切り、
+//!   ほかの手順も動けるようにする。
+//! - チャンクと索引を変える処理 (起動時の突き合わせ、チャンクの作り直し、削除、索引を開く、埋め込みの
+//!   保存) は、すべて `Inner::index_lock` の下で行う (互いの間に入り込んで、消した会話の埋め込みが
+//!   残る・同じチャンクを 2 度埋め込む、を防ぐ)。埋め込みの要求の間は鍵を持たない。
+//! - 保存は冪等: 同じモデル・同じチャンクの前の埋め込みは、同じ依頼で消してから書く。
+//! - 埋め込みのサーバに断られ続けるチャンクは、このプロセスの間は飛ばす (後ろのチャンクを止めないため)。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +27,12 @@ use crate::{Inner, roles, write_derived, writes};
 
 /// 1 回に埋め込むチャンクの数。
 const BATCH: usize = 32;
-/// 1 回の埋め込みの要求の締切。
-const LIMIT: Duration = Duration::from_secs(60);
+/// 1 回の手順で埋め込む回数の上限 (ほかの手順も動けるように、ここで区切る)。
+const ROUNDS_PER_STEP: usize = 8;
+/// 埋め込みの要求の締切 (1 件あたり 2 秒、少なくとも 20 秒)。
+fn limit(n: usize) -> Duration {
+    Duration::from_secs((2 * n as u64).max(20))
+}
 /// これより多く足りないときは、状態の行に「作り直し中」と出す (ターンごとの数件では出さない)。
 const REBUILD_SHOWN_AT: usize = BATCH;
 
@@ -77,7 +85,7 @@ pub(crate) fn current(inner: &Inner) -> Option<(String, Arc<VecIndex>)> {
         .map(|v| (v.key.clone(), v.index.clone()))
 }
 
-/// 足りないチャンク (語彙の索引にあって、今のモデルのベクトルの索引に無いもの) と、全体の数。
+/// 足りないチャンク (語彙の索引にあって、今のモデルのベクトルの索引に無く、飛ばしていないもの) と、全体の数。
 fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
     let Some(lex) = &inner.index else {
         return (Vec::new(), 0);
@@ -87,7 +95,12 @@ fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
         Some((k, ix)) if k == key => ix.snapshot().ids(),
         _ => HashSet::new(),
     };
-    let mut out: Vec<Id> = all.difference(&have).copied().collect();
+    let skip = inner.embed_skip.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<Id> = all
+        .difference(&have)
+        .filter(|id| !skip.contains(*id))
+        .copied()
+        .collect();
     out.sort();
     (out, all.len())
 }
@@ -105,14 +118,6 @@ pub(crate) fn needed(inner: &Inner) -> bool {
     })
 }
 
-/// 索引を DB と突き合わせ終えた (埋め込みの手順を動かしてよい)。
-fn mark_opened(inner: &Inner, key: &str) {
-    *inner
-        .vectors_opened
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(key.to_owned());
-}
-
 /// 作り直しの進み具合 (足りないものが多いときだけ。百分率)。
 pub(crate) fn rebuilding(inner: &Inner) -> Option<u8> {
     let (_, key) = embedder(inner)?;
@@ -121,98 +126,182 @@ pub(crate) fn rebuilding(inner: &Inner) -> Option<u8> {
         .then(|| (((total - gap.len()) * 100) / total).min(99) as u8)
 }
 
-/// 索引を開き、DB の記録と突き合わせる。前の世代より古い索引と記録は消す (05 §2.2)。
+/// 索引を開き、DB の記録と突き合わせる (`index_lock` の下で、同じモデルについては 1 回だけ)。前の世代より
+/// 古い索引と記録は消す (05 §2.2)。DB の本体だけで ID を比べ、足す分のベクトルだけを読む (NFR-101)。
 pub(crate) async fn open(inner: &Arc<Inner>) {
     let Some((_, key)) = embedder(inner) else {
         return;
     };
+    let _lock = inner.index_lock.lock().await;
+    if inner
+        .vectors_opened
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(key.as_str())
+    {
+        return;
+    }
     let previous = previous_key(inner, &key);
-    let root = inner.store.data_root().to_path_buf();
     let worker = inner.clone();
     let key2 = key.clone();
-    let loaded = tokio::task::spawn_blocking(move || {
-        let mut keep = vec![key2.as_str()];
-        if let Some(p) = &previous {
-            keep.push(p.as_str());
-        }
-        evorag_index::vec::prune_generations(&memory_dir(&root), &keep);
-        let r = worker.store.read().ok()?;
-        let all = evorag_memory::embeddings_of_model(&r, None).ok()?;
-        let chunks: HashSet<Id> = worker
-            .index
-            .as_ref()
-            .map(|ix| ix.snapshot().ids())
-            .unwrap_or_default();
-        // 対象のチャンクが無い埋め込みと、前の世代より古いモデルの埋め込みは消す。
-        let mut stale = Vec::new();
-        let mut mine = Vec::new();
-        for (id, b, v) in all {
-            let kept_model =
-                b.model_key == key2 || previous.as_deref() == Some(b.model_key.as_str());
-            if !kept_model || (!chunks.is_empty() && !chunks.contains(&b.target)) {
-                stale.push(id);
-            } else if b.model_key == key2 && v.len() == b.dim as usize {
-                mine.push((b, v));
-            }
-        }
-        Some((stale, mine))
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some((stale, mine)) = loaded else {
+    let planned =
+        tokio::task::spawn_blocking(move || plan_open(&worker, &key2, previous.as_deref()))
+            .await
+            .ok()
+            .flatten();
+    let Some(plan) = planned else {
+        tracing::warn!("vector index could not be checked");
         return;
     };
-    if !stale.is_empty() {
+    if !plan.stale.is_empty() {
         let w = writes(inner);
-        let ops: Vec<_> = stale
+        let ops: Vec<_> = plan
+            .stale
             .iter()
             .flat_map(|id| w.delete_embedding(*id))
             .collect();
         let _ = write_derived(inner, ops).await;
     }
-    let Some(dim) = mine.first().map(|(b, _)| b.dim as usize) else {
-        // まだ 1 件も無い。最初の埋め込みのときに開く。
-        mark_opened(inner, &key);
-        return;
-    };
-    let dir = vec_dir(inner.store.data_root(), &key);
-    let worker = inner.clone();
-    let opened = tokio::task::spawn_blocking(move || -> std::io::Result<Arc<VecIndex>> {
-        let (ix, opened) = VecIndex::open(&dir, dim)?;
-        let want: HashSet<Id> = mine.iter().map(|(b, _)| b.target).collect();
-        let have = ix.snapshot().ids();
-        if opened != Opened::Ok || have != want {
-            tracing::info!(rows = want.len(), "vector index rebuilt from the database");
-            let extra: HashSet<Id> = have.difference(&want).copied().collect();
-            if !extra.is_empty() {
-                ix.remove(&extra)?;
-            }
-            let add: Vec<VecInput> = mine
-                .into_iter()
-                .filter(|(b, _)| opened != Opened::Ok || !have.contains(&b.target))
-                .map(|(b, v)| VecInput {
-                    id: b.target,
-                    session: b.session,
-                    unit: Unit::Chunk,
-                    vector: v,
-                })
-                .collect();
-            ix.add(add)?;
-        }
-        drop(worker);
-        Ok(Arc::new(ix))
-    })
-    .await;
-    match opened {
-        Ok(Ok(index)) => {
+    match plan.index {
+        Some(index) => {
             *inner.vectors.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vectors {
                 key: key.clone(),
                 index,
             });
-            mark_opened(inner, &key);
         }
-        _ => tracing::warn!("vector index could not be opened"),
+        None => {
+            *inner.vectors.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+    *inner
+        .vectors_opened
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(key);
+}
+
+struct OpenPlan {
+    /// 消す埋め込みの記録 (古いモデル、対象の無いもの、重複、ベクトルの壊れたもの)。
+    stale: Vec<Id>,
+    /// 突き合わせた索引 (今のモデルの記録が無ければ `None`)。
+    index: Option<Arc<VecIndex>>,
+}
+
+fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPlan> {
+    let root = inner.store.data_root().to_path_buf();
+    let mut keep = vec![key];
+    keep.extend(previous);
+    evorag_index::vec::prune_generations(&memory_dir(&root), &keep);
+    let r = inner.store.read().ok()?;
+    let bodies = evorag_memory::embedding_bodies(&r).ok()?;
+    let chunks: HashSet<Id> = inner
+        .index
+        .as_ref()
+        .map(|ix| ix.snapshot().ids())
+        .unwrap_or_default();
+    let mut stale = Vec::new();
+    // 今と前のモデルの、対象ごとに 1 件 (新しい記録を残す。ID は時刻の順)。
+    let mut mine: HashMap<Id, (Id, EmbeddingBody)> = HashMap::new();
+    let mut prev: HashMap<Id, Id> = HashMap::new();
+    for (id, b) in bodies {
+        let orphan = !chunks.is_empty() && !chunks.contains(&b.target);
+        if orphan {
+            stale.push(id);
+        } else if b.model_key == key {
+            match mine.get(&b.target) {
+                Some((kept, _)) if *kept > id => stale.push(id),
+                Some((kept, _)) => {
+                    stale.push(*kept);
+                    mine.insert(b.target, (id, b));
+                }
+                None => {
+                    mine.insert(b.target, (id, b));
+                }
+            }
+        } else if previous == Some(b.model_key.as_str()) {
+            match prev.get(&b.target) {
+                Some(kept) if *kept > id => stale.push(id),
+                Some(kept) => {
+                    stale.push(*kept);
+                    prev.insert(b.target, id);
+                }
+                None => {
+                    prev.insert(b.target, id);
+                }
+            }
+        } else {
+            stale.push(id);
+        }
+    }
+    let dir = vec_dir(&root, key);
+    let Some(dim) = mine.values().next().map(|(_, b)| b.dim as usize) else {
+        // 今のモデルの記録が無い: 索引のフォルダがあっても、中身は信用できないので消す (作り直す)。
+        if dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Some(OpenPlan { stale, index: None });
+    };
+    let (ix, opened) = VecIndex::open(&dir, dim).ok()?;
+    let want: HashSet<Id> = mine.keys().copied().collect();
+    let have = if opened == Opened::Ok {
+        ix.snapshot().ids()
+    } else {
+        HashSet::new()
+    };
+    let extra: HashSet<Id> = have.difference(&want).copied().collect();
+    if !extra.is_empty() {
+        ix.remove(&extra).ok()?;
+    }
+    let mut add = Vec::new();
+    for (target, (id, b)) in &mine {
+        if have.contains(target) {
+            continue;
+        }
+        match evorag_memory::embedding_vector(&r, *id).ok().flatten() {
+            Some(v) if v.len() == dim && b.dim as usize == dim => add.push(VecInput {
+                id: *target,
+                session: b.session,
+                unit: Unit::Chunk,
+                vector: v,
+            }),
+            // ベクトルの壊れた・次元の違う記録は消す (もう一度埋め込む)。
+            _ => stale.push(*id),
+        }
+    }
+    if !add.is_empty() {
+        tracing::info!(rows = add.len(), "vector index filled from the database");
+        ix.add(add).ok()?;
+    }
+    Some(OpenPlan {
+        stale,
+        index: Some(Arc::new(ix)),
+    })
+}
+
+/// 消した会話のチャンクの行を、今と前の世代のベクトルの索引から除く (04 §7、AC-FR-309-1)。
+/// 呼び手は `index_lock` を持つ。
+pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
+    if gone.is_empty() {
+        return;
+    }
+    let current = current(inner);
+    if let Some((_, ix)) = &current {
+        let _ = ix.remove(gone);
+    }
+    let Ok(entries) = std::fs::read_dir(memory_dir(inner.store.data_root())) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(key) = name.strip_prefix("vec-") else {
+            continue;
+        };
+        if current.as_ref().is_some_and(|(k, _)| k == key) {
+            continue;
+        }
+        if let Some(ix) = VecIndex::open_existing(&e.path()) {
+            let _ = ix.remove(gone);
+        }
     }
 }
 
@@ -244,104 +333,135 @@ fn chunk_texts(inner: &Inner, ids: &[Id]) -> Vec<(Id, ChunkBody, String)> {
     out
 }
 
-/// 裏の処理の手順: 足りないチャンクを埋め込む。利用者の操作で落とされても、済んだ分は残る。
-/// 1 件でも足せたら `true` (読めないチャンクは飛ばし、残りを続ける)。
+/// 埋め込む。要求ごと断られたら 1 件ずつ試し、断られたものは `None` にする。
+async fn embed_each(client: &dyn LlmClient, texts: &[String]) -> Vec<Option<Vec<f32>>> {
+    let ok = |v: &Vec<f32>| !v.is_empty() && v.iter().all(|x| x.is_finite());
+    if let Ok(Ok(v)) = tokio::time::timeout(limit(texts.len()), client.embed(texts)).await
+        && v.len() == texts.len()
+        && v.iter().all(ok)
+    {
+        return v.into_iter().map(Some).collect();
+    }
+    let mut out = Vec::with_capacity(texts.len());
+    for t in texts {
+        let one = std::slice::from_ref(t);
+        out.push(
+            match tokio::time::timeout(limit(1), client.embed(one)).await {
+                Ok(Ok(mut v)) if v.len() == 1 && ok(&v[0]) => v.pop(),
+                _ => None,
+            },
+        );
+    }
+    out
+}
+
+/// 裏の処理の手順: 足りないチャンクを埋め込む (数回分で区切る)。利用者の操作で落とされても、済んだ分は
+/// 残る。1 件でも足せたら `true`。
 pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     let Some((client, key)) = embedder(inner) else {
         return false;
     };
     let mut progressed = false;
-    // 読めないチャンク (区切りの作り直しで消えた直後など。次の突き合わせで片付く)。
-    let mut unreadable: HashSet<Id> = HashSet::new();
-    loop {
-        // 前の回の保存 (落とされない task) が終わるまで待つ。終わる前に足りない分を数えると、
-        // 保存中のチャンクをもう一度埋め込んでしまう。鍵は保存の task に渡し、終わるまで持たせる。
-        let gate = inner.embed_gate.clone().lock_owned().await;
+    for _ in 0..ROUNDS_PER_STEP {
         let (gap, _) = missing(inner, &key);
-        let batch: Vec<Id> = gap
-            .into_iter()
-            .filter(|id| !unreadable.contains(id))
-            .take(BATCH)
-            .collect();
+        let batch: Vec<Id> = gap.into_iter().take(BATCH).collect();
         if batch.is_empty() {
-            return progressed;
+            break;
         }
         let items = chunk_texts(inner, &batch);
         let read: HashSet<Id> = items.iter().map(|(id, _, _)| *id).collect();
-        unreadable.extend(batch.iter().filter(|id| !read.contains(id)));
+        // 読めないチャンク (区切りの作り直しで消えた直後など) は、このプロセスの間は飛ばす
+        // (次の起動の突き合わせで片付く)。
+        inner
+            .embed_skip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(batch.iter().filter(|id| !read.contains(id)));
         if items.is_empty() {
             continue;
         }
         let texts: Vec<String> = items.iter().map(|(_, _, t)| t.clone()).collect();
-        let vectors = match tokio::time::timeout(LIMIT, client.embed(&texts)).await {
-            Ok(Ok(v)) if v.len() == items.len() && v.iter().all(|x| !x.is_empty()) => v,
-            other => {
-                tracing::warn!(failed = other.is_err(), "embedding batch failed");
-                return progressed;
+        let vectors = embed_each(&*client, &texts).await;
+        let mut keep = Vec::new();
+        let mut done = Vec::new();
+        for (item, v) in items.into_iter().zip(vectors) {
+            match v {
+                Some(v) => {
+                    keep.push(item);
+                    done.push(v);
+                }
+                None => {
+                    // 断られ続けるチャンクは飛ばす (後ろのチャンクを止めないため)。
+                    tracing::warn!("a chunk was refused by the embedding server; skipping it");
+                    inner
+                        .embed_skip
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(item.0);
+                }
             }
-        };
-        // 記録と索引への反映は、落とされない task で行う。
+        }
+        if keep.is_empty() {
+            continue;
+        }
+        // 記録と索引への反映は、鍵の下の落とされない task で行う。
         let worker = inner.clone();
         let key2 = key.clone();
         let saved = tokio::spawn(async move {
-            let ok = save(&worker, &key2, items, vectors).await;
-            drop(gate);
-            ok
+            let _lock = worker.index_lock.lock().await;
+            save(&worker, &key2, keep, done).await
         })
         .await;
         if !matches!(saved, Ok(true)) {
-            return progressed;
+            break;
         }
         progressed = true;
         crate::emit_recall_state(inner);
     }
+    progressed
 }
 
-/// 埋め込みを記録し、索引に足す。索引がまだ無ければ、ベクトルの次元で開く。
+/// 埋め込みを記録し、索引に足す (呼び手は `index_lock` を持つ)。同じモデル・同じチャンクの前の埋め込みは
+/// 同じ依頼で消す (冪等)。索引がまだ無ければ、ベクトルの次元で開く。
 async fn save(
     inner: &Arc<Inner>,
     key: &str,
     items: Vec<(Id, ChunkBody, String)>,
     vectors: Vec<Vec<f32>>,
 ) -> bool {
-    // 埋め込んでいる間に、ターンの区切りが作り直されて消えたチャンクは書かない (残った分は、次の
-    // 起動の突き合わせで消える)。
-    let alive: HashSet<Id> = inner
-        .store
-        .read()
-        .ok()
-        .map(|r| {
-            items
-                .iter()
-                .filter(|(id, _, _)| matches!(r.get(KIND_CHUNK, *id), Ok(Some(Read::Ok(_)))))
-                .map(|(id, _, _)| *id)
-                .collect()
-        })
-        .unwrap_or_default();
     let w = writes(inner);
     let mut ops = Vec::new();
     let mut rows = Vec::new();
-    for ((id, c, _), v) in items.into_iter().zip(vectors) {
-        if !alive.contains(&id) {
-            continue;
-        }
-        let body = EmbeddingBody {
-            target: id,
-            unit: UNIT_CHUNK.to_owned(),
-            session: c.session,
-            model_key: key.to_owned(),
-            dim: v.len() as u32,
+    {
+        let Ok(r) = inner.store.read() else {
+            return false;
         };
-        match w.embedding(&body, &v) {
-            Ok((_, o)) => ops.extend(o),
-            Err(_) => return false,
+        for ((id, c, _), v) in items.into_iter().zip(vectors) {
+            // 埋め込んでいる間に消えたチャンクは書かない (削除と区切りの作り直しは、この鍵の下で行う)。
+            if !matches!(r.get(KIND_CHUNK, id), Ok(Some(Read::Ok(_)))) {
+                continue;
+            }
+            for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {
+                ops.extend(w.delete_embedding(old));
+            }
+            let body = EmbeddingBody {
+                target: id,
+                unit: UNIT_CHUNK.to_owned(),
+                session: c.session,
+                model_key: key.to_owned(),
+                dim: v.len() as u32,
+            };
+            match w.embedding(&body, &v) {
+                Ok((_, o)) => ops.extend(o),
+                Err(_) => return false,
+            }
+            rows.push(VecInput {
+                id,
+                session: c.session,
+                unit: Unit::Chunk,
+                vector: v,
+            });
         }
-        rows.push(VecInput {
-            id,
-            session: c.session,
-            unit: Unit::Chunk,
-            vector: v,
-        });
     }
     if rows.is_empty() {
         return true;

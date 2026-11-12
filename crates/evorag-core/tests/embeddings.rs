@@ -309,9 +309,150 @@ async fn on_battery_reduce_delays_the_embedding() {
     core.touch();
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(emb.aux_calls().0, 0, "not before 5 x idle");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // 5 倍 (1.5 秒) を過ぎたら始まる (見直しは 1 秒ごとなので、締切つきで待つ)。
+    for _ in 0..100 {
+        if emb.aux_calls().0 > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(emb.aux_calls().0 > 0);
     core.shutdown().await;
+}
+
+/// 「拒否」を含む文書を断る埋め込みのサーバ (1 件ずつ送り直すと、それだけが断られる)。
+struct Picky(Arc<ReplayClient>);
+
+impl LlmClient for Picky {
+    fn health(&self) -> evorag_llm::BoxFuture<'_, Result<(), evorag_llm::LlmError>> {
+        self.0.health()
+    }
+    fn server_info(
+        &self,
+    ) -> evorag_llm::BoxFuture<'_, Result<evorag_llm::ServerInfo, evorag_llm::LlmError>> {
+        self.0.server_info()
+    }
+    fn count_tokens<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> evorag_llm::BoxFuture<'a, Result<usize, evorag_llm::LlmError>> {
+        self.0.count_tokens(text)
+    }
+    fn chat(
+        &self,
+        req: evorag_llm::ChatRequest,
+    ) -> evorag_llm::BoxFuture<'_, Result<Box<dyn evorag_llm::ChatStream>, evorag_llm::LlmError>>
+    {
+        self.0.chat(req)
+    }
+    fn embed<'a>(
+        &'a self,
+        inputs: &'a [String],
+    ) -> evorag_llm::BoxFuture<'a, Result<Vec<Vec<f32>>, evorag_llm::LlmError>> {
+        if inputs.iter().any(|t| t.contains("拒否")) {
+            return Box::pin(async {
+                Err(evorag_llm::LlmError::Http {
+                    status: 500,
+                    body: "too long".into(),
+                })
+            });
+        }
+        self.0.embed(inputs)
+    }
+}
+
+/// verifies: AC-FR-301-1 (埋め込みのサーバに断られるチャンクは飛ばし、後ろのチャンクを止めない)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_chunk_does_not_block_the_others() {
+    let dir = TempDir::new("embed-refused");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+    let mut cfg = config(dir.path(), 1, embedder(2), SleepConfig::immediate(), on_ac);
+    cfg.embed = Some(Arc::new(Picky(embedder(2))) as Arc<dyn LlmClient>);
+    cfg.clock = clock.clone();
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(chat(3))).await.unwrap();
+    talk(&core, &mut rx, &["拒否される文書です", TALK[0], TALK[1]]).await;
+    core.settle_background().await;
+    core.shutdown().await;
+    let chunks = count(dir.path(), evorag_memory::KIND_CHUNK);
+    // 断られた 1 件 (利用者の発話のチャンク) だけが埋め込まれない。
+    assert_eq!(embeddings(dir.path()).len(), chunks - 1);
+}
+
+/// verifies: AC-FR-309-1 (会話を消すと、前の世代のベクトルの索引からも、その行が消える)
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_also_cleans_the_previous_generation() {
+    let dir = TempDir::new("embed-delete-prev");
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), 1, embedder(2), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(1)),
+    )
+    .await
+    .unwrap();
+    talk(&core, &mut rx, &TALK[..1]).await;
+    core.settle_background().await;
+    core.shutdown().await;
+    // 埋め込みのモデルを切り替える (前の世代として vec-<2> が残る)。
+    {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_660_000_000)));
+        let m = DataRootModels::open(
+            dir.path(),
+            "0.0.6",
+            clock.clone(),
+            Arc::new(UuidV7Gen::with_seed(clock, 3)),
+        )
+        .unwrap();
+        m.bind("embed", origin(5)).unwrap();
+    }
+    let (core, _rx, _) = Core::start(
+        config(dir.path(), 4, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    core.shutdown().await;
+    let prev = evorag_index::vec::VecIndex::open_existing(&vec_dir(dir.path(), 2)).unwrap();
+    let rows_before = prev.snapshot().len();
+    assert!(rows_before > 0);
+    drop(prev);
+    // 最初のセッションを開いて消す。
+    let first = first_session(dir.path());
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), 6, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.command(Command::OpenSession { id: first });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.shutdown().await;
+    let prev = evorag_index::vec::VecIndex::open_existing(&vec_dir(dir.path(), 2)).unwrap();
+    assert_eq!(
+        prev.snapshot().len(),
+        0,
+        "the previous generation is cleaned too"
+    );
+}
+
+/// 最初に作ったセッションの ID。
+fn first_session(root: &Path) -> evorag_types::Id {
+    let s = store(root);
+    let r = s.read().unwrap();
+    let mut ids = Vec::new();
+    r.for_each(evorag_memory::KIND_SESSION, |x| {
+        if let Read::Ok(e) = x {
+            ids.push(e.id);
+        }
+        true
+    })
+    .unwrap();
+    ids.sort();
+    ids[0]
 }
 
 /// verifies: AC-FR-309-1 (会話を消すと、そのチャンクの埋め込みとベクトルも消える)

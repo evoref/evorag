@@ -241,8 +241,11 @@ struct Inner {
     vectors: Mutex<Option<embedding::Vectors>>,
     /// ベクトルの索引を DB と突き合わせ終えた埋め込みのモデル (それまでは埋め込みの手順を動かさない)。
     vectors_opened: Mutex<Option<String>>,
-    /// 埋め込みの保存の鍵 (保存が終わるまで、次の回の埋め込みを始めない)。
-    embed_gate: Arc<tokio::sync::Mutex<()>>,
+    /// チャンクと索引を変える処理の鍵 (起動時の突き合わせ、チャンクの作り直し、削除、ベクトルの索引を
+    /// 開く、埋め込みの保存。互いの間に入り込まないように、embedding.rs の冒頭)。
+    index_lock: tokio::sync::Mutex<()>,
+    /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
+    embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
     backoff: Mutex<std::collections::HashMap<sleep::Step, std::time::Instant>>,
     /// 途中まで済んだ較正 (リランカーの model_key と、済んだ問いの結果)。裏の処理で落とされたら続きから。
@@ -531,7 +534,8 @@ impl Core {
             calib_progress: Mutex::new(None),
             vectors: Mutex::new(None),
             vectors_opened: Mutex::new(None),
-            embed_gate: Arc::new(tokio::sync::Mutex::new(())),
+            index_lock: tokio::sync::Mutex::new(()),
+            embed_skip: Mutex::new(std::collections::HashSet::new()),
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
@@ -835,6 +839,8 @@ impl Core {
                 let _ = t.await;
             }
         }
+        // 落とされない保存 (埋め込み) が終わるのを待つ (書き手を止める前に、ストアを手放させるため)。
+        drop(self.inner.index_lock.lock().await);
         let running = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.running.take()
@@ -1546,6 +1552,9 @@ async fn delete(inner: &Arc<Inner>) {
         reject(inner, MessageKey::NoSession);
         return;
     };
+    // 関係を読んでから索引から除くまでを、チャンクと索引の鍵の下で行う (保存中の埋め込みや、作り直し中の
+    // チャンクが、消した会話に残らないように)。
+    let _lock = inner.index_lock.lock().await;
     let ops = inner.store.read().ok().and_then(|rtx| {
         let s = evorag_memory::load_session(&rtx, sid).ok()?;
         evorag_memory::delete_session(&rtx, &s.envelope).ok()
@@ -1575,9 +1584,10 @@ async fn delete(inner: &Arc<Inner>) {
         let gone = gone.clone();
         let _ = tokio::task::spawn_blocking(move || ix.remove(&gone)).await;
     }
-    if let Some((_, vx)) = embedding::current(inner) {
-        let _ = tokio::task::spawn_blocking(move || vx.remove(&gone)).await;
-    }
+    // 今と前の世代のベクトルの索引から除く (04 §7)。
+    let worker = inner.clone();
+    let _ = tokio::task::spawn_blocking(move || embedding::remove_everywhere(&worker, &gone)).await;
+    drop(_lock);
     inner
         .state
         .lock()
@@ -1828,6 +1838,7 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
         return;
     };
     for &id in ids {
+        let _lock = inner.index_lock.lock().await;
         let Some((body, old)) = inner.store.read().ok().and_then(|r| {
             let e = match r.get(evorag_memory::KIND_TURN, id).ok()?? {
                 evorag_store::Read::Ok(e) => e,
@@ -1870,14 +1881,16 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
             .unwrap_or_default();
         let w = writes(inner);
         ops.extend(embeddings.iter().flat_map(|e| w.delete_embedding(*e)));
-        if let Some((_, vx)) = embedding::current(inner)
-            && !old_ids.is_empty()
-        {
-            let gone: std::collections::HashSet<Id> = old_ids.iter().copied().collect();
-            let _ = tokio::task::spawn_blocking(move || vx.remove(&gone)).await;
-        }
         if write_derived(inner, ops).await.is_err() {
             continue;
+        }
+        // 書いた後に、前のチャンクの行をベクトルの索引から除く。
+        if !old_ids.is_empty() {
+            let gone: std::collections::HashSet<Id> = old_ids.iter().copied().collect();
+            let worker = inner.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || embedding::remove_everywhere(&worker, &gone))
+                    .await;
         }
         let docs: Vec<_> = made
             .iter()
@@ -1922,6 +1935,8 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) {
     let Some(ix) = inner.index.clone() else {
         return;
     };
+    // 新しいターンのチャンク化と重ならないように、鍵の下で行う。
+    let _lock = inner.index_lock.lock().await;
     let started = std::time::Instant::now();
     let store = inner.store.clone();
     let Ok(plan) = tokio::task::spawn_blocking(move || recall::sync_plan(&store)).await else {

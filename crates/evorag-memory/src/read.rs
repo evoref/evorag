@@ -196,6 +196,49 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
 }
 
 /// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+/// 埋め込みの記録の本体だけ (ベクトルは読まない。起動のたびに全件のベクトルを読まないため、NFR-101)。
+pub fn embedding_bodies(tx: &ReadTxn<'_>) -> Result<Vec<(Id, EmbeddingBody)>, MemoryError> {
+    let mut out = Vec::new();
+    tx.for_each(KIND_EMBEDDING, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<EmbeddingBody>()
+        {
+            out.push((e.id, b));
+        }
+        true
+    })?;
+    Ok(out)
+}
+
+/// 埋め込みのベクトル (`blobs` の part 0)。読めなければ `None`。
+pub fn embedding_vector(tx: &ReadTxn<'_>, id: Id) -> Result<Option<Vec<f32>>, MemoryError> {
+    Ok(tx.blob(id, 0)?.map(|b| {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect()
+    }))
+}
+
+/// チャンクの、あるモデルの埋め込みの記録の ID (同じチャンクを書き直すときに前のものを消す)。
+pub fn embeddings_of_chunk(
+    tx: &ReadTxn<'_>,
+    chunk: Id,
+    model_key: &str,
+) -> Result<Vec<Id>, MemoryError> {
+    let mut out = Vec::new();
+    for (id, _) in tx.links_to(chunk, REL_EMBEDDING_OF)? {
+        if let Some(Read::Ok(e)) = tx.get(KIND_EMBEDDING, id)?
+            && e.body_as::<EmbeddingBody>()
+                .is_ok_and(|b| b.model_key == model_key)
+        {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
 /// 埋め込みのモデルの埋め込み (記録の ID、本体、ベクトル)。`model_key` が `None` ならすべて。
 pub fn embeddings_of_model(
     tx: &ReadTxn<'_>,
