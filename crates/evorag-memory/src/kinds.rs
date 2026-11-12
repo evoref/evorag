@@ -70,9 +70,39 @@ pub fn kinds() -> Vec<KindSpec> {
             journaled: true,
             derive: None,
         },
+        // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
+        KindSpec::new(KIND_MODEL_PROBE, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
     ]
+}
+
+/// モデルの性質の点検の結果 (06 §3.3、v0.2)。
+pub const KIND_MODEL_PROBE: &str = "model_probe";
+
+/// `model_probe` の本体 (v1)。役割・model_key・`build_info` ごとに 1 件 (新しいものを採る)。
+/// 測っていない項目は null。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelProbeBody {
+    pub role: String,
+    pub model_key: String,
+    pub build_info: String,
+    /// chat: プロンプトの処理の速さ (トークン毎秒)。
+    pub prompt_tps: Option<f64>,
+    /// chat: 生成の速さ (トークン毎秒)。
+    pub gen_tps: Option<f64>,
+    /// chat: 補助の呼び出しの設定で、思考が出なかった。
+    pub thinking_off: Option<bool>,
+    /// chat: 型縛りの出力が、型に合う JSON だった (空にならなかった)。
+    pub structured_ok: Option<bool>,
+    /// embed: 次元の数。
+    pub dims: Option<u32>,
+    /// embed: 問い 1 件の埋め込みの時間 (ms)。
+    pub embed_ms: Option<u32>,
+    /// rerank: 往復 6 件のリランクの時間 (ms)。
+    pub rerank6_ms: Option<u32>,
+    /// 点検が失敗した理由 (利用者に見せる文言ではない)。
+    pub error: Option<String>,
 }
 
 /// モデルの元の値 (違いの中身を見せるため、06 §3.1)。

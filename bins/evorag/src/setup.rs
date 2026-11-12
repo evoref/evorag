@@ -242,7 +242,7 @@ pub fn run(
     for u in &urls {
         match probe(rt, u, key.clone(), cfg.llm.allow_remote) {
             Probe::Found(client, info) if role_of(rt, &client) == "chat" => {
-                found = Some((u.clone(), info));
+                found = Some((u.clone(), info, client));
                 break;
             }
             Probe::Found(..) => {}
@@ -253,7 +253,7 @@ pub fn run(
             Probe::Missing => {}
         }
     }
-    let Some((url, info)) = found else {
+    let Some((url, info, chat_client)) = found else {
         say(MessageKey::CliSetupGuide, &[("tried", &urls.join(", "))]);
         return ExitCode::from(3);
     };
@@ -268,7 +268,7 @@ pub fn run(
     );
 
     // embed と rerank を探す (設定の接続先 → 既定)。chat の接続先は見ない。
-    let mut aux_found: Vec<(&'static str, String, ServerInfo)> = Vec::new();
+    let mut aux_found: Vec<(&'static str, String, ServerInfo, Arc<HttpClient>)> = Vec::new();
     for role in ["embed", "rerank"] {
         let configured = cfg.role(role);
         let role_key = configured
@@ -279,14 +279,14 @@ pub fn run(
         tried.extend(AUX_CANDIDATES.iter().map(|s| (*s).to_owned()));
         tried.dedup();
         for u in tried.iter().filter(|u| **u != url) {
-            if aux_found.iter().any(|(_, x, _)| x == u) {
+            if aux_found.iter().any(|(_, x, _, _)| x == u) {
                 continue;
             }
             if let Probe::Found(client, info) = probe(rt, u, role_key.clone(), cfg.llm.allow_remote)
             {
                 let r = role_of(rt, &client);
                 if r == role {
-                    aux_found.push((role, u.clone(), info));
+                    aux_found.push((role, u.clone(), info, client));
                     break;
                 }
                 if r == "chat" && role == "embed" {
@@ -297,8 +297,8 @@ pub fn run(
         }
     }
     for role in ["embed", "rerank"] {
-        match aux_found.iter().find(|(r, _, _)| *r == role) {
-            Some((_, u, i)) => say(
+        match aux_found.iter().find(|(r, _, _, _)| *r == role) {
+            Some((_, u, i, _)) => say(
                 MessageKey::CliSetupRoleFound,
                 &[
                     ("role", role),
@@ -321,7 +321,7 @@ pub fn run(
     }
     let aux_urls: Vec<(&str, &str)> = aux_found
         .iter()
-        .map(|(r, u, _)| (*r, u.as_str()))
+        .map(|(r, u, _, _)| (*r, u.as_str()))
         .filter(|(r, u)| cfg.role(r).map(|x| x.url) != Some((*u).to_owned()))
         .collect();
 
@@ -418,17 +418,25 @@ pub fn run(
         }
     };
     let recorded = models.recorded();
-    let mut roles: Vec<(&str, &ServerInfo)> = vec![("chat", &info)];
-    roles.extend(aux_found.iter().map(|(r, _, i)| (*r, i)));
-    for (role, info) in roles {
+    let mut roles: Vec<(&str, &ServerInfo, &Arc<HttpClient>)> = vec![("chat", &info, &chat_client)];
+    roles.extend(aux_found.iter().map(|(r, _, i, c)| (*r, i, c)));
+    // 記録と合っている役割 (このあと点検する)。
+    let mut usable_roles: Vec<(&str, evorag_memory::ModelOrigin, &Arc<HttpClient>)> = Vec::new();
+    for (role, info, client) in roles {
         let now = evorag_core::origin(info);
         let file = now.file_name.clone();
         let bind = |what: MessageKey| match models.bind(role, now.clone()) {
-            Ok(()) => say(what, &[("role", role), ("file", &file)]),
-            Err(e) => say(MessageKey::CliError, &[("detail", &e)]),
+            Ok(()) => {
+                say(what, &[("role", role), ("file", &file)]);
+                true
+            }
+            Err(e) => {
+                say(MessageKey::CliError, &[("detail", &e)]);
+                false
+            }
         };
-        match evorag_core::rebind::diff(role, recorded.get(role), &now) {
-            RoleDiff::Same => {}
+        let usable = match evorag_core::rebind::diff(role, recorded.get(role), &now) {
+            RoleDiff::Same => true,
             RoleDiff::New => bind(MessageKey::CliSetupModelRecorded),
             RoleDiff::Different {
                 recorded,
@@ -457,16 +465,59 @@ pub fn run(
                     yes_no(&c.with(MessageKey::CliSetupAskSwitch, &[("role", role)]))
                 };
                 if switched {
-                    bind(MessageKey::CliSetupSwitched);
+                    bind(MessageKey::CliSetupSwitched)
                 } else if role == "chat" {
                     say(
                         MessageKey::CliSetupKeptChat,
                         &[("recorded", &recorded.file_name)],
                     );
+                    false
                 } else {
                     say(MessageKey::CliSetupKept, &[("role", role)]);
+                    false
                 }
             }
+        };
+        if usable {
+            usable_roles.push((role, now, client));
+        }
+    }
+
+    // 5. 使うモデルの性質を点検する (06 §3.3)。前回の点検と model_key・`build_info` が同じなら行わない。
+    let aux_extra: evorag_llm::RequestExtra = cfg
+        .llm
+        .chat
+        .aux_request_extra
+        .as_ref()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for (role, o, client) in usable_roles {
+        if models.probed(role, &o.model_key, &o.build_info) {
+            continue;
+        }
+        say(MessageKey::CliSetupProbing, &[("role", role)]);
+        let body = rt.block_on(async {
+            match role {
+                "chat" => {
+                    evorag_core::probe::chat(
+                        &**client,
+                        &o.model_key,
+                        &o.build_info,
+                        &aux_extra,
+                        None,
+                    )
+                    .await
+                }
+                "embed" => evorag_core::probe::embed(&**client, &o.model_key, &o.build_info).await,
+                _ => evorag_core::probe::rerank(&**client, &o.model_key, &o.build_info).await,
+            }
+        });
+        for line in crate::doctor::probe_lines(c, role, &body) {
+            eprintln!("{line}");
+        }
+        if let Err(e) = models.save_probe(&body) {
+            say(MessageKey::CliError, &[("detail", &e)]);
         }
     }
     ExitCode::SUCCESS

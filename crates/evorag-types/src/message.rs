@@ -86,6 +86,8 @@ message_keys! {
     CliSetupKeptChat => "cli.setup.kept_chat",
     CliSetupKept => "cli.setup.kept",
     CliSetupNeedsConfirm => "cli.setup.needs_confirm",
+    /// 引数: `role`。
+    CliSetupProbing => "cli.setup.probing",
     CliRoleMismatch => "cli.role_mismatch",
     CliRoleWaiting => "cli.role_waiting",
     UiRoleReady => "ui.notice.role_ready",
@@ -93,6 +95,10 @@ message_keys! {
     UiRoleStatusWaiting => "ui.role_status.waiting",
     UiRoleStatusReady => "ui.role_status.ready",
     UiRoleStatusMismatch => "ui.role_status.mismatch",
+    /// モデルの点検で使えない機能が見つかった (06 §3.3)。引数: `role`, `reasons`。
+    UiProbeIssues => "ui.notice.probe_issues",
+    UiProbeThinkingNotOff => "probe.thinking_not_off",
+    UiProbeStructuredBroken => "probe.structured_broken",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",
@@ -120,6 +126,7 @@ message_keys! {
     UiMarkFailed => "ui.mark.failed",
     UiMarkNoReply => "ui.mark.no_reply",
     UiStatusIdle => "ui.status.idle",
+    UiStatusLimited => "ui.status.limited",
     UiStatusGenerating => "ui.status.generating",
     UiStatusThinking => "ui.status.thinking",
     UiThinking => "ui.thinking",
@@ -225,6 +232,16 @@ message_keys! {
     /// 引数: `count`, `latest`。
     DoctorBackups => "doctor.backups",
     DoctorBackupsNone => "doctor.backups_none",
+    /// 引数: `prompt`, `gen`, `issues`。
+    DoctorProbeChat => "doctor.probe_chat",
+    DoctorProbeNoIssue => "doctor.probe_no_issue",
+    /// 引数: `dims`, `ms`。
+    DoctorProbeEmbed => "doctor.probe_embed",
+    /// 引数: `ms`。
+    DoctorProbeRerank => "doctor.probe_rerank",
+    /// 引数: `role`, `detail`。
+    DoctorProbeFailed => "doctor.probe_failed",
+    DoctorProbeNone => "doctor.probe_none",
     /// 引数: `count`, `path`。
     DoctorBroken => "doctor.broken",
     /// 引数: `docs`, `segments`。

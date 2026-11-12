@@ -99,6 +99,8 @@ pub struct Status {
     pub endpoint: String,
     pub model: String,
     pub n_ctx: u32,
+    /// モデルの点検で、使えない機能を止めた (06 §3.3)。
+    pub limited: bool,
 }
 
 /// 生成中の応答。
@@ -292,6 +294,25 @@ impl App {
                         None => return,
                     },
                 };
+                self.notice(m);
+            }
+            Event::ProbeIssues {
+                role,
+                thinking_not_off,
+                structured_broken,
+            } => {
+                let mut reasons = Vec::new();
+                if thinking_not_off {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeThinkingNotOff));
+                }
+                if structured_broken {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeStructuredBroken));
+                }
+                self.status.limited = true;
+                let m = self.catalog.with(
+                    MessageKey::UiProbeIssues,
+                    &[("role", &role), ("reasons", &reasons.join("、"))],
+                );
                 self.notice(m);
             }
             Event::SourcesInfo { memory } => {

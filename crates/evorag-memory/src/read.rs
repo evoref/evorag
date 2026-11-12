@@ -194,3 +194,28 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
     })?;
     Ok(out)
 }
+
+/// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+pub fn load_probe(
+    tx: &ReadTxn<'_>,
+    role: &str,
+    model_key: &str,
+    build_info: &str,
+) -> Result<Option<(Envelope, ModelProbeBody)>, MemoryError> {
+    let mut best: Option<(Envelope, ModelProbeBody)> = None;
+    tx.for_each(KIND_MODEL_PROBE, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<ModelProbeBody>()
+            && b.role == role
+            && b.model_key == model_key
+            && b.build_info == build_info
+            && best
+                .as_ref()
+                .is_none_or(|(old, _)| old.updated_at <= e.updated_at)
+        {
+            best = Some((e, b));
+        }
+        true
+    })?;
+    Ok(best)
+}

@@ -11,6 +11,7 @@
 mod context;
 pub mod localtime;
 pub mod logging;
+pub mod probe;
 mod prompt;
 pub mod rebind;
 mod recall;
@@ -62,6 +63,10 @@ pub struct CoreConfig {
     /// embed と rerank の役割の llama-server (設定 `llm.embed`・`llm.rerank`、06 §2)。無ければ `None`。
     pub embed: Option<Arc<dyn LlmClient>>,
     pub rerank: Option<Arc<dyn LlmClient>>,
+    /// 設定 `llm.chat.aux_request_extra` (補助の呼び出しに足す JSON、06 §6)。
+    pub aux_request_extra: evorag_llm::RequestExtra,
+    /// 起動の後に、まだ点検していないモデルを裏で点検する (06 §3.3)。試験では切る。
+    pub probe_models: bool,
     /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
     pub memory_enabled: bool,
     pub clock: Arc<dyn Clock>,
@@ -205,8 +210,10 @@ struct Inner {
     chat_model: evorag_memory::ModelOrigin,
     /// embed と rerank の役割 (06 §3)。
     aux: Mutex<Vec<roles::AuxRole>>,
-    /// 繋がらない役割を試し直す task (終了のときに止める)。
+    /// 繋がらない役割を試し直す task と、点検の task (終了のときに止める)。
     aux_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    probe_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    aux_request_extra: evorag_llm::RequestExtra,
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
@@ -415,6 +422,8 @@ impl Core {
             chat_model: recorded_chat.unwrap_or(connected),
             aux: Mutex::new(aux),
             aux_task: Mutex::new(None),
+            probe_task: Mutex::new(None),
+            aux_request_extra: cfg.aux_request_extra,
             index,
             memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
@@ -509,6 +518,15 @@ impl Core {
             roles: role_infos,
             recorded_roles,
         };
+        if cfg.probe_models {
+            let worker = core.inner.clone();
+            let task = tokio::spawn(async move { probe_unprobed(&worker).await });
+            *core
+                .inner
+                .probe_task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(task);
+        }
         if waiting {
             let worker = core.inner.clone();
             let task = tokio::spawn(async move {
@@ -605,6 +623,43 @@ impl Core {
             .is_some()
     }
 
+    /// 試験のため: 点検の task が終わるまで待つ。
+    #[doc(hidden)]
+    pub async fn settle_probe(&self) {
+        let t = self
+            .inner
+            .probe_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = t {
+            let _ = t.await;
+        }
+    }
+
+    /// 保存した点検の結果 (今のモデルの分、06 §3.3)。
+    pub fn probe_result(&self, role: &str) -> Option<evorag_memory::ModelProbeBody> {
+        let (model_key, build_info) = match role {
+            evorag_memory::ROLE_CHAT => {
+                let s = self.inner.conn().1;
+                (s.model_key, s.build_info)
+            }
+            _ => {
+                let aux = self.inner.aux.lock().unwrap_or_else(|e| e.into_inner());
+                let a = aux.iter().find(|a| a.role == role)?;
+                match &a.state {
+                    roles::RoleState::Ready(o) => (o.model_key.clone(), o.build_info.clone()),
+                    _ => return None,
+                }
+            }
+        };
+        let rtx = self.inner.store.read().ok()?;
+        evorag_memory::load_probe(&rtx, role, &model_key, &build_info)
+            .ok()
+            .flatten()
+            .map(|(_, b)| b)
+    }
+
     /// 試験のため: 繋がらない役割を、待たずに今すぐ試し直す (06 §3)。まだ繋がらない役割があれば `true`。
     #[doc(hidden)]
     pub async fn recheck_roles(&self) -> bool {
@@ -625,14 +680,10 @@ impl Core {
             let _ = stop.send(());
             let _ = task.await;
         }
-        if let Some(t) = self
-            .inner
-            .aux_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            t.abort();
+        for slot in [&self.inner.aux_task, &self.inner.probe_task] {
+            if let Some(t) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                t.abort();
+            }
         }
         let running = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -733,6 +784,72 @@ fn ignored_config_notices(
         }
     }
     fresh
+}
+
+/// まだ点検していないモデル (役割・model_key・`build_info` ごと) を点検して保存する (06 §3.3)。
+/// 使えない機能が見つかれば知らせる。chat の点検は、裏の処理と同じく最後のスロットを使い、
+/// 応答を作っている間は待つ (06 §4。スロットが 1 つのサーバで、利用者の応答を遅らせないため)。
+async fn probe_unprobed(inner: &Arc<Inner>) {
+    let (llm, server, _) = inner.conn();
+    let mut targets: Vec<(&'static str, Arc<dyn LlmClient>, String, String)> = vec![(
+        evorag_memory::ROLE_CHAT,
+        llm,
+        server.model_key.clone(),
+        server.build_info.clone(),
+    )];
+    for a in inner.aux.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if let (Some(c), roles::RoleState::Ready(o)) = (a.ready_client(), &a.state) {
+            targets.push((a.role, c, o.model_key.clone(), o.build_info.clone()));
+        }
+    }
+    let slot = (server.total_slots > 1).then(|| server.total_slots - 1);
+    for (role, client, key, build) in targets {
+        let old = inner
+            .store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_probe(&r, role, &key, &build).ok())
+            .flatten();
+        if old.is_some() {
+            continue;
+        }
+        while is_running(inner) {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let body = match role {
+            evorag_memory::ROLE_CHAT => {
+                probe::chat(&*client, &key, &build, &inner.aux_request_extra, slot).await
+            }
+            evorag_memory::ROLE_EMBED => probe::embed(&*client, &key, &build).await,
+            _ => probe::rerank(&*client, &key, &build).await,
+        };
+        tracing::info!(
+            role,
+            prompt_tps = body.prompt_tps,
+            gen_tps = body.gen_tps,
+            structured_ok = body.structured_ok,
+            thinking_off = body.thinking_off,
+            dims = body.dims,
+            embed_ms = body.embed_ms,
+            rerank6_ms = body.rerank6_ms,
+            failed = body.error.is_some(),
+            "model probed"
+        );
+        if let Ok(ops) = writes(inner).save_probe(None, &body) {
+            let _ = write(inner, ops).await;
+        }
+        let found = probe::issues(&body);
+        if !found.is_empty() {
+            emit(
+                inner,
+                Event::ProbeIssues {
+                    role: role.to_owned(),
+                    thinking_not_off: found.contains(&probe::ProbeIssue::ThinkingNotOff),
+                    structured_broken: found.contains(&probe::ProbeIssue::StructuredBroken),
+                },
+            );
+        }
+    }
 }
 
 /// 繋がらない役割を試し直す (06 §3)。繋がったら記録と照合し、記録が無ければ記録する。

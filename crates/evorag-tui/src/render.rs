@@ -176,9 +176,15 @@ pub fn draw(app: &App, f: &mut Frame) {
         app.catalog.key(MessageKey::UiStatusIdle)
     };
     let st = &app.status;
+    // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
+    let limited = if st.limited {
+        format!(" │ {}", app.catalog.key(MessageKey::UiStatusLimited))
+    } else {
+        String::new()
+    };
     f.render_widget(
         Paragraph::new(format!(
-            " {} │ {} │ n_ctx {} │ {state}",
+            " {} │ {} │ n_ctx {} │ {state}{limited}",
             st.endpoint, st.model, st.n_ctx
         )),
         status,
@@ -319,6 +325,7 @@ mod tests {
                 endpoint: "127.0.0.1:8080".into(),
                 model: "qwen".into(),
                 n_ctx: 8192,
+                limited: false,
             },
         );
         let sid = Id::from_bytes([1; 16]);
