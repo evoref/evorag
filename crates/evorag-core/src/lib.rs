@@ -16,6 +16,7 @@ pub use sleep::{OnBattery, SleepConfig};
 mod context;
 pub mod localtime;
 pub mod logging;
+mod notes;
 mod precompute;
 pub mod probe;
 mod prompt;
@@ -255,6 +256,8 @@ struct Inner {
     /// 先に済ませる処理 (05 §4.5) の task と、入力が止まったときの処理を動かすか。
     pre: precompute::Tasks,
     precompute: bool,
+    /// ノートの手順の状態 (04 §2)。
+    notes: Mutex<notes::State>,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -550,6 +553,7 @@ impl Core {
             query_cache: Arc::new(recall::QueryCache::default()),
             rerank_cache: Arc::new(recall::RerankCache::default()),
             pre: precompute::Tasks::default(),
+            notes: Mutex::new(notes::State::default()),
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
@@ -1483,7 +1487,7 @@ fn read_env(inner: &Inner, kind: &str, id: Id) -> Option<Envelope> {
     }
 }
 
-fn writes(inner: &Inner) -> Writes<'_> {
+pub(crate) fn writes(inner: &Inner) -> Writes<'_> {
     Writes {
         clock: &*inner.clock,
         ids: &*inner.ids,
@@ -1647,6 +1651,7 @@ async fn delete(inner: &Arc<Inner>) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .session = None;
+    notes::touch(inner);
     emit(inner, Event::SessionDeleted { id: sid });
     let worker = inner.clone();
     let task = tokio::task::spawn_blocking(move || purge(&worker, job, &ids));
@@ -1876,6 +1881,8 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
 
 /// 書いたターンを裏でチャンクに分け、チャンクを記録して語彙の索引に足す (05 §2.3・§2.4)。
 fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
+    // 話題の区切りが変わったかもしれない (04 §2)。
+    notes::touch(inner);
     if inner.index.is_none() {
         return;
     }

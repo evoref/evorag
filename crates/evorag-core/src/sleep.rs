@@ -86,6 +86,8 @@ pub(crate) enum Step {
     Calibrate,
     /// チャンクの埋め込みを作る (04 §4 の手順 1)。sleep-time の手順。
     Embed,
+    /// ノートの検索の鍵を作る (04 §2、04 §4 の手順 2)。sleep-time の手順。
+    Notes,
     /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
     Backup,
 }
@@ -107,7 +109,9 @@ fn sleep_ready(inner: &Inner) -> Result<(), BackgroundState> {
     if !crate::has_space(inner) {
         return Err(BackgroundState::PausedLowSpace);
     }
+    // 次のターンの分の先の処理 (05 §4.5) が終わってから。
     if is_running(inner)
+        || inner.pre.warming()
         || inner.activity.held.load(Ordering::SeqCst)
         || inner.activity.since() < idle
     {
@@ -121,6 +125,9 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     let waiting = |s: Step| skip.get(&s).is_some_and(|t| t.elapsed() < BACKOFF);
     if !waiting(Step::Embed) && crate::embedding::needed(inner) {
         return Some(Step::Embed);
+    }
+    if !waiting(Step::Notes) && crate::notes::needed(inner) {
+        return Some(Step::Notes);
     }
     if !waiting(Step::Backup)
         && inner.startup_done.load(Ordering::SeqCst)
@@ -297,6 +304,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
                 false
             }
             Step::Embed => crate::embedding::run(inner).await,
+            Step::Notes => crate::notes::run(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

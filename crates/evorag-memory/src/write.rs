@@ -381,6 +381,42 @@ impl Writes<'_> {
         ))
     }
 
+    /// ノートを書く (04 §2)。同じ区切りの前のノート `old` (とその埋め込み `old_embeddings`) は消す。
+    pub fn note(
+        &self,
+        old: &[Id],
+        old_embeddings: &[Id],
+        body: &NoteBody,
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let mut ops = Vec::new();
+        for e in old_embeddings {
+            ops.extend(self.delete_embedding(*e));
+        }
+        for id in old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_NOTE.into(),
+                id: *id,
+            });
+            ops.push(WriteOp::DeleteLinksOf(*id));
+        }
+        let id = self.ids.next_id();
+        ops.push(WriteOp::Put(envelope(
+            id,
+            KIND_NOTE,
+            self.clock.now(),
+            body,
+        )?));
+        for turn in &body.exchanges {
+            ops.push(WriteOp::PutLink {
+                from: id,
+                rel: REL_NOTE_OF.into(),
+                to: *turn,
+                attrs: Vec::new(),
+            });
+        }
+        Ok((id, ops))
+    }
+
     /// 埋め込みを消す (記録・ベクトル・関係)。
     pub fn delete_embedding(&self, id: Id) -> Vec<WriteOp> {
         vec![
@@ -472,7 +508,26 @@ pub fn delete_session(
 ) -> Result<Vec<WriteOp>, crate::MemoryError> {
     let mut ops = Vec::new();
     let mut feedback = std::collections::BTreeSet::new();
+    let mut notes = std::collections::BTreeSet::new();
     for (turn, _) in tx.links_to(session.id, REL_IN_SESSION)? {
+        // ノートは出典の往復と一緒に消す (鍵の埋め込みを含む、03 §4.2 の規則 12)。
+        for (n, _) in tx.links_to(turn, REL_NOTE_OF)? {
+            if notes.insert(n) {
+                for (emb, _) in tx.links_to(n, REL_EMBEDDING_OF)? {
+                    ops.push(WriteOp::Delete {
+                        kind: KIND_EMBEDDING.into(),
+                        id: emb,
+                    });
+                    ops.push(WriteOp::DeleteBlobs(emb));
+                    ops.push(WriteOp::DeleteLinksOf(emb));
+                }
+                ops.push(WriteOp::Delete {
+                    kind: KIND_NOTE.into(),
+                    id: n,
+                });
+                ops.push(WriteOp::DeleteLinksOf(n));
+            }
+        }
         for (signal, _) in tx.links_to(turn, REL_TARGET)? {
             ops.push(WriteOp::Delete {
                 kind: KIND_SIGNAL.into(),

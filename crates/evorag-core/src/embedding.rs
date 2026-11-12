@@ -450,6 +450,7 @@ async fn save(
                 session: c.session,
                 model_key: key.to_owned(),
                 dim: v.len() as u32,
+                key: None,
             };
             match w.embedding(&body, &v) {
                 Ok((_, o)) => ops.extend(o),

@@ -156,7 +156,7 @@ url = "http://127.0.0.1:8082"
 
 ## 6. 出力の型縛り
 
-- 補助の判定と抽出 (ノートの検索の鍵、事実の候補、訂正の検証、precept の提案、採点) は、Rust の型から `schemars` で作った JSON Schema を `response_format` (`{"type": "json_schema", ...}`) で送る (v0.2)。
+- 補助の判定と抽出 (ノートの検索の鍵、事実の候補、訂正の検証、precept の提案、採点) は、Rust の型に合わせた JSON Schema を `response_format` (`{"type": "json_schema", ...}`) で送る (v0.2)。型は小さい (鍵の並びなど) ので、Schema は呼び出しの隣に手で書き、`schemars` は使わない (推移的な依存を増やさない、NFR-203。2026-11-12)。
 - 受け取った JSON は型で検証し、合わなければ 1 回だけやり直し、それでも合わなければその手順を失敗として `job` に記録する。
 - 型縛りの呼び出しは temperature 0 と固定の seed で出し、`id_slot` を固定する (スロットを固定すると同じ入力から同じ出力が得られ、固定しないと割り当てられたスロットで出力が変わることを S-02 で確かめた)。
 - 思考の部分を出すモデル (Qwen3.5 など) は、補助の呼び出しで思考を切る設定 (`chat_template_kwargs: {"enable_thinking": false}` など) が要る。モデルごとに設定 `llm.chat.aux_request_extra` (要求に足す JSON) で持つ。応答の要求で思考を切りたいときは、`llm.chat.request_extra` で同じように持つ (思考を出すモデルは、思考が終わるまで本文が流れ始めないため)。

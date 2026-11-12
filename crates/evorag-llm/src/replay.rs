@@ -57,6 +57,9 @@ pub struct Cassette {
     /// 要求は `warm_requests` に分けて記録する。無ければすぐに終える。
     #[serde(default)]
     pub warm: Option<Vec<Step>>,
+    /// `/slots` の答え (無ければ、使えないサーバとして断る)。
+    #[serde(default)]
+    pub slots: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,6 +266,18 @@ impl LlmClient for ReplayClient {
                     status: 501,
                     body: "replay: no rerank".into(),
                 })
+            }
+        })
+    }
+
+    fn slots(&self) -> BoxFuture<'_, Result<Vec<crate::SlotState>, LlmError>> {
+        Box::pin(async move {
+            match &self.cassette.slots {
+                Some(v) => crate::parse_slots(v),
+                None => Err(LlmError::Http {
+                    status: 501,
+                    body: "replay: no slots".into(),
+                }),
             }
         })
     }

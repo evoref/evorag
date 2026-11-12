@@ -44,6 +44,15 @@ impl Tasks {
             .collect()
     }
 
+    /// 次のターンの分を処理させている (sleep-time の手順はその後、04 §4)。
+    pub(crate) fn warming(&self) -> bool {
+        self.warm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|t| !t.is_finished())
+    }
+
     /// 届いていない命令か、動いているものがある (試験で待つため)。
     pub(crate) fn busy(&self) -> bool {
         self.seen.load(Ordering::SeqCst) < self.asked.load(Ordering::SeqCst)

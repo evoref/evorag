@@ -59,7 +59,7 @@ flowchart TB
 | crate | 役割 | 主な依存 | 入る版 |
 |---|---|---|---|
 | `evorag-types` | ID、時刻、エラー、文言キー、コアの API の命令・イベント・照会の型 | serde | v0.1 |
-| `evorag-llm` | llama-server のクライアント (chat・embed・rerank・tokenize・props・slots) | reqwest (TLS なし)、serde_json、schemars | v0.1 |
+| `evorag-llm` | llama-server のクライアント (chat・embed・rerank・tokenize・props・slots) | reqwest (TLS なし)、serde_json | v0.1 |
 | `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック | redb、ciborium、xxhash-rust | v0.1 |
 | `evorag-index` | 語彙の索引とベクトルの索引、セグメントの形式と入れ替え | memmap2、rayon、arc-swap | v0.1 (語彙) / v0.2 (ベクトル) |
 | `evorag-memory` | メモリの書き込み・統合・読み出し、事実の入口、訂正の検証 | — | v0.1 (ターンとセッション) / v0.2〜v0.3 |

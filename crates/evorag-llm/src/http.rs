@@ -415,6 +415,13 @@ impl LlmClient for HttpClient {
         })
     }
 
+    fn slots(&self) -> BoxFuture<'_, Result<Vec<crate::SlotState>, LlmError>> {
+        Box::pin(async move {
+            let v = self.json(|| self.get("/slots")).await?;
+            crate::parse_slots(&v)
+        })
+    }
+
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
         Box::pin(async move {
             let body = self.body(chat_body(&req));
