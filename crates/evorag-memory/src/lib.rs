@@ -24,9 +24,9 @@ pub use kinds::{
 };
 pub use read::{
     Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, chunks_of,
-    embeddings_of_model, feedback_for_answer, list_sessions, load_bindings, load_probe,
-    load_session, load_settings, load_threshold, pending_user_turns, session_turns,
-    session_turns_counted,
+    embedding_bodies, embedding_vector, embeddings_of_chunk, embeddings_of_model,
+    feedback_for_answer, list_sessions, load_bindings, load_probe, load_session, load_settings,
+    load_threshold, pending_user_turns, session_turns, session_turns_counted,
 };
 pub use write::{
     AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,

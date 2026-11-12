@@ -424,6 +424,23 @@ impl VecIndex {
         Ok(s)
     }
 
+    /// 既にある索引を、記録された次元で開く (次元を知らない呼び手のため。消した会話の行を、前の世代の
+    /// 索引からも除くときなど)。まだ作っていない・読めなければ `None`。
+    pub fn open_existing(dir: &Path) -> Option<Self> {
+        let current = std::fs::read_to_string(dir.join(CURRENT)).ok()?;
+        let current = current.trim();
+        if current.contains(['/', '\\']) || !current.starts_with("manifest-") {
+            return None;
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(current)).ok()?).ok()?;
+        let dim = usize::try_from(manifest["dim"].as_u64()?).ok()?;
+        match Self::open(dir, dim) {
+            Ok((ix, Opened::Ok)) => Some(ix),
+            _ => None,
+        }
+    }
+
     /// 次元。
     pub fn dim(&self) -> usize {
         self.dim
