@@ -198,6 +198,16 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// しきい値の記録を足す (05 §3.7)。版は呼ぶ側が前の版 + 1 にする。前の版は消さない。
+    pub fn save_threshold(&self, body: &ThresholdBody) -> Result<Vec<WriteOp>, BodyError> {
+        Ok(vec![WriteOp::Put(envelope(
+            self.ids.next_id(),
+            KIND_THRESHOLD,
+            self.clock.now(),
+            body,
+        )?)])
+    }
+
     /// 点検の結果を書く (06 §3.3)。同じ役割・model_key・`build_info` の古い結果は消す。
     pub fn save_probe(
         &self,

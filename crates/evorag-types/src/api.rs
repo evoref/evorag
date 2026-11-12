@@ -113,6 +113,22 @@ pub enum RoleStatus {
     Mismatch,
 }
 
+/// 想起の状態 (07 §2.1 の状態の行の「想起」の欄、05 §3.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallState {
+    /// リランカーと、合格したしきい値がある。
+    Standard,
+    /// リランカーが無い・使えない (語彙の規則などで動く)。
+    Simple,
+    /// リランカーはあるが、しきい値が無い (自動では添えず、候補だけを出す)。
+    CandidatesOnly {
+        /// 較正の途中。
+        calibrating: bool,
+        /// 較正に落ちた (`evorag setup` で別のリランカーを勧める)。
+        failed: bool,
+    },
+}
+
 /// 読み取り用のセッション。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
@@ -198,6 +214,8 @@ pub enum Event {
     /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
     /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
     StyleInfo { values: [String; 3], changed: bool },
+    /// 想起の状態が変わった (較正が終わった、リランカーが繋がった、05 §3.7)。
+    RecallStatus { state: RecallState },
     /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。
     ProbeIssues {
         role: String,

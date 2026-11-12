@@ -124,7 +124,7 @@
 | `embedding` | どの記録の、どの単位 (チャンク 1 つ、またはノートの鍵 1 つ) の、どのモデル (model_key) の埋め込みか。ベクトル自体は `blobs` | 対象の記録へ | v0.2 |
 | `model_binding` | 役割 (`chat`・`embed`・`rerank`。足すだけで広げる文字列) ごとに記録したモデル: model_key、元の値 (ファイル名、名前、`meta` の値、`build_info`)、記録した時刻、前の model_key の履歴 (06 §3.1) | 役割 | v0.2 |
 | `model_probe` | モデルの性質の点検の結果 (06 §3.3)。作り直せる派生の記録 | model_key と `build_info` | v0.2 |
-| `threshold` | リランクのしきい値と帯の下限: リランカーの model_key、対象の種類 (`conversation` など。足すだけで広げる文字列)、版、求めた方法 (`bundled`、v0.4 から `signals`)、採用した時刻 (05 §3.7) | リランカーの model_key と対象の種類 | v0.2 |
+| `threshold` | リランクのしきい値と帯の下限: リランカーの model_key、対象の種類 (`conversation` など。足すだけで広げる文字列)、版、求めた方法 (`bundled`、v0.4 から `signals`)、使った同梱の事例、合否と数えた値、採用した時刻 (封筒の作成時刻、05 §3.7) | リランカーの model_key と対象の種類 | v0.2 |
 | `recall_feedback` | 想起への利用者の操作 (05 §5.2): 操作 (`attach`・`irrelevant`)、問いの応答のターン、対象の往復、その時のリランクの生の値とリランカーの model_key | 応答のターンへ、対象の往復のターンへ | v0.2 |
 | `fact` | 04 §5 の「事実の形」 | 出典のターンへ、置き換えた事実へ。subject と attribute | v0.3 |
 | `correction` | 訂正の候補と検証の結果 | 対象のターンへ | v0.3 |

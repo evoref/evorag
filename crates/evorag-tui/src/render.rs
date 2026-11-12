@@ -1,7 +1,7 @@
 //! 描画 (07 §2.1)。描画のたびに、端末の本当のカーソルを入力欄の入力位置に置く (07 §2.3)。
 
 use evorag_types::MessageKey;
-use evorag_types::api::{Role, StyleItem, TurnStatus, TurnView};
+use evorag_types::api::{RecallState, Role, StyleItem, TurnStatus, TurnView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -177,6 +177,19 @@ pub fn draw(app: &App, f: &mut Frame) {
     };
     let st = &app.status;
     // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
+    // 想起の欄 (07 §2.1)。較正に落ちたときは「→ evorag setup」を添える。
+    let recall = st.recall.map(|r| {
+        let k = match r {
+            RecallState::Standard => MessageKey::UiRecallStandard,
+            RecallState::Simple => MessageKey::UiRecallSimple,
+            RecallState::CandidatesOnly {
+                calibrating: true, ..
+            } => MessageKey::UiRecallCalibrating,
+            RecallState::CandidatesOnly { failed: true, .. } => MessageKey::UiRecallFailed,
+            RecallState::CandidatesOnly { .. } => MessageKey::UiRecallCandidates,
+        };
+        format!(" {} │", app.catalog.key(k))
+    });
     let limited = if st.limited {
         format!(" │ {}", app.catalog.key(MessageKey::UiStatusLimited))
     } else {
@@ -184,8 +197,11 @@ pub fn draw(app: &App, f: &mut Frame) {
     };
     f.render_widget(
         Paragraph::new(format!(
-            " {} │ {} │ n_ctx {} │ {state}{limited}",
-            st.endpoint, st.model, st.n_ctx
+            " {} │ {} │{} n_ctx {} │ {state}{limited}",
+            st.endpoint,
+            st.model,
+            recall.unwrap_or_default(),
+            st.n_ctx
         )),
         status,
     );
@@ -326,6 +342,7 @@ mod tests {
                 model: "qwen".into(),
                 n_ctx: 8192,
                 limited: false,
+                recall: None,
             },
         );
         let sid = Id::from_bytes([1; 16]);

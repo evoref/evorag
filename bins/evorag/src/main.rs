@@ -556,6 +556,7 @@ fn main() -> ExitCode {
             limited: core
                 .probe_result(evorag_memory::ROLE_CHAT)
                 .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
+            recall: Some(report.recall),
         },
     );
     for w in &report.location_warnings {

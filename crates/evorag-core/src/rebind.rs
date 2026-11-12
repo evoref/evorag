@@ -128,6 +128,35 @@ impl DataRootModels {
             .is_some()
     }
 
+    /// データ根に記録したプロンプトの言語 (無ければ `None`、07 §6.1)。
+    pub fn prompt_language(&self) -> Option<String> {
+        self.store
+            .meta(evorag_store::meta::PROMPT_LANGUAGE)
+            .ok()
+            .flatten()
+    }
+
+    /// リランカーのいちばん新しい版のしきい値の記録 (05 §3.7)。
+    pub fn threshold(&self, reranker_key: &str) -> Option<evorag_memory::ThresholdBody> {
+        let r = self.store.read().ok()?;
+        evorag_memory::load_threshold(&r, reranker_key, evorag_memory::TARGET_CONVERSATION)
+            .ok()?
+            .map(|(_, b)| b)
+    }
+
+    /// しきい値の記録を足す (前の版は残す)。
+    pub fn save_threshold(&self, body: &evorag_memory::ThresholdBody) -> Result<(), String> {
+        let w = Writes {
+            clock: &*self.clock,
+            ids: &*self.ids,
+        };
+        let ops = w.save_threshold(body).map_err(|e| e.to_string())?;
+        self.handle
+            .submit_wait(WriteRequest::conversation(ops))
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
     /// 点検の結果を保存する。
     pub fn save_probe(&self, body: &evorag_memory::ModelProbeBody) -> Result<(), String> {
         let w = Writes {

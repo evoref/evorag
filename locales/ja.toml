@@ -45,6 +45,11 @@ no_reply = "(応答なし)"
 [ui.status]
 idle = "待機中"
 limited = "一部の機能を止めています (evorag doctor)"
+recall_standard = "想起: 標準"
+recall_simple = "想起: 簡易"
+recall_candidates = "想起: 候補だけ"
+recall_calibrating = "想起: 候補だけ (較正中)"
+recall_failed = "想起: 候補だけ → evorag setup"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
 
@@ -92,6 +97,8 @@ source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で
 source = "[{n}] {title} ({at})\n{excerpt}"
 no_sources = "出典の付いた応答がありません。"
 style = "答え方: 言語 {language}・長さ {length}・書式 {format} (/style で選び直せます)。"
+calibrated = "リランカーの較正が終わりました。以前の会話を、関係が高いと判断したときに自動で添えます。"
+calibration_failed = "リランカーが較正の基準に届かなかったので、以前の会話は自動では添えず、候補として示します。別のリランカーを evorag setup で選べます。"
 probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
 
@@ -206,6 +213,9 @@ preset_example = """1 つの llama-server で 3 つの役割を動かすこと�
   reranking = true
 起動の例: llama-server --models-preset evorag.ini --host 127.0.0.1 --port 8080 --api-key <キー>
 その後でもう一度 evorag setup を実行すると、役割ごとのモデルを見分けて設定に書きます。"""
+calibrating = "リランカーのしきい値を、同梱の事例で求めています… {done}/{total}"
+calibrated = "リランカーのしきい値を記録しました: {threshold} (帯の下限 {band})。順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。"
+calibration_failed = "リランカーが較正の基準に届きませんでした (順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。どちらも 8 割以上が要ります)。以前の会話は自動では添えず、候補として示します。別のリランカーを勧めます。"
 probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
 
 [doctor]

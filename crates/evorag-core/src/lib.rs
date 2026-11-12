@@ -8,6 +8,7 @@
 //! 命令は 1 本の待ち行列で順に処理する。生成は別の task で走らせ、中断の命令で取り消す。
 //! 書き手のスレッドはここで作る (02 §4.3 の R7)。tokio の実行器の中で使う。
 
+pub mod calibration;
 mod context;
 pub mod localtime;
 pub mod logging;
@@ -29,7 +30,7 @@ use evorag_store::{
     Envelope, OpenError, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer, WriterHandle,
     meta,
 };
-use evorag_types::api::{Command, Event};
+use evorag_types::api::{Command, Event, RecallState, RoleStatus};
 use evorag_types::{Clock, Id, IdGen, Message, MessageKey};
 use tokio::sync::{mpsc, oneshot};
 
@@ -178,6 +179,8 @@ pub struct StartReport {
     pub roles: Vec<evorag_types::api::ModelRoleInfo>,
     /// この起動でモデルを初めて記録した役割 (embed・rerank)。
     pub recorded_roles: Vec<String>,
+    /// 想起の状態 (07 §2.1)。
+    pub recall: evorag_types::api::RecallState,
 }
 
 /// 生成の取り消しの理由。
@@ -214,6 +217,12 @@ struct Inner {
     aux_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     probe_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     aux_request_extra: evorag_llm::RequestExtra,
+    /// 裏で点検と較正を行う (06 §3.3、05 §3.7。設定 `probe_models`)。
+    background_checks: bool,
+    /// 今のリランカーのしきい値の記録 (今の同梱の事例で求めたものだけ、05 §3.7)。
+    threshold: Mutex<Option<evorag_memory::ThresholdBody>>,
+    /// 較正の task (終了のときに止める)。動いている間は「較正中」。
+    calib_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
@@ -424,6 +433,9 @@ impl Core {
             aux_task: Mutex::new(None),
             probe_task: Mutex::new(None),
             aux_request_extra: cfg.aux_request_extra,
+            background_checks: cfg.probe_models,
+            threshold: Mutex::new(None),
+            calib_task: Mutex::new(None),
             index,
             memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
@@ -507,6 +519,8 @@ impl Core {
             index = core.inner.index.is_some(),
             "core started"
         );
+        core.inner.load_threshold();
+        ensure_calibration(&core.inner);
         let report = StartReport {
             server,
             store: open_report,
@@ -517,6 +531,7 @@ impl Core {
             ignored_config,
             roles: role_infos,
             recorded_roles,
+            recall: core.inner.recall_state(),
         };
         if cfg.probe_models {
             let worker = core.inner.clone();
@@ -623,6 +638,29 @@ impl Core {
             .is_some()
     }
 
+    /// 試験のため: 較正の task が終わるまで待つ。
+    #[doc(hidden)]
+    pub async fn settle_calibration(&self) {
+        let t = self
+            .inner
+            .calib_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = t {
+            let _ = t.await;
+        }
+    }
+
+    /// 今のリランカーのしきい値の記録 (05 §3.7)。
+    pub fn threshold(&self) -> Option<evorag_memory::ThresholdBody> {
+        self.inner
+            .threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// 試験のため: 点検の task が終わるまで待つ。
     #[doc(hidden)]
     pub async fn settle_probe(&self) {
@@ -680,7 +718,11 @@ impl Core {
             let _ = stop.send(());
             let _ = task.await;
         }
-        for slot in [&self.inner.aux_task, &self.inner.probe_task] {
+        for slot in [
+            &self.inner.aux_task,
+            &self.inner.probe_task,
+            &self.inner.calib_task,
+        ] {
             if let Some(t) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 t.abort();
             }
@@ -912,9 +954,135 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
             aux[i].state = state;
             aux[i].info()
         };
+        let rerank_ready =
+            info.role == evorag_memory::ROLE_RERANK && info.status == RoleStatus::Ready;
         emit(inner, Event::RoleChanged { info, recorded_now });
+        if rerank_ready {
+            inner.load_threshold();
+            emit(
+                inner,
+                Event::RecallStatus {
+                    state: inner.recall_state(),
+                },
+            );
+            ensure_calibration(inner);
+        }
     }
     still
+}
+
+impl Inner {
+    /// 今のリランカー (使えるもの) と、その model_key。
+    fn reranker(&self) -> Option<(Arc<dyn LlmClient>, String)> {
+        let aux = self.aux.lock().unwrap_or_else(|e| e.into_inner());
+        let a = aux.iter().find(|a| a.role == evorag_memory::ROLE_RERANK)?;
+        match (&a.state, a.ready_client()) {
+            (roles::RoleState::Ready(o), Some(c)) => Some((c, o.model_key.clone())),
+            _ => None,
+        }
+    }
+
+    /// 今のリランカーのしきい値の記録を読み直す (今の同梱の事例で求めたものだけ)。
+    fn load_threshold(&self) {
+        let lang = self.language.as_str();
+        let body = self.reranker().and_then(|(_, key)| {
+            let r = self.store.read().ok()?;
+            let (_, b) =
+                evorag_memory::load_threshold(&r, &key, evorag_memory::TARGET_CONVERSATION)
+                    .ok()??;
+            calibration::is_current(&b, lang).then_some(b)
+        });
+        *self.threshold.lock().unwrap_or_else(|e| e.into_inner()) = body;
+    }
+
+    /// 較正の task が動いているか。
+    fn calibrating(&self) -> bool {
+        self.calib_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|t| !t.is_finished())
+    }
+
+    /// 想起の状態 (07 §2.1)。
+    fn recall_state(&self) -> RecallState {
+        self.recall_state_with(self.calibrating())
+    }
+
+    fn recall_state_with(&self, calibrating: bool) -> RecallState {
+        if self.reranker().is_none() {
+            return RecallState::Simple;
+        }
+        match &*self.threshold.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(b) if b.passed => RecallState::Standard,
+            Some(_) => RecallState::CandidatesOnly {
+                calibrating: false,
+                failed: true,
+            },
+            None => RecallState::CandidatesOnly {
+                calibrating,
+                failed: false,
+            },
+        }
+    }
+}
+
+/// リランカーがあって、しきい値の記録が無ければ、裏で較正する (05 §3.7 の「いつ」、AC-FR-413-3)。
+fn ensure_calibration(inner: &Arc<Inner>) {
+    if !inner.background_checks
+        || inner.calibrating()
+        || inner
+            .threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    {
+        return;
+    }
+    let Some((rerank, key)) = inner.reranker() else {
+        return;
+    };
+    let worker = inner.clone();
+    let task = tokio::spawn(async move {
+        while is_running(&worker) {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let version = worker
+            .store
+            .read()
+            .ok()
+            .and_then(|r| {
+                evorag_memory::load_threshold(&r, &key, evorag_memory::TARGET_CONVERSATION).ok()
+            })
+            .flatten()
+            .map_or(1, |(_, b)| b.version + 1);
+        let lang = worker.language.as_str();
+        let started = std::time::Instant::now();
+        match calibration::calibrate(&*rerank, &key, lang, version, &mut |_, _| {}).await {
+            Ok(body) => {
+                tracing::info!(
+                    passed = body.passed,
+                    threshold = body.threshold,
+                    band_low = body.band_low,
+                    version = body.version,
+                    ms = started.elapsed().as_millis() as u64,
+                    "reranker calibrated"
+                );
+                if let Ok(ops) = writes(&worker).save_threshold(&body) {
+                    let _ = write(&worker, ops).await;
+                }
+                *worker.threshold.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
+            }
+            Err(e) => tracing::warn!(error = %e, "reranker calibration failed"),
+        }
+        emit(
+            &worker,
+            Event::RecallStatus {
+                state: worker.recall_state_with(false),
+            },
+        );
+    });
+    *inner.calib_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
 }
 
 fn role_info(

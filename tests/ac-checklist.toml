@@ -878,3 +878,30 @@ status = "test"
 tests = ["bins/evorag/src/setup.rs::a_router_is_written_with_a_model_name_per_role", "bins/evorag/src/setup.rs::a_role_is_chosen_from_the_router_candidates"]
 manual = ""
 note = "設定の書き方と選び方。ルーターの探索と役割の見分けは、本物のルーター (S-15 のプリセット) で setup --yes を流して確かめた (対話で選ぶ手順は手動の受入)。"
+
+[[ac]]
+id = "AC-FR-413-1"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once", "crates/evorag-retrieval/src/calibrate.rs::the_threshold_is_just_above_the_ninetieth_percentile_of_irrelevant_queries", "crates/evorag-retrieval/src/calibrate.rs::the_bundled_cases_load_with_gold_exchanges"]
+manual = "evorag setup で、本物のリランカー (japanese-bge-reranker-v2-m3) のしきい値が求まり記録されることを確かめた (2026-11-12、M2.3 の 1 つ目)"
+note = "求め方・合否・記録 (model_key・対象の種類・版・事例・合否)。落ちたときの「添えずに帯にだけ出す」は、応答の経路を作る M2.3 の 2 つ目で足す。setup の表示は bin。"
+
+[[ac]]
+id = "AC-FR-413-2"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::switching_rerankers_keeps_each_threshold"]
+manual = ""
+note = "コアの側 (切り替えた後の起動で求め直し、前の記録が残り、戻すとそれを使う)。setup の中で求めるのは bin (本物のリランカーで確かめた)。"
+
+[[ac]]
+id = "AC-FR-413-3"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once"]
+manual = ""
+note = "裏で較正し、終わると RecallStatus で状態 (標準・候補だけ) を知らせる。状態の行の表示は TUI。"

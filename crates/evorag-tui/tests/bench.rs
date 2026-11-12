@@ -31,6 +31,7 @@ fn app() -> App {
             model: "bench".into(),
             n_ctx: 8192,
             limited: false,
+            recall: None,
         },
     );
     let turns = (0..TURNS)

@@ -138,6 +138,19 @@ message_keys! {
     UiMarkNoReply => "ui.mark.no_reply",
     UiStatusIdle => "ui.status.idle",
     UiStatusLimited => "ui.status.limited",
+    UiRecallStandard => "ui.status.recall_standard",
+    UiRecallSimple => "ui.status.recall_simple",
+    UiRecallCandidates => "ui.status.recall_candidates",
+    UiRecallCalibrating => "ui.status.recall_calibrating",
+    UiRecallFailed => "ui.status.recall_failed",
+    UiCalibrated => "ui.notice.calibrated",
+    UiCalibrationFailed => "ui.notice.calibration_failed",
+    /// 引数: `done`, `total`。
+    CliSetupCalibrating => "cli.setup.calibrating",
+    /// 引数: `threshold`, `band`, `rank_ok`, `rank_n`, `value_ok`, `value_n`。
+    CliSetupCalibrated => "cli.setup.calibrated",
+    /// 引数: `rank_ok`, `rank_n`, `value_ok`, `value_n`。
+    CliSetupCalibrationFailed => "cli.setup.calibration_failed",
     UiStatusGenerating => "ui.status.generating",
     UiStatusThinking => "ui.status.thinking",
     UiThinking => "ui.thinking",

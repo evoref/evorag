@@ -11,17 +11,17 @@ mod write;
 
 pub use kinds::{
     GenerationRecord, JOB_PURGE_BACKUPS, JobBody, KIND_JOB, KIND_MODEL_BINDING, KIND_MODEL_PROBE,
-    KIND_SESSION, KIND_SETTING, KIND_SIGNAL, KIND_TURN, ModelBindingBody, ModelOrigin,
-    ModelProbeBody, RECALL_BEFORE_UTTERANCE, REL_IN_SESSION, REL_REPLY_TO, REL_TARGET, ROLE_CHAT,
-    ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallRecord, SETTING_ANSWER_FORMAT,
-    SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody,
-    SessionState, SettingBody, SignalBody, SignalKind, TurnBody, TurnObs, TurnRole, TurnState,
-    kinds,
+    KIND_SESSION, KIND_SETTING, KIND_SIGNAL, KIND_THRESHOLD, KIND_TURN, METHOD_BUNDLED,
+    ModelBindingBody, ModelOrigin, ModelProbeBody, RECALL_BEFORE_UTTERANCE, REL_IN_SESSION,
+    REL_REPLY_TO, REL_TARGET, ROLE_CHAT, ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallRecord,
+    SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG,
+    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION,
+    ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, kinds,
 };
 pub use read::{
     Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, list_sessions,
-    load_bindings, load_probe, load_session, load_settings, pending_user_turns, session_turns,
-    session_turns_counted,
+    load_bindings, load_probe, load_session, load_settings, load_threshold, pending_user_turns,
+    session_turns, session_turns_counted,
 };
 pub use write::{
     AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
