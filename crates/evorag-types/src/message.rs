@@ -247,6 +247,12 @@ message_keys! {
     CliAskRestore => "cli.ask_restore",
     /// 引数: `from`。
     CliRestored => "cli.restored",
+    /// 引数: `backup`・`removed`・`docs`。
+    CliRebuilt => "cli.rebuilt",
+    /// 引数: `backup`・`docs`。
+    CliRebuiltIndex => "cli.rebuilt_index",
+    /// 引数: `detail`。
+    CliRebuildFailed => "cli.rebuild_failed",
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
     CliLlmUnauthorized => "cli.llm_unauthorized",

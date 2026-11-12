@@ -715,6 +715,23 @@ impl Store {
         )
     }
 
+    /// 作り直しなどの操作の前の退避 (03 §7.2)。DB の写しと `extra_files` (`config.toml` など) を、
+    /// `backups/pre-op/` に作る。作ったフォルダを返す。
+    pub fn pre_op_backup(
+        &self,
+        operation: &str,
+        extra_files: &[&Path],
+    ) -> Result<PathBuf, StoreError> {
+        crate::backup::pre_op(
+            &self.db,
+            &self.root,
+            self.clock.now().as_millis(),
+            operation,
+            "current",
+            extra_files,
+        )
+    }
+
     /// その日の日次の退避がまだ無いか (03 §7.1)。
     pub fn daily_backup_due(&self, backups: Option<&Path>) -> bool {
         let default = self.root.join(crate::backup::BACKUPS_DIR);
