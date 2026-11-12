@@ -83,6 +83,12 @@ enum Sub {
         /// 書き出すフォルダ (空か、まだ無いフォルダ)
         out: PathBuf,
     },
+    /// 派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)
+    Rebuild {
+        /// 索引だけを作り直す
+        #[arg(long)]
+        index: bool,
+    },
     /// 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
         /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
@@ -94,6 +100,55 @@ enum Sub {
 enum BackupsAction {
     /// 退避の一覧 (新しい順)
     List,
+}
+
+/// `evorag rebuild [--index]` (03 §10、FR-212)。
+fn rebuild(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+    config_file: &std::path::Path,
+    index_only: bool,
+    clock: Arc<dyn evorag_types::Clock>,
+) -> ExitCode {
+    let ids = Arc::new(UuidV7Gen::new(clock.clone()));
+    match evorag_core::rebuild::run(evorag_core::rebuild::RebuildOptions {
+        data_root: data_root.to_path_buf(),
+        evorag_version: VERSION.to_owned(),
+        config_file: Some(config_file.to_path_buf()),
+        index_only,
+        clock,
+        ids,
+    }) {
+        Ok(r) => {
+            let backup = r.backup.display().to_string();
+            let m = if index_only {
+                catalog.with(
+                    MessageKey::CliRebuiltIndex,
+                    &[("backup", &backup), ("docs", &r.docs.to_string())],
+                )
+            } else {
+                catalog.with(
+                    MessageKey::CliRebuilt,
+                    &[
+                        ("backup", &backup),
+                        ("removed", &r.removed.to_string()),
+                        ("docs", &r.docs.to_string()),
+                    ],
+                )
+            };
+            eprintln!("{m}");
+            ExitCode::SUCCESS
+        }
+        Err(evorag_core::rebuild::RebuildError::Open(OpenError::Lock(LockError::InUse {
+            pid,
+        }))) => data_root_in_use(catalog, data_root, pid),
+        Err(e) => fail(
+            catalog,
+            1,
+            MessageKey::CliRebuildFailed,
+            &[("detail", &e.to_string())],
+        ),
+    }
 }
 
 /// y / n を尋ねる。端末でなければ n。
@@ -294,6 +349,9 @@ fn main() -> ExitCode {
             out,
             clock.now().as_millis(),
         );
+    }
+    if let Some(Sub::Rebuild { index }) = &args.command {
+        return rebuild(&catalog, &data_root, &config_file, *index, clock.clone());
     }
     if let Some(Sub::Restore { backup }) = &args.command {
         return match evorag_store::restore::restore(

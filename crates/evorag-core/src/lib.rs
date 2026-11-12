@@ -21,6 +21,7 @@ mod precompute;
 pub mod probe;
 mod prompt;
 pub mod rebind;
+pub mod rebuild;
 mod recall;
 mod roles;
 mod views;

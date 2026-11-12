@@ -745,6 +745,15 @@ manual = ""
 note = "コアは添えた往復と出典の番号・帯・リランクの値としきい値との差・縮退の理由・このセッションの出典を返し、画面はそれを文にする。"
 
 [[ac]]
+id = "AC-FR-212-1"
+requirement = "FR-212"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebuild.rs::rebuild_keeps_the_originals_and_recalls_the_same"]
+manual = ""
+note = "--index と全体の両方で、退避が作られ、モデルの記録・しきい値・想起への操作・ターンの数が変わらず、同じ問いで同じ往復が添えられる。"
+
+[[ac]]
 id = "AC-FR-414-1"
 requirement = "FR-414"
 level = "Must"
