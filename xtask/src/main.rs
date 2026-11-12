@@ -6,6 +6,7 @@ mod deps;
 mod dist;
 mod i18n;
 mod metadata;
+mod trace;
 mod verify_tag;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ commands:
   check-deps               dependency rules (02 §4.3) and transitive count (NFR-203)
       [--manifest-path P]  measure another workspace (C-code check and count only)
   i18n                     message keys in code vs locales/*.toml (NFR-602)
+  trace [--version X.Y]    every Must AC up to X.Y (default 0.2) has a test or steps (NFR-702)
   dist                     build the release archive, SHA256SUMS and release.json (12 §5)
       [--target T] [--out DIR] [--skip-build]
   bench [--out DIR]        benchmarks BM-101..104, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
@@ -37,6 +39,7 @@ fn main() -> ExitCode {
         Some("check") => check(&root),
         Some("check-deps") => check_deps(&root, &args[1..]),
         Some("i18n") => report("i18n", i18n::run(&root)),
+        Some("trace") => report("trace", trace::run(&root, &args[1..])),
         Some("bench") => bench(&root, &args[1..]),
         Some("live-llm") => live_llm(&root),
         Some("dist") => done("dist", dist::dist(&root, &args[1..])),
