@@ -86,12 +86,51 @@ pub enum Mode {
     },
     ConfirmDelete,
     Help,
+    /// 出典・帯の往復の詳細の窓 (FR-110、05 §5.2)。`row` は窓の下の操作の位置。
+    Detail {
+        answer: Id,
+        target: Id,
+        /// 帯の往復 (「添えて作り直す」を選べる)。出典なら偽。
+        band: bool,
+        irrelevant: bool,
+        title: String,
+        body: String,
+        row: usize,
+    },
     /// 答え方の既定を選ぶ窓 (07 §3 の `/style`)。`choice` は項目ごとの値の位置。
     Style {
         row: usize,
         choice: [usize; 3],
         initial: [usize; 3],
     },
+}
+
+/// Tab で選んでいるもの (07 §2.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// 応答 `answer` の出典 `n` (セッションの通し番号)。
+    Source { answer: Id, n: usize },
+    /// 応答 `answer` の帯の往復 `target`。
+    Band { answer: Id, target: Id },
+}
+
+/// 詳細の窓の下の操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailAction {
+    /// 添えて作り直す (帯だけ)。
+    Attach,
+    /// 「無関係」の印を付ける・取り消す。
+    Irrelevant,
+}
+
+impl DetailAction {
+    pub fn list(band: bool) -> &'static [DetailAction] {
+        if band {
+            &[DetailAction::Attach, DetailAction::Irrelevant]
+        } else {
+            &[DetailAction::Irrelevant]
+        }
+    }
 }
 
 /// 状態の行に出す接続の情報。
@@ -127,8 +166,8 @@ pub struct App {
     pub scroll: usize,
     pub mode: Mode,
     pub status: Status,
-    /// 選んでいる出典 (応答の ID と番号、FR-110)。
-    pub source: Option<(Id, usize)>,
+    /// Tab で選んでいる出典か帯の往復 (FR-110、05 §5.2)。
+    pub pick: Option<Pick>,
     /// 次の答え方の既定の知らせで、選ぶ窓を開く (`/style` を値なしで打った)。
     style_picker: bool,
     ctrl_c_armed: bool,
@@ -146,7 +185,7 @@ impl App {
             scroll: 0,
             mode: Mode::Chat,
             status,
-            source: None,
+            pick: None,
             style_picker: false,
             ctrl_c_armed: false,
         }
@@ -342,12 +381,42 @@ impl App {
                 let m = self.catalog.key(k);
                 self.notice(m);
             }
+            Event::IrrelevantChanged {
+                answer,
+                target,
+                irrelevant,
+            } => {
+                if let Some(t) = self.turns.iter_mut().find(|t| t.id == answer) {
+                    t.irrelevant.retain(|x| *x != target);
+                    if irrelevant {
+                        t.irrelevant.push(target);
+                    }
+                }
+                if let Mode::Detail {
+                    target: shown,
+                    irrelevant: flag,
+                    ..
+                } = &mut self.mode
+                    && *shown == target
+                {
+                    *flag = irrelevant;
+                }
+                let k = if irrelevant {
+                    MessageKey::UiIrrelevantMarked
+                } else {
+                    MessageKey::UiIrrelevantCleared
+                };
+                let m = self.catalog.key(k);
+                self.notice(m);
+            }
             Event::SourceDetail {
                 n,
+                answer,
+                target,
+                irrelevant,
                 title,
                 at,
                 lines,
-                ..
             } => {
                 let excerpt = lines
                     .iter()
@@ -365,8 +434,13 @@ impl App {
 ",
                     );
                 let at = evorag_core::localtime::datetime(at.as_millis());
-                let m = self.catalog.with(
-                    MessageKey::UiSourceDetail,
+                let band = n == 0;
+                let body = self.catalog.with(
+                    if band {
+                        MessageKey::UiBandDetail
+                    } else {
+                        MessageKey::UiSourceDetail
+                    },
                     &[
                         ("n", &n.to_string()),
                         ("title", &title),
@@ -374,7 +448,21 @@ impl App {
                         ("excerpt", &excerpt),
                     ],
                 );
-                self.notice(m);
+                let title = if band {
+                    self.catalog.key(MessageKey::UiBandRelated)
+                } else {
+                    self.catalog
+                        .with(MessageKey::UiDetailSource, &[("n", &n.to_string())])
+                };
+                self.mode = Mode::Detail {
+                    answer,
+                    target,
+                    band,
+                    irrelevant,
+                    title,
+                    body,
+                    row: 0,
+                };
             }
             Event::StyleInfo { values, changed } => {
                 if std::mem::take(&mut self.style_picker) {
@@ -527,47 +615,120 @@ impl App {
                 }
                 _ => Vec::new(),
             },
+            Mode::Detail { .. } => self.on_detail_key(key),
             Mode::Chat => self.on_chat_key(key),
         }
     }
 
-    /// Tab: 出典の付いた最後の応答の、次の番号を選ぶ。
-    fn next_source(&mut self) {
+    /// Tab: 出典か帯の付いた最後の応答の、次の出典・帯の往復を選ぶ (07 §2.5)。
+    fn next_pick(&mut self) {
         let Some(t) = self
             .turns
             .iter()
             .rev()
-            .find(|t| t.role == Role::Assistant && t.sources > 0)
+            .find(|t| t.role == Role::Assistant && (t.sources > 0 || !t.band.is_empty()))
         else {
             let m = self.catalog.key(MessageKey::UiNoSources);
             self.notice(m);
             return;
         };
-        // 番号はセッションの通し番号 (05 §5.1)。この応答の分だけを巡る。
+        // 番号はセッションの通し番号 (05 §5.1)。この応答の出典を巡り、続けて帯を巡る。
         let first = t.source_base.max(1);
-        let last = first + t.sources - 1;
-        let n = match self.source {
-            Some((id, n)) if id == t.id && n < last => n + 1,
-            _ => first,
+        let mut all: Vec<Pick> = (first..first + t.sources)
+            .map(|n| Pick::Source { answer: t.id, n })
+            .collect();
+        all.extend(t.band.iter().map(|b| Pick::Band {
+            answer: t.id,
+            target: b.target,
+        }));
+        let next = match self.pick.and_then(|p| all.iter().position(|x| *x == p)) {
+            Some(i) => all[(i + 1) % all.len()],
+            None => all[0],
         };
-        self.source = Some((t.id, n));
-        let m = self
-            .catalog
-            .with(MessageKey::UiSourceSelected, &[("n", &n.to_string())]);
+        self.pick = Some(next);
+        let m = match next {
+            Pick::Source { n, .. } => self
+                .catalog
+                .with(MessageKey::UiSourceSelected, &[("n", &n.to_string())]),
+            Pick::Band { target, .. } => {
+                let title = t
+                    .band
+                    .iter()
+                    .find(|b| b.target == target)
+                    .map(|b| b.title.clone())
+                    .unwrap_or_default();
+                self.catalog
+                    .with(MessageKey::UiBandSelected, &[("title", &title)])
+            }
+        };
         self.notice(m);
     }
 
+    /// 詳細の窓の操作 (05 §5.2)。
+    fn on_detail_key(&mut self, key: Key) -> Vec<Action> {
+        let Mode::Detail {
+            answer,
+            target,
+            band,
+            row,
+            ..
+        } = self.mode.clone()
+        else {
+            return Vec::new();
+        };
+        let actions = DetailAction::list(band);
+        let run = |a: DetailAction| match a {
+            DetailAction::Attach => Command::AttachBand { answer, target },
+            DetailAction::Irrelevant => Command::ToggleIrrelevant { answer, target },
+        };
+        let chosen = match key {
+            Key::Esc => {
+                self.mode = Mode::Chat;
+                return Vec::new();
+            }
+            Key::Up | Key::Down => {
+                let n = actions.len();
+                let next = if key == Key::Up {
+                    (row + n - 1) % n
+                } else {
+                    (row + 1) % n
+                };
+                if let Mode::Detail { row, .. } = &mut self.mode {
+                    *row = next;
+                }
+                return Vec::new();
+            }
+            Key::Enter { .. } => actions.get(row).copied(),
+            Key::Char('a') if band => Some(DetailAction::Attach),
+            Key::Char('x') => Some(DetailAction::Irrelevant),
+            _ => None,
+        };
+        match chosen {
+            Some(DetailAction::Attach) => {
+                // 作り直しが始まるので、窓を閉じる。
+                self.mode = Mode::Chat;
+                vec![Action::Command(run(DetailAction::Attach))]
+            }
+            Some(a) => vec![Action::Command(run(a))],
+            None => Vec::new(),
+        }
+    }
+
     fn on_chat_key(&mut self, key: Key) -> Vec<Action> {
-        // 出典を選んでいる間は、Enter で表示し、Esc でやめる。ほかのキーでも選ぶのをやめる。
-        if let Some((turn, n)) = self.source.take() {
+        // 出典・帯を選んでいる間は、Enter で表示し、Esc でやめる。ほかのキーでも選ぶのをやめる。
+        if let Some(p) = self.pick.take() {
             match key {
                 Key::Tab => {
-                    self.source = Some((turn, n));
-                    self.next_source();
+                    self.pick = Some(p);
+                    self.next_pick();
                     return Vec::new();
                 }
                 Key::Enter { newline: false } if self.input.is_empty() => {
-                    return vec![Action::Command(Command::ShowSource { turn, n })];
+                    let c = match p {
+                        Pick::Source { answer, n } => Command::ShowSource { turn: answer, n },
+                        Pick::Band { answer, target } => Command::ShowBand { answer, target },
+                    };
+                    return vec![Action::Command(c)];
                 }
                 Key::Esc if !self.generating() => return Vec::new(),
                 _ => {}
@@ -575,7 +736,7 @@ impl App {
         }
         match key {
             Key::Tab => {
-                self.next_source();
+                self.next_pick();
                 Vec::new()
             }
             Key::CtrlQ => vec![Action::Quit],
@@ -979,27 +1140,40 @@ mod tests {
     fn tab_selects_a_source_and_enter_shows_it() {
         let mut a = app();
         assert!(a.on_key(Key::Tab).is_empty());
-        assert!(a.notices.last().unwrap().contains("出典の付いた応答"));
+        assert!(a.notices.last().unwrap().contains("出典や関係しそうな記録"));
         let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
         answer.sources = 2;
         a.turns = vec![turn(1, Role::User, TurnStatus::Confirmed, None), answer];
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
-        assert_eq!(a.source, Some((id(2), 2)));
+        assert_eq!(
+            a.pick,
+            Some(Pick::Source {
+                answer: id(2),
+                n: 2
+            })
+        );
         a.on_key(Key::Tab);
-        assert_eq!(a.source, Some((id(2), 1)), "wraps around");
+        assert_eq!(
+            a.pick,
+            Some(Pick::Source {
+                answer: id(2),
+                n: 1
+            }),
+            "wraps around"
+        );
         assert_eq!(
             a.on_key(Key::Enter { newline: false }),
             vec![Action::Command(Command::ShowSource { turn: id(2), n: 1 })]
         );
-        assert_eq!(a.source, None);
+        assert_eq!(a.pick, None);
         // Esc でやめる。ほかのキーは普通に効く。
         a.on_key(Key::Tab);
         assert!(a.on_key(Key::Esc).is_empty());
-        assert_eq!(a.source, None);
+        assert_eq!(a.pick, None);
         a.on_key(Key::Tab);
         a.on_key(Key::Char('x'));
-        assert_eq!((a.source, a.input.text()), (None, "x"));
+        assert_eq!((a.pick, a.input.text()), (None, "x"));
 
         a.on_event(Event::SourceDetail {
             n: 1,
@@ -1013,9 +1187,113 @@ mod tests {
                 (Role::Assistant, "町家です".into()),
             ],
         });
-        let shown = a.notices.last().unwrap();
-        assert!(shown.starts_with("[1] 旅行の計画 ("), "{shown}");
-        assert!(shown.contains("あなた: 宿はどこ？"), "{shown}");
+        let Mode::Detail {
+            body, band, title, ..
+        } = &a.mode
+        else {
+            panic!("{:?}", a.mode)
+        };
+        assert!(body.starts_with("[1] 旅行の計画 ("), "{body}");
+        assert!(body.contains("あなた: 宿はどこ？"), "{body}");
+        assert!(!band);
+        assert_eq!(title, "出典 [1]");
+        // 出典の詳細でも「無関係」の印を付けられる (x)。添えて作り直すは帯だけ。
+        assert!(a.on_key(Key::Char('a')).is_empty());
+        assert_eq!(
+            a.on_key(Key::Char('x')),
+            vec![Action::Command(Command::ToggleIrrelevant {
+                answer: id(9),
+                target: id(8)
+            })]
+        );
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
+    fn band_item(n: u8) -> evorag_types::api::BandItem {
+        evorag_types::api::BandItem {
+            target: id(n),
+            title: format!("会話 {n}"),
+            at: Timestamp::from_millis(0),
+            head: "モンステラの水やり".into(),
+        }
+    }
+
+    /// verifies: AC-FR-412-1 (画面の層: 帯を Tab で選び、詳細で a を選ぶと作り直しの命令が出る)
+    #[test]
+    fn the_band_is_picked_after_the_sources_and_attached_with_a() {
+        let mut a = app();
+        let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        answer.sources = 1;
+        answer.band = vec![band_item(5), band_item(6)];
+        a.turns = vec![turn(1, Role::User, TurnStatus::Confirmed, None), answer];
+        a.on_key(Key::Tab);
+        a.on_key(Key::Tab);
+        assert_eq!(
+            a.pick,
+            Some(Pick::Band {
+                answer: id(2),
+                target: id(5)
+            })
+        );
+        assert!(a.notices.last().unwrap().contains("会話 5"));
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ShowBand {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        a.on_event(Event::SourceDetail {
+            n: 0,
+            answer: id(2),
+            target: id(5),
+            irrelevant: false,
+            title: "会話 5".into(),
+            at: Timestamp::from_millis(0),
+            lines: vec![(Role::User, "モンステラの水やり".into())],
+        });
+        assert!(matches!(
+            a.mode,
+            Mode::Detail {
+                band: true,
+                row: 0,
+                ..
+            }
+        ));
+        // ↓ と Enter で 2 つ目の操作 (無関係の印)。
+        a.on_key(Key::Down);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ToggleIrrelevant {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        // 印が付くと、知らせを出し、帯に印を出し、窓の操作が「取り消す」になる。
+        a.on_event(Event::IrrelevantChanged {
+            answer: id(2),
+            target: id(5),
+            irrelevant: true,
+        });
+        assert!(a.notices.last().unwrap().contains("判定は変わりません"));
+        assert_eq!(a.turns[1].irrelevant, [id(5)]);
+        assert!(matches!(
+            a.mode,
+            Mode::Detail {
+                irrelevant: true,
+                ..
+            }
+        ));
+        // a で添えて作り直す。窓は閉じる。
+        assert_eq!(
+            a.on_key(Key::Char('a')),
+            vec![Action::Command(Command::AttachBand {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        assert_eq!(a.mode, Mode::Chat);
     }
 
     /// verifies: AC-FR-409-1 (画面の層)
