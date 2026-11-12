@@ -420,6 +420,95 @@ fn band(order: &[(usize, f32)], ex: &[Exchange], keep: impl Fn(usize, f32) -> bo
     picked.into_iter().map(|i| ex[i].rep).collect()
 }
 
+/// ベクトルの候補を引く用意 (05 §3.2)。埋め込みのモデルが使え、索引を作り直していないときだけ。
+pub struct VectorQuery {
+    pub client: Arc<dyn LlmClient>,
+    /// 埋め込みのモデルの model_key (問いの埋め込みのキャッシュの鍵)。
+    pub key: String,
+    pub index: Arc<evorag_index::vec::VecIndex>,
+    pub cache: Arc<QueryCache>,
+}
+
+/// 問いの埋め込みの締切 (05 §3.4)。
+pub const EMBED_DEADLINE: std::time::Duration = std::time::Duration::from_millis(200);
+/// 問いの埋め込みのキャッシュの長さ (05 §3.1 の 4)。
+const QUERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// 語彙とベクトルのそれぞれで集める候補の数 (05 §3.2)。
+const CANDIDATES: usize = 50;
+/// RRF の k (05 §3.3)。
+const RRF_K: f64 = 60.0;
+
+/// 問いの埋め込みのキャッシュ (同じ問いは 5 分の間使い回す。入力が止まったときに先に作る、05 §4.5)。
+#[derive(Default)]
+pub struct QueryCache(std::sync::Mutex<HashMap<CacheKey, (std::time::Instant, Vec<f32>)>>);
+
+/// 問いの埋め込みのキャッシュの鍵 (埋め込みのモデルの model_key と、問いの本文)。
+type CacheKey = (String, String);
+
+impl QueryCache {
+    pub fn get(&self, key: &str, text: &str) -> Option<Vec<f32>> {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.retain(|_, (t, _)| t.elapsed() < QUERY_CACHE_TTL);
+        m.get(&(key.to_owned(), text.to_owned()))
+            .map(|(_, v)| v.clone())
+    }
+
+    pub fn put(&self, key: &str, text: &str, v: Vec<f32>) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.insert(
+            (key.to_owned(), text.to_owned()),
+            (std::time::Instant::now(), v),
+        );
+    }
+}
+
+/// 問いを埋め込む (キャッシュにあればそれ。締切を過ぎたら `None`)。
+pub async fn embed_query(v: &VectorQuery, text: &str) -> Option<Vec<f32>> {
+    if let Some(e) = v.cache.get(&v.key, text) {
+        return Some(e);
+    }
+    let input = [text.to_owned()];
+    match tokio::time::timeout(EMBED_DEADLINE, v.client.embed(&input)).await {
+        Ok(Ok(mut out)) if out.len() == 1 && !out[0].is_empty() => {
+            let e = out.pop()?;
+            v.cache.put(&v.key, text, e.clone());
+            Some(e)
+        }
+        _ => None,
+    }
+}
+
+/// ベクトルの当たり (チャンク) を、ターンの順位にする (チャンクの最も良い順位をターンの順位にする)。
+fn vector_turns(store: &Store, rows: &[(evorag_index::vec::VecRow, f32)]) -> Vec<Id> {
+    let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (row, _) in rows {
+        if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_CHUNK, row.id)
+            && let Ok(c) = e.body_as::<ChunkBody>()
+            && seen.insert(c.turn)
+        {
+            out.push(c.turn);
+        }
+    }
+    out
+}
+
+/// 順位の列を RRF (k = 60) で 1 つにする (05 §3.3。値は混ぜない)。同点は新しいターンを先にする。
+fn rrf(lists: &[Vec<Id>]) -> Vec<Id> {
+    let mut score: HashMap<Id, f64> = HashMap::new();
+    for list in lists {
+        for (rank, id) in list.iter().enumerate() {
+            *score.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+        }
+    }
+    let mut out: Vec<(Id, f64)> = score.into_iter().collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.cmp(&a.0)));
+    out.into_iter().map(|(id, _)| id).collect()
+}
+
 /// 自動で選んだ結果 (添えるターン、判定点、観測値)。
 struct Selection {
     hits: Vec<Id>,
@@ -435,12 +524,14 @@ async fn select(
     session: Id,
     user_turn: Id,
     mode: &RerankMode,
+    vectors: Option<&VectorQuery>,
 ) -> Selection {
-    // 埋め込みの候補は M2.5 で足す。それまでは、語彙の候補だけで動く (05 §3.5 の `no_embed`)。
-    let mut obs = RecallObs {
-        degraded: vec![evorag_memory::DEGRADED_NO_EMBED.to_owned()],
-        ..RecallObs::default()
-    };
+    let mut obs = RecallObs::default();
+    if vectors.is_none() {
+        // 埋め込みが無い・記録と違う・作り直しの途中 (05 §3.5 の `no_embed`)。
+        obs.degraded
+            .push(evorag_memory::DEGRADED_NO_EMBED.to_owned());
+    }
     let none = |decision, obs: RecallObs| Selection {
         hits: Vec::new(),
         decision,
@@ -500,12 +591,7 @@ async fn select(
         }
         RerankMode::Use(u) => u,
     };
-    let ranked: Vec<Id> = r.candidates.iter().map(|h| h.id).collect();
-    let ex = exchanges(store, &ranked, u.top);
-    if ex.is_empty() {
-        return none(RecallDecision::Abstain, obs);
-    }
-    // 追い質問は、直前の発話を足した問いでリランクする (05 §3.1)。
+    // 追い質問は、直前の発話を足した問いで引き、リランクする (05 §3.1)。
     let q = match previous
         .as_deref()
         .filter(|_| evorag_retrieval::recall::is_follow_up(&query))
@@ -513,6 +599,28 @@ async fn select(
         Some(p) => format!("{p}\n{query}"),
         None => query.clone(),
     };
+    // 語彙とベクトルの候補を RRF で 1 つの順位にする (05 §3.2・§3.3)。
+    let mut lists: Vec<Vec<Id>> = vec![r.candidates.iter().map(|h| h.id).collect()];
+    if let Some(v) = vectors {
+        match embed_query(v, &q).await {
+            Some(qv) => {
+                let rows = v
+                    .index
+                    .snapshot()
+                    .search(&qv, CANDIDATES, &|row| row.session == session);
+                lists.push(vector_turns(store, &rows));
+            }
+            // 問いの埋め込みが締切に間に合わない: その要求だけ語彙の候補で (05 §3.5)。
+            None => obs
+                .degraded
+                .push(evorag_memory::DEGRADED_EMBED_DEADLINE.to_owned()),
+        }
+    }
+    let ranked = rrf(&lists);
+    let ex = exchanges(store, &ranked, u.top);
+    if ex.is_empty() {
+        return none(RecallDecision::Abstain, obs);
+    }
     let docs: Vec<String> = ex.iter().map(|x| exchange_text(lang, x)).collect();
     let scores = match tokio::time::timeout(RERANK_DEADLINE, u.client.rerank(&q, &docs)).await {
         Ok(Ok(s)) if s.len() == ex.len() => s,
@@ -578,9 +686,10 @@ pub async fn attach(
     user_turn: Id,
     base: u32,
     mode: &RerankMode,
+    vectors: Option<&VectorQuery>,
     extra: &[Id],
 ) -> Attached {
-    let mut sel = select(store, index, lang, session, user_turn, mode).await;
+    let mut sel = select(store, index, lang, session, user_turn, mode, vectors).await;
     for id in extra {
         if !sel.hits.contains(id) {
             sel.hits.push(*id);
@@ -729,6 +838,16 @@ pub fn session_title(store: &Store, session: Id) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// verifies: AC-FR-402-1 (語彙とベクトルの順位を RRF で合わせる、05 §3.3)
+    #[test]
+    fn rrf_prefers_turns_found_by_both_and_breaks_ties_by_recency() {
+        let id = |n: u8| Id::from_bytes([n; 16]);
+        // 両方に出たもの (3) が先。次に片方の 1 位 (1)。片方の 2 位どうし (2 と 4) は同点で、新しい
+        // (ID の大きい) 方が先。
+        let fused = rrf(&[vec![id(1), id(2), id(3)], vec![id(3), id(4)]]);
+        assert_eq!(fused, [id(3), id(1), id(4), id(2)]);
+    }
 
     #[test]
     fn the_nonce_changes_and_is_removed_from_quotes() {
