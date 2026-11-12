@@ -364,6 +364,9 @@ mod tests {
                 model_key: None,
                 reply_to: None,
                 created_at: Timestamp::from_millis(36_000_000),
+                band: Vec::new(),
+                band_nearby: false,
+                irrelevant: Vec::new(),
             }],
             unreadable: 0,
         });

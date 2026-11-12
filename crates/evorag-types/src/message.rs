@@ -114,6 +114,9 @@ message_keys! {
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",
     StyleUnknownValue => "error.style_unknown_value",
+    BandNotLatest => "error.band_not_latest",
+    BandUnknown => "error.band_unknown",
+    FeedbackNotSaved => "error.feedback_not_saved",
     UiStyleInfo => "ui.notice.style",
     UiStyleChanged => "ui.notice.style_changed",
     UiStyleTitle => "ui.style.title",

@@ -125,6 +125,7 @@ pub struct RecallObs {
     pub reranker: Option<String>,
     pub threshold_version: Option<u32>,
     pub band: Vec<Id>,
+    pub user_attached: Vec<Id>,
     pub degraded: Vec<String>,
 }
 
@@ -363,39 +364,35 @@ fn band(order: &[(usize, f32)], ex: &[Exchange], keep: impl Fn(usize, f32) -> bo
     picked.into_iter().map(|i| ex[i].rep).collect()
 }
 
-/// 応答の前に引いて、文脈に添えるものを作る。出典の番号は `base` から振る (05 §5.1)。
-#[allow(clippy::too_many_arguments)]
-pub async fn attach(
+/// 自動で選んだ結果 (添えるターン、判定点、観測値)。
+struct Selection {
+    hits: Vec<Id>,
+    decision: RecallDecision,
+    obs: RecallObs,
+}
+
+/// 引いて、添えるターンを自動で選ぶ (05 §3.3〜§3.5)。
+async fn select(
     store: &Store,
     index: Option<&LexIndex>,
     lang: PromptLanguage,
-    llm: &dyn LlmClient,
-    tokens: &TokenCache,
-    model_key: &str,
-    n_ctx: usize,
-    reserve: usize,
     session: Id,
     user_turn: Id,
-    base: u32,
     mode: &RerankMode,
-) -> Attached {
+) -> Selection {
     // 埋め込みの候補は M2.5 で足す。それまでは、語彙の候補だけで動く (05 §3.5 の `no_embed`)。
     let mut obs = RecallObs {
         degraded: vec![evorag_memory::DEGRADED_NO_EMBED.to_owned()],
         ..RecallObs::default()
     };
-    let skip = |decision, obs: RecallObs| Attached {
-        quote: None,
-        attached: Vec::new(),
-        record: RecallRecord {
-            decision,
-            sources: Vec::new(),
-        },
+    let none = |decision, obs: RecallObs| Selection {
+        hits: Vec::new(),
+        decision,
         obs,
     };
     let Some(index) = index else {
         obs.degraded = vec![evorag_memory::DEGRADED_NO_INDEX.to_owned()];
-        return skip(RecallDecision::Skip, obs);
+        return none(RecallDecision::Skip, obs);
     };
     let (query, previous) = {
         let turns = store
@@ -424,99 +421,126 @@ pub async fn attach(
     );
     if r.decision == Decision::Skip {
         obs.degraded = vec![evorag_memory::DEGRADED_NO_INDEX.to_owned()];
-        return skip(RecallDecision::Skip, obs);
+        return none(RecallDecision::Skip, obs);
     }
-
-    // 添える出典 (セッションごとにまとめる前のターン) を決める。
-    let hits: Vec<Id> = match mode {
-        RerankMode::Lexical(reason) => {
-            obs.degraded.push((*reason).to_owned());
-            if r.decision == Decision::Abstain {
-                return skip(RecallDecision::Abstain, obs);
-            }
-            r.hits.iter().map(|h| h.id).collect()
-        }
-        RerankMode::Use(u) => {
-            let ranked: Vec<Id> = r.candidates.iter().map(|h| h.id).collect();
-            let ex = exchanges(store, &ranked, u.top);
-            if ex.is_empty() {
-                return skip(RecallDecision::Abstain, obs);
-            }
-            // 追い質問は、直前の発話を足した問いでリランクする (05 §3.1)。
-            let q = match previous
-                .as_deref()
-                .filter(|_| evorag_retrieval::recall::is_follow_up(&query))
-            {
-                Some(p) => format!("{p}\n{query}"),
-                None => query.clone(),
-            };
-            let docs: Vec<String> = ex.iter().map(|x| exchange_text(lang, x)).collect();
-            let scored =
-                match tokio::time::timeout(RERANK_DEADLINE, u.client.rerank(&q, &docs)).await {
-                    Ok(Ok(s)) if s.len() == ex.len() => Ok(s),
-                    Ok(_) => Err(evorag_memory::DEGRADED_RERANK_ERROR),
-                    Err(_) => Err(evorag_memory::DEGRADED_RERANK_DEADLINE),
-                };
-            let scores = match scored {
-                Ok(s) => s,
-                Err(reason) => {
-                    // その要求だけ、v0.1 の規則に戻す (05 §3.5)。
-                    obs.degraded.push(reason.to_owned());
-                    if r.decision == Decision::Abstain {
-                        return skip(RecallDecision::Abstain, obs);
-                    }
-                    return finish(
-                        store,
-                        lang,
-                        llm,
-                        tokens,
-                        model_key,
-                        n_ctx,
-                        reserve,
-                        session,
-                        base,
-                        r.hits.iter().map(|h| h.id).collect(),
-                        obs,
-                    )
-                    .await;
-                }
-            };
-            // 値の高い順。同じ値は新しい往復を先にする (05 §3.4)。
-            let mut order: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
-            order.sort_by(|a, b| b.1.total_cmp(&a.1).then(ex[b.0].rep.cmp(&ex[a.0].rep)));
-            obs.reranked = order
-                .iter()
-                .map(|&(i, score)| evorag_memory::Reranked {
-                    id: ex[i].rep,
-                    score,
-                })
-                .collect();
-            obs.reranker = Some(u.key.clone());
-            match u.threshold {
-                Some((thr, band_low, version)) => {
-                    obs.threshold_version = Some(version);
-                    let (top, top_score) = order[0];
-                    let fire = f64::from(top_score) >= thr;
-                    obs.band = band(&order, &ex, |i, s| {
-                        (!fire || i != top) && f64::from(s) >= band_low && f64::from(s) < thr
-                    });
-                    if !fire {
-                        return skip(RecallDecision::Abstain, obs);
-                    }
-                    ex[top].turns.iter().map(|t| t.envelope.id).collect()
-                }
-                None => {
-                    // しきい値が無い: 添えずに、上位 3 件を帯に出す (05 §3.5 の `no_threshold`)。
-                    obs.degraded
-                        .push(evorag_memory::DEGRADED_NO_THRESHOLD.to_owned());
-                    obs.band = band(&order, &ex, |_, _| true);
-                    return skip(RecallDecision::Abstain, obs);
-                }
+    let lexical = |obs: RecallObs| {
+        if r.decision == Decision::Abstain {
+            none(RecallDecision::Abstain, obs)
+        } else {
+            Selection {
+                hits: r.hits.iter().map(|h| h.id).collect(),
+                decision: RecallDecision::Fire,
+                obs,
             }
         }
     };
+    let u = match mode {
+        RerankMode::Lexical(reason) => {
+            obs.degraded.push((*reason).to_owned());
+            return lexical(obs);
+        }
+        RerankMode::Use(u) => u,
+    };
+    let ranked: Vec<Id> = r.candidates.iter().map(|h| h.id).collect();
+    let ex = exchanges(store, &ranked, u.top);
+    if ex.is_empty() {
+        return none(RecallDecision::Abstain, obs);
+    }
+    // 追い質問は、直前の発話を足した問いでリランクする (05 §3.1)。
+    let q = match previous
+        .as_deref()
+        .filter(|_| evorag_retrieval::recall::is_follow_up(&query))
+    {
+        Some(p) => format!("{p}\n{query}"),
+        None => query.clone(),
+    };
+    let docs: Vec<String> = ex.iter().map(|x| exchange_text(lang, x)).collect();
+    let scores = match tokio::time::timeout(RERANK_DEADLINE, u.client.rerank(&q, &docs)).await {
+        Ok(Ok(s)) if s.len() == ex.len() => s,
+        failed => {
+            // その要求だけ、v0.1 の規則に戻す (05 §3.5)。
+            obs.degraded.push(
+                match failed {
+                    Err(_) => evorag_memory::DEGRADED_RERANK_DEADLINE,
+                    Ok(_) => evorag_memory::DEGRADED_RERANK_ERROR,
+                }
+                .to_owned(),
+            );
+            return lexical(obs);
+        }
+    };
+    // 値の高い順。同じ値は新しい往復を先にする (05 §3.4)。
+    let mut order: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(ex[b.0].rep.cmp(&ex[a.0].rep)));
+    obs.reranked = order
+        .iter()
+        .map(|&(i, score)| evorag_memory::Reranked {
+            id: ex[i].rep,
+            score,
+        })
+        .collect();
+    obs.reranker = Some(u.key.clone());
+    let Some((thr, band_low, version)) = u.threshold else {
+        // しきい値が無い: 添えずに、上位 3 件を帯に出す (05 §3.5 の `no_threshold`)。
+        obs.degraded
+            .push(evorag_memory::DEGRADED_NO_THRESHOLD.to_owned());
+        obs.band = band(&order, &ex, |_, _| true);
+        return none(RecallDecision::Abstain, obs);
+    };
+    obs.threshold_version = Some(version);
+    let (top, top_score) = order[0];
+    let fire = f64::from(top_score) >= thr;
+    obs.band = band(&order, &ex, |i, s| {
+        (!fire || i != top) && f64::from(s) >= band_low && f64::from(s) < thr
+    });
+    if !fire {
+        return none(RecallDecision::Abstain, obs);
+    }
+    Selection {
+        hits: ex[top].turns.iter().map(|t| t.envelope.id).collect(),
+        decision: RecallDecision::Fire,
+        obs,
+    }
+}
+
+/// 応答の前に引いて、文脈に添えるものを作る。出典の番号は `base` から振る (05 §5.1)。
+/// `extra` は、利用者が帯から選んで添えた往復 (05 §5.2 の「添えて作り直す」)。自動で選んだものに足す。
+#[allow(clippy::too_many_arguments)]
+pub async fn attach(
+    store: &Store,
+    index: Option<&LexIndex>,
+    lang: PromptLanguage,
+    llm: &dyn LlmClient,
+    tokens: &TokenCache,
+    model_key: &str,
+    n_ctx: usize,
+    reserve: usize,
+    session: Id,
+    user_turn: Id,
+    base: u32,
+    mode: &RerankMode,
+    extra: &[Id],
+) -> Attached {
+    let mut sel = select(store, index, lang, session, user_turn, mode).await;
+    for id in extra {
+        if !sel.hits.contains(id) {
+            sel.hits.push(*id);
+        }
+    }
+    sel.obs.user_attached = extra.to_vec();
+    if sel.hits.is_empty() {
+        return Attached {
+            quote: None,
+            attached: Vec::new(),
+            record: RecallRecord {
+                decision: sel.decision,
+                sources: Vec::new(),
+            },
+            obs: sel.obs,
+        };
+    }
     finish(
-        store, lang, llm, tokens, model_key, n_ctx, reserve, session, base, hits, obs,
+        store, lang, llm, tokens, model_key, n_ctx, reserve, session, base, sel.hits, sel.obs,
     )
     .await
 }
@@ -583,6 +607,15 @@ async fn finish(
         },
         obs,
     }
+}
+
+/// 往復 (代表のターンと、その相手) のターン。帯の詳細に使う (05 §5.2)。
+pub fn exchange_turns(store: &Store, target: Id) -> Option<Vec<Turn>> {
+    sources(store, &[target])
+        .into_iter()
+        .next()
+        .map(|s| s.turns)
+        .filter(|t| !t.is_empty())
 }
 
 /// 出典の番号の始まり (05 §5.1)。観測値の無いターン (v0.1) は 1。
