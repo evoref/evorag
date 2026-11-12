@@ -306,7 +306,7 @@ pub struct TurnBody {
 }
 
 /// 応答のターンの観測値 (05 §3.6)。項目はすべて任意で、足すだけにする。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TurnObs {
     /// このセッションの出典の通し番号の始まり (05 §5.1)。無いターン (v0.1) は 1 から。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,7 +320,38 @@ pub struct TurnObs {
     /// 選んでいた答え方の既定 (`language`・`length`・`format` → 値、07 §3)。
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub answer: std::collections::BTreeMap<String, String>,
+    /// リランクした往復と、その生の値 (高い順、05 §3.6)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reranked: Vec<Reranked>,
+    /// 採点したリランカーの model_key。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<String>,
+    /// 使ったしきい値の記録の版 (05 §3.7)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_version: Option<u32>,
+    /// 帯に出した往復 (05 §3.4)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub band: Vec<Id>,
+    /// 縮退の理由 (`no_embed`・`no_rerank` など、05 §3.5)。値は足すだけで、知らない値はそのまま読む。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<String>,
 }
+
+/// リランクした 1 つの往復。`id` は往復を代表するターン (利用者の発話。発話の無い往復は、そのターン)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Reranked {
+    pub id: Id,
+    pub score: f32,
+}
+
+/// 縮退の理由 (05 §3.5)。
+pub const DEGRADED_NO_EMBED: &str = "no_embed";
+pub const DEGRADED_NO_RERANK: &str = "no_rerank";
+pub const DEGRADED_RERANK_SLOW: &str = "rerank_slow";
+pub const DEGRADED_RERANK_DEADLINE: &str = "rerank_deadline";
+pub const DEGRADED_RERANK_ERROR: &str = "rerank_error";
+pub const DEGRADED_NO_THRESHOLD: &str = "no_threshold";
+pub const DEGRADED_NO_INDEX: &str = "no_index";
 
 /// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1)。
 pub const RECALL_BEFORE_UTTERANCE: &str = "before_utterance";

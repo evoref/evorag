@@ -102,6 +102,14 @@ fn turn_v1() {
                 history_from: Some(id("019a6a2b-0000-7000-8000-000000000003")),
                 recall_position: Some(RECALL_BEFORE_UTTERANCE.into()),
                 answer: [("language".to_owned(), "auto".to_owned())].into(),
+                reranked: vec![Reranked {
+                    id: id("019a6a2b-0000-7000-8000-00000000000a"),
+                    score: -2.5,
+                }],
+                reranker: Some(format!("{:032x}", 0x0fed_cba9_8765_4321_u128)),
+                threshold_version: Some(1),
+                band: vec![id("019a6a2b-0000-7000-8000-00000000000b")],
+                degraded: vec![DEGRADED_NO_EMBED.into()],
             }),
         },
     );

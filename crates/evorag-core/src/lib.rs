@@ -982,6 +982,61 @@ impl Inner {
         }
     }
 
+    /// 応答の経路のリランクの使い方 (05 §3.4・§3.5)。点検で測った往復 6 件の時間が締切を超えるときは
+    /// 往復の数を減らし、3 件でも超えるならリランクしない (`rerank_slow`)。
+    fn rerank_mode(&self) -> recall::RerankMode {
+        let found = {
+            let aux = self.aux.lock().unwrap_or_else(|e| e.into_inner());
+            aux.iter()
+                .find(|a| a.role == evorag_memory::ROLE_RERANK)
+                .and_then(|a| match (&a.state, a.ready_client()) {
+                    (roles::RoleState::Ready(o), Some(c)) => Some((c, o.clone())),
+                    _ => None,
+                })
+        };
+        let Some((client, origin)) = found else {
+            return recall::RerankMode::Lexical(evorag_memory::DEGRADED_NO_RERANK);
+        };
+        let ms = self
+            .store
+            .read()
+            .ok()
+            .and_then(|r| {
+                evorag_memory::load_probe(
+                    &r,
+                    evorag_memory::ROLE_RERANK,
+                    &origin.model_key,
+                    &origin.build_info,
+                )
+                .ok()
+            })
+            .flatten()
+            .and_then(|(_, p)| p.rerank6_ms);
+        let deadline = recall::RERANK_DEADLINE.as_millis() as f64;
+        let top = match ms {
+            Some(ms) if f64::from(ms) > deadline => {
+                let n = (deadline / (f64::from(ms) / 6.0)).floor() as usize;
+                if n < 3 {
+                    return recall::RerankMode::Lexical(evorag_memory::DEGRADED_RERANK_SLOW);
+                }
+                n
+            }
+            _ => evorag_retrieval::calibrate::TOP,
+        };
+        let threshold = self
+            .threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|b| calibration::usable(b).map(|(t, band)| (t, band, b.version)));
+        recall::RerankMode::Use(recall::RerankUse {
+            client,
+            key: origin.model_key,
+            threshold,
+            top,
+        })
+    }
+
     /// 今のリランカーのしきい値の記録を読み直す (今の同梱の事例で求めたものだけ)。
     fn load_threshold(&self) {
         let lang = self.language.as_str();
@@ -1828,6 +1883,7 @@ async fn generate(
                 session,
                 user_turn,
                 conv.next_source,
+                &inner.rerank_mode(),
             )
             .await,
         )
@@ -1859,6 +1915,7 @@ async fn generate(
         conv.from,
     )
     .await;
+    let recall_obs = memory.as_ref().map(|m| m.obs.clone()).unwrap_or_default();
     let obs = evorag_memory::TurnObs {
         source_base: Some(conv.next_source),
         history_from: Some(assembled.history_from),
@@ -1866,6 +1923,11 @@ async fn generate(
             .is_some()
             .then(|| evorag_memory::RECALL_BEFORE_UTTERANCE.to_owned()),
         answer: defaults.record(),
+        reranked: recall_obs.reranked,
+        reranker: recall_obs.reranker,
+        threshold_version: recall_obs.threshold_version,
+        band: recall_obs.band,
+        degraded: recall_obs.degraded,
     };
     let req = ChatRequest {
         messages: assembled.messages,
