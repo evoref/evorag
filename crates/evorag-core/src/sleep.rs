@@ -79,7 +79,7 @@ impl SleepConfig {
 
 /// 手順 (04 §4 の手順の一覧のうち、この版にあるもの)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Step {
+pub(crate) enum Step {
     /// モデルの性質の点検 (06 §3.3)。起動後の点検。
     Probe,
     /// リランクのしきい値の較正 (05 §3.7)。起動後の点検。
@@ -183,10 +183,28 @@ fn next_check(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     None
 }
 
-/// 要る手順があるか (状態の行の「較正中」と、試験の待ち合わせ)。
+/// 要る手順 (待たせている手順を除く。試験の待ち合わせと、時間切れのときの知らせ)。
+pub(crate) fn pending_steps(inner: &Inner) -> Vec<String> {
+    let backoff = inner
+        .backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut out = Vec::new();
+    if let Some(s) = next_check(inner, &backoff) {
+        out.push(format!("{s:?}"));
+    }
+    if inner.sleep.enabled
+        && let Some(s) = next_sleep(inner, &backoff)
+    {
+        out.push(format!("{s:?}"));
+    }
+    out
+}
+
+/// 要る手順があるか (待たせている手順を除く)。
 pub(crate) fn pending(inner: &Inner) -> bool {
-    next_check(inner, &HashMap::new()).is_some()
-        || (inner.sleep.enabled && next_sleep(inner, &HashMap::new()).is_some())
+    !pending_steps(inner).is_empty()
 }
 
 /// 起動後の点検が止められていないか (電池で `stop`)。
@@ -217,8 +235,13 @@ fn resting(inner: &Inner) -> BackgroundState {
 
 /// 裏の処理を回す。終了のときに止める (task を abort して待つ)。
 pub(crate) async fn run(inner: Arc<Inner>) {
-    let mut backoff: HashMap<Step, Instant> = HashMap::new();
     loop {
+        // 待たせている手順 (共有して、待ち合わせの判定でも見る)。
+        let backoff = inner
+            .backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // 操作の世代を、動かすと決める前に覚える (決めた後の操作を取りこぼさないため)。
         let generation = inner.activity.generation();
         match next(&inner, &backoff) {
@@ -231,7 +254,11 @@ pub(crate) async fn run(inner: Arc<Inner>) {
                     // 終えたのにまだ要る (保存できなかったなど) なら、しばらく待たせる。
                     if next(&inner, &backoff) == Ok(step) {
                         tracing::warn!(?step, "background step still needed; backing off");
-                        backoff.insert(step, Instant::now());
+                        inner
+                            .backoff
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(step, Instant::now());
                     }
                     continue;
                 }

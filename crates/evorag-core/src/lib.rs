@@ -241,6 +241,8 @@ struct Inner {
     vectors: Mutex<Option<embedding::Vectors>>,
     /// ベクトルの索引を DB と突き合わせ終えた埋め込みのモデル (それまでは埋め込みの手順を動かさない)。
     vectors_opened: Mutex<Option<String>>,
+    /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
+    backoff: Mutex<std::collections::HashMap<sleep::Step, std::time::Instant>>,
     /// 途中まで済んだ較正 (リランカーの model_key と、済んだ問いの結果)。裏の処理で落とされたら続きから。
     calib_progress: Mutex<Option<(String, CalibProgress)>>,
     aux_request_extra: evorag_llm::RequestExtra,
@@ -527,6 +529,7 @@ impl Core {
             calib_progress: Mutex::new(None),
             vectors: Mutex::new(None),
             vectors_opened: Mutex::new(None),
+            backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
             background_checks: cfg.probe_models,
@@ -751,7 +754,10 @@ impl Core {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        panic!("background work did not settle within 10 seconds");
+        panic!(
+            "background work did not settle within 10 seconds: {:?}",
+            sleep::pending_steps(&self.inner)
+        );
     }
 
     /// 試験のため: 較正が終わるまで待つ。
