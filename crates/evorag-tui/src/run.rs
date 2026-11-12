@@ -131,13 +131,20 @@ fn event_loop(
         // トークンの受信から描画までを短く保つ (NFR-104 の 50 ms)。
         if event::poll(Duration::from_millis(16))? {
             let mut actions = Vec::new();
+            let mut touched = false;
             if let Some(k) = key_of(event::read()?) {
+                touched = true;
                 actions.extend(app.on_key(k));
             }
             while event::poll(Duration::ZERO)? {
                 if let Some(k) = key_of(event::read()?) {
+                    touched = true;
                     actions.extend(app.on_key(k));
                 }
+            }
+            // キー入力は裏の処理を止める (04 §4、FR-301)。
+            if touched {
+                core.touch();
             }
             for a in actions {
                 match a {
@@ -151,7 +158,12 @@ fn event_loop(
                         core.command(c);
                     }
                     Action::OpenEditor => match draft.as_deref_mut() {
-                        Some(d) => edit_outside(term, app, d),
+                        Some(d) => {
+                            // 外部のエディタで書いている間は、裏の処理を出さない (06 §4)。
+                            core.hold(true);
+                            edit_outside(term, app, d);
+                            core.hold(false);
+                        }
                         None => {
                             let m = app
                                 .catalog

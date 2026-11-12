@@ -59,6 +59,7 @@ fn config(root: &Path, seed: u64) -> CoreConfig {
         rerank: None,
         aux_request_extra: aux,
         probe_models: true,
+        sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),

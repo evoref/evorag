@@ -83,6 +83,7 @@ fn config(root: &Path, rerank: Option<Arc<ReplayClient>>) -> CoreConfig {
         rerank: rerank.map(|r| r as Arc<dyn LlmClient>),
         aux_request_extra: Default::default(),
         probe_models: false,
+        sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 7)),

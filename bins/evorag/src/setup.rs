@@ -743,6 +743,7 @@ pub fn run(
                 &key,
                 &lang,
                 version,
+                &std::sync::Mutex::default(),
                 &mut progress,
             ));
             match result {

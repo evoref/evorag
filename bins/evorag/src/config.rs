@@ -216,7 +216,31 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
                 line_of(text, "enabled")
             ));
         }
-        for k in m.keys().filter(|k| k.as_str() != "enabled") {
+        if m.get("sleep_time").is_some_and(|v| !v.is_bool()) {
+            return Err(format!(
+                "line {}: memory.sleep_time must be true or false",
+                line_of(text, "sleep_time")
+            ));
+        }
+        if m.get("idle_seconds")
+            .is_some_and(|v| v.as_integer().is_none_or(|n| !(1..=86_400).contains(&n)))
+        {
+            return Err(format!(
+                "line {}: memory.idle_seconds must be an integer from 1 to 86400",
+                line_of(text, "idle_seconds")
+            ));
+        }
+        if m.get("on_battery")
+            .is_some_and(|v| v.as_str().and_then(evorag_core::OnBattery::parse).is_none())
+        {
+            return Err(format!(
+                "line {}: memory.on_battery must be \"reduce\", \"normal\" or \"stop\"",
+                line_of(text, "on_battery")
+            ));
+        }
+        for k in m.keys().filter(|k| {
+            !["enabled", "sleep_time", "idle_seconds", "on_battery"].contains(&k.as_str())
+        }) {
             ignored.push(format!("memory.{k}"));
         }
     }
@@ -228,6 +252,26 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
 }
 
 impl Config {
+    /// 裏の処理の設定 (`memory.sleep_time`・`idle_seconds`・`on_battery`、07 §4.2)。値は読むときに確かめた。
+    pub fn sleep(&self) -> evorag_core::SleepConfig {
+        let d = evorag_core::SleepConfig::default();
+        let m = self.memory.as_ref();
+        let get = |k: &str| m.and_then(|m| m.get(k));
+        evorag_core::SleepConfig {
+            enabled: get("sleep_time")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(d.enabled),
+            idle: get("idle_seconds")
+                .and_then(toml::Value::as_integer)
+                .and_then(|n| u64::try_from(n).ok())
+                .map_or(d.idle, std::time::Duration::from_secs),
+            on_battery: get("on_battery")
+                .and_then(toml::Value::as_str)
+                .and_then(evorag_core::OnBattery::parse)
+                .unwrap_or(d.on_battery),
+        }
+    }
+
     /// `memory.enabled` (既定は true、07 §4.2)。
     pub fn memory_enabled(&self) -> bool {
         self.memory
@@ -387,14 +431,35 @@ enabled = true
         assert!(l.ignored.is_empty());
     }
 
+    /// verifies: AC-FR-301-2 (設定の層: memory.sleep_time・idle_seconds・on_battery)
+    #[test]
+    fn sleep_settings_are_read_and_checked() {
+        let d = parse("").unwrap().config.sleep();
+        assert_eq!(d, evorag_core::SleepConfig::default());
+        let s = parse("[memory]\nsleep_time = false\nidle_seconds = 120\non_battery = \"stop\"\n")
+            .unwrap()
+            .config
+            .sleep();
+        assert!(!s.enabled);
+        assert_eq!(s.idle, std::time::Duration::from_secs(120));
+        assert_eq!(s.on_battery, evorag_core::OnBattery::Stop);
+        for bad in [
+            "[memory]\non_battery = \"sometimes\"\n",
+            "[memory]\nidle_seconds = 0\n",
+            "[memory]\nsleep_time = \"yes\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn keys_of_later_versions_are_ignored_with_a_warning() {
         // v0.2 から llm.embed の url は使う。知らないキーだけを警告して無視する。
         let l = parse(
-            "[llm.embed]\nurl = \"http://127.0.0.1:8081\"\nfuture = 1\n[memory]\nsleep_time = true\n",
+            "[llm.embed]\nurl = \"http://127.0.0.1:8081\"\nfuture = 1\n[memory]\nsleep_time = true\nfuture = 2\n",
         )
         .unwrap();
-        assert_eq!(l.ignored, ["llm.embed.future", "memory.sleep_time"]);
+        assert_eq!(l.ignored, ["llm.embed.future", "memory.future"]);
         let r = l.config.role("embed").unwrap();
         assert_eq!(r.url, "http://127.0.0.1:8081");
         assert!(l.config.role("rerank").is_none());

@@ -54,6 +54,7 @@ async fn start(
         rerank: None,
         aux_request_extra: Default::default(),
         probe_models: false,
+        sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock.clone(), 11)),

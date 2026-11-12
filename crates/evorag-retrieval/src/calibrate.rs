@@ -199,14 +199,17 @@ impl Bundled {
         out
     }
 
-    /// すべての問いをリランクする。`progress` は (済んだ数, 全体の数) で呼ぶ。
+    /// すべての問いをリランクする。`done` には済んだ問いの結果を順に足していき、途中で落とされても
+    /// 残る (裏の処理で、次の機会に続きから求めるため。リランクの値は決定的なので、結果は同じになる)。
+    /// `progress` は (済んだ数, 全体の数) で呼ぶ。
     pub async fn run(
         &self,
         rerank: &dyn LlmClient,
+        done: &std::sync::Mutex<Vec<CaseResult>>,
         progress: &mut (dyn FnMut(usize, usize) + Send),
     ) -> Result<Vec<CaseResult>, LlmError> {
-        let mut out = Vec::with_capacity(self.cases.len());
-        for (i, case) in self.cases.iter().enumerate() {
+        let start = done.lock().unwrap_or_else(|e| e.into_inner()).len();
+        for (i, case) in self.cases.iter().enumerate().skip(start) {
             let cand = self.candidates(case);
             let result = if cand.is_empty() {
                 CaseResult {
@@ -226,10 +229,10 @@ impl Bundled {
                     top_ok: case.gold == Some(cand[best]),
                 }
             };
-            out.push(result);
+            done.lock().unwrap_or_else(|e| e.into_inner()).push(result);
             progress(i + 1, self.cases.len());
         }
-        Ok(out)
+        Ok(done.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 }
 

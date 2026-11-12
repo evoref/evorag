@@ -2,6 +2,7 @@
 
 use evorag_llm::{LlmClient, LlmError};
 use evorag_memory::{METHOD_BUNDLED, TARGET_CONVERSATION, ThresholdBody};
+pub use evorag_retrieval::calibrate::CaseResult;
 use evorag_retrieval::calibrate::{Bundled, calibrate as compute, cases_id};
 
 /// 記録が今の同梱の事例で求めたものか (違えば求め直す)。
@@ -10,16 +11,18 @@ pub fn is_current(body: &ThresholdBody, lang: &str) -> bool {
 }
 
 /// 同梱の事例 (プロンプトの言語 `lang`) でしきい値を求め、記録の本体を作る。`version` は前の版 + 1。
+/// `done` は済んだ問いの結果 (裏の処理で落とされても残り、次は続きから求める)。
 /// `progress` は (済んだ数, 全体の数) で呼ぶ。
 pub async fn calibrate(
     rerank: &dyn LlmClient,
     reranker_key: &str,
     lang: &str,
     version: u32,
+    done: &std::sync::Mutex<Vec<CaseResult>>,
     progress: &mut (dyn FnMut(usize, usize) + Send),
 ) -> Result<ThresholdBody, LlmError> {
     let bundled = Bundled::load(lang);
-    let results = bundled.run(rerank, progress).await?;
+    let results = bundled.run(rerank, done, progress).await?;
     let mut body = ThresholdBody {
         reranker_key: reranker_key.to_owned(),
         target: TARGET_CONVERSATION.to_owned(),
