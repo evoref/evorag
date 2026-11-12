@@ -355,3 +355,81 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
         assert!(!file_contains(&b, MARK), "{}", b.display());
     }
 }
+
+/// 削除の行をジャーナルに書いた後、DB に確定する前に落ちた状態 (DB のファイルを削除の前の写しに戻して作る) から
+/// 開くと、ジャーナルの取り込みがターンとセッションを消し、起動時の突き合わせが残った派生の記録を消す。
+/// verifies: AC-NFR-506-2
+#[tokio::test(flavor = "multi_thread")]
+async fn derived_records_go_when_a_deletion_is_replayed_from_the_journal() {
+    let dir = TempDir::new("orphans-journal");
+    prepare(dir.path(), true);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
+    let llm = chat(
+        &[reply(REPLY), reply(&format!(r#"{{"keys": ["{MARK}"]}}"#))],
+        false,
+    );
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.embed = Some(Arc::new(embedder()));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    core.settle().await;
+    core.command(Command::NewSession {
+        title: "植物".into(),
+    });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let a = say(&core, &mut rx, "モンステラの水やり").await;
+    clock.advance(SEGMENT_QUIET_MS);
+    core.settle_background().await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0, "the note was made");
+
+    // 削除の前の DB を写しておき、v0.2 で消してから、DB だけを写しに戻す (ジャーナルには削除の行が残る)。
+    let db = dir.path().join("evorag.redb");
+    let before = dir.path().join("evorag.redb.before");
+    std::fs::copy(&db, &before).unwrap();
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 60_000)));
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 61));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(chat(&[], false))).await.unwrap();
+    core.settle().await;
+    core.command(Command::OpenSession { id: a.session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.shutdown().await;
+    std::fs::copy(&before, &db).unwrap();
+
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 120_000)));
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 71));
+    cfg.embed = Some(Arc::new(embedder()));
+    let (core, _rx, _) = Core::start(cfg, Arc::new(chat(&[], false))).await.unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    assert!(core.sessions(10).iter().all(|s| s.id != a.session));
+    core.shutdown().await;
+
+    let store = open(
+        dir.path(),
+        Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 180_000))),
+        81,
+    );
+    let r = store.read().unwrap();
+    let mut left = 0;
+    for kind in [
+        evorag_memory::KIND_TURN,
+        evorag_memory::KIND_CHUNK,
+        evorag_memory::KIND_NOTE,
+        evorag_memory::KIND_EMBEDDING,
+    ] {
+        r.for_each(kind, |_| {
+            left += 1;
+            true
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        left, 0,
+        "no turn and no derived record of the deleted session"
+    );
+}
