@@ -46,6 +46,13 @@ pub enum LlmError {
     /// 逐次表示の途中で切れた (再試行しない、06 §7)。
     #[error("the response stream was cut: {0}")]
     Cut(String),
+    /// ルーターモードの llama-server に、モデルの名前を付けずに繋いだ (06 §2)。`models` はルーターが
+    /// 持つモデルの名前。
+    #[error("llama-server is a router; set the model name (one of: {})", models.join(", "))]
+    RouterNeedsModel { models: Vec<String> },
+    /// ルーターモードで、名前を付けたモデルを使えない (知らない名前、読み込めない、読み込みが終わらない)。
+    #[error("the router cannot use model `{model}`: {detail}")]
+    RouterModel { model: String, detail: String },
 }
 
 /// 逐次表示の応答。落とすと接続を閉じる。

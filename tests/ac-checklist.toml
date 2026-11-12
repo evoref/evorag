@@ -860,3 +860,12 @@ status = "test"
 tests = ["crates/evorag-core/tests/probe.rs::the_chat_probe_checks_structured_output_thinking_and_speed", "crates/evorag-core/tests/probe.rs::the_embed_and_rerank_probes_measure_dims_and_time", "crates/evorag-core/tests/probe.rs::the_core_probes_once_per_model_and_reports_issues"]
 manual = ""
 note = "点検・保存・同じモデルでは繰り返さないこと・使えない機能の知らせ。状態の行の印と doctor の表示は bin と TUI。型縛りの補助の呼び出し (ノートの鍵など) は M2.3 から入るので、止める側はそこで probe_result を見る。rerank の締切 (rerank_slow) は M2.5。"
+
+[[ac]]
+id = "AC-FR-511-1"
+requirement = "FR-511"
+level = "Should"
+status = "test"
+tests = ["crates/evorag-llm/tests/http_client.rs::a_router_gets_the_model_name_on_every_request", "crates/evorag-llm/tests/http_client.rs::a_router_without_a_model_name_lists_its_models", "crates/evorag-llm/tests/http_client.rs::a_plain_server_gets_no_model_name"]
+manual = ""
+note = "クライアントの層。embed・rerank に名前が無いときは、繋がらない役割と同じく使わずに動く (30 秒ごとに試す)。setup でルーターのモデルから役割を選ぶのは次の変更。本物のルーター (S-15 のプリセット) で、照合・読み込み待ち・応答を確かめた。"

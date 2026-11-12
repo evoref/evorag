@@ -294,6 +294,8 @@ pub fn default_places() -> Option<Places> {
 pub struct RoleConfig {
     pub url: String,
     pub api_key: Option<String>,
+    /// ルーターモードのときのモデルの名前 (06 §2)。
+    pub model: Option<String>,
 }
 
 impl Config {
@@ -306,7 +308,11 @@ impl Config {
         let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(str::to_owned);
         let url = s("url").filter(|u| !u.trim().is_empty())?;
         let api_key = s("api_key").or_else(|| s("api_key_env").and_then(|v| std::env::var(v).ok()));
-        Some(RoleConfig { url, api_key })
+        Some(RoleConfig {
+            url,
+            api_key,
+            model: s("model"),
+        })
     }
 }
 
