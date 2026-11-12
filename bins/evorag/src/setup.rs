@@ -7,6 +7,8 @@
 //!    起動例には `--host 127.0.0.1` と `--api-key` を付ける (06 §9)。
 //! 3. chat が見つからなければ、入手と起動の手順を示し、設定ファイルを書かない (AC-FR-510-1)。
 //!    既にある設定ファイルを書き換えるときは、確かめてから、元のファイルを写して残す。
+//!    ルーターモード (1 つの URL で複数のモデル、06 §2) を見つけたら、モデルを 1 つずつ確かめて役割を
+//!    見分け、役割ごとに候補が複数あれば選ばせる。設定には URL とモデルの名前を書く。
 //! 4. 役割ごとのモデルを、データ根の記録と比べる。記録が無ければ記録する。違えば、違いの中身と
 //!    やり直しになるものを示し、利用者が対話で確かめたときだけ書き換える (`--yes` では書き換えない)。
 
@@ -39,11 +41,34 @@ pub struct SetupArgs {
 
 enum Probe {
     Found(Arc<HttpClient>, ServerInfo),
+    /// ルーターモード。モデルの名前の一覧。
+    Router(Vec<String>),
     NeedsKey,
     Missing,
 }
 
+/// 見つけた役割の接続先 (ルーターなら `model` にモデルの名前)。
+struct Found {
+    role: &'static str,
+    url: String,
+    model: Option<String>,
+    info: ServerInfo,
+    client: Arc<HttpClient>,
+}
+
 fn probe(rt: &tokio::runtime::Runtime, url: &str, key: Option<String>, remote: bool) -> Probe {
+    connect(rt, url, key, remote, None, Duration::from_secs(5))
+}
+
+/// 繋いで能力を読む。`model` はルーターのモデルの名前 (読み込みを待つので、締切を長くする)。
+fn connect(
+    rt: &tokio::runtime::Runtime,
+    url: &str,
+    key: Option<String>,
+    remote: bool,
+    model: Option<&str>,
+    limit: Duration,
+) -> Probe {
     let Ok(endpoint) = Endpoint::new(url, key, remote) else {
         return Probe::Missing;
     };
@@ -51,9 +76,9 @@ fn probe(rt: &tokio::runtime::Runtime, url: &str, key: Option<String>, remote: b
     let Ok(client) = HttpClient::new(endpoint, RetryPolicy { delays: Vec::new() }) else {
         return Probe::Missing;
     };
-    let client = Arc::new(client);
+    let client = Arc::new(client.with_model(model.map(str::to_owned)));
     let r = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(limit, async {
             client.health().await?;
             client.server_info().await
         })
@@ -61,8 +86,90 @@ fn probe(rt: &tokio::runtime::Runtime, url: &str, key: Option<String>, remote: b
     });
     match r {
         Ok(Ok(info)) => Probe::Found(client, info),
+        Ok(Err(LlmError::RouterNeedsModel { models })) => Probe::Router(models),
         Ok(Err(LlmError::Http { status, .. })) if status == 401 || status == 403 => Probe::NeedsKey,
         _ => Probe::Missing,
+    }
+}
+
+/// ルーターのモデルを 1 つずつ確かめて、役割を見分ける (06 §2)。読み込んでいないモデルは読み込む。
+fn router_roles(
+    rt: &tokio::runtime::Runtime,
+    c: &Catalog,
+    url: &str,
+    key: Option<String>,
+    remote: bool,
+    models: &[String],
+) -> Vec<Found> {
+    let mut out = Vec::new();
+    for m in models {
+        eprintln!(
+            "{}",
+            c.with(MessageKey::CliSetupRouterChecking, &[("model", m)])
+        );
+        if let Probe::Found(client, info) = connect(
+            rt,
+            url,
+            key.clone(),
+            remote,
+            Some(m),
+            Duration::from_secs(150),
+        ) {
+            let role = role_of(rt, &client);
+            out.push(Found {
+                role,
+                url: url.to_owned(),
+                model: Some(m.clone()),
+                info,
+                client,
+            });
+        }
+    }
+    out
+}
+
+/// 役割の候補から 1 つを選ぶ。設定に書いた名前があればそれ、1 つならそれ。複数なら、`--yes` では
+/// 先頭を、対話では番号で選ばせる。`None` は候補が無い。
+fn choose(
+    cands: &[&Found],
+    preferred: Option<&str>,
+    ask_number: impl Fn() -> usize,
+) -> Option<usize> {
+    if cands.is_empty() {
+        return None;
+    }
+    if let Some(i) =
+        preferred.and_then(|p| cands.iter().position(|f| f.model.as_deref() == Some(p)))
+    {
+        return Some(i);
+    }
+    if cands.len() == 1 {
+        return Some(0);
+    }
+    Some(ask_number().min(cands.len() - 1))
+}
+
+/// 役割の候補を示して、番号で選ばせる (1 から)。`--yes` では 0。
+fn ask_choice(c: &Catalog, role: &str, cands: &[&Found], yes: bool) -> usize {
+    if yes {
+        return 0;
+    }
+    let list = cands
+        .iter()
+        .enumerate()
+        .map(|(i, f)| format!("{}) {}", i + 1, f.model.as_deref().unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("  ");
+    loop {
+        let a = ask(&c.with(
+            MessageKey::CliSetupRouterChoose,
+            &[("role", role), ("choices", &list)],
+        ));
+        if let Ok(n) = a.parse::<usize>()
+            && (1..=cands.len()).contains(&n)
+        {
+            return n - 1;
+        }
     }
 }
 
@@ -116,11 +223,13 @@ fn yes_no(prompt: &str) -> bool {
 }
 
 /// 新しく書く設定ファイルの中身 (説明つき)。
+/// `chat_model` と `aux` の名前は、ルーターモードのモデルの名前 (06 §2)。
 fn template(
     url: &str,
+    chat_model: Option<&str>,
     api_key_env: Option<&str>,
     language: Option<&str>,
-    aux: &[(&str, &str)],
+    aux: &[(&str, &str, Option<&str>)],
 ) -> String {
     let mut s = String::from(
         "# evorag の設定 (evorag setup が書いた。キーの説明は docs/07-tui-config.md §4)\nversion = 1\n",
@@ -131,12 +240,20 @@ fn template(
         ));
     }
     s.push_str(&format!("\n[llm.chat]\nurl = \"{url}\"\n"));
+    if let Some(m) = chat_model {
+        s.push_str(&format!(
+            "# ルーターモードのモデルの名前 (プリセットの節の名前)\nmodel = \"{m}\"\n"
+        ));
+    }
     match api_key_env {
         Some(v) => s.push_str(&format!("api_key_env = \"{v}\"\n")),
         None => s.push_str("# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書く\n# api_key_env = \"EVORAG_API_KEY\"\n"),
     }
-    for (role, u) in aux {
+    for (role, u, m) in aux {
         s.push_str(&format!("\n[llm.{role}]\nurl = \"{u}\"\n"));
+        if let Some(m) = m {
+            s.push_str(&format!("model = \"{m}\"\n"));
+        }
         if let Some(v) = api_key_env {
             s.push_str(&format!("api_key_env = \"{v}\"\n"));
         }
@@ -148,9 +265,10 @@ fn template(
 fn updated(
     text: &str,
     url: &str,
+    chat_model: Option<&str>,
     api_key_env: Option<&str>,
     language: Option<&str>,
-    aux: &[(&str, &str)],
+    aux: &[(&str, &str, Option<&str>)],
 ) -> Result<Option<String>, String> {
     let mut t: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     let before = t.clone();
@@ -165,13 +283,21 @@ fn updated(
     let mut llm = table(&mut t, "llm")?;
     let mut chat = table(&mut llm, "chat")?;
     chat.insert("url".into(), toml::Value::String(url.into()));
+    if let Some(m) = chat_model {
+        chat.insert("model".into(), toml::Value::String(m.into()));
+    }
     if let Some(v) = api_key_env {
         chat.insert("api_key_env".into(), toml::Value::String(v.into()));
     }
     llm.insert("chat".into(), toml::Value::Table(chat));
-    for (role, u) in aux {
+    for (role, u, m) in aux {
         let mut r = table(&mut llm, role)?;
         r.insert("url".into(), toml::Value::String((*u).into()));
+        match m {
+            Some(m) => r.insert("model".into(), toml::Value::String((*m).into())),
+            // ルーターでない接続先に変えたときは、前のルーターの名前を残さない。
+            None => r.remove("model"),
+        };
         llm.insert((*role).into(), toml::Value::Table(r));
     }
     t.insert("llm".into(), toml::Value::Table(llm));
@@ -238,14 +364,43 @@ pub fn run(
         .clone()
         .or_else(|| key_env.as_ref().and_then(|v| std::env::var(v).ok()));
 
-    let mut found = None;
+    let mut found: Option<Found> = None;
+    // ルーターで見分けた役割の候補 (chat の接続先がルーターだったとき)。
+    let mut routed: Vec<Found> = Vec::new();
     for u in &urls {
         match probe(rt, u, key.clone(), cfg.llm.allow_remote) {
             Probe::Found(client, info) if role_of(rt, &client) == "chat" => {
-                found = Some((u.clone(), info, client));
+                found = Some(Found {
+                    role: "chat",
+                    url: u.clone(),
+                    model: None,
+                    info,
+                    client,
+                });
                 break;
             }
             Probe::Found(..) => {}
+            Probe::Router(models) => {
+                say(
+                    MessageKey::CliSetupRouterFound,
+                    &[("url", u), ("models", &models.join(", "))],
+                );
+                let cands = router_roles(rt, c, u, key.clone(), cfg.llm.allow_remote, &models);
+                let chats: Vec<&Found> = cands.iter().filter(|f| f.role == "chat").collect();
+                let pick = choose(&chats, cfg.llm.chat.model.as_deref(), || {
+                    ask_choice(c, "chat", &chats, args.yes)
+                });
+                if let Some(i) = pick {
+                    let model = chats[i].model.clone();
+                    routed = cands;
+                    let at = routed
+                        .iter()
+                        .position(|f| f.role == "chat" && f.model == model)
+                        .unwrap_or_default();
+                    found = Some(routed.remove(at));
+                    break;
+                }
+            }
             Probe::NeedsKey => {
                 say(MessageKey::CliSetupNeedsKey, &[("url", u)]);
                 return ExitCode::from(3);
@@ -253,10 +408,11 @@ pub fn run(
             Probe::Missing => {}
         }
     }
-    let Some((url, info, chat_client)) = found else {
+    let Some(chat) = found else {
         say(MessageKey::CliSetupGuide, &[("tried", &urls.join(", "))]);
         return ExitCode::from(3);
     };
+    let (url, info) = (chat.url.clone(), chat.info.clone());
     say(
         MessageKey::CliSetupFound,
         &[
@@ -267,10 +423,26 @@ pub fn run(
         ],
     );
 
-    // embed と rerank を探す (設定の接続先 → 既定)。chat の接続先は見ない。
-    let mut aux_found: Vec<(&'static str, String, ServerInfo, Arc<HttpClient>)> = Vec::new();
+    // embed と rerank を探す。ルーターなら、そのモデルから選ぶ。無ければ設定の接続先 → 既定を探す
+    // (chat の接続先は見ない)。
+    let mut aux_found: Vec<Found> = Vec::new();
     for role in ["embed", "rerank"] {
         let configured = cfg.role(role);
+        let cands: Vec<&Found> = routed.iter().filter(|f| f.role == role).collect();
+        if !cands.is_empty() {
+            let preferred = configured.as_ref().and_then(|r| r.model.clone());
+            if let Some(i) = choose(&cands, preferred.as_deref(), || {
+                ask_choice(c, role, &cands, args.yes)
+            }) {
+                let model = cands[i].model.clone();
+                let at = routed
+                    .iter()
+                    .position(|f| f.role == role && f.model == model)
+                    .unwrap_or_default();
+                aux_found.push(routed.remove(at));
+                continue;
+            }
+        }
         let role_key = configured
             .as_ref()
             .and_then(|r| r.api_key.clone())
@@ -279,14 +451,20 @@ pub fn run(
         tried.extend(AUX_CANDIDATES.iter().map(|s| (*s).to_owned()));
         tried.dedup();
         for u in tried.iter().filter(|u| **u != url) {
-            if aux_found.iter().any(|(_, x, _, _)| x == u) {
+            if aux_found.iter().any(|f| f.url == *u) {
                 continue;
             }
             if let Probe::Found(client, info) = probe(rt, u, role_key.clone(), cfg.llm.allow_remote)
             {
                 let r = role_of(rt, &client);
                 if r == role {
-                    aux_found.push((role, u.clone(), info, client));
+                    aux_found.push(Found {
+                        role,
+                        url: u.clone(),
+                        model: None,
+                        info,
+                        client,
+                    });
                     break;
                 }
                 if r == "chat" && role == "embed" {
@@ -296,17 +474,19 @@ pub fn run(
             }
         }
     }
+    let mut missing = false;
     for role in ["embed", "rerank"] {
-        match aux_found.iter().find(|(r, _, _, _)| *r == role) {
-            Some((_, u, i, _)) => say(
+        match aux_found.iter().find(|f| f.role == role) {
+            Some(f) => say(
                 MessageKey::CliSetupRoleFound,
                 &[
                     ("role", role),
-                    ("url", u),
-                    ("file", evorag_llm::file_name(&i.model_path)),
+                    ("url", &f.url),
+                    ("file", evorag_llm::file_name(&f.info.model_path)),
                 ],
             ),
             None => {
+                missing = true;
                 let example = if role == "embed" {
                     MessageKey::CliSetupEmbedExample
                 } else {
@@ -319,10 +499,18 @@ pub fn run(
             }
         }
     }
-    let aux_urls: Vec<(&str, &str)> = aux_found
+    if missing {
+        // 3 つの役割を 1 つのプロセスで動かす手段 (S-15 §2)。
+        say(MessageKey::CliSetupPresetExample, &[]);
+    }
+    // 設定に書く役割 (設定の接続先・名前と違うものだけ)。
+    let aux_targets: Vec<(&str, &str, Option<&str>)> = aux_found
         .iter()
-        .map(|(r, u, _, _)| (*r, u.as_str()))
-        .filter(|(r, u)| cfg.role(r).map(|x| x.url) != Some((*u).to_owned()))
+        .filter(|f| {
+            cfg.role(f.role)
+                .is_none_or(|x| x.url != f.url || x.model != f.model)
+        })
+        .map(|f| (f.role, f.url.as_str(), f.model.as_deref()))
         .collect();
 
     // プロンプトの言語: 設定に無く、データ根にも記録が無ければ尋ねる (07 §6.1)。
@@ -345,16 +533,23 @@ pub fn run(
     let written = match std::fs::read_to_string(config_file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_private(
             config_file,
-            &template(&url, args.api_key_env.as_deref(), language, &aux_urls),
+            &template(
+                &url,
+                chat.model.as_deref(),
+                args.api_key_env.as_deref(),
+                language,
+                &aux_targets,
+            ),
         )
         .map(|()| true),
         Err(e) => Err(e),
         Ok(text) => match updated(
             &text,
             &url,
+            chat.model.as_deref(),
             args.api_key_env.as_deref(),
             language,
-            &aux_urls,
+            &aux_targets,
         ) {
             Err(e) => {
                 say(MessageKey::CliConfigError, &[("detail", &e)]);
@@ -418,8 +613,8 @@ pub fn run(
         }
     };
     let recorded = models.recorded();
-    let mut roles: Vec<(&str, &ServerInfo, &Arc<HttpClient>)> = vec![("chat", &info, &chat_client)];
-    roles.extend(aux_found.iter().map(|(r, _, i, c)| (*r, i, c)));
+    let mut roles: Vec<(&str, &ServerInfo, &Arc<HttpClient>)> = vec![("chat", &info, &chat.client)];
+    roles.extend(aux_found.iter().map(|f| (f.role, &f.info, &f.client)));
     // 記録と合っている役割 (このあと点検する)。
     let mut usable_roles: Vec<(&str, evorag_memory::ModelOrigin, &Arc<HttpClient>)> = Vec::new();
     for (role, info, client) in roles {
@@ -529,7 +724,7 @@ mod tests {
 
     #[test]
     fn the_template_is_a_valid_config() {
-        let t = template("http://127.0.0.1:8080", None, Some("ja"), &[]);
+        let t = template("http://127.0.0.1:8080", None, None, Some("ja"), &[]);
         let l = crate::config::parse(&t).unwrap();
         assert_eq!(
             l.config.llm.chat.url.as_deref(),
@@ -538,9 +733,10 @@ mod tests {
         assert_eq!(l.config.prompt.language.as_deref(), Some("ja"));
         let t = template(
             "http://127.0.0.1:8081",
+            None,
             Some("K"),
             None,
-            &[("embed", "http://127.0.0.1:8082")],
+            &[("embed", "http://127.0.0.1:8082", None)],
         );
         let l = crate::config::parse(&t).unwrap();
         assert_eq!(l.config.llm.chat.api_key_env.as_deref(), Some("K"));
@@ -549,19 +745,90 @@ mod tests {
         assert!(l.config.role("rerank").is_none());
     }
 
+    /// verifies: AC-FR-511-2 (ルーターのモデルの名前を、役割ごとに設定に書く)
+    #[test]
+    fn a_router_is_written_with_a_model_name_per_role() {
+        let r = "http://127.0.0.1:8080";
+        let t = template(
+            r,
+            Some("chat"),
+            None,
+            Some("ja"),
+            &[("embed", r, Some("emb")), ("rerank", r, Some("rr"))],
+        );
+        let l = crate::config::parse(&t).unwrap();
+        assert_eq!(l.config.llm.chat.model.as_deref(), Some("chat"));
+        assert_eq!(
+            l.config.role("embed").unwrap().model.as_deref(),
+            Some("emb")
+        );
+        assert_eq!(l.config.role("rerank").unwrap().url, r);
+        // 直接繋ぐ構成に戻すと、役割の名前は消す (chat の名前は表示に使うので残す)。
+        let back = updated(
+            &t,
+            r,
+            None,
+            None,
+            None,
+            &[("embed", "http://127.0.0.1:8081", None)],
+        )
+        .unwrap()
+        .unwrap();
+        let l = crate::config::parse(&back).unwrap();
+        assert_eq!(l.config.role("embed").unwrap().model, None);
+        assert_eq!(l.config.llm.chat.model.as_deref(), Some("chat"));
+    }
+
+    fn found(role: &'static str, model: &str) -> Found {
+        Found {
+            role,
+            url: "http://127.0.0.1:8080".into(),
+            model: Some(model.into()),
+            info: ServerInfo {
+                build_info: String::new(),
+                model_path: String::new(),
+                model_name: model.into(),
+                total_slots: 1,
+                n_ctx: 8192,
+                meta: Default::default(),
+                model_key: String::new(),
+            },
+            client: Arc::new(
+                HttpClient::new(
+                    Endpoint::new("http://127.0.0.1:8080", None, false).unwrap(),
+                    RetryPolicy::default(),
+                )
+                .unwrap(),
+            ),
+        }
+    }
+
+    /// verifies: AC-FR-511-2 (候補が複数のときだけ選ばせ、設定に書いた名前を先に採る)
+    #[test]
+    fn a_role_is_chosen_from_the_router_candidates() {
+        let (a, b) = (found("chat", "a"), found("chat", "b"));
+        let none: Vec<&Found> = Vec::new();
+        assert_eq!(choose(&none, None, || unreachable!()), None);
+        assert_eq!(choose(&[&a], None, || unreachable!()), Some(0));
+        assert_eq!(choose(&[&a, &b], Some("b"), || unreachable!()), Some(1));
+        assert_eq!(choose(&[&a, &b], None, || 1), Some(1));
+        assert_eq!(choose(&[&a, &b], Some("zz"), || 0), Some(0));
+    }
+
     #[test]
     fn updating_keeps_other_keys_and_reports_no_change() {
         let text = "version = 1\n[llm.chat]\nurl = \"http://127.0.0.1:8080\"\n[storage]\nallow_unsafe_location = true\n";
         assert_eq!(
-            updated(text, "http://127.0.0.1:8080", None, None, &[]).unwrap(),
+            updated(text, "http://127.0.0.1:8080", None, None, None, &[]).unwrap(),
             None
         );
         let new = updated(
             text,
             "http://127.0.0.1:8081",
             None,
+            None,
             Some("en"),
-            &[("rerank", "http://127.0.0.1:8082")],
+            &[("rerank", "http://127.0.0.1:8082", None)],
         )
         .unwrap()
         .unwrap();

@@ -190,6 +190,22 @@ switched = "{role} のモデルを切り替えました ({file})。"
 kept_chat = "応答のモデルは切り替えませんでした。このままでは次の起動で止まります。llama-server を {recorded} で起動し直してください。"
 kept = "{role} のモデルは切り替えませんでした。切り替えるまで、{role} を使わずに動きます。"
 needs_confirm = "モデルの切り替えには、対話での確認が要ります (--yes では切り替えません)。"
+router_found = "{url} はルーターモード (1 つの URL で複数のモデルを扱う) の llama-server です。モデル: {models}"
+router_checking = "  {model} の役割を確かめています (読み込んでいなければ読み込みます)…"
+router_choose = "{role} に使うモデルを、番号で選んでください: {choices}"
+preset_example = """1 つの llama-server で 3 つの役割を動かすこともできます (ルーターモード)。プリセットの例 (evorag.ini):
+  version = 1
+  [chat]
+  model = <応答のモデル>.gguf
+  [embed]
+  model = <埋め込みのモデル>.gguf
+  embedding = true
+  pooling = last
+  [rerank]
+  model = <リランカー>.gguf
+  reranking = true
+起動の例: llama-server --models-preset evorag.ini --host 127.0.0.1 --port 8080 --api-key <キー>
+その後でもう一度 evorag setup を実行すると、役割ごとのモデルを見分けて設定に書きます。"""
 probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
 
 [doctor]
