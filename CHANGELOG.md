@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
+埋め込みとリランカーで以前の会話を探し、利用者が操作していない間に会話を整理する版。Linux x86_64 の配布物を足した。データの形式を 0.2 に上げたので、v0.1 のデータ根は最初の起動で退避してから移します (0.1.2 から更新してください。手順は同梱の `README.md` §6)。
+
 ### 追加
 
 - 応答のモデルを、データ根に記録する (最初の起動、または v0.1 のデータ根を初めて開いたとき)。記録と違うモデルの llama-server では、画面を開かずに、違いと取れる手 (記録したモデルで起動し直す、`evorag setup` で切り替える、別のデータ根で試す) を示して終わる (終了コード 6)。起動中にモデルが入れ替わったときは、送らずに知らせる。
@@ -78,7 +82,8 @@
 - ログを状態のフォルダの `logs\` に書く (7 日分)。会話の本文や API キーは書かない。
 - 以前の会話の中に紛れ込ませた指示に従わないよう、引用の扱いをシステムプロンプトで指示する。
 
-[Unreleased]: https://github.com/evoref/evorag/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/evoref/evorag/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/evoref/evorag/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/evoref/evorag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/evoref/evorag/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/evoref/evorag/releases/tag/v0.1.0
