@@ -106,6 +106,7 @@ fn config(
         probe_models: false,
         sleep,
         memory_enabled: true,
+        precompute: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),
     }

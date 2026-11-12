@@ -53,6 +53,10 @@ pub struct Cassette {
     /// `/v1/rerank` に答える (rerank の役割)。無ければ 501。
     #[serde(default)]
     pub rerank: bool,
+    /// 生成を 1 トークンに限った要求 (次のターンを先に処理させる要求、05 §4.5) への答え。`chats` を使わず、
+    /// 要求は `warm_requests` に分けて記録する。無ければすぐに終える。
+    #[serde(default)]
+    pub warm: Option<Vec<Step>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +137,9 @@ struct State {
     /// `/v1/embeddings` と `/v1/rerank` を呼んだ回数。
     embed_calls: usize,
     rerank_calls: usize,
+    /// 生成を 1 トークンに限った要求と、終わる前に落とされた数。
+    warm: Vec<ChatRequest>,
+    warm_dropped: usize,
 }
 
 /// 記録を流す `LlmClient`。複製すると同じ状態を共有する。
@@ -175,6 +182,16 @@ impl ReplayClient {
     /// 終わる前に落とされた応答の数 (中断で接続を閉じた数)。
     pub fn dropped_early(&self) -> usize {
         self.lock().dropped_early
+    }
+
+    /// 生成を 1 トークンに限った要求 (順に)。`requests` には入らない。
+    pub fn warm_requests(&self) -> Vec<ChatRequest> {
+        self.lock().warm.clone()
+    }
+
+    /// 生成を 1 トークンに限った要求のうち、終わる前に落とされた数。
+    pub fn warm_dropped(&self) -> usize {
+        self.lock().warm_dropped
     }
 
     /// `/v1/embeddings` と `/v1/rerank` を呼んだ回数。
@@ -252,6 +269,20 @@ impl LlmClient for ReplayClient {
 
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
         Box::pin(async move {
+            if req.generation.max_tokens == Some(1) {
+                self.lock().warm.push(req);
+                let steps = self.cassette.warm.clone().unwrap_or_else(|| {
+                    vec![Step::Done {
+                        done: DoneStep::default(),
+                    }]
+                });
+                return Ok(Box::new(ReplayStream {
+                    steps: steps.into(),
+                    finished: false,
+                    warm: true,
+                    state: self.state.clone(),
+                }) as Box<dyn ChatStream>);
+            }
             let script = {
                 let mut st = self.lock();
                 st.requests.push(req);
@@ -269,6 +300,7 @@ impl LlmClient for ReplayClient {
                 Some(ChatScript::Events { events }) => Ok(Box::new(ReplayStream {
                     steps: events.into(),
                     finished: false,
+                    warm: false,
                     state: self.state.clone(),
                 })
                     as Box<dyn ChatStream>),
@@ -280,16 +312,19 @@ impl LlmClient for ReplayClient {
 struct ReplayStream {
     steps: VecDeque<Step>,
     finished: bool,
+    warm: bool,
     state: Arc<Mutex<State>>,
 }
 
 impl Drop for ReplayStream {
     fn drop(&mut self) {
         if !self.finished {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .dropped_early += 1;
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if self.warm {
+                st.warm_dropped += 1;
+            } else {
+                st.dropped_early += 1;
+            }
         }
     }
 }

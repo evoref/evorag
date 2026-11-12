@@ -119,6 +119,7 @@ fn config(root: &Path, rerank: Arc<Slow>, sleep: SleepConfig, power: fn() -> Pow
         probe_models: true,
         sleep,
         memory_enabled: true,
+        precompute: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }

@@ -16,6 +16,7 @@ pub use sleep::{OnBattery, SleepConfig};
 mod context;
 pub mod localtime;
 pub mod logging;
+mod precompute;
 pub mod probe;
 mod prompt;
 pub mod rebind;
@@ -76,6 +77,9 @@ pub struct CoreConfig {
     pub sleep: SleepConfig,
     /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
     pub memory_enabled: bool,
+    /// 設定 `retrieval.precompute` (07 §4.2。書かないときは `llm.allow_remote` の逆)。入力が止まったときに
+    /// 想起を先に済ませる (05 §4.5)。次のターンの分は、これに関わらず動かす。
+    pub precompute: bool,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
 }
@@ -246,6 +250,11 @@ struct Inner {
     index_lock: tokio::sync::Mutex<()>,
     /// 問いの埋め込みのキャッシュ (05 §3.1 の 4)。
     query_cache: Arc<recall::QueryCache>,
+    /// リランクの結果のキャッシュ (05 §4.5)。
+    rerank_cache: Arc<recall::RerankCache>,
+    /// 先に済ませる処理 (05 §4.5) の task と、入力が止まったときの処理を動かすか。
+    pre: precompute::Tasks,
+    precompute: bool,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -539,6 +548,9 @@ impl Core {
             index_lock: tokio::sync::Mutex::new(()),
             embed_skip: Mutex::new(std::collections::HashSet::new()),
             query_cache: Arc::new(recall::QueryCache::default()),
+            rerank_cache: Arc::new(recall::RerankCache::default()),
+            pre: precompute::Tasks::default(),
+            precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
@@ -664,6 +676,12 @@ impl Core {
 
     /// 命令を送る。結果はイベントで届く。
     pub fn command(&self, cmd: Command) {
+        if matches!(cmd, Command::InputIdle { .. }) {
+            self.inner
+                .pre
+                .asked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let _ = self.commands.send(cmd);
     }
 
@@ -751,6 +769,18 @@ impl Core {
             .held
             .store(on, std::sync::atomic::Ordering::SeqCst);
         self.inner.activity.touch();
+    }
+
+    /// 試験のため: 先に済ませる処理 (05 §4.5) が終わるまで待つ (10 秒で終わらなければ panic する)。
+    #[doc(hidden)]
+    pub async fn settle_precompute(&self) {
+        for _ in 0..500 {
+            if !self.inner.pre.busy() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("precompute did not settle within 10 seconds");
     }
 
     /// 試験のため: 裏の処理の要る手順が無くなるまで待つ (10 秒で終わらなければ panic する)。
@@ -853,6 +883,9 @@ impl Core {
                 let _ = c.send(Cancel::Shutdown);
             }
             let _ = r.task.await;
+        }
+        for t in self.inner.pre.stop() {
+            let _ = t.await;
         }
         let background: Vec<_> = self
             .inner
@@ -1170,6 +1203,7 @@ impl Inner {
             key: origin.model_key,
             threshold,
             top,
+            cache: self.rerank_cache.clone(),
         })
     }
 
@@ -1525,6 +1559,7 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
             toggle_irrelevant(inner, answer, target).await;
         }
         Command::Style { set } => style(inner, set).await,
+        Command::InputIdle { text } => precompute::input_idle(inner, text),
         _ => {}
     }
 }
@@ -2382,13 +2417,13 @@ fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id, extra: Vec<I
 }
 
 /// LLM に送る会話 (05 §4.1)。
-struct Conversation {
+pub(crate) struct Conversation {
     /// 発話 `user_turn` より前の発言 (失敗した応答と、この発話への前の応答は除く)。
-    past: Vec<context::Past>,
+    pub(crate) past: Vec<context::Past>,
     /// 今の発話の本文と、記録した時刻。
     current: Option<(String, i64)>,
     /// 前のターンが履歴を始めた位置 (05 §4.2)。
-    from: Option<Id>,
+    pub(crate) from: Option<Id>,
     /// 次に振る出典の番号 (05 §5.1)。
     next_source: u32,
 }
@@ -2398,7 +2433,7 @@ fn stamped(lang: PromptLanguage, at_ms: i64, text: &str) -> String {
     format!("{} {text}", prompt::stamp(lang, at_ms))
 }
 
-fn conversation(inner: &Inner, session: Id, user_turn: Id) -> Conversation {
+pub(crate) fn conversation(inner: &Inner, session: Id, user_turn: Id) -> Conversation {
     let turns = inner
         .store
         .read()
@@ -2482,6 +2517,8 @@ async fn generate(
     extra: Vec<Id>,
     mut cancel: oneshot::Receiver<Cancel>,
 ) {
+    // 先に済ませる処理を止める (応答の経路が先、06 §4)。
+    inner.pre.stop();
     emit(
         inner,
         Event::ResponseStarted {
@@ -2670,6 +2707,11 @@ async fn generate(
         },
         _ => Err("the session or the utterance is gone".into()),
     };
+    // 次のターンの分を先に処理させる (05 §4.5)。「生成中」を解く前に始める (次の発話の応答の経路が、
+    // 始める前に必ず止めるように)。
+    if matches!(outcome, Outcome::Completed) && written.is_ok() {
+        precompute::warm_next(inner, session);
+    }
     // 終わりのイベントを出す前に「生成中」を解く (イベントを受けてすぐ次を送っても断られないように)。
     // task の handle は残し、終了のときに待つ。
     if let Some(r) = inner

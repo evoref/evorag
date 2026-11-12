@@ -244,6 +244,17 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
             ignored.push(format!("memory.{k}"));
         }
     }
+    if config
+        .retrieval
+        .as_ref()
+        .and_then(|r| r.get("precompute"))
+        .is_some_and(|v| !v.is_bool())
+    {
+        return Err(format!(
+            "line {}: retrieval.precompute must be true or false",
+            line_of(text, "precompute")
+        ));
+    }
     Ok(Loaded {
         config,
         ignored,
@@ -270,6 +281,16 @@ impl Config {
                 .and_then(evorag_core::OnBattery::parse)
                 .unwrap_or(d.on_battery),
         }
+    }
+
+    /// `retrieval.precompute` (07 §4.2)。書かないときは、ループバック以外を許した設定では切る (送っていない
+    /// 入力が別の機械へ出るため、05 §4.5)。
+    pub fn precompute(&self) -> bool {
+        self.retrieval
+            .as_ref()
+            .and_then(|r| r.get("precompute"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(!self.llm.allow_remote)
     }
 
     /// `memory.enabled` (既定は true、07 §4.2)。
@@ -463,6 +484,35 @@ enabled = true
         let r = l.config.role("embed").unwrap();
         assert_eq!(r.url, "http://127.0.0.1:8081");
         assert!(l.config.role("rerank").is_none());
+    }
+
+    /// verifies: AC-FR-415-2 (ループバック以外を許した設定では、書かなければ入力が止まったときの処理を切る)
+    #[test]
+    fn precompute_defaults_to_off_only_when_remote_servers_are_allowed() {
+        assert!(parse("").unwrap().config.precompute());
+        assert!(
+            !parse("[llm]\nallow_remote = true\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        assert!(
+            parse("[llm]\nallow_remote = true\n[retrieval]\nprecompute = true\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        assert!(
+            !parse("[retrieval]\nprecompute = false\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        let e = parse("[retrieval]\nprecompute = \"yes\"\n").unwrap_err();
+        assert!(
+            e.contains("line 2") && e.contains("retrieval.precompute"),
+            "{e}"
+        );
     }
 
     /// verifies: AC-FR-108-2 (使わなくなったキーを見つける)

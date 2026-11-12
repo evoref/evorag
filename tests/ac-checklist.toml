@@ -736,6 +736,24 @@ manual = ""
 note = "想起を添えたターンの次の要求を含めて、前の要求の今の発話までが次の要求の先頭と一致する (引用は外れる)。"
 
 [[ac]]
+id = "AC-FR-415-1"
+requirement = "FR-415"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/precompute.rs::the_next_turn_is_processed_ahead_and_stopped_by_a_send", "crates/evorag-core/tests/precompute.rs::an_idle_input_is_reranked_ahead_and_reused_when_sent", "crates/evorag-tui/src/app.rs::idle_input_is_signalled_once_per_text_after_500_ms", "crates/evorag-tui/src/app.rs::only_sendable_text_is_offered_for_precompute"]
+manual = ""
+note = "1 トークンの要求は応答のスロットへ出て、次の発話の要求と空の発話の前までが同じ。入力の分は、問いの埋め込みとリランクのキャッシュに残り、同じ発話なら使う。"
+
+[[ac]]
+id = "AC-FR-415-2"
+requirement = "FR-415"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/src/config.rs::precompute_defaults_to_off_only_when_remote_servers_are_allowed", "crates/evorag-core/tests/precompute.rs::idle_precompute_respects_the_setting_and_the_battery"]
+manual = ""
+note = "設定の既定は llm.allow_remote の逆。コアは切られていれば要求を出さない。電池の reduce・stop も確かめる。"
+
+[[ac]]
 id = "AC-FR-414-2"
 requirement = "FR-414"
 level = "Must"

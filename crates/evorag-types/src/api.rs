@@ -41,6 +41,9 @@ pub enum Command {
     AttachBand { answer: Id, target: Id },
     /// 応答 `answer` の出典・帯の往復 `target` に「無関係」の印を付ける。付いていれば取り消す (05 §5.2)。
     ToggleIrrelevant { answer: Id, target: Id },
+    /// 入力欄の文字が約 500 ms 変わらなかった (05 §4.5 の先に済ませる処理の合図)。`text` は、そのまま送ったら
+    /// 発話になる本文。コアは想起を先に済ませ、同じ発話が送られたら結果を使う。保存しない。
+    InputIdle { text: String },
 }
 
 /// 答え方の既定の項目 (07 §3)。

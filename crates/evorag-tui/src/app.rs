@@ -156,6 +156,43 @@ pub struct Streaming {
     pub thinking: bool,
 }
 
+/// 入力が止まったとみなす長さ (05 §4.5)。
+pub const INPUT_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 入力が止まったことの判定 (05 §4.5)。入力欄の文字が `INPUT_IDLE` の間変わらなければ、その文字について
+/// 1 回だけ知らせる。
+pub struct IdleWatch {
+    text: String,
+    since: std::time::Instant,
+    sent: bool,
+}
+
+impl IdleWatch {
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            text: String::new(),
+            since: now,
+            sent: false,
+        }
+    }
+
+    /// 今の入力欄の文字を見る。止まってから `INPUT_IDLE` が過ぎ、まだ知らせていなければ `true`。
+    pub fn due(&mut self, text: &str, now: std::time::Instant) -> bool {
+        if text != self.text {
+            text.clone_into(&mut self.text);
+            self.since = now;
+            self.sent = false;
+            return false;
+        }
+        !self.sent && now.duration_since(self.since) >= INPUT_IDLE
+    }
+
+    /// 知らせた (同じ文字では、もう知らせない)。
+    pub fn sent(&mut self) {
+        self.sent = true;
+    }
+}
+
 pub struct App {
     pub catalog: Catalog,
     pub session: Option<SessionView>,
@@ -195,6 +232,20 @@ impl App {
 
     pub fn generating(&self) -> bool {
         self.streaming.is_some()
+    }
+
+    /// 入力が止まったときに先に済ませる処理へ渡す本文 (05 §4.5)。そのまま Enter で送れば発話になる
+    /// ときだけ (空・スラッシュコマンド・生成中・セッションが無いときは `None`)。
+    pub fn idle_text(&self) -> Option<String> {
+        let text = self.input.text();
+        if text.trim().is_empty()
+            || slash::parse(text).is_some()
+            || self.generating()
+            || self.session.is_none()
+        {
+            return None;
+        }
+        Some(slash::unescape(text).to_owned())
     }
 
     fn notice(&mut self, text: String) {
@@ -941,6 +992,41 @@ mod tests {
         for ch in s.chars() {
             a.on_key(Key::Char(ch));
         }
+    }
+
+    /// verifies: AC-FR-415-1 (入力欄の文字が 500 ms 変わらなければ、その文字で 1 回だけ知らせる)
+    #[test]
+    fn idle_input_is_signalled_once_per_text_after_500_ms() {
+        let t0 = std::time::Instant::now();
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let mut w = IdleWatch::new(t0);
+        assert!(!w.due("あ", ms(0)));
+        assert!(!w.due("あ", ms(499)));
+        assert!(w.due("あ", ms(500)));
+        w.sent();
+        assert!(!w.due("あ", ms(2000)));
+        // 変わったら数え直す。
+        assert!(!w.due("あい", ms(2100)));
+        assert!(!w.due("あい", ms(2500)));
+        assert!(w.due("あい", ms(2600)));
+        // 知らせなかった (送れない文字だった) ときは、次に見たときにまた `true`。
+        assert!(w.due("あい", ms(2700)));
+    }
+
+    /// verifies: AC-FR-415-1 (送れば発話になる文字だけを知らせる)
+    #[test]
+    fn only_sendable_text_is_offered_for_precompute() {
+        let mut a = app();
+        type_text(&mut a, "こんにちは");
+        assert_eq!(a.idle_text(), None, "no session yet");
+        a.session = Some(session());
+        assert_eq!(a.idle_text().as_deref(), Some("こんにちは"));
+        a.input.take();
+        type_text(&mut a, "/help");
+        assert_eq!(a.idle_text(), None);
+        a.input.take();
+        type_text(&mut a, "   ");
+        assert_eq!(a.idle_text(), None);
     }
 
     #[test]

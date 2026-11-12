@@ -201,6 +201,8 @@ pub struct RerankUse {
     pub threshold: Option<(f64, f64, u32)>,
     /// リランクする往復の数 (既定 6、点検の結果で減らす、§3.4)。
     pub top: usize,
+    /// リランクの結果のキャッシュ (05 §4.5)。
+    pub cache: Arc<RerankCache>,
 }
 
 /// リランクの締切 (05 §3.4)。
@@ -462,13 +464,64 @@ impl QueryCache {
     }
 }
 
+/// リランクの結果のキャッシュ (入力が止まったときに先に済ませた結果を、同じ発話を送ったときに使う、
+/// 05 §4.5)。鍵はリランカーの model_key・問い・往復の本文で、候補が変われば使わない。保存しない。
+#[derive(Default)]
+pub struct RerankCache(std::sync::Mutex<Vec<(std::time::Instant, RerankKey, Vec<f32>)>>);
+
+type RerankKey = (String, String, Vec<String>);
+
+/// リランクの結果のキャッシュに残す数。
+const RERANK_CACHE_MAX: usize = 8;
+
+impl RerankCache {
+    fn get(&self, key: &RerankKey) -> Option<Vec<f32>> {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.retain(|(t, _, _)| t.elapsed() < QUERY_CACHE_TTL);
+        m.iter()
+            .find(|(_, k, _)| k == key)
+            .map(|(_, _, s)| s.clone())
+    }
+
+    fn put(&self, key: RerankKey, scores: Vec<f32>) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.retain(|(_, k, _)| *k != key);
+        if m.len() >= RERANK_CACHE_MAX {
+            m.remove(0);
+        }
+        m.push((std::time::Instant::now(), key, scores));
+    }
+}
+
+/// 問いの埋め込みとリランクの締切。応答の経路は 05 §3.4 の値。先に済ませる処理は利用者を待たせない
+/// ので長くする (遅いサーバでも、送ったときにキャッシュから使えるように)。
+#[derive(Debug, Clone, Copy)]
+pub struct Deadlines {
+    pub embed: std::time::Duration,
+    pub rerank: std::time::Duration,
+}
+
+pub const RESPONSE_DEADLINES: Deadlines = Deadlines {
+    embed: EMBED_DEADLINE,
+    rerank: RERANK_DEADLINE,
+};
+
+pub const PRECOMPUTE_DEADLINES: Deadlines = Deadlines {
+    embed: std::time::Duration::from_secs(5),
+    rerank: std::time::Duration::from_secs(5),
+};
+
 /// 問いを埋め込む (キャッシュにあればそれ。締切を過ぎたら `None`)。
-pub async fn embed_query(v: &VectorQuery, text: &str) -> Option<Vec<f32>> {
+pub async fn embed_query(
+    v: &VectorQuery,
+    text: &str,
+    deadline: std::time::Duration,
+) -> Option<Vec<f32>> {
     if let Some(e) = v.cache.get(&v.key, text) {
         return Some(e);
     }
     let input = [text.to_owned()];
-    match tokio::time::timeout(EMBED_DEADLINE, v.client.embed(&input)).await {
+    match tokio::time::timeout(deadline, v.client.embed(&input)).await {
         Ok(Ok(mut out)) if out.len() == 1 && !out[0].is_empty() => {
             let e = out.pop()?;
             v.cache.put(&v.key, text, e.clone());
@@ -516,6 +569,21 @@ struct Selection {
     obs: RecallObs,
 }
 
+/// セッションの `upto` までの発話の本文 (新しい順)。
+fn user_texts(store: &Store, session: Id, upto: Id) -> Vec<String> {
+    let turns = store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
+        .unwrap_or_default();
+    turns
+        .iter()
+        .rev()
+        .filter(|t| t.body.role == TurnRole::User && t.envelope.id <= upto)
+        .map(|t| t.body.text.clone())
+        .collect()
+}
+
 /// 引いて、添えるターンを自動で選ぶ (05 §3.3〜§3.5)。
 async fn select(
     store: &Store,
@@ -525,6 +593,65 @@ async fn select(
     user_turn: Id,
     mode: &RerankMode,
     vectors: Option<&VectorQuery>,
+) -> Selection {
+    let mut users = user_texts(store, session, user_turn).into_iter();
+    let query = users.next().unwrap_or_default();
+    let previous = users.next();
+    select_for(
+        store,
+        index,
+        lang,
+        session,
+        query,
+        previous,
+        mode,
+        vectors,
+        RESPONSE_DEADLINES,
+    )
+    .await
+}
+
+/// 入力が止まったときに、送る前の発話 `draft` で問いの準備・候補の収集・リランクを先に済ませる
+/// (05 §4.5)。結果は問いの埋め込みとリランクのキャッシュに残るだけで、保存しない。
+#[allow(clippy::too_many_arguments)]
+pub async fn precompute(
+    store: &Store,
+    index: Option<&LexIndex>,
+    lang: PromptLanguage,
+    session: Id,
+    draft: String,
+    mode: &RerankMode,
+    vectors: Option<&VectorQuery>,
+) {
+    // 送ると、今の最後の発話が「直前の発話」になる。
+    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]))
+        .into_iter()
+        .next();
+    select_for(
+        store,
+        index,
+        lang,
+        session,
+        draft,
+        previous,
+        mode,
+        vectors,
+        PRECOMPUTE_DEADLINES,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn select_for(
+    store: &Store,
+    index: Option<&LexIndex>,
+    lang: PromptLanguage,
+    session: Id,
+    query: String,
+    previous: Option<String>,
+    mode: &RerankMode,
+    vectors: Option<&VectorQuery>,
+    deadlines: Deadlines,
 ) -> Selection {
     let mut obs = RecallObs::default();
     if vectors.is_none() {
@@ -540,22 +667,6 @@ async fn select(
     let Some(index) = index else {
         obs.degraded = vec![evorag_memory::DEGRADED_NO_INDEX.to_owned()];
         return none(RecallDecision::Skip, obs);
-    };
-    let (query, previous) = {
-        let turns = store
-            .read()
-            .ok()
-            .and_then(|r| evorag_memory::session_turns(&r, session).ok())
-            .unwrap_or_default();
-        let mut users = turns
-            .iter()
-            .filter(|t| t.body.role == TurnRole::User && t.envelope.id <= user_turn)
-            .rev();
-        let query = users
-            .next()
-            .map(|t| t.body.text.clone())
-            .unwrap_or_default();
-        (query, users.next().map(|t| t.body.text.clone()))
     };
     let snap = index.snapshot();
     // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。
@@ -602,7 +713,7 @@ async fn select(
     // 語彙とベクトルの候補を RRF で 1 つの順位にする (05 §3.2・§3.3)。
     let mut lists: Vec<Vec<Id>> = vec![r.candidates.iter().map(|h| h.id).collect()];
     if let Some(v) = vectors {
-        match embed_query(v, &q).await {
+        match embed_query(v, &q, deadlines.embed).await {
             Some(qv) => {
                 let rows = v
                     .index
@@ -622,8 +733,16 @@ async fn select(
         return none(RecallDecision::Abstain, obs);
     }
     let docs: Vec<String> = ex.iter().map(|x| exchange_text(lang, x)).collect();
-    let scores = match tokio::time::timeout(RERANK_DEADLINE, u.client.rerank(&q, &docs)).await {
-        Ok(Ok(s)) if s.len() == ex.len() => s,
+    let key: RerankKey = (u.key.clone(), q.clone(), docs);
+    let reranked = match u.cache.get(&key) {
+        Some(s) => Ok(Ok(s)),
+        None => tokio::time::timeout(deadlines.rerank, u.client.rerank(&q, &key.2)).await,
+    };
+    let scores = match reranked {
+        Ok(Ok(s)) if s.len() == ex.len() => {
+            u.cache.put(key, s.clone());
+            s
+        }
         failed => {
             // その要求だけ、v0.1 の規則に戻す (05 §3.5)。
             obs.degraded.push(

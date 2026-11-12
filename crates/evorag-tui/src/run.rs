@@ -116,6 +116,7 @@ fn event_loop(
     mut draft: Option<&mut Draft>,
 ) -> io::Result<()> {
     let mut last_save = Instant::now();
+    let mut idle = crate::app::IdleWatch::new(Instant::now());
     loop {
         // 下書きを 5 秒ごとに保存する (04 §3)。
         if last_save.elapsed() >= Duration::from_secs(5) {
@@ -126,6 +127,13 @@ fn event_loop(
         }
         while let Ok(ev) = events.try_recv() {
             app.on_event(ev);
+        }
+        // 入力が止まったら、想起を先に済ませてもらう (05 §4.5)。
+        if idle.due(app.input.text(), Instant::now())
+            && let Some(text) = app.idle_text()
+        {
+            core.command(Command::InputIdle { text });
+            idle.sent();
         }
         term.draw(|f| render::draw(app, f))?;
         // トークンの受信から描画までを短く保つ (NFR-104 の 50 ms)。

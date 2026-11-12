@@ -393,6 +393,7 @@ fn main() -> ExitCode {
         probe_models: true,
         sleep: cfg.sleep(),
         memory_enabled: cfg.memory_enabled(),
+        precompute: cfg.precompute(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };
