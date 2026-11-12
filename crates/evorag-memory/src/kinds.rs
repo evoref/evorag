@@ -33,6 +33,29 @@ pub const REL_IN_SESSION: &str = "in_session";
 pub const REL_REPLY_TO: &str = "reply_to";
 /// 信号 → 対象のターン。
 pub const REL_TARGET: &str = "target";
+/// 関係: 埋め込み → 対象 (チャンク) (05 §2.2)。
+pub const REL_EMBEDDING_OF: &str = "embedding_of";
+
+/// 埋め込み (05 §2.2、v0.2)。どの記録のどの単位の、どのモデルの埋め込みか。ベクトルは `blobs` の
+/// part 0 (f32 のリトルエンディアン)。作り直せる派生の記録なので、ジャーナルに書かない。
+pub const KIND_EMBEDDING: &str = "embedding";
+/// 埋め込みの単位: チャンク。
+pub const UNIT_CHUNK: &str = "chunk";
+
+/// `embedding` の本体 (v1)。出典の ID を本体にも持つ (03 §4.2 の規則 12)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingBody {
+    /// 対象の記録 (チャンク)。
+    pub target: Id,
+    /// 単位 (`chunk`、後の版で `key`)。知らない値は読んで残し、使わない。
+    pub unit: String,
+    /// 対象のセッション (今のセッションを候補から除くため)。
+    pub session: Id,
+    /// 埋め込みのモデルの model_key。
+    pub model_key: String,
+    pub dim: u32,
+}
+
 /// 関係: チャンク → 元のターン (05 §2.4)。
 pub const REL_CHUNK_OF: &str = "chunk_of";
 
@@ -122,6 +145,8 @@ pub fn kinds() -> Vec<KindSpec> {
         KindSpec::new(KIND_MODEL_PROBE, 1),
         // チャンクは作り直せる派生の記録 (05 §2.4)。関係は書くときに足す。
         KindSpec::new(KIND_CHUNK, 1),
+        // 埋め込みは作り直せる派生の記録 (05 §2.2)。
+        KindSpec::new(KIND_EMBEDDING, 1),
         // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。

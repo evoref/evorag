@@ -235,6 +235,21 @@ fn chunk_v1() {
 }
 
 #[test]
+fn embedding_v1() {
+    check(
+        KIND_EMBEDDING,
+        id("019a6a2b-0000-7000-8000-00000000000f"),
+        EmbeddingBody {
+            target: id("019a6a2b-0000-7000-8000-00000000000e"),
+            unit: UNIT_CHUNK.into(),
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            model_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
+            dim: 1024,
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,

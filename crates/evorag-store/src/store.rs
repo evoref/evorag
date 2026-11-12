@@ -715,6 +715,12 @@ impl Store {
         )
     }
 
+    /// その日の日次の退避がまだ無いか (03 §7.1)。
+    pub fn daily_backup_due(&self, backups: Option<&Path>) -> bool {
+        let default = self.root.join(crate::backup::BACKUPS_DIR);
+        crate::backup::daily_due(backups.unwrap_or(&default), self.clock.now().as_millis())
+    }
+
     /// その種類をジャーナルにも書くか。
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)

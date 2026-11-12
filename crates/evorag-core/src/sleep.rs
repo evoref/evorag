@@ -79,11 +79,76 @@ impl SleepConfig {
 
 /// 手順 (04 §4 の手順の一覧のうち、この版にあるもの)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Step {
+pub(crate) enum Step {
     /// モデルの性質の点検 (06 §3.3)。起動後の点検。
     Probe,
     /// リランクのしきい値の較正 (05 §3.7)。起動後の点検。
     Calibrate,
+    /// チャンクの埋め込みを作る (04 §4 の手順 1)。sleep-time の手順。
+    Embed,
+    /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
+    Backup,
+}
+
+/// sleep-time の手順を動かせる状態か。
+fn sleep_ready(inner: &Inner) -> Result<(), BackgroundState> {
+    let cfg = &inner.sleep;
+    if !cfg.enabled {
+        return Err(BackgroundState::Off);
+    }
+    let mut idle = cfg.idle;
+    if (inner.probe.power)() == Power::Battery {
+        match cfg.on_battery {
+            OnBattery::Stop => return Err(BackgroundState::PausedBattery),
+            OnBattery::Reduce => idle *= 5,
+            OnBattery::Normal => {}
+        }
+    }
+    if !crate::has_space(inner) {
+        return Err(BackgroundState::PausedLowSpace);
+    }
+    if is_running(inner)
+        || inner.activity.held.load(Ordering::SeqCst)
+        || inner.activity.since() < idle
+    {
+        return Err(BackgroundState::Idle);
+    }
+    Ok(())
+}
+
+/// 要る sleep-time の手順 (状態から求める)。
+fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
+    let waiting = |s: Step| skip.get(&s).is_some_and(|t| t.elapsed() < BACKOFF);
+    if !waiting(Step::Embed) && crate::embedding::needed(inner) {
+        return Some(Step::Embed);
+    }
+    if !waiting(Step::Backup)
+        && inner.startup_done.load(Ordering::SeqCst)
+        && inner.store.daily_backup_due(inner.backup_dir.as_deref())
+    {
+        return Some(Step::Backup);
+    }
+    None
+}
+
+/// 次に動かす手順。動かせないときは、その理由の状態。
+fn next(inner: &Inner, skip: &HashMap<Step, Instant>) -> Result<Step, BackgroundState> {
+    let check =
+        check_ready(inner).and_then(|()| next_check(inner, skip).ok_or(BackgroundState::Idle));
+    if let Ok(step) = check {
+        return Ok(step);
+    }
+    match sleep_ready(inner) {
+        Ok(()) => next_sleep(inner, skip).ok_or(BackgroundState::Idle),
+        // 点検を止めている理由 (電池・空き) を先に出す。
+        Err(BackgroundState::Off | BackgroundState::Idle) => match check {
+            Err(state @ (BackgroundState::PausedBattery | BackgroundState::PausedLowSpace)) => {
+                Err(state)
+            }
+            _ => Err(sleep_ready(inner).err().unwrap_or(BackgroundState::Idle)),
+        },
+        Err(state) => Err(state),
+    }
 }
 
 /// 起動後の点検を動かせる状態か。動かせないときは、その理由の状態。
@@ -118,9 +183,28 @@ fn next_check(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     None
 }
 
-/// 要る手順があるか (状態の行の「較正中」と、試験の待ち合わせ)。
+/// 要る手順 (待たせている手順を除く。試験の待ち合わせと、時間切れのときの知らせ)。
+pub(crate) fn pending_steps(inner: &Inner) -> Vec<String> {
+    let backoff = inner
+        .backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut out = Vec::new();
+    if let Some(s) = next_check(inner, &backoff) {
+        out.push(format!("{s:?}"));
+    }
+    if inner.sleep.enabled
+        && let Some(s) = next_sleep(inner, &backoff)
+    {
+        out.push(format!("{s:?}"));
+    }
+    out
+}
+
+/// 要る手順があるか (待たせている手順を除く)。
 pub(crate) fn pending(inner: &Inner) -> bool {
-    next_check(inner, &HashMap::new()).is_some()
+    !pending_steps(inner).is_empty()
 }
 
 /// 起動後の点検が止められていないか (電池で `stop`)。
@@ -140,7 +224,7 @@ fn set_state(inner: &Inner, state: BackgroundState) {
     }
 }
 
-/// 待っているときの状態 (sleep-time の手順はまだ無いので、設定で切っていれば「切っている」)。
+/// 待っているときの状態 (設定で切っていれば「切っている」)。
 fn resting(inner: &Inner) -> BackgroundState {
     if inner.sleep.enabled {
         BackgroundState::Idle
@@ -151,28 +235,34 @@ fn resting(inner: &Inner) -> BackgroundState {
 
 /// 裏の処理を回す。終了のときに止める (task を abort して待つ)。
 pub(crate) async fn run(inner: Arc<Inner>) {
-    let mut backoff: HashMap<Step, Instant> = HashMap::new();
     loop {
+        // 待たせている手順 (共有して、待ち合わせの判定でも見る)。
+        let backoff = inner
+            .backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // 操作の世代を、動かすと決める前に覚える (決めた後の操作を取りこぼさないため)。
         let generation = inner.activity.generation();
-        match check_ready(&inner) {
-            Ok(()) => match next_check(&inner, &backoff) {
-                Some(step) => {
-                    set_state(&inner, BackgroundState::Working);
-                    let done = run_step(&inner, step, generation).await;
-                    tracing::info!(?step, done, "background step");
-                    set_state(&inner, resting(&inner));
-                    if done {
-                        // 終えたのにまだ要る (保存できなかったなど) なら、しばらく待たせる。
-                        if next_check(&inner, &backoff) == Some(step) {
-                            tracing::warn!(?step, "background step still needed; backing off");
-                            backoff.insert(step, Instant::now());
-                        }
-                        continue;
+        match next(&inner, &backoff) {
+            Ok(step) => {
+                set_state(&inner, BackgroundState::Working);
+                let done = run_step(&inner, step, generation).await;
+                tracing::info!(?step, done, "background step");
+                set_state(&inner, resting(&inner));
+                if done {
+                    // 終えたのにまだ要る (保存できなかったなど) なら、しばらく待たせる。
+                    if next(&inner, &backoff) == Ok(step) {
+                        tracing::warn!(?step, "background step still needed; backing off");
+                        inner
+                            .backoff
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(step, Instant::now());
                     }
+                    continue;
                 }
-                None => set_state(&inner, resting(&inner)),
-            },
+            }
             Err(BackgroundState::Idle) => set_state(&inner, resting(&inner)),
             Err(state) => set_state(&inner, state),
         }
@@ -198,6 +288,12 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> bool {
         match step {
             Step::Probe => crate::probe_unprobed(inner).await,
             Step::Calibrate => crate::calibrate_now(inner).await,
+            Step::Embed => crate::embedding::run(inner).await,
+            Step::Backup => {
+                // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
+                let worker = inner.clone();
+                let _ = tokio::task::spawn_blocking(move || crate::backup_now(&worker)).await;
+            }
         }
     };
     let done = tokio::select! {

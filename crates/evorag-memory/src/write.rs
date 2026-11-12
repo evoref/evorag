@@ -358,6 +358,41 @@ impl Writes<'_> {
         Ok((made, ops))
     }
 
+    /// 埋め込みを書く (05 §2.2)。ベクトルは `blobs` の part 0 に、f32 のリトルエンディアンで置く。
+    pub fn embedding(
+        &self,
+        body: &EmbeddingBody,
+        vector: &[f32],
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let id = self.ids.next_id();
+        let bytes: Vec<u8> = vector.iter().flat_map(|x| x.to_le_bytes()).collect();
+        Ok((
+            id,
+            vec![
+                WriteOp::Put(envelope(id, KIND_EMBEDDING, self.clock.now(), body)?),
+                WriteOp::PutBlob { id, part: 0, bytes },
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_EMBEDDING_OF.into(),
+                    to: body.target,
+                    attrs: Vec::new(),
+                },
+            ],
+        ))
+    }
+
+    /// 埋め込みを消す (記録・ベクトル・関係)。
+    pub fn delete_embedding(&self, id: Id) -> Vec<WriteOp> {
+        vec![
+            WriteOp::Delete {
+                kind: KIND_EMBEDDING.into(),
+                id,
+            },
+            WriteOp::DeleteBlobs(id),
+            WriteOp::DeleteLinksOf(id),
+        ]
+    }
+
     /// 想起への操作を記録する (05 §5.2)。
     pub fn recall_feedback(
         &self,
@@ -447,6 +482,15 @@ pub fn delete_session(
         }
         // チャンクは元のターンと一緒に消す (出典の無い派生の記録、03 §4.2 の規則 12)。
         for (c, _) in tx.links_to(turn, REL_CHUNK_OF)? {
+            // チャンクの埋め込みも消す (ベクトルを含む)。
+            for (emb, _) in tx.links_to(c, REL_EMBEDDING_OF)? {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_EMBEDDING.into(),
+                    id: emb,
+                });
+                ops.push(WriteOp::DeleteBlobs(emb));
+                ops.push(WriteOp::DeleteLinksOf(emb));
+            }
             ops.push(WriteOp::Delete {
                 kind: KIND_CHUNK.into(),
                 id: c,

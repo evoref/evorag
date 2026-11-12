@@ -56,6 +56,7 @@ recall_simple = "想起: 簡易"
 recall_candidates = "想起: 候補だけ"
 recall_calibrating = "想起: 候補だけ (較正中)"
 recall_failed = "想起: 候補だけ → evorag setup"
+recall_rebuilding = "想起: 作り直し中 {percent}%"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
 

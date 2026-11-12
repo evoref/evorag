@@ -222,7 +222,15 @@ pub fn draw(app: &App, f: &mut Frame) {
     // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
     // 想起の欄 (07 §2.1)。較正に落ちたときは「→ evorag setup」を添える。
     let recall = st.recall.map(|r| {
+        if let RecallState::Rebuilding { percent } = r {
+            let text = app.catalog.with(
+                MessageKey::UiRecallRebuilding,
+                &[("percent", &percent.to_string())],
+            );
+            return format!(" {text} │");
+        }
         let k = match r {
+            RecallState::Rebuilding { .. } => MessageKey::UiRecallStandard,
             RecallState::Standard => MessageKey::UiRecallStandard,
             RecallState::Simple => MessageKey::UiRecallSimple,
             RecallState::CandidatesOnly {
