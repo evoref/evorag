@@ -95,7 +95,7 @@ fn every_record_is_written_once_as_an_envelope() {
         dir.path().file_name().unwrap().to_string_lossy()
     ));
     let _ = std::fs::remove_dir_all(&out);
-    let report = export(dir.path(), &out, "0.0.6", 1).unwrap();
+    let report = export(dir.path(), &out, "0.0.6", 1, &[]).unwrap();
     assert_eq!(report.kinds.get("note"), Some(&2));
     assert_eq!(report.kinds.get("mark"), Some(&1));
     assert_eq!(report.skipped_corrupt, 1);
@@ -134,7 +134,7 @@ fn every_record_is_written_once_as_an_envelope() {
 
     // 中身のあるフォルダには書かない。
     assert!(matches!(
-        export(dir.path(), &out, "0.0.6", 2),
+        export(dir.path(), &out, "0.0.6", 2, &[]),
         Err(ExportError::NotEmpty(_))
     ));
     let _ = std::fs::remove_dir_all(&out);
@@ -142,8 +142,26 @@ fn every_record_is_written_once_as_an_envelope() {
     // 使っているプロセスがあれば断る。
     let store = open(dir.path());
     assert!(matches!(
-        export(dir.path(), &out, "0.0.6", 3),
+        export(dir.path(), &out, "0.0.6", 3, &[]),
         Err(ExportError::Open(_))
     ));
     drop(store);
+}
+
+/// verifies: AC-FR-209-1 (作り直せる種類は書き出さない、03 §11)
+#[test]
+fn excluded_kinds_are_not_written() {
+    let dir = TempDir::new("export-exclude");
+    let store = open(dir.path());
+    write_records(&store);
+    drop(store);
+    let out = dir.path().join("..").join(format!(
+        "{}-out",
+        dir.path().file_name().unwrap().to_string_lossy()
+    ));
+    let _ = std::fs::remove_dir_all(&out);
+    let report = export(dir.path(), &out, "0.0.6", 1, &["mark"]).unwrap();
+    assert_eq!(report.kinds.get("note"), Some(&3));
+    assert_eq!(report.kinds.get("mark"), None);
+    assert!(!out.join("mark.jsonl").exists());
 }

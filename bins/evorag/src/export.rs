@@ -47,7 +47,14 @@ fn copy_config(config_file: &Path, out: &Path) -> std::io::Result<bool> {
 }
 
 pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms: i64) -> ExitCode {
-    let report = match export(data_root, out, env!("CARGO_PKG_VERSION"), now_ms) {
+    // 点検の結果は作り直せるので書き出さない (03 §11)。
+    let report = match export(
+        data_root,
+        out,
+        env!("CARGO_PKG_VERSION"),
+        now_ms,
+        &[evorag_memory::KIND_MODEL_PROBE],
+    ) {
         Ok(r) => r,
         Err(ExportError::NotEmpty(p)) => {
             eprintln!(
