@@ -16,8 +16,8 @@ use std::sync::Arc;
 use evorag_index::lex::{LexIndex, Opened};
 use evorag_llm::LlmClient;
 use evorag_memory::{
-    ChunkBody, KIND_CHUNK, KIND_SESSION, KIND_TURN, RecallDecision, RecallRecord, Turn, TurnBody,
-    TurnRole, TurnState,
+    ChunkBody, KIND_CHUNK, KIND_NOTE, KIND_SESSION, KIND_TURN, NoteBody, RecallDecision,
+    RecallRecord, Turn, TurnBody, TurnRole, TurnState,
 };
 use evorag_retrieval::doc_input;
 use evorag_retrieval::recall::{Decision, RecallConfig, recall};
@@ -81,6 +81,28 @@ pub(crate) fn chunk_doc(id: Id, c: &ChunkBody, text: &str) -> evorag_index::lex:
     doc_input(id, c.session, &evorag_retrieval::chunk::slice(text, span))
 }
 
+/// ノートの鍵を索引の項目にする (鍵ごとに 1 件。ID はノートの ID、04 §2)。
+pub(crate) fn note_docs(id: Id, n: &NoteBody) -> Vec<evorag_index::lex::DocInput> {
+    n.keys.iter().map(|k| doc_input(id, n.session, k)).collect()
+}
+
+/// 索引の当たり (チャンクかノート) が指すターン。ノートは、指す往復の発話のターンのすべて (04 §2)。
+fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id) -> Vec<Id> {
+    if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_CHUNK, id) {
+        return e
+            .body_as::<ChunkBody>()
+            .map(|c| vec![c.turn])
+            .unwrap_or_default();
+    }
+    match rtx.get(KIND_NOTE, id) {
+        Ok(Some(Read::Ok(e))) => e
+            .body_as::<NoteBody>()
+            .map(|n| n.exchanges)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// 起動時の突き合わせの計画 (DB を読むだけ)。
 #[derive(Default)]
 pub(crate) struct SyncPlan {
@@ -88,7 +110,7 @@ pub(crate) struct SyncPlan {
     pub delete: Vec<Id>,
     /// チャンクの無いターンの、新しいチャンク。
     pub create: Vec<ChunkBody>,
-    /// 残すチャンクの、索引の 1 件。
+    /// 残すチャンクとノートの鍵の、索引の 1 件。
     pub keep: Vec<evorag_index::lex::DocInput>,
     /// ターンの本文 (新しいチャンクの索引の 1 件を作るため)。
     pub texts: HashMap<Id, String>,
@@ -118,8 +140,23 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
         }
         true
     });
+    let mut notes: Vec<(Id, NoteBody)> = Vec::new();
+    let _ = rtx.for_each(KIND_NOTE, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<NoteBody>()
+        {
+            notes.push((e.id, b));
+        }
+        true
+    });
     drop(rtx);
     let mut plan = SyncPlan::default();
+    // ノートの鍵 (出典の往復の残っているもの。出典の無いノートは、ノートの手順が消す)。
+    for (id, n) in &notes {
+        if n.exchanges.iter().any(|t| turns.contains_key(t)) {
+            plan.keep.extend(note_docs(*id, n));
+        }
+    }
     let mut covered: HashSet<Id> = HashSet::new();
     for (id, c) in chunks {
         match turns.get(&c.turn) {
@@ -151,15 +188,10 @@ fn turn_hits(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for h in hits {
-        let turn = match rtx.get(KIND_CHUNK, h.id) {
-            Ok(Some(Read::Ok(e))) => match e.body_as::<ChunkBody>() {
-                Ok(c) => c.turn,
-                Err(_) => continue,
-            },
-            _ => continue,
-        };
-        if seen.insert(turn) {
-            out.push(evorag_retrieval::recall::Hit { id: turn, ..*h });
+        for turn in hit_turns(&rtx, h.id) {
+            if seen.insert(turn) {
+                out.push(evorag_retrieval::recall::Hit { id: turn, ..*h });
+            }
         }
     }
     out
@@ -539,11 +571,10 @@ fn vector_turns(store: &Store, rows: &[(evorag_index::vec::VecRow, f32)]) -> Vec
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (row, _) in rows {
-        if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_CHUNK, row.id)
-            && let Ok(c) = e.body_as::<ChunkBody>()
-            && seen.insert(c.turn)
-        {
-            out.push(c.turn);
+        for turn in hit_turns(&rtx, row.id) {
+            if seen.insert(turn) {
+                out.push(turn);
+            }
         }
     }
     out

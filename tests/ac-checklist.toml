@@ -727,6 +727,15 @@ note = ""
 # v0.2 (01 §5.5)。M2.1 から足していく。
 
 [[ac]]
+id = "AC-FR-303-1"
+requirement = "FR-303"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/notes.rs::a_key_hit_attaches_the_original_exchange", "crates/evorag-core/tests/notes.rs::a_note_is_made_once_the_segment_closes", "crates/evorag-memory/src/note.rs::keys_are_cut_filtered_and_capped"]
+manual = ""
+note = "鍵だけが合う問いで、出典の往復の原文が添えられ、鍵の文は添えられない (ノートが無ければ添わない)。鍵の検査は決定論の単体試験。"
+
+[[ac]]
 id = "AC-FR-414-1"
 requirement = "FR-414"
 level = "Must"

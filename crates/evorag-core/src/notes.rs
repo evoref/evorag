@@ -239,6 +239,44 @@ async fn make_keys(
     Err(KeysError::Invalid)
 }
 
+/// ノートを書き (消し)、語彙の索引に鍵を足し、消したノートの項目を語彙とベクトルの索引から除く。
+/// チャンクと索引を変える処理の鍵の下の、落とされない task で行う (embedding.rs の冒頭)。鍵の埋め込みは、
+/// 埋め込みの手順が語彙の索引との差から作る。
+async fn save(
+    inner: &Arc<Inner>,
+    ops: Vec<evorag_store::WriteOp>,
+    gone: Vec<Id>,
+    made: Option<(Id, NoteBody)>,
+) -> bool {
+    let worker = inner.clone();
+    let task = tokio::spawn(async move {
+        let _lock = worker.index_lock.lock().await;
+        if crate::write_derived(&worker, ops).await.is_err() {
+            return false;
+        }
+        let gone: HashSet<Id> = gone.into_iter().collect();
+        crate::embedding::remove_everywhere(&worker, &gone);
+        if let Some(ix) = worker.index.clone() {
+            let docs = made
+                .as_ref()
+                .map(|(id, n)| crate::recall::note_docs(*id, n))
+                .unwrap_or_default();
+            let _ = tokio::task::spawn_blocking(move || {
+                if !gone.is_empty() {
+                    ix.remove(&gone)?;
+                }
+                if !docs.is_empty() {
+                    ix.add(docs)?;
+                }
+                Ok::<_, std::io::Error>(())
+            })
+            .await;
+        }
+        true
+    });
+    task.await.unwrap_or(false)
+}
+
 /// 手順を動かす。1 つでもノートを書けたら `true`。
 pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     let version = inner
@@ -266,7 +304,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             });
             ops.push(evorag_store::WriteOp::DeleteLinksOf(*n));
         }
-        if crate::write_derived(inner, ops).await.is_err() {
+        if !save(inner, ops, plan.orphans.clone(), None).await {
             return false;
         }
         progressed = true;
@@ -309,10 +347,10 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             model_key: server.model_key.clone(),
             rules: NOTE_RULES,
         };
-        let Ok((_, ops)) = crate::writes(inner).note(&w.old, &w.old_embeddings, &body) else {
+        let Ok((id, ops)) = crate::writes(inner).note(&w.old, &w.old_embeddings, &body) else {
             return progressed;
         };
-        if crate::write_derived(inner, ops).await.is_err() {
+        if !save(inner, ops, w.old, Some((id, body))).await {
             return progressed;
         }
         progressed = true;
