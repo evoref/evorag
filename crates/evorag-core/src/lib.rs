@@ -9,6 +9,7 @@
 //! 書き手のスレッドはここで作る (02 §4.3 の R7)。tokio の実行器の中で使う。
 
 pub mod calibration;
+pub(crate) mod embedding;
 pub mod power;
 mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
@@ -234,6 +235,12 @@ struct Inner {
     working: std::sync::atomic::AtomicBool,
     /// 較正が最後に失敗した時刻。
     calib_failed_at: Mutex<Option<std::time::Instant>>,
+    /// 起動時の突き合わせと退避が済んだ (sleep-time の退避は、その後で日をまたいだときだけ)。
+    startup_done: std::sync::atomic::AtomicBool,
+    /// 今の埋め込みのモデルのベクトルの索引 (05 §2.2)。
+    vectors: Mutex<Option<embedding::Vectors>>,
+    /// ベクトルの索引を DB と突き合わせ終えた埋め込みのモデル (それまでは埋め込みの手順を動かさない)。
+    vectors_opened: Mutex<Option<String>>,
     /// 途中まで済んだ較正 (リランカーの model_key と、済んだ問いの結果)。裏の処理で落とされたら続きから。
     calib_progress: Mutex<Option<(String, CalibProgress)>>,
     aux_request_extra: evorag_llm::RequestExtra,
@@ -518,6 +525,9 @@ impl Core {
             working: std::sync::atomic::AtomicBool::new(false),
             calib_failed_at: Mutex::new(None),
             calib_progress: Mutex::new(None),
+            vectors: Mutex::new(None),
+            vectors_opened: Mutex::new(None),
+            startup_done: std::sync::atomic::AtomicBool::new(false),
             aux_request_extra: cfg.aux_request_extra,
             background_checks: cfg.probe_models,
             threshold: Mutex::new(None),
@@ -562,8 +572,10 @@ impl Core {
         // 前の起動で終わらなかった退避の整理を続けてから、今日の退避を作る (03 §7.3)。
         let worker = core.inner.clone();
         let task = tokio::spawn(async move {
-            // チャンクと語彙の索引を DB と突き合わせる (05 §2.3・§2.4)。
+            // チャンクと語彙の索引を DB と突き合わせ、ベクトルの索引を開く (05 §2.2〜§2.4)。
             sync_chunks(&worker, rebuild_index).await;
+            embedding::open(&worker).await;
+            let done = worker.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let jobs = worker
                     .store
@@ -577,13 +589,12 @@ impl Core {
                 for (job, ids) in jobs {
                     purge(&worker, job, &ids);
                 }
-                match worker.store.daily_backup(worker.backup_dir.as_deref()) {
-                    Ok(Some(_)) => tracing::info!("daily backup written"),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(error = %e, "daily backup failed"),
-                }
+                backup_now(&worker);
             })
             .await;
+            done.startup_done
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            done.activity.kick();
         });
         core.inner
             .background
@@ -965,7 +976,7 @@ async fn save_probe_result(
 ) {
     {
         if let Ok(ops) = writes(inner).save_probe(None, &body) {
-            let _ = write(inner, ops).await;
+            let _ = write_derived(inner, ops).await;
         }
         let found = probe::issues(&body);
         if !found.is_empty() {
@@ -1043,6 +1054,10 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
         };
         let rerank_ready =
             info.role == evorag_memory::ROLE_RERANK && info.status == RoleStatus::Ready;
+        if info.role == evorag_memory::ROLE_EMBED && info.status == RoleStatus::Ready {
+            embedding::open(inner).await;
+            inner.activity.kick();
+        }
         emit(inner, Event::RoleChanged { info, recorded_now });
         if rerank_ready {
             inner.load_threshold();
@@ -1151,6 +1166,9 @@ impl Inner {
         if self.reranker().is_none() {
             return RecallState::Simple;
         }
+        if let Some(percent) = embedding::rebuilding(self) {
+            return RecallState::Rebuilding { percent };
+        }
         match &*self.threshold.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(b) if b.passed => RecallState::Standard,
             Some(_) => RecallState::CandidatesOnly {
@@ -1234,7 +1252,7 @@ pub(crate) async fn calibrate_now(inner: &Arc<Inner>) {
             let worker = inner.clone();
             let _ = tokio::spawn(async move {
                 if let Ok(ops) = writes(&worker).save_threshold(&body) {
-                    let _ = write(&worker, ops).await;
+                    let _ = write_derived(&worker, ops).await;
                 }
             })
             .await;
@@ -1363,11 +1381,21 @@ fn reject(inner: &Inner, key: MessageKey) {
 
 /// 書き手に送り、結果を待つ。
 async fn write(inner: &Inner, ops: Vec<WriteOp>) -> Result<(), String> {
+    write_with(inner, WriteRequest::conversation(ops)).await
+}
+
+/// 作り直せる派生の記録 (チャンク・埋め込み・点検・しきい値) を書く。書き切りを待たない
+/// (落ちても作り直せる。会話の追記を遅らせないため、03 §3.4)。
+pub(crate) async fn write_derived(inner: &Inner, ops: Vec<WriteOp>) -> Result<(), String> {
+    write_with(inner, WriteRequest::background(ops)).await
+}
+
+async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
     let (tx, rx) = oneshot::channel();
     inner
         .writer
         .submit(
-            WriteRequest::conversation(ops),
+            req,
             Box::new(move |r| {
                 let _ = tx.send(r);
             }),
@@ -1533,9 +1561,13 @@ async fn delete(inner: &Arc<Inner>) {
         return;
     }
     // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。
+    let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
     if let Some(ix) = inner.index.clone() {
-        let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
+        let gone = gone.clone();
         let _ = tokio::task::spawn_blocking(move || ix.remove(&gone)).await;
+    }
+    if let Some((_, vx)) = embedding::current(inner) {
+        let _ = tokio::task::spawn_blocking(move || vx.remove(&gone)).await;
     }
     inner
         .state
@@ -1808,10 +1840,34 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
             continue;
         }
         let old_ids: Vec<Id> = old.iter().map(|(i, _)| *i).collect();
-        let Ok((made, ops)) = writes(inner).chunks(&old_ids, &new) else {
+        let Ok((made, mut ops)) = writes(inner).chunks(&old_ids, &new) else {
             continue;
         };
-        if write(inner, ops).await.is_err() {
+        // 前のチャンクの埋め込みも消す (05 §2.2。ベクトルの索引からは下で除く)。
+        let embeddings: Vec<Id> = inner
+            .store
+            .read()
+            .ok()
+            .map(|r| {
+                old_ids
+                    .iter()
+                    .flat_map(|c| {
+                        r.links_to(*c, evorag_memory::REL_EMBEDDING_OF)
+                            .unwrap_or_default()
+                    })
+                    .map(|(e, _)| e)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let w = writes(inner);
+        ops.extend(embeddings.iter().flat_map(|e| w.delete_embedding(*e)));
+        if let Some((_, vx)) = embedding::current(inner)
+            && !old_ids.is_empty()
+        {
+            let gone: std::collections::HashSet<Id> = old_ids.iter().copied().collect();
+            let _ = tokio::task::spawn_blocking(move || vx.remove(&gone)).await;
+        }
+        if write_derived(inner, ops).await.is_err() {
             continue;
         }
         let docs: Vec<_> = made
@@ -1827,6 +1883,28 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
         })
         .await;
     }
+}
+
+/// 日次の退避を作る (その日の分が無ければ、03 §7.1)。
+pub(crate) fn backup_now(inner: &Inner) {
+    if !enough_space(inner) {
+        return;
+    }
+    match inner.store.daily_backup(inner.backup_dir.as_deref()) {
+        Ok(Some(_)) => tracing::info!("daily backup written"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "daily backup failed"),
+    }
+}
+
+/// 想起の状態を知らせる (埋め込みの作り直しの進み具合など)。
+pub(crate) fn emit_recall_state(inner: &Inner) {
+    emit(
+        inner,
+        Event::RecallStatus {
+            state: inner.recall_state(),
+        },
+    );
 }
 
 /// 起動時: チャンクと語彙の索引を DB と突き合わせる。チャンクの無いターンにはチャンクを作り、元の
@@ -1847,7 +1925,7 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) {
         let Ok((made, ops)) = writes(inner).chunks(&plan.delete, &plan.create) else {
             return;
         };
-        if write(inner, ops).await.is_err() {
+        if write_derived(inner, ops).await.is_err() {
             tracing::warn!("chunks not written");
             return;
         }

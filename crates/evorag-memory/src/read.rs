@@ -196,6 +196,36 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
 }
 
 /// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+/// 埋め込みのモデルの埋め込み (記録の ID、本体、ベクトル)。`model_key` が `None` ならすべて。
+pub fn embeddings_of_model(
+    tx: &ReadTxn<'_>,
+    model_key: Option<&str>,
+) -> Result<Vec<(Id, EmbeddingBody, Vec<f32>)>, MemoryError> {
+    let mut found = Vec::new();
+    tx.for_each(KIND_EMBEDDING, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<EmbeddingBody>()
+            && model_key.is_none_or(|k| k == b.model_key)
+        {
+            found.push((e.id, b));
+        }
+        true
+    })?;
+    let mut out = Vec::with_capacity(found.len());
+    for (id, b) in found {
+        let v: Vec<f32> = tx
+            .blob(id, 0)?
+            .unwrap_or_default()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect();
+        out.push((id, b, v));
+    }
+    Ok(out)
+}
+
 /// ターンのチャンク (05 §2.4)。
 pub fn chunks_of(tx: &ReadTxn<'_>, turn: Id) -> Result<Vec<(Id, ChunkBody)>, MemoryError> {
     let mut out = Vec::new();

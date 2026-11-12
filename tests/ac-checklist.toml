@@ -935,18 +935,18 @@ id = "AC-FR-301-1"
 requirement = "FR-301"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database"]
 manual = ""
-note = "部分: 枠組みと、今ある手順 (点検・較正。較正は済んだ問いの結果を覚えて続きから求める)。job の進み具合の記録と強制終了の後の再開は、最初の段階的な手順 (M2.5 の埋め込み) と合わせて足す (08 §2.3 の注)。"
+note = "枠組みと手順 (点検・較正・埋め込み・退避)。較正は済んだ問いを覚えて続きから、埋め込みは足りない分を状態から求めて続きから (job を書かない、04 §4)。chat の裏の要求 (M2.7 のノート) も同じ枠組みに載せる。"
 
 [[ac]]
 id = "AC-FR-301-2"
 requirement = "FR-301"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/sleep_time.rs::on_battery_the_background_work_is_reduced_or_stopped", "bins/evorag/src/config.rs::sleep_settings_are_read_and_checked"]
+tests = ["crates/evorag-core/tests/sleep_time.rs::on_battery_the_background_work_is_reduced_or_stopped", "bins/evorag/src/config.rs::sleep_settings_are_read_and_checked", "crates/evorag-core/tests/embeddings.rs::on_battery_reduce_delays_the_embedding"]
 manual = ""
-note = "部分: 電源の状態を注入して確かめる。stop は起動後の点検も止める。reduce が待ち時間を延ばすのは sleep-time の手順 (M2.5 から)、先に済ませる処理 (05 §4.5) への効き方は M2.6 で足す。"
+note = "部分: 電源の状態を注入して確かめる。stop は起動後の点検も止める。reduce は sleep-time の手順 (埋め込み) の待ち時間を 5 倍にする (embeddings の試験)、先に済ませる処理 (05 §4.5) への効き方は M2.6 で足す。"
 
 [[ac]]
 id = "AC-FR-504-1"
@@ -964,3 +964,11 @@ status = "test"
 tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
 manual = ""
 note = "操作から、動いている裏の要求が落とされるまでの時間を測る (再生の試験。本物の llama-server が接続を切られて止まるまでの 0.2 秒は S-02)。"
+[[ac]]
+id = "AC-FR-410-1"
+requirement = "FR-410"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/embeddings.rs::switching_the_embedding_model_rebuilds_and_keeps_one_previous_generation", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-core/tests/model_binding.rs"]
+manual = ""
+note = "記録と違う埋め込みのモデルでは役割を使わない (model_binding の試験、M2.2)。切り替えると全件を作り直し、前のモデルの索引を 1 世代残す。作り直しの間の状態の行は「想起: 作り直し中 N%」。ベクトルの検索を想起に使うのは M2.6 (それまでは語彙の候補とリランクで答える)。"

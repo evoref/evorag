@@ -165,6 +165,8 @@ message_keys! {
     UiRecallCandidates => "ui.status.recall_candidates",
     UiRecallCalibrating => "ui.status.recall_calibrating",
     UiRecallFailed => "ui.status.recall_failed",
+    /// 引数: `percent`。
+    UiRecallRebuilding => "ui.status.recall_rebuilding",
     UiCalibrated => "ui.notice.calibrated",
     UiCalibrationFailed => "ui.notice.calibration_failed",
     /// 引数: `done`, `total`。
