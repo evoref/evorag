@@ -115,7 +115,12 @@ pub(crate) fn warm_next(inner: &Arc<Inner>, session: Id) {
 
 /// 入力が止まった (05 §4.5)。送る前の発話 `text` で、想起を先に済ませる。
 pub(crate) fn input_idle(inner: &Arc<Inner>, text: String) {
+    start_idle(inner, text);
+    // 受け取ったと数えるのは、task を登録した後 (試験の待ち合わせが、登録の前に終わらないように)。
     inner.pre.seen.fetch_add(1, Ordering::SeqCst);
+}
+
+fn start_idle(inner: &Arc<Inner>, text: String) {
     if !inner.precompute || on_battery(inner).is_some_and(|b| b != OnBattery::Normal) {
         return;
     }
