@@ -52,6 +52,7 @@ evorag/
   - `spec: 03 §5.2` (実装の根拠の節)
   - `verifies: AC-FR-301-1` (その試験が判定する受入基準)
 - v0.1 の間は、受入基準の一覧 `tests/ac-checklist.toml` (人が保守する) で、各 AC に試験か手動の確認手順が対応していることを確かめる。生成による突合 (`xtask trace`) は v0.2 で入れる (確定、[OQ-19](10-decisions.md#oq-19-トレーサビリティの機械化の時期))。
+- v0.2 からは `cargo xtask trace [--version X.Y]` で、要件の表 (01) から版までに Must になる AC を求め、コードの `verifies:`、対応表の `status = "test"` (試験か CI のジョブ)、`"manual"`・`"review"` (手順) のどれかが当たることを確かめる。後の版の範囲の AC は、対応表で `status = "later"` にして理由を `note` に書く。要件の表に無い AC を指す `verifies:` と、対応表に書いた試験が見つからないものも失敗にする。リリースのゲートで流す。
 
 ## 3. タスクの単位と PR の形
 
