@@ -173,6 +173,7 @@ fn config(root: &Path) -> CoreConfig {
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
+        precompute: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock)),
     }
