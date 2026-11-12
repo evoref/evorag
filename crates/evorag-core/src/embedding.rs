@@ -19,7 +19,10 @@ use std::time::Duration;
 use evorag_index::lex::Opened;
 use evorag_index::vec::{Unit, VecIndex, VecInput};
 use evorag_llm::LlmClient;
-use evorag_memory::{ChunkBody, EmbeddingBody, KIND_CHUNK, KIND_TURN, TurnBody, UNIT_CHUNK};
+use evorag_memory::{
+    ChunkBody, EmbeddingBody, KIND_CHUNK, KIND_NOTE, KIND_TURN, NoteBody, TurnBody, UNIT_CHUNK,
+    UNIT_KEY,
+};
 use evorag_store::Read;
 use evorag_types::Id;
 
@@ -200,33 +203,36 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
         .map(|ix| ix.snapshot().ids())
         .unwrap_or_default();
     let mut stale = Vec::new();
-    // 今と前のモデルの、対象ごとに 1 件 (新しい記録を残す。ID は時刻の順)。
-    let mut mine: HashMap<Id, (Id, EmbeddingBody)> = HashMap::new();
-    let mut prev: HashMap<Id, Id> = HashMap::new();
+    // 今と前のモデルの、対象と単位 (チャンク、またはノートの鍵の位置) ごとに 1 件 (新しい記録を残す。ID は
+    // 時刻の順)。
+    let mut mine: HashMap<(Id, Option<u32>), (Id, EmbeddingBody)> = HashMap::new();
+    let mut prev: HashMap<(Id, Option<u32>), Id> = HashMap::new();
     for (id, b) in bodies {
         let orphan = !chunks.is_empty() && !chunks.contains(&b.target);
         if orphan {
             stale.push(id);
         } else if b.model_key == key {
-            match mine.get(&b.target) {
+            let unit = (b.target, b.key);
+            match mine.get(&unit) {
                 Some((kept, _)) if *kept > id => stale.push(id),
                 Some((kept, _)) => {
                     stale.push(*kept);
-                    mine.insert(b.target, (id, b));
+                    mine.insert(unit, (id, b));
                 }
                 None => {
-                    mine.insert(b.target, (id, b));
+                    mine.insert(unit, (id, b));
                 }
             }
         } else if previous == Some(b.model_key.as_str()) {
-            match prev.get(&b.target) {
+            let unit = (b.target, b.key);
+            match prev.get(&unit) {
                 Some(kept) if *kept > id => stale.push(id),
                 Some(kept) => {
                     stale.push(*kept);
-                    prev.insert(b.target, id);
+                    prev.insert(unit, id);
                 }
                 None => {
-                    prev.insert(b.target, id);
+                    prev.insert(unit, id);
                 }
             }
         } else {
@@ -242,7 +248,7 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
         return Some(OpenPlan { stale, index: None });
     };
     let (ix, opened) = VecIndex::open(&dir, dim).ok()?;
-    let want: HashSet<Id> = mine.keys().copied().collect();
+    let want: HashSet<Id> = mine.keys().map(|(t, _)| *t).collect();
     let have = if opened == Opened::Ok {
         ix.snapshot().ids()
     } else {
@@ -253,7 +259,7 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
         ix.remove(&extra).ok()?;
     }
     let mut add = Vec::new();
-    for (target, (id, b)) in &mine {
+    for ((target, _), (id, b)) in &mine {
         if have.contains(target) {
             continue;
         }
@@ -261,7 +267,11 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
             Some(v) if v.len() == dim && b.dim as usize == dim => add.push(VecInput {
                 id: *target,
                 session: b.session,
-                unit: Unit::Chunk,
+                unit: if b.unit == UNIT_KEY {
+                    Unit::Key
+                } else {
+                    Unit::Chunk
+                },
                 vector: v,
             }),
             // ベクトルの壊れた・次元の違う記録は消す (もう一度埋め込む)。
@@ -305,13 +315,35 @@ pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
     }
 }
 
-/// チャンクの本文を読む (チャンクの範囲を、元のターンの本文から取る)。
-fn chunk_texts(inner: &Inner, ids: &[Id]) -> Vec<(Id, ChunkBody, String)> {
+/// 埋め込む 1 件 (チャンク 1 つ、またはノートの鍵 1 つ)。
+struct Item {
+    id: Id,
+    session: Id,
+    /// ノートの鍵の位置 (チャンクは `None`)。
+    key: Option<u32>,
+    text: String,
+}
+
+/// 埋め込む本文を読む。チャンクは範囲を元のターンの本文から取り、ノートは鍵のそれぞれを 1 件にする。
+fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
     let Ok(r) = inner.store.read() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for id in ids {
+        if let Ok(Some(Read::Ok(e))) = r.get(KIND_NOTE, *id)
+            && let Ok(n) = e.body_as::<NoteBody>()
+        {
+            for (i, k) in n.keys.iter().enumerate() {
+                out.push(Item {
+                    id: *id,
+                    session: n.session,
+                    key: Some(i as u32),
+                    text: k.clone(),
+                });
+            }
+            continue;
+        }
         let Ok(Some(Read::Ok(e))) = r.get(KIND_CHUNK, *id) else {
             continue;
         };
@@ -328,7 +360,12 @@ fn chunk_texts(inner: &Inner, ids: &[Id]) -> Vec<(Id, ChunkBody, String)> {
             start: c.start as usize,
             end: c.end as usize,
         };
-        out.push((*id, c, evorag_retrieval::chunk::slice(&tb.text, span)));
+        out.push(Item {
+            id: *id,
+            session: c.session,
+            key: None,
+            text: evorag_retrieval::chunk::slice(&tb.text, span),
+        });
     }
     out
 }
@@ -368,8 +405,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if batch.is_empty() {
             break;
         }
-        let items = chunk_texts(inner, &batch);
-        let read: HashSet<Id> = items.iter().map(|(id, _, _)| *id).collect();
+        let items = unit_texts(inner, &batch);
+        let read: HashSet<Id> = items.iter().map(|i| i.id).collect();
         // 読めないチャンク (区切りの作り直しで消えた直後など) は、このプロセスの間は飛ばす
         // (次の起動の突き合わせで片付く)。
         inner
@@ -380,25 +417,33 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if items.is_empty() {
             continue;
         }
-        let texts: Vec<String> = items.iter().map(|(_, _, t)| t.clone()).collect();
+        let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
         let vectors = embed_each(&*client, &texts).await;
+        // 断られ続ける単位は飛ばす (後ろを止めないため)。ノートは、鍵が 1 つでも断られたら全体を飛ばす
+        // (鍵の行はノートごとにまとめて入れ替えるので、一部だけを書かない)。
+        let refused: HashSet<Id> = items
+            .iter()
+            .zip(&vectors)
+            .filter(|(_, v)| v.is_none())
+            .map(|(i, _)| i.id)
+            .collect();
+        if !refused.is_empty() {
+            tracing::warn!(
+                n = refused.len(),
+                "some units were refused by the embedding server; skipping them"
+            );
+            inner
+                .embed_skip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(refused.iter().copied());
+        }
         let mut keep = Vec::new();
         let mut done = Vec::new();
         for (item, v) in items.into_iter().zip(vectors) {
-            match v {
-                Some(v) => {
-                    keep.push(item);
-                    done.push(v);
-                }
-                None => {
-                    // 断られ続けるチャンクは飛ばす (後ろのチャンクを止めないため)。
-                    tracing::warn!("a chunk was refused by the embedding server; skipping it");
-                    inner
-                        .embed_skip
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(item.0);
-                }
+            if let Some(v) = v.filter(|_| !refused.contains(&item.id)) {
+                keep.push(item);
+                done.push(v);
             }
         }
         if keep.is_empty() {
@@ -423,12 +468,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
 
 /// 埋め込みを記録し、索引に足す (呼び手は `index_lock` を持つ)。同じモデル・同じチャンクの前の埋め込みは
 /// 同じ依頼で消す (冪等)。索引がまだ無ければ、ベクトルの次元で開く。
-async fn save(
-    inner: &Arc<Inner>,
-    key: &str,
-    items: Vec<(Id, ChunkBody, String)>,
-    vectors: Vec<Vec<f32>>,
-) -> bool {
+async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<f32>>) -> bool {
     let w = writes(inner);
     let mut ops = Vec::new();
     let mut rows = Vec::new();
@@ -436,21 +476,36 @@ async fn save(
         let Ok(r) = inner.store.read() else {
             return false;
         };
-        for ((id, c, _), v) in items.into_iter().zip(vectors) {
-            // 埋め込んでいる間に消えたチャンクは書かない (削除と区切りの作り直しは、この鍵の下で行う)。
-            if !matches!(r.get(KIND_CHUNK, id), Ok(Some(Read::Ok(_)))) {
+        let mut cleared = HashSet::new();
+        for (item, v) in items.into_iter().zip(vectors) {
+            let id = item.id;
+            // 埋め込んでいる間に消えたチャンクとノートは書かない (削除・区切りの作り直し・ノートの作り直しは、
+            // この鍵の下で行う)。
+            let kind = if item.key.is_some() {
+                KIND_NOTE
+            } else {
+                KIND_CHUNK
+            };
+            if !matches!(r.get(kind, id), Ok(Some(Read::Ok(_)))) {
                 continue;
             }
-            for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {
-                ops.extend(w.delete_embedding(old));
+            if cleared.insert(id) {
+                for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {
+                    ops.extend(w.delete_embedding(old));
+                }
             }
             let body = EmbeddingBody {
                 target: id,
-                unit: UNIT_CHUNK.to_owned(),
-                session: c.session,
+                unit: if item.key.is_some() {
+                    UNIT_KEY
+                } else {
+                    UNIT_CHUNK
+                }
+                .to_owned(),
+                session: item.session,
                 model_key: key.to_owned(),
                 dim: v.len() as u32,
-                key: None,
+                key: item.key,
             };
             match w.embedding(&body, &v) {
                 Ok((_, o)) => ops.extend(o),
@@ -458,8 +513,12 @@ async fn save(
             }
             rows.push(VecInput {
                 id,
-                session: c.session,
-                unit: Unit::Chunk,
+                session: item.session,
+                unit: if item.key.is_some() {
+                    Unit::Key
+                } else {
+                    Unit::Chunk
+                },
                 vector: v,
             });
         }

@@ -278,3 +278,114 @@ async fn notes_wait_for_a_free_slot_need_structured_output_and_go_with_the_sessi
     core.shutdown().await;
     assert!(notes(dir.path()).is_empty());
 }
+
+/// 鍵だけが合う問い: 鍵で当たり、鍵ではなく出典の往復の原文が添えられる。ノートが無ければ添わない。
+/// verifies: AC-FR-303-1 (ノートの検索の鍵で当たった問いに、鍵ではなく出典の往復が添えられる)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_hit_attaches_the_original_exchange() {
+    const ASKED: &str = "モンステラの水やりは週に何回？";
+    const ANSWERED: &str = "週に1回が目安です";
+    const QUERY: &str = "観葉植物の世話について前に話したことを教えて";
+    let keys = r#"{"keys": ["観葉植物の世話", "植物の水分管理"]}"#;
+    for (case, structured) in [("keys", true), ("no-keys", false)] {
+        let dir = TempDir::new(&format!("notes-hit-{case}"));
+        prepare(dir.path(), structured);
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+        let chats: Vec<String> = if structured {
+            vec![reply(ANSWERED), reply(keys), reply(REPLY)]
+        } else {
+            vec![reply(ANSWERED), reply(REPLY)]
+        };
+        let llm = chat(&chats, false);
+        let (core, mut rx, _) =
+            Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
+                .await
+                .unwrap();
+        core.settle().await;
+        core.command(Command::NewSession {
+            title: "植物".into(),
+        });
+        until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+        say(&core, &mut rx, ASKED).await;
+        clock.advance(SEGMENT_QUIET_MS);
+        core.settle_background().await;
+        core.command(Command::NewSession {
+            title: "今日".into(),
+        });
+        until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+        say(&core, &mut rx, QUERY).await;
+        core.shutdown().await;
+        let last = llm
+            .requests()
+            .last()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        if structured {
+            assert!(last.contains(ASKED) && last.contains(ANSWERED), "{last}");
+            assert!(
+                !last.contains("植物の水分管理"),
+                "the key itself is not attached: {last}"
+            );
+        } else {
+            assert!(!last.contains(ASKED), "{last}");
+        }
+    }
+}
+
+/// 埋め込みのサーバがあると、鍵ごとの埋め込みを作り、ノートと一緒に消す。
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_are_embedded_one_row_each() {
+    let dir = TempDir::new("notes-embed");
+    prepare(dir.path(), true);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+    let embed = ReplayClient::from_json(
+        r#"{
+          "props": {"build_info": "b1-test", "model_path": "/m/emb.gguf", "total_slots": 4,
+                    "default_generation_settings": {"n_ctx": 8192}},
+          "models": {"data": [{"id": "emb", "meta": {"n_params": 5, "size": 9, "n_vocab": 7}}]},
+          "embed": {"dim": 16}
+        }"#,
+    )
+    .unwrap();
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.embed = Some(Arc::new(embed));
+    let llm = chat(&[reply(REPLY), reply(KEYS)], false);
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    core.settle().await;
+    core.command(Command::NewSession { title: "s".into() });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    say(&core, &mut rx, "一つ目").await;
+    clock.advance(SEGMENT_QUIET_MS);
+    core.settle_background().await;
+    core.shutdown().await;
+    let mut keys: Vec<Option<u32>> = embeddings(dir.path())
+        .into_iter()
+        .filter(|b| b.unit == evorag_memory::UNIT_KEY)
+        .map(|b| b.key)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, [Some(0), Some(1), Some(2)]);
+}
+
+fn embeddings(root: &Path) -> Vec<evorag_memory::EmbeddingBody> {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
+    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.6".into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+        config_file: None,
+    })
+    .unwrap();
+    let rtx = store.read().unwrap();
+    evorag_memory::embedding_bodies(&rtx)
+        .unwrap()
+        .into_iter()
+        .map(|(_, b)| b)
+        .collect()
+}
