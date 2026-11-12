@@ -286,10 +286,27 @@ async fn save(
     items: Vec<(Id, ChunkBody, String)>,
     vectors: Vec<Vec<f32>>,
 ) -> bool {
+    // 埋め込んでいる間に、ターンの区切りが作り直されて消えたチャンクは書かない (残った分は、次の
+    // 起動の突き合わせで消える)。
+    let alive: HashSet<Id> = inner
+        .store
+        .read()
+        .ok()
+        .map(|r| {
+            items
+                .iter()
+                .filter(|(id, _, _)| matches!(r.get(KIND_CHUNK, *id), Ok(Some(Read::Ok(_)))))
+                .map(|(id, _, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default();
     let w = writes(inner);
     let mut ops = Vec::new();
     let mut rows = Vec::new();
     for ((id, c, _), v) in items.into_iter().zip(vectors) {
+        if !alive.contains(&id) {
+            continue;
+        }
         let body = EmbeddingBody {
             target: id,
             unit: UNIT_CHUNK.to_owned(),
@@ -307,6 +324,9 @@ async fn save(
             unit: Unit::Chunk,
             vector: v,
         });
+    }
+    if rows.is_empty() {
+        return true;
     }
     if write_derived(inner, ops).await.is_err() {
         return false;

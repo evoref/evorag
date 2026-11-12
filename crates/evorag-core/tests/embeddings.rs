@@ -203,7 +203,11 @@ async fn chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the
     core.shutdown().await;
     let chunks = count(dir.path(), evorag_memory::KIND_CHUNK);
     let got = embeddings(dir.path());
-    assert_eq!(got.len(), chunks, "every chunk is embedded once");
+    // チャンクごとにちょうど 1 つ (区切りの作り直しと重なって残った、もう無いチャンクの埋め込みは、
+    // 次の起動の突き合わせで消える)。
+    let targets: std::collections::HashSet<_> = got.iter().map(|b| b.target).collect();
+    assert_eq!(targets.len(), got.len(), "no chunk is embedded twice");
+    assert!(got.len() >= chunks);
     assert!(got.iter().all(|b| b.model_key == key(2) && b.dim == 8));
     assert!(vec_dir(dir.path(), 2).join("CURRENT").is_file());
     let calls = emb.aux_calls().0;
@@ -227,6 +231,11 @@ async fn chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the
     core.settle_background().await;
     core.shutdown().await;
     assert_eq!(again.aux_calls().0, 0, "no re-embedding (was {calls})");
+    assert_eq!(
+        embeddings(dir.path()).len(),
+        chunks,
+        "every chunk is embedded once"
+    );
     assert!(vec_dir(dir.path(), 2).join("CURRENT").is_file());
 }
 
