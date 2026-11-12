@@ -1,7 +1,7 @@
 //! 描画 (07 §2.1)。描画のたびに、端末の本当のカーソルを入力欄の入力位置に置く (07 §2.3)。
 
 use evorag_types::MessageKey;
-use evorag_types::api::{RecallState, Role, StyleItem, TurnStatus, TurnView};
+use evorag_types::api::{BackgroundState, RecallState, Role, StyleItem, TurnStatus, TurnView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -211,7 +211,12 @@ pub fn draw(app: &App, f: &mut Frame) {
     } else if app.generating() {
         app.catalog.key(MessageKey::UiStatusGenerating)
     } else {
-        app.catalog.key(MessageKey::UiStatusIdle)
+        app.catalog.key(match app.status.background {
+            Some(BackgroundState::Working) => MessageKey::UiStatusWorking,
+            Some(BackgroundState::PausedBattery) => MessageKey::UiStatusBattery,
+            Some(BackgroundState::PausedLowSpace) => MessageKey::UiStatusLowSpace,
+            _ => MessageKey::UiStatusIdle,
+        })
     };
     let st = &app.status;
     // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
@@ -410,6 +415,7 @@ mod tests {
                 n_ctx: 8192,
                 limited: false,
                 recall: None,
+                background: None,
             },
         );
         let sid = Id::from_bytes([1; 16]);

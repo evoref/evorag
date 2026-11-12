@@ -119,6 +119,21 @@ pub enum RoleStatus {
     Mismatch,
 }
 
+/// 裏の処理の状態 (07 §2.1 の状態の行、04 §4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundState {
+    /// 待機中 (操作の無い時間を待っている、または要る手順が無い)。
+    Idle,
+    /// 整理中 (手順が動いている)。
+    Working,
+    /// 電池のため休止 (`memory.on_battery = "stop"`)。
+    PausedBattery,
+    /// 空きが足りないので休止 (03 §8)。
+    PausedLowSpace,
+    /// 設定で切っている (`memory.sleep_time = false`)。
+    Off,
+}
+
 /// 想起の状態 (07 §2.1 の状態の行の「想起」の欄、05 §3.5)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecallState {
@@ -249,6 +264,8 @@ pub enum Event {
         target: Id,
         irrelevant: bool,
     },
+    /// 裏の処理の状態が変わった (04 §4)。
+    BackgroundState { state: BackgroundState },
     /// 想起の状態が変わった (較正が終わった、リランカーが繋がった、05 §3.7)。
     RecallStatus { state: RecallState },
     /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。

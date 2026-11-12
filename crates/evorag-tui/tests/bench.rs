@@ -32,6 +32,7 @@ fn app() -> App {
             n_ctx: 8192,
             limited: false,
             recall: None,
+            background: None,
         },
     );
     let turns = (0..TURNS)

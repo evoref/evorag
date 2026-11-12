@@ -9,6 +9,9 @@
 //! 書き手のスレッドはここで作る (02 §4.3 の R7)。tokio の実行器の中で使う。
 
 pub mod calibration;
+pub mod power;
+mod sleep;
+pub use sleep::{OnBattery, SleepConfig};
 mod context;
 pub mod localtime;
 pub mod logging;
@@ -66,8 +69,10 @@ pub struct CoreConfig {
     pub rerank: Option<Arc<dyn LlmClient>>,
     /// 設定 `llm.chat.aux_request_extra` (補助の呼び出しに足す JSON、06 §6)。
     pub aux_request_extra: evorag_llm::RequestExtra,
-    /// 起動の後に、まだ点検していないモデルを裏で点検する (06 §3.3)。試験では切る。
+    /// 裏の処理で、モデルの点検とリランカーの較正を行う (06 §3.3、05 §3.7)。試験では切る。
     pub probe_models: bool,
+    /// 裏の処理の設定 (07 §4.2 の `memory.sleep_time`・`idle_seconds`・`on_battery`)。
+    pub sleep: SleepConfig,
     /// 設定 `memory.enabled` (05 §3、FR-409)。セッションごとに `/sources` で変えられる。
     pub memory_enabled: bool,
     pub clock: Arc<dyn Clock>,
@@ -79,6 +84,8 @@ pub struct CoreConfig {
 pub struct Probe {
     pub location: fn(&std::path::Path) -> evorag_store::location::Verdict,
     pub free_bytes: fn(&std::path::Path) -> Option<u64>,
+    /// 電源の状態 (裏の処理の電池の設定、04 §4)。
+    pub power: fn() -> power::Power,
 }
 
 impl Probe {
@@ -87,6 +94,7 @@ impl Probe {
         Self {
             location: evorag_store::location::check,
             free_bytes: evorag_store::location::free_bytes,
+            power: power::system,
         }
     }
 }
@@ -215,14 +223,25 @@ struct Inner {
     aux: Mutex<Vec<roles::AuxRole>>,
     /// 繋がらない役割を試し直す task と、点検の task (終了のときに止める)。
     aux_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    probe_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 裏の処理 (sleep-time) の task (終了のときに止める)。
+    sleep_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    sleep: sleep::SleepConfig,
+    /// 利用者の操作 (裏の処理を止め、アイドルの判定に使う、04 §4)。
+    activity: Activity,
+    /// 裏の処理の状態 (状態の行)。
+    background_state: Mutex<evorag_types::api::BackgroundState>,
+    /// 裏の処理の手順が動いている。
+    working: std::sync::atomic::AtomicBool,
+    /// 較正が最後に失敗した時刻。
+    calib_failed_at: Mutex<Option<std::time::Instant>>,
+    /// 途中まで済んだ較正 (リランカーの model_key と、済んだ問いの結果)。裏の処理で落とされたら続きから。
+    calib_progress: Mutex<Option<(String, CalibProgress)>>,
     aux_request_extra: evorag_llm::RequestExtra,
     /// 裏で点検と較正を行う (06 §3.3、05 §3.7。設定 `probe_models`)。
     background_checks: bool,
     /// 今のリランカーのしきい値の記録 (今の同梱の事例で求めたものだけ、05 §3.7)。
     threshold: Mutex<Option<evorag_memory::ThresholdBody>>,
-    /// 較正の task (終了のときに止める)。動いている間は「較正中」。
-    calib_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
@@ -243,6 +262,67 @@ struct Inner {
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// 命令の待ち行列を回す task と、その止め方。
     command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
+}
+
+/// 途中まで済んだ較正の、問いごとの結果。
+type CalibProgress = Arc<Mutex<Vec<calibration::CaseResult>>>;
+
+/// 利用者の操作 (04 §4)。最後の操作の時刻と、裏の処理へ知らせる口。
+pub(crate) struct Activity {
+    last: Mutex<tokio::time::Instant>,
+    /// 操作があった (動いている手順を止める)。
+    touched: tokio::sync::Notify,
+    /// 見直してほしい (役割が繋がった、操作があった)。
+    kick: tokio::sync::Notify,
+    generation: std::sync::atomic::AtomicU64,
+    /// 画面の外で入力している (外部のエディタ)。
+    pub(crate) held: std::sync::atomic::AtomicBool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            last: Mutex::new(tokio::time::Instant::now()),
+            touched: tokio::sync::Notify::new(),
+            kick: tokio::sync::Notify::new(),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            held: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn touch(&self) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = tokio::time::Instant::now();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.touched.notify_waiters();
+        self.kick.notify_one();
+    }
+
+    /// 操作の世代 (操作のたびに増える)。手順を始める前に覚え、待つ準備をした後に変わっていれば止める
+    /// (`notify_waiters` は待っている者にしか届かないので、その間の操作を取りこぼさないため)。
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn touched_notify(&self) -> &tokio::sync::Notify {
+        &self.touched
+    }
+
+    fn kick(&self) {
+        self.kick.notify_one();
+    }
+
+    /// 最後の操作からの時間。
+    pub(crate) fn since(&self) -> std::time::Duration {
+        self.last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed()
+    }
+
+    pub(crate) async fn kicked(&self) {
+        self.kick.notified().await;
+    }
 }
 
 /// 動いているコア。
@@ -431,11 +511,17 @@ impl Core {
             chat_model: recorded_chat.unwrap_or(connected),
             aux: Mutex::new(aux),
             aux_task: Mutex::new(None),
-            probe_task: Mutex::new(None),
+            sleep_task: Mutex::new(None),
+            sleep: cfg.sleep,
+            activity: Activity::new(),
+            background_state: Mutex::new(evorag_types::api::BackgroundState::Idle),
+            working: std::sync::atomic::AtomicBool::new(false),
+            calib_failed_at: Mutex::new(None),
+            calib_progress: Mutex::new(None),
             aux_request_extra: cfg.aux_request_extra,
             background_checks: cfg.probe_models,
             threshold: Mutex::new(None),
-            calib_task: Mutex::new(None),
+
             index,
             memory_enabled: cfg.memory_enabled,
             clock: cfg.clock,
@@ -520,7 +606,6 @@ impl Core {
             "core started"
         );
         core.inner.load_threshold();
-        ensure_calibration(&core.inner);
         let report = StartReport {
             server,
             store: open_report,
@@ -533,15 +618,14 @@ impl Core {
             recorded_roles,
             recall: core.inner.recall_state(),
         };
-        if cfg.probe_models {
-            let worker = core.inner.clone();
-            let task = tokio::spawn(async move { probe_unprobed(&worker).await });
-            *core
-                .inner
-                .probe_task
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(task);
-        }
+        // 裏の処理 (04 §4)。利用者が操作していない間に、要る手順を動かす。
+        let worker = core.inner.clone();
+        let task = tokio::spawn(sleep::run(worker));
+        *core
+            .inner
+            .sleep_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(task);
         if waiting {
             let worker = core.inner.clone();
             let task = tokio::spawn(async move {
@@ -638,18 +722,38 @@ impl Core {
             .is_some()
     }
 
-    /// 試験のため: 較正の task が終わるまで待つ。
+    /// 利用者が操作した (キー入力、発話の送信)。動いている裏の処理を止め、アイドルの判定を始め直す (04 §4)。
+    pub fn touch(&self) {
+        self.inner.activity.touch();
+    }
+
+    /// 利用者が画面の外で入力している (外部のエディタ) 間は、裏の処理を出さない (06 §4)。
+    pub fn hold(&self, on: bool) {
+        self.inner
+            .activity
+            .held
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+        self.inner.activity.touch();
+    }
+
+    /// 試験のため: 裏の処理の要る手順が無くなるまで待つ (10 秒で終わらなければ panic する)。
+    #[doc(hidden)]
+    pub async fn settle_background(&self) {
+        for _ in 0..500 {
+            if !sleep::pending(&self.inner)
+                && !self.inner.working.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("background work did not settle within 10 seconds");
+    }
+
+    /// 試験のため: 較正が終わるまで待つ。
     #[doc(hidden)]
     pub async fn settle_calibration(&self) {
-        let t = self
-            .inner
-            .calib_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(t) = t {
-            let _ = t.await;
-        }
+        self.settle_background().await;
     }
 
     /// 今のリランカーのしきい値の記録 (05 §3.7)。
@@ -661,18 +765,10 @@ impl Core {
             .clone()
     }
 
-    /// 試験のため: 点検の task が終わるまで待つ。
+    /// 試験のため: 点検が終わるまで待つ。
     #[doc(hidden)]
     pub async fn settle_probe(&self) {
-        let t = self
-            .inner
-            .probe_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(t) = t {
-            let _ = t.await;
-        }
+        self.settle_background().await;
     }
 
     /// 保存した点検の結果 (今のモデルの分、06 §3.3)。
@@ -718,13 +814,12 @@ impl Core {
             let _ = stop.send(());
             let _ = task.await;
         }
-        for slot in [
-            &self.inner.aux_task,
-            &self.inner.probe_task,
-            &self.inner.calib_task,
-        ] {
-            if let Some(t) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        for slot in [&self.inner.aux_task, &self.inner.sleep_task] {
+            let t = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(t) = t {
                 t.abort();
+                // 落ちるまで待つ (task が持つストアとデータ根のロックを、戻る前に手放すため)。
+                let _ = t.await;
             }
         }
         let running = {
@@ -828,24 +923,13 @@ fn ignored_config_notices(
     fresh
 }
 
-/// まだ点検していないモデル (役割・model_key・`build_info` ごと) を点検して保存する (06 §3.3)。
-/// 使えない機能が見つかれば知らせる。chat の点検は、裏の処理と同じく最後のスロットを使い、
-/// 応答を作っている間は待つ (06 §4。スロットが 1 つのサーバで、利用者の応答を遅らせないため)。
-async fn probe_unprobed(inner: &Arc<Inner>) {
-    let (llm, server, _) = inner.conn();
-    let mut targets: Vec<(&'static str, Arc<dyn LlmClient>, String, String)> = vec![(
-        evorag_memory::ROLE_CHAT,
-        llm,
-        server.model_key.clone(),
-        server.build_info.clone(),
-    )];
-    for a in inner.aux.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        if let (Some(c), roles::RoleState::Ready(o)) = (a.ready_client(), &a.state) {
-            targets.push((a.role, c, o.model_key.clone(), o.build_info.clone()));
-        }
-    }
+/// まだ点検していないモデル (役割・model_key・`build_info` ごと) を点検して保存する (06 §3.3、裏の処理の手順)。
+/// 使えない機能が見つかれば知らせる。chat の点検は、裏の処理と同じく最後のスロットを使う (06 §4)。
+/// 役割ごとに保存するので、途中で落とされても、済んだ役割は次の機会に飛ばす。
+pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
+    let server = inner.conn().1;
     let slot = (server.total_slots > 1).then(|| server.total_slots - 1);
-    for (role, client, key, build) in targets {
+    for (role, client, key, build) in probe_targets(inner) {
         let old = inner
             .store
             .read()
@@ -854,9 +938,6 @@ async fn probe_unprobed(inner: &Arc<Inner>) {
             .flatten();
         if old.is_some() {
             continue;
-        }
-        while is_running(inner) {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
         let body = match role {
             evorag_memory::ROLE_CHAT => {
@@ -877,6 +958,19 @@ async fn probe_unprobed(inner: &Arc<Inner>) {
             failed = body.error.is_some(),
             "model probed"
         );
+        // 保存と知らせは、落とされない task で行う (記録だけが残って、知らせが出ないことが無いように)。
+        let worker = inner.clone();
+        let _ = tokio::spawn(async move { save_probe_result(&worker, role, body).await }).await;
+    }
+}
+
+/// 点検の結果を保存し、使えない機能が見つかれば知らせる。
+async fn save_probe_result(
+    inner: &Arc<Inner>,
+    role: &'static str,
+    body: evorag_memory::ModelProbeBody,
+) {
+    {
         if let Ok(ops) = writes(inner).save_probe(None, &body) {
             let _ = write(inner, ops).await;
         }
@@ -965,7 +1059,7 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
                     state: inner.recall_state(),
                 },
             );
-            ensure_calibration(inner);
+            inner.activity.kick();
         }
     }
     still
@@ -1050,13 +1144,9 @@ impl Inner {
         *self.threshold.lock().unwrap_or_else(|e| e.into_inner()) = body;
     }
 
-    /// 較正の task が動いているか。
+    /// 較正を待っているか、している (裏の処理で求める、05 §3.7)。
     fn calibrating(&self) -> bool {
-        self.calib_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|t| !t.is_finished())
+        self.background_checks && sleep::checks_allowed(self) && needs_calibration(self)
     }
 
     /// 想起の状態 (07 §2.1)。
@@ -1082,64 +1172,127 @@ impl Inner {
     }
 }
 
-/// リランカーがあって、しきい値の記録が無ければ、裏で較正する (05 §3.7 の「いつ」、AC-FR-413-3)。
-fn ensure_calibration(inner: &Arc<Inner>) {
-    if !inner.background_checks
-        || inner.calibrating()
-        || inner
+/// リランカーがあって、しきい値の記録が無いか (05 §3.7 の「いつ」、04 §4 の「要る作り直しは状態から求める」)。
+/// 失敗した直後 (5 分) は求め直さない (繋がらないリランカーに繰り返し送らないため)。
+pub(crate) fn needs_calibration(inner: &Inner) -> bool {
+    let failed_recently = inner
+        .calib_failed_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300));
+    !failed_recently
+        && inner.reranker().is_some()
+        && inner
             .threshold
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-    {
-        return;
-    }
+            .is_none()
+}
+
+/// しきい値を求めて記録する (裏の処理の手順、05 §3.7、AC-FR-413-3)。途中で落とされたら、済んだ問いの
+/// 結果を覚えておき、次は続きから求める。保存と反映は落とされない task で行う (記録だけが残り、
+/// 反映されずに求め直すことが無いように)。
+pub(crate) async fn calibrate_now(inner: &Arc<Inner>) {
     let Some((rerank, key)) = inner.reranker() else {
         return;
     };
-    let worker = inner.clone();
-    let task = tokio::spawn(async move {
-        while is_running(&worker) {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let done = {
+        let mut p = inner
+            .calib_progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match &*p {
+            Some((k, d)) if *k == key => d.clone(),
+            _ => {
+                let d = Arc::new(Mutex::new(Vec::new()));
+                *p = Some((key.clone(), d.clone()));
+                d
+            }
         }
-        let version = worker
-            .store
-            .read()
-            .ok()
-            .and_then(|r| {
-                evorag_memory::load_threshold(&r, &key, evorag_memory::TARGET_CONVERSATION).ok()
-            })
-            .flatten()
-            .map_or(1, |(_, b)| b.version + 1);
-        let lang = worker.language.as_str();
-        let started = std::time::Instant::now();
-        match calibration::calibrate(&*rerank, &key, lang, version, &mut |_, _| {}).await {
-            Ok(body) => {
-                tracing::info!(
-                    passed = body.passed,
-                    threshold = body.threshold,
-                    band_low = body.band_low,
-                    version = body.version,
-                    ms = started.elapsed().as_millis() as u64,
-                    "reranker calibrated"
-                );
+    };
+    let version = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| {
+            evorag_memory::load_threshold(&r, &key, evorag_memory::TARGET_CONVERSATION).ok()
+        })
+        .flatten()
+        .map_or(1, |(_, b)| b.version + 1);
+    let lang = inner.language.as_str();
+    let started = std::time::Instant::now();
+    let result = calibration::calibrate(&*rerank, &key, lang, version, &done, &mut |_, _| {}).await;
+    *inner
+        .calib_progress
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    match result {
+        Ok(body) => {
+            tracing::info!(
+                passed = body.passed,
+                threshold = body.threshold,
+                band_low = body.band_low,
+                version = body.version,
+                ms = started.elapsed().as_millis() as u64,
+                "reranker calibrated"
+            );
+            // 先に反映してから、落とされない task で保存する。
+            *inner.threshold.lock().unwrap_or_else(|e| e.into_inner()) = Some(body.clone());
+            let worker = inner.clone();
+            let _ = tokio::spawn(async move {
                 if let Ok(ops) = writes(&worker).save_threshold(&body) {
                     let _ = write(&worker, ops).await;
                 }
-                *worker.threshold.lock().unwrap_or_else(|e| e.into_inner()) = Some(body);
-            }
-            Err(e) => tracing::warn!(error = %e, "reranker calibration failed"),
+            })
+            .await;
         }
-        emit(
-            &worker,
-            Event::RecallStatus {
-                state: worker.recall_state_with(false),
-            },
-        );
-    });
-    *inner.calib_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
+        Err(e) => {
+            tracing::warn!(error = %e, "reranker calibration failed");
+            *inner
+                .calib_failed_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        }
+    }
+    emit(
+        inner,
+        Event::RecallStatus {
+            state: inner.recall_state_with(false),
+        },
+    );
 }
 
+/// まだ点検していないモデルがあるか (06 §3.3)。
+pub(crate) fn needs_probe(inner: &Inner) -> bool {
+    probe_targets(inner).iter().any(|(role, _, key, build)| {
+        inner
+            .store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_probe(&r, role, key, build).ok())
+            .flatten()
+            .is_none()
+    })
+}
+
+/// 点検する役割 (chat と、使える embed・rerank) と、その接続・model_key・`build_info`。
+type ProbeTarget = (&'static str, Arc<dyn LlmClient>, String, String);
+
+fn probe_targets(inner: &Inner) -> Vec<ProbeTarget> {
+    let (llm, server, _) = inner.conn();
+    let mut targets: Vec<ProbeTarget> = vec![(
+        evorag_memory::ROLE_CHAT,
+        llm,
+        server.model_key.clone(),
+        server.build_info.clone(),
+    )];
+    for a in inner.aux.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        if let (Some(c), roles::RoleState::Ready(o)) = (a.ready_client(), &a.state) {
+            targets.push((a.role, c, o.model_key.clone(), o.build_info.clone()));
+        }
+    }
+    targets
+}
 fn role_info(
     role: &str,
     recorded: Option<&evorag_memory::ModelOrigin>,
@@ -1284,15 +1437,24 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
             open_session(inner, id);
         }
         Command::OpenSession { id } => open_session(inner, id),
-        Command::Send { text } => send(inner, text).await,
+        Command::Send { text } => {
+            inner.activity.touch();
+            send(inner, text).await;
+        }
         Command::Interrupt => {
             let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(c) = st.running.as_mut().and_then(|r| r.cancel.take()) {
                 let _ = c.send(Cancel::User);
             }
         }
-        Command::Retry => regenerate(inner, true).await,
-        Command::Resend => regenerate(inner, false).await,
+        Command::Retry => {
+            inner.activity.touch();
+            regenerate(inner, true).await;
+        }
+        Command::Resend => {
+            inner.activity.touch();
+            regenerate(inner, false).await;
+        }
         Command::RenameSession { title } => rename(inner, title).await,
         Command::DeleteSession => delete(inner).await,
         Command::Rate { good, reason } => rate(inner, good, reason).await,
@@ -1300,7 +1462,10 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::Sources { memory } => sources(inner, memory).await,
         Command::ShowSource { turn, n } => show_source(inner, turn, n),
         Command::ShowBand { answer, target } => show_band(inner, answer, target),
-        Command::AttachBand { answer, target } => attach_band(inner, answer, target).await,
+        Command::AttachBand { answer, target } => {
+            inner.activity.touch();
+            attach_band(inner, answer, target).await;
+        }
         Command::ToggleIrrelevant { answer, target } => {
             toggle_irrelevant(inner, answer, target).await;
         }
@@ -1397,13 +1562,8 @@ async fn delete(inner: &Arc<Inner>) {
 /// 退避と退避の整理の前に、空きが DB の大きさ以上あるかを確かめる (03 §7.1、§8)。足りなければ
 /// 裏の処理を止めて知らせる (会話の追記は続ける、FR-217)。
 fn enough_space(inner: &Inner) -> bool {
-    let root = inner.store.data_root();
-    let need = std::fs::metadata(root.join(evorag_store::DB_FILE)).map_or(0, |m| m.len());
-    let place = inner
-        .backup_dir
-        .clone()
-        .unwrap_or_else(|| root.to_path_buf());
-    match (inner.probe.free_bytes)(&place) {
+    let (free, need) = space(inner);
+    match free {
         Some(free) if free < need => {
             emit(
                 inner,
@@ -1417,6 +1577,23 @@ fn enough_space(inner: &Inner) -> bool {
         }
         _ => true,
     }
+}
+
+/// 裏の処理に足りる空きがあるか (知らせは出さない。裏の処理の判定で毎秒見る、03 §8)。
+pub(crate) fn has_space(inner: &Inner) -> bool {
+    let (free, need) = space(inner);
+    free.is_none_or(|f| f >= need)
+}
+
+/// 退避の置き場所の空きと、要る大きさ (DB の大きさ)。
+fn space(inner: &Inner) -> (Option<u64>, u64) {
+    let root = inner.store.data_root();
+    let need = std::fs::metadata(root.join(evorag_store::DB_FILE)).map_or(0, |m| m.len());
+    let place = inner
+        .backup_dir
+        .clone()
+        .unwrap_or_else(|| root.to_path_buf());
+    ((inner.probe.free_bytes)(&place), need)
 }
 
 /// 退避の整理の job を行い、終えたら job を消す。失敗したら job を残す (次の起動で続ける)。

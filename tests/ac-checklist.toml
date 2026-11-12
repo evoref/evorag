@@ -930,3 +930,37 @@ status = "test"
 tests = ["crates/evorag-core/tests/recall_feedback.rs::the_irrelevant_mark_is_recorded_toggled_and_survives_a_lost_database", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-core/tests/recall_feedback.rs::deleting_a_session_removes_its_feedback", "crates/evorag-memory/tests/golden_kinds.rs::recall_feedback_v1"]
 manual = ""
 note = "記録・取り消し・ジャーナルから戻す・判定を変えない・再生成の信号を書かない・会話を消すと操作の記録も消える。印の表示と知らせの文言は TUI の試験 (the_band_is_picked_after_the_sources_and_attached_with_a)。"
+[[ac]]
+id = "AC-FR-301-1"
+requirement = "FR-301"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+manual = ""
+note = "部分: 枠組みと、今ある手順 (点検・較正。較正は済んだ問いの結果を覚えて続きから求める)。job の進み具合の記録と強制終了の後の再開は、最初の段階的な手順 (M2.5 の埋め込み) と合わせて足す (08 §2.3 の注)。"
+
+[[ac]]
+id = "AC-FR-301-2"
+requirement = "FR-301"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::on_battery_the_background_work_is_reduced_or_stopped", "bins/evorag/src/config.rs::sleep_settings_are_read_and_checked"]
+manual = ""
+note = "部分: 電源の状態を注入して確かめる。stop は起動後の点検も止める。reduce が待ち時間を延ばすのは sleep-time の手順 (M2.5 から)、先に済ませる処理 (05 §4.5) への効き方は M2.6 で足す。"
+
+[[ac]]
+id = "AC-FR-504-1"
+requirement = "FR-504"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+manual = ""
+note = "裏の要求は、応答の生成の間と入力の間は出ず、キー入力と発話の送信で落とされる (試験は両方)。chat の裏の要求は最後のスロット (probe.rs の試験)。/slots の is_processing を見るのは、chat を長く使う M2.7 のノートで足す (08 §2.3 の注)。"
+[[ac]]
+id = "AC-NFR-105-1"
+requirement = "NFR-105"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+manual = ""
+note = "操作から、動いている裏の要求が落とされるまでの時間を測る (再生の試験。本物の llama-server が接続を切られて止まるまでの 0.2 秒は S-02)。"

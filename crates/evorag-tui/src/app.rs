@@ -3,8 +3,8 @@
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
 use evorag_types::api::{
-    Command, Event, ModelRoleInfo, RecallState, Role, RoleStatus, SessionView, StyleItem,
-    TurnStatus, TurnView,
+    BackgroundState, Command, Event, ModelRoleInfo, RecallState, Role, RoleStatus, SessionView,
+    StyleItem, TurnStatus, TurnView,
 };
 use evorag_types::{Id, MessageKey};
 
@@ -143,6 +143,8 @@ pub struct Status {
     pub limited: bool,
     /// 想起の状態 (07 §2.1。v0.1 のコアは送らない)。
     pub recall: Option<RecallState>,
+    /// 裏の処理の状態 (07 §2.1、04 §4)。
+    pub background: Option<BackgroundState>,
 }
 
 /// 生成中の応答。
@@ -337,6 +339,9 @@ impl App {
                     },
                 };
                 self.notice(m);
+            }
+            Event::BackgroundState { state } => {
+                self.status.background = Some(state);
             }
             Event::RecallStatus { state } => {
                 let before = self.status.recall.replace(state);

@@ -391,6 +391,7 @@ fn main() -> ExitCode {
         rerank: rerank.clone(),
         aux_request_extra: aux_request_extra.clone(),
         probe_models: true,
+        sleep: cfg.sleep(),
         memory_enabled: cfg.memory_enabled(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
@@ -557,6 +558,7 @@ fn main() -> ExitCode {
                 .probe_result(evorag_memory::ROLE_CHAT)
                 .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
             recall: Some(report.recall),
+            background: None,
         },
     );
     for w in &report.location_warnings {
