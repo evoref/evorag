@@ -86,6 +86,13 @@ message_keys! {
     CliSetupKeptChat => "cli.setup.kept_chat",
     CliSetupKept => "cli.setup.kept",
     CliSetupNeedsConfirm => "cli.setup.needs_confirm",
+    /// 引数: `url`, `models`。
+    CliSetupRouterFound => "cli.setup.router_found",
+    /// 引数: `model`。
+    CliSetupRouterChecking => "cli.setup.router_checking",
+    /// 引数: `role`, `choices`。
+    CliSetupRouterChoose => "cli.setup.router_choose",
+    CliSetupPresetExample => "cli.setup.preset_example",
     /// 引数: `role`。
     CliSetupProbing => "cli.setup.probing",
     CliRoleMismatch => "cli.role_mismatch",

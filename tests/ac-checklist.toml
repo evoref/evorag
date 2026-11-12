@@ -869,3 +869,12 @@ status = "test"
 tests = ["crates/evorag-llm/tests/http_client.rs::a_router_gets_the_model_name_on_every_request", "crates/evorag-llm/tests/http_client.rs::a_router_without_a_model_name_lists_its_models", "crates/evorag-llm/tests/http_client.rs::a_plain_server_gets_no_model_name"]
 manual = ""
 note = "クライアントの層。embed・rerank に名前が無いときは、繋がらない役割と同じく使わずに動く (30 秒ごとに試す)。setup でルーターのモデルから役割を選ぶのは次の変更。本物のルーター (S-15 のプリセット) で、照合・読み込み待ち・応答を確かめた。"
+
+[[ac]]
+id = "AC-FR-511-2"
+requirement = "FR-511"
+level = "Should"
+status = "test"
+tests = ["bins/evorag/src/setup.rs::a_router_is_written_with_a_model_name_per_role", "bins/evorag/src/setup.rs::a_role_is_chosen_from_the_router_candidates"]
+manual = ""
+note = "設定の書き方と選び方。ルーターの探索と役割の見分けは、本物のルーター (S-15 のプリセット) で setup --yes を流して確かめた (対話で選ぶ手順は手動の受入)。"
