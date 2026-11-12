@@ -593,6 +593,48 @@ fn rrf(lists: &[Vec<Id>]) -> Vec<Id> {
     out.into_iter().map(|(id, _)| id).collect()
 }
 
+/// 評価のため (09 §5.2 の検索の評価): リランクの前の順位 (語彙とベクトルの候補を RRF で合わせたもの) を、
+/// 上位 `limit` 往復のターンの並びで返す。応答の経路 (`select_for`) と同じ部品で組み立てる。締切は設けない。
+pub(crate) async fn eval_exchanges(
+    store: &Store,
+    index: Option<&LexIndex>,
+    session: Id,
+    query: &str,
+    vectors: Option<&VectorQuery>,
+    limit: usize,
+) -> Vec<Vec<Id>> {
+    let Some(index) = index else {
+        return Vec::new();
+    };
+    let snap = index.snapshot();
+    let r = recall(
+        &snap,
+        query,
+        None,
+        &|d| d.session == session,
+        &RecallConfig::default(),
+    );
+    let mut lists: Vec<Vec<Id>> = vec![
+        turn_hits(store, &r.candidates)
+            .iter()
+            .map(|h| h.id)
+            .collect(),
+    ];
+    if let Some(v) = vectors
+        && let Some(qv) = embed_query(v, query, std::time::Duration::from_secs(30)).await
+    {
+        let rows = v
+            .index
+            .snapshot()
+            .search(&qv, CANDIDATES, &|row| row.session == session);
+        lists.push(vector_turns(store, &rows));
+    }
+    exchanges(store, &rrf(&lists), limit)
+        .into_iter()
+        .map(|x| x.turns.iter().map(|t| t.envelope.id).collect())
+        .collect()
+}
+
 /// 自動で選んだ結果 (添えるターン、判定点、観測値)。
 struct Selection {
     hits: Vec<Id>,

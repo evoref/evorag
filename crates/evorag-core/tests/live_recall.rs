@@ -432,3 +432,94 @@ async fn live_paraphrases_reach_the_right_exchange_through_vectors() {
         o.misses
     );
 }
+
+/// 検索の評価の基準値 (09 §5.2、08 §2.3 の合格条件 (9)): リランクの前の順位 (語彙とベクトルの RRF) で、
+/// 正しい往復が上位 3・10 往復に入る割合 (recall@3・recall@10) と nDCG@10、候補を集める時間 (問いの埋め込みを
+/// 含む) の平均と p95。合否は判定せず、`EVORAG_BENCH_OUT` があれば `EVAL-retrieval.json` に書く。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs embedding and reranking llama-servers (cargo xtask live-llm)"]
+async fn live_retrieval_baseline() {
+    let Some((embed, rerank)) = servers() else {
+        return;
+    };
+    let mut out = serde_json::Map::new();
+    for file in [
+        "tests/retrieval/recall-v0.1.toml",
+        "tests/retrieval/recall-v0.2-para.toml",
+    ] {
+        let text = std::fs::read_to_string(workspace().join(file)).unwrap();
+        let cases: Cases = toml::from_str(&text).unwrap();
+        let dir = TempDir::new("live-eval");
+        let (names, sessions) = write_sessions(dir.path(), &cases.session);
+        let (core, _rx, _) = Core::start(config(dir.path(), &embed, &rerank), Arc::new(chat(0)))
+            .await
+            .unwrap();
+        core.settle().await;
+        core.settle_background_within(Duration::from_secs(600))
+            .await;
+        // 往復の名前 (`<セッション>-tMM` の MM を 2 つずつまとめる)。
+        let exchange = |name: &str| -> String {
+            let (s, t) = name.rsplit_once("-t").unwrap();
+            let n: usize = t.parse().unwrap();
+            format!("{s}-e{}", n.div_ceil(2))
+        };
+        let (mut at3, mut at10, mut ndcg, mut related) = (0.0, 0.0, 0.0, 0.0);
+        let mut times = Vec::new();
+        for c in cases.case.iter().filter(|c| !c.gold.is_empty()) {
+            related += 1.0;
+            let session = if c.session == "new" {
+                Id::from_bytes([0xee; 16])
+            } else {
+                sessions[&c.session]
+            };
+            let t = std::time::Instant::now();
+            let ranked = core.eval_exchanges(session, &c.query, 10).await;
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            let gold: std::collections::HashSet<String> =
+                c.gold.iter().map(|g| exchange(g)).collect();
+            let rank = ranked.iter().position(|turns| {
+                turns
+                    .iter()
+                    .filter_map(|id| names.get(id))
+                    .any(|n| gold.contains(&exchange(n)))
+            });
+            if let Some(r) = rank {
+                if r < 3 {
+                    at3 += 1.0;
+                }
+                at10 += 1.0;
+                ndcg += 1.0 / ((r + 2) as f64).log2();
+            }
+        }
+        core.shutdown().await;
+        times.sort_by(f64::total_cmp);
+        let mean = times.iter().sum::<f64>() / times.len().max(1) as f64;
+        let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
+        let v = serde_json::json!({
+            "cases": related,
+            "recall_at_3": at3 / related,
+            "recall_at_10": at10 / related,
+            "ndcg_at_10": ndcg / related,
+            "candidates_mean_ms": mean,
+            "candidates_p95_ms": p95,
+        });
+        println!("{file}: {v}");
+        out.insert(file.to_owned(), v);
+    }
+    if let Some(dir) = std::env::var_os("EVORAG_BENCH_OUT") {
+        let dir = Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let v = serde_json::json!({
+            "id": "EVAL-retrieval",
+            "evorag": env!("CARGO_PKG_VERSION"),
+            "embed_url": embed,
+            "rerank_url": rerank,
+            "results": out,
+        });
+        std::fs::write(
+            dir.join("EVAL-retrieval.json"),
+            serde_json::to_string_pretty(&v).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+}
