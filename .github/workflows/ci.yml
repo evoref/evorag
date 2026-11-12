@@ -102,6 +102,39 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask i18n
 
+  trace:
+    name: trace
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Must の AC に、試験か手順が対応していること (NFR-702、AC-NFR-702-2)。
+      - run: cargo xtask trace
+  # Linux の配布物を作れることを、PR ごとに確かめる (リリースのワークフローはタグでしか動かないため、12 §5.1)。
+  dist-linux:
+    name: dist (linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about
+      - run: cargo xtask dist --target x86_64-unknown-linux-musl --out dist-out
+      - run: cargo xtask verify-release dist-out
+      - name: run the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./dist-out/evorag-*-x86_64-unknown-linux-musl/evorag --version
+          file ./dist-out/evorag-*-x86_64-unknown-linux-musl/evorag | grep -Eq 'static(ally|-pie) linked'
+
   dco:
     name: dco
     runs-on: ubuntu-24.04
