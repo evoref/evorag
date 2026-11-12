@@ -247,12 +247,13 @@ pub(crate) async fn run(inner: Arc<Inner>) {
         match next(&inner, &backoff) {
             Ok(step) => {
                 set_state(&inner, BackgroundState::Working);
-                let done = run_step(&inner, step, generation).await;
-                tracing::info!(?step, done, "background step");
+                let result = run_step(&inner, step, generation).await;
+                tracing::info!(?step, ?result, "background step");
                 set_state(&inner, resting(&inner));
-                if done {
-                    // 終えたのにまだ要る (保存できなかったなど) なら、しばらく待たせる。
-                    if next(&inner, &backoff) == Ok(step) {
+                if let Some(progressed) = result {
+                    // 終えたのに、進まずにまだ要る (保存できなかったなど) なら、しばらく待たせる。
+                    // 少しでも進んだ手順は待たせない (残りは次の回で続ける)。
+                    if !progressed && next(&inner, &backoff) == Ok(step) {
                         tracing::warn!(?step, "background step still needed; backing off");
                         inner
                             .backoff
@@ -274,31 +275,39 @@ pub(crate) async fn run(inner: Arc<Inner>) {
     }
 }
 
-/// 手順を 1 つ動かす。利用者が操作したら future を落として止め、`false` を返す。
-async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> bool {
+/// 手順を 1 つ動かす。利用者が操作したら future を落として止め、`None` を返す。終えたら、進んだか
+/// (埋め込みは 1 件でも足せたか。ほかの手順は「進まなかった」として、まだ要れば待たせる)。
+async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<bool> {
     let touched = inner.activity.touched_notify().notified();
     tokio::pin!(touched);
     // 待つ準備をしてから、世代が変わっていないかを確かめる (その間の操作を取りこぼさない)。
     touched.as_mut().enable();
     if inner.activity.generation() != generation {
-        return false;
+        return None;
     }
     inner.working.store(true, Ordering::SeqCst);
     let work = async {
         match step {
-            Step::Probe => crate::probe_unprobed(inner).await,
-            Step::Calibrate => crate::calibrate_now(inner).await,
+            Step::Probe => {
+                crate::probe_unprobed(inner).await;
+                false
+            }
+            Step::Calibrate => {
+                crate::calibrate_now(inner).await;
+                false
+            }
             Step::Embed => crate::embedding::run(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();
                 let _ = tokio::task::spawn_blocking(move || crate::backup_now(&worker)).await;
+                false
             }
         }
     };
     let done = tokio::select! {
-        () = work => true,
-        () = touched => false,
+        progressed = work => Some(progressed),
+        () = touched => None,
     };
     inner.working.store(false, Ordering::SeqCst);
     done

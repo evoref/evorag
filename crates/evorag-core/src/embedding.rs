@@ -245,30 +245,39 @@ fn chunk_texts(inner: &Inner, ids: &[Id]) -> Vec<(Id, ChunkBody, String)> {
 }
 
 /// 裏の処理の手順: 足りないチャンクを埋め込む。利用者の操作で落とされても、済んだ分は残る。
-pub(crate) async fn run(inner: &Arc<Inner>) {
+/// 1 件でも足せたら `true` (読めないチャンクは飛ばし、残りを続ける)。
+pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     let Some((client, key)) = embedder(inner) else {
-        return;
+        return false;
     };
+    let mut progressed = false;
+    // 読めないチャンク (区切りの作り直しで消えた直後など。次の突き合わせで片付く)。
+    let mut unreadable: HashSet<Id> = HashSet::new();
     loop {
         // 前の回の保存 (落とされない task) が終わるまで待つ。終わる前に足りない分を数えると、
         // 保存中のチャンクをもう一度埋め込んでしまう。鍵は保存の task に渡し、終わるまで持たせる。
         let gate = inner.embed_gate.clone().lock_owned().await;
         let (gap, _) = missing(inner, &key);
-        if gap.is_empty() {
-            return;
+        let batch: Vec<Id> = gap
+            .into_iter()
+            .filter(|id| !unreadable.contains(id))
+            .take(BATCH)
+            .collect();
+        if batch.is_empty() {
+            return progressed;
         }
-        let batch: Vec<Id> = gap.into_iter().take(BATCH).collect();
         let items = chunk_texts(inner, &batch);
+        let read: HashSet<Id> = items.iter().map(|(id, _, _)| *id).collect();
+        unreadable.extend(batch.iter().filter(|id| !read.contains(id)));
         if items.is_empty() {
-            // 読めないチャンク (消えた直後など)。次の突き合わせで片付く。
-            return;
+            continue;
         }
         let texts: Vec<String> = items.iter().map(|(_, _, t)| t.clone()).collect();
         let vectors = match tokio::time::timeout(LIMIT, client.embed(&texts)).await {
             Ok(Ok(v)) if v.len() == items.len() && v.iter().all(|x| !x.is_empty()) => v,
             other => {
                 tracing::warn!(failed = other.is_err(), "embedding batch failed");
-                return;
+                return progressed;
             }
         };
         // 記録と索引への反映は、落とされない task で行う。
@@ -281,8 +290,9 @@ pub(crate) async fn run(inner: &Arc<Inner>) {
         })
         .await;
         if !matches!(saved, Ok(true)) {
-            return;
+            return progressed;
         }
+        progressed = true;
         crate::emit_recall_state(inner);
     }
 }
