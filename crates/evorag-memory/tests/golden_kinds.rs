@@ -220,6 +220,21 @@ fn recall_feedback_v1() {
 }
 
 #[test]
+fn chunk_v1() {
+    check(
+        KIND_CHUNK,
+        id("019a6a2b-0000-7000-8000-00000000000e"),
+        ChunkBody {
+            turn: id("019a6a2b-0000-7000-8000-000000000003"),
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            start: 0,
+            end: 398,
+            rules: 1,
+        },
+    );
+}
+
+#[test]
 fn job_v1() {
     check(
         KIND_JOB,

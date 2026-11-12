@@ -33,6 +33,25 @@ pub const REL_IN_SESSION: &str = "in_session";
 pub const REL_REPLY_TO: &str = "reply_to";
 /// 信号 → 対象のターン。
 pub const REL_TARGET: &str = "target";
+/// 関係: チャンク → 元のターン (05 §2.4)。
+pub const REL_CHUNK_OF: &str = "chunk_of";
+
+/// ターンの中の範囲 (05 §2.4、v0.2)。作り直せる派生の記録なので、ジャーナルに書かない。
+pub const KIND_CHUNK: &str = "chunk";
+
+/// `chunk` の本体 (v1)。本文は持たない (ターンの本文から作り直せる)。出典のターンの ID を本体にも持つ
+/// (03 §4.2 の規則 12)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkBody {
+    pub turn: Id,
+    pub session: Id,
+    /// ターンの本文の中の範囲 (文字の位置)。
+    pub start: u32,
+    pub end: u32,
+    /// 区切り方の版 (05 §2.4)。変われば作り直す。
+    pub rules: u32,
+}
+
 /// 関係: 想起への操作 → 問いの応答のターン (05 §5.2)。
 pub const REL_FEEDBACK_ANSWER: &str = "feedback_answer";
 /// 関係: 想起への操作 → 対象の往復 (を代表するターン)。
@@ -101,6 +120,8 @@ pub fn kinds() -> Vec<KindSpec> {
         },
         // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_MODEL_PROBE, 1),
+        // チャンクは作り直せる派生の記録 (05 §2.4)。関係は書くときに足す。
+        KindSpec::new(KIND_CHUNK, 1),
         // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
