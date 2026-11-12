@@ -198,7 +198,7 @@
 4. **昇格とタグ**: `develop` → `main` の PR を人間が作り、merge commit で入れる。`main` のマージコミットに、人間が署名付きのタグ `vX.Y.Z` を付ける。`release.yml` は最初にタグを検証する (`git verify-tag` と `.github/allowed_signers`、`main` のマージコミットを指すこと、`Cargo.toml` の版との一致、判定コミットとの差分が記録の許可リストだけであること)。昇格が終わったら凍結を解く。
    - タグの署名鍵 (Git の SSH 署名鍵) は、minisign の鍵とは別の鍵にする (11 §9.7)。
    - `release.yml` の失敗: publish の前 (draft のまま) なら、直して同じタグで再実行してよい。成果物の内容に関わる直しが要るときは、メンテナが draft の Release とタグを消し、直しを `develop` に入れて手順 3・4 をやり直してから、同じ版でタグを付け直す。publish した後は同じ版のタグを付け直さない (次のパッチ版で出す)。
-5. **ビルド** (`release.yml`): `cargo xtask dist` で、配布物 (v0.1 は Windows x86_64 の zip、C ランタイムは静的にリンク)・`SHA256SUMS`・`release.json` を作り、`THIRD-PARTY-NOTICES.md` を同梱する (12 §5)。
+5. **ビルド** (`release.yml`): `cargo xtask dist` で、配布物 (v0.1 は Windows x86_64 の zip、C ランタイムは静的にリンク。v0.2 から Linux x86_64 の tar.gz (musl、静的) も)・`SHA256SUMS`・`release.json` を作り、`THIRD-PARTY-NOTICES.md` を同梱する (12 §5)。v0.2 からは、タグの検証と下書きの作成 (draft)、ターゲットごとの配布物 (build)、すべての配布物の目録 (manifest、`cargo xtask dist --manifest-only`) の 3 段で行う。
 6. **検証** (`release.yml`): 配布物の中身とハッシュ、`release.json` と `SHA256SUMS` の一致、`evorag --version` の版がタグと一致することを確かめ、draft の Release に置く。minisign の検証は署名 (手順 7) の後なので、ここでは行わず手順 9・10 で行う。
 7. **署名**: メンテナが手元 (オフラインの鍵) で `SHA256SUMS` と `release.json` に minisign で署名し (trusted comment に版と `release.json` の SHA-256、12 §5.2)、`.minisig` を draft に添付する。公開鍵はリポジトリ直下の `minisign.pub` と README に置き、リポジトリの外の経路でも公開する。
 8. **SBOM**: v0.1 では行わない (時期は未定)。

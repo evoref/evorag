@@ -38,6 +38,19 @@ top_p = 0.95
 # [llm.chat.request_extra]
 # chat_template_kwargs = { enable_thinking = false }
 
+# 補助の呼び出し (ノートの検索の鍵など、型縛りの要求) に足す JSON。思考するモデルは思考を切ります。
+# [llm.chat.aux_request_extra]
+# chat_template_kwargs = { enable_thinking = false }
+
+# 埋め込みとリランカーの llama-server (v0.2)。書かなければ、その役割は無いものとして縮退します
+# (以前の会話は文字の重なりで探します)。evorag setup が見つけて書きます。
+# [llm.embed]
+# url = "http://127.0.0.1:8081"
+# api_key_env = "EVORAG_API_KEY"
+# [llm.rerank]
+# url = "http://127.0.0.1:8082"
+# api_key_env = "EVORAG_API_KEY"
+
 # v0.1 の [[llm.chat.models]] (/model で切り替える候補) は、v0.2 から使いません。
 # 応答のモデルはデータ根に記録し、切り替えは evorag setup で行います。
 
@@ -52,6 +65,18 @@ allow_unsafe_location = false
 [memory]
 # 以前の会話を応答に添えるかの既定 (セッションごとに /sources で変えられます)。
 enabled = true
+# 裏の処理 (埋め込み・ノートの検索の鍵・自動の退避) を動かすか。止めても会話の保存と想起は動きます。
+sleep_time = true
+# 裏の処理を始めるまでの、操作の無い時間 (秒)。
+idle_seconds = 60
+# 電池で動いている間: "reduce" (入力が止まったときの先の処理を止め、裏の処理は 5 倍待つ)、
+# "normal" (変えない)、"stop" (先の処理と裏の処理をすべて止める)。
+on_battery = "reduce"
+
+[retrieval]
+# 入力が 0.5 秒ほど止まったら、問いの埋め込みとリランクを先に済ませる (送っていない入力が、設定した
+# llama-server へ出ます)。書かなければ、allow_remote = true のときは false、それ以外は true。
+# precompute = true
 
 [context]
 # 生成に残すトークン数 (既定は n_ctx の 25%、最低 1,024)。
