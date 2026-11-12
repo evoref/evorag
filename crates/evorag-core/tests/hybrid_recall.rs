@@ -328,3 +328,103 @@ async fn memory_shows_what_the_last_answer_used() {
     assert_eq!(report.sources.len(), 1);
     assert_eq!(report.sources[0].n, 1);
 }
+
+/// 埋め込み・リランカー・しきい値の有無の組み合わせで run を回し、応答のターンを返す。
+async fn run_with(dir: &TempDir, embed: bool, rerank: bool) -> (TurnBody, Id) {
+    let llm = chat(3);
+    let mut cfg = config(dir.path(), rerank.then(reranker));
+    if embed {
+        cfg.embed = Some(Arc::new(embedder()));
+    }
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm)).await.unwrap();
+    core.settle().await;
+    session(&core, &mut rx, "観葉植物").await;
+    let plant = say(&core, &mut rx, PLANT).await.reply_to.unwrap();
+    session(&core, &mut rx, "車").await;
+    say(&core, &mut rx, CAR).await;
+    core.settle_background().await;
+    session(&core, &mut rx, "今日").await;
+    let answer = say(&core, &mut rx, ASK).await;
+    core.shutdown().await;
+    (turn_body(dir.path(), answer.id), plant)
+}
+
+/// verifies: AC-FR-404-2 (埋め込み・リランカー・較正の値のそれぞれが無い構成で、05 §3.5 の表のとおりに縮退し、
+/// 理由が観測値に残る)
+#[tokio::test(flavor = "multi_thread")]
+async fn each_missing_part_degrades_as_specified() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    for (case, embed, rerank, threshold, reasons, decision) in [
+        ("all", true, true, true, vec![], RecallDecision::Fire),
+        (
+            "no-embed",
+            false,
+            true,
+            true,
+            vec!["no_embed"],
+            RecallDecision::Fire,
+        ),
+        (
+            "no-rerank",
+            true,
+            false,
+            true,
+            vec!["no_rerank"],
+            RecallDecision::Fire,
+        ),
+        (
+            "neither",
+            false,
+            false,
+            true,
+            vec!["no_embed", "no_rerank"],
+            RecallDecision::Fire,
+        ),
+        (
+            "no-threshold",
+            true,
+            true,
+            false,
+            vec!["no_threshold"],
+            RecallDecision::Abstain,
+        ),
+    ] {
+        let dir = TempDir::new(&format!("degrade-{case}"));
+        prepare(
+            dir.path(),
+            threshold.then_some((true, sp - 0.5, sc - 1.0)),
+            None,
+        );
+        let (answer, plant) = run_with(&dir, embed, rerank).await;
+        let obs = answer.obs.unwrap();
+        assert_eq!(obs.degraded, reasons, "{case}");
+        assert_eq!(answer.recall.unwrap().decision, decision, "{case}");
+        if decision == RecallDecision::Fire {
+            assert!(answer.attached.contains(&plant), "{case}");
+        }
+    }
+}
+
+/// verifies: AC-FR-404-1 (同じ索引と問いで、RRF の順位・往復へのまとめ・添える 1 件が毎回同じ)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_data_and_question_give_the_same_choice() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    let mut seen = Vec::new();
+    for round in 0..2 {
+        let dir = TempDir::new(&format!("determinism-{round}"));
+        prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+        let (answer, _) = run_with(&dir, true, true).await;
+        let obs = answer.obs.unwrap();
+        // 裏の処理と ID の振られる順が前後するので、ID ではなく本文で比べる。
+        let text = |id: &Id| turn_body(dir.path(), *id).text;
+        seen.push((
+            answer.attached.iter().map(text).collect::<Vec<_>>(),
+            obs.reranked
+                .iter()
+                .map(|r| (text(&r.id), r.score.to_bits()))
+                .collect::<Vec<_>>(),
+            obs.band.iter().map(text).collect::<Vec<_>>(),
+        ));
+    }
+    assert_eq!(seen[0], seen[1]);
+}
