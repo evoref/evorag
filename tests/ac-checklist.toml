@@ -603,7 +603,7 @@ id = "AC-NFR-306-1"
 requirement = "NFR-306"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-index/src/lex.rs::a_bad_hash_or_other_rules_ask_for_a_rebuild", "crates/evorag-core/tests/recall_path.rs::a_lost_index_is_rebuilt_from_the_database"]
+tests = ["crates/evorag-index/src/lex.rs::a_bad_hash_or_other_rules_ask_for_a_rebuild", "crates/evorag-core/tests/recall_path.rs::a_lost_index_is_rebuilt_from_the_database", "crates/evorag-index/src/vec.rs::a_broken_segment_or_another_dimension_needs_a_rebuild"]
 manual = ""
 note = "ハッシュが合わない索引は起動時に捨てて DB から作り直す。v0.1 は索引の全体を作り直す (作り直しの間は想起が Skip)。"
 
