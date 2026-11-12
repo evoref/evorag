@@ -379,7 +379,7 @@ async fn a_refused_chunk_does_not_block_the_others() {
     assert_eq!(embeddings(dir.path()).len(), chunks - 1);
 }
 
-/// verifies: AC-FR-309-1 (会話を消すと、前の世代のベクトルの索引からも、その行が消える)
+/// verifies: AC-FR-309-1, AC-FR-309-2 (会話を消すと、前の世代のベクトルの索引からも、その行が消える)
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_session_also_cleans_the_previous_generation() {
     let dir = TempDir::new("embed-delete-prev");
@@ -456,7 +456,7 @@ fn first_session(root: &Path) -> evorag_types::Id {
     ids[0]
 }
 
-/// verifies: AC-FR-309-1 (会話を消すと、そのチャンクの埋め込みとベクトルも消える)
+/// verifies: AC-FR-309-1, AC-FR-309-2 (会話を消すと、そのチャンクの埋め込みとベクトルも消える)
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_session_removes_its_embeddings() {
     let dir = TempDir::new("embed-delete");

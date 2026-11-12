@@ -350,7 +350,7 @@ async fn the_irrelevant_mark_is_recorded_toggled_and_survives_a_lost_database() 
     assert_eq!((fb[0].op.as_str(), fb[0].target), ("irrelevant", car));
 }
 
-/// verifies: AC-FR-412-2 (問いか対象の会話を消すと、その操作の記録も消える。03 §4.2 の規則 12)
+/// verifies: AC-FR-412-2 (問いか対象の会話を消すと、その操作の記録も消える。03 §4.2 の規則 12), AC-FR-309-2
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_session_removes_its_feedback() {
     let dir = TempDir::new("feedback-delete");

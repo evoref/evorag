@@ -278,7 +278,7 @@ async fn sources_off_keeps_earlier_conversations_out() {
     assert_eq!(turn_body(dir.path(), off.id).recall, None);
 }
 
-/// verifies: AC-FR-309-1 (語彙の索引の部分)
+/// verifies: AC-FR-309-1 (語彙の索引の部分), AC-FR-309-2 (チャンクが消え、以後の想起に出ない)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
     let dir = TempDir::new("recall-delete");

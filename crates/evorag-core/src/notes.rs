@@ -8,9 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use evorag_llm::{ChatMessage, ChatRequest, Generation, LlmClient, Role};
-use evorag_memory::{
-    KIND_NOTE, KIND_SESSION, NOTE_RULES, NoteBody, REL_EMBEDDING_OF, Segment, sanitize_keys,
-};
+use evorag_memory::{KIND_NOTE, NOTE_RULES, NoteBody, REL_EMBEDDING_OF, Segment, sanitize_keys};
 use evorag_store::{Read, Store};
 use evorag_types::Id;
 use serde_json::json;
@@ -68,7 +66,8 @@ pub(crate) fn needed(inner: &Inner) -> bool {
                 .due_at
                 .is_some_and(|t| inner.clock.now().as_millis() >= t)
     };
-    due && usable(inner)
+    // 起動時の突き合わせ (出典の無いノートの削除と退避の整理、orphans.rs) が済んでから。
+    due && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst) && usable(inner)
 }
 
 /// 作る (作り直す) ノート 1 つ分。
@@ -82,9 +81,6 @@ struct Work {
 
 struct Plan {
     work: Vec<Work>,
-    /// 出典のセッションの無いノート (古い版が消したセッションなど、03 §4.2 の規則 12) と、その埋め込み。
-    orphans: Vec<Id>,
-    orphan_embeddings: Vec<Id>,
     due_at: Option<i64>,
 }
 
@@ -107,20 +103,11 @@ fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
         true
     })
     .ok()?;
+    // 出典のセッションの無いノート (古い版が消したセッションなど) は、起動時の突き合わせが消す (orphans.rs)。
     let mut p = Plan {
         work: Vec::new(),
-        orphans: Vec::new(),
-        orphan_embeddings: Vec::new(),
         due_at: None,
     };
-    for (session, list) in &notes {
-        if !matches!(r.get(KIND_SESSION, *session), Ok(Some(Read::Ok(_)))) {
-            for (id, _) in list {
-                p.orphans.push(*id);
-                p.orphan_embeddings.extend(embeddings_of(&r, *id));
-            }
-        }
-    }
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
         let turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
@@ -291,24 +278,6 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     };
     inner.notes.lock().unwrap_or_else(|e| e.into_inner()).due_at = plan.due_at;
     let mut progressed = false;
-    if !plan.orphans.is_empty() {
-        let w = crate::writes(inner);
-        let mut ops = Vec::new();
-        for e in &plan.orphan_embeddings {
-            ops.extend(w.delete_embedding(*e));
-        }
-        for n in &plan.orphans {
-            ops.push(evorag_store::WriteOp::Delete {
-                kind: KIND_NOTE.into(),
-                id: *n,
-            });
-            ops.push(evorag_store::WriteOp::DeleteLinksOf(*n));
-        }
-        if !save(inner, ops, plan.orphans.clone(), None).await {
-            return false;
-        }
-        progressed = true;
-    }
     let (llm, server, _) = inner.conn();
     // 裏の処理は最後のスロット (06 §4)。
     let slot = (server.total_slots > 1).then(|| server.total_slots - 1);

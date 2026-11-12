@@ -17,6 +17,7 @@ mod context;
 pub mod localtime;
 pub mod logging;
 mod notes;
+mod orphans;
 mod precompute;
 pub mod probe;
 mod prompt;
@@ -603,7 +604,9 @@ impl Core {
         let worker = core.inner.clone();
         let task = tokio::spawn(async move {
             // チャンクと語彙の索引を DB と突き合わせ、ベクトルの索引を開く (05 §2.2〜§2.4)。
-            sync_chunks(&worker, rebuild_index).await;
+            let gone = sync_chunks(&worker, rebuild_index).await;
+            // 古い版で消した会話の派生の記録を、DB・索引・退避から除く (03 §4.2 の規則 12)。
+            orphans::reconcile(&worker, gone).await;
             embedding::open(&worker).await;
             let done = worker.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -1994,27 +1997,29 @@ pub(crate) fn emit_recall_state(inner: &Inner) {
 
 /// 起動時: チャンクと語彙の索引を DB と突き合わせる。チャンクの無いターンにはチャンクを作り、元の
 /// ターンが無いチャンク (古い版が消したターンなど、03 §4.2 の規則 12) は消す。`rebuild` なら索引を作り直す。
-async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) {
+/// 消したチャンクの ID を返す (退避からも除くため)。
+async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
     let Some(ix) = inner.index.clone() else {
-        return;
+        return Vec::new();
     };
     // 新しいターンのチャンク化と重ならないように、鍵の下で行う。
     let _lock = inner.index_lock.lock().await;
     let started = std::time::Instant::now();
     let store = inner.store.clone();
     let Ok(plan) = tokio::task::spawn_blocking(move || recall::sync_plan(&store)).await else {
-        return;
+        return Vec::new();
     };
+    let gone = plan.delete.clone();
     let mut docs = plan.keep;
     let deleted = plan.delete.len();
     let created = plan.create.len();
     if !plan.delete.is_empty() || !plan.create.is_empty() {
         let Ok((made, ops)) = writes(inner).chunks(&plan.delete, &plan.create) else {
-            return;
+            return Vec::new();
         };
         if write_derived(inner, ops).await.is_err() {
             tracing::warn!("chunks not written");
-            return;
+            return Vec::new();
         }
         docs.extend(made.iter().filter_map(|(cid, c)| {
             plan.texts
@@ -2048,6 +2053,7 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) {
         ),
         _ => tracing::warn!("lexical index sync failed"),
     }
+    gone
 }
 
 /// このセッションでメモリを添えるか。

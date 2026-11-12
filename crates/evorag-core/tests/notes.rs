@@ -235,6 +235,7 @@ async fn a_grown_segment_is_redone_and_invalid_output_is_skipped() {
 
 /// 応答のスロットが処理中なら出さない。点検で型縛りが通らなかったモデルでは作らない。セッションを
 /// 消すとノートも消える。
+/// verifies: AC-FR-309-2 (セッションを消すと、そのノートが消える)
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_wait_for_a_free_slot_need_structured_output_and_go_with_the_session() {
     for (case, structured, busy) in [("busy", true, true), ("no-schema", false, false)] {
