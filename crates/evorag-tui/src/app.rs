@@ -347,6 +347,7 @@ impl App {
                 title,
                 at,
                 lines,
+                ..
             } => {
                 let excerpt = lines
                     .iter()
@@ -755,6 +756,9 @@ mod tests {
             created_at: Timestamp::from_millis(0),
             sources: 0,
             source_base: 1,
+            band: Vec::new(),
+            band_nearby: false,
+            irrelevant: Vec::new(),
         }
     }
 
@@ -999,6 +1003,9 @@ mod tests {
 
         a.on_event(Event::SourceDetail {
             n: 1,
+            answer: id(9),
+            target: id(8),
+            irrelevant: false,
             title: "旅行の計画".into(),
             at: Timestamp::from_millis(0),
             lines: vec![

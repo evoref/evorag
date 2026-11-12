@@ -33,6 +33,34 @@ pub const REL_IN_SESSION: &str = "in_session";
 pub const REL_REPLY_TO: &str = "reply_to";
 /// 信号 → 対象のターン。
 pub const REL_TARGET: &str = "target";
+/// 関係: 想起への操作 → 問いの応答のターン (05 §5.2)。
+pub const REL_FEEDBACK_ANSWER: &str = "feedback_answer";
+/// 関係: 想起への操作 → 対象の往復 (を代表するターン)。
+pub const REL_FEEDBACK_TARGET: &str = "feedback_target";
+
+/// 想起への利用者の操作 (05 §5.2、v0.2)。利用者の明示の操作なのでジャーナルに書く。
+pub const KIND_RECALL_FEEDBACK: &str = "recall_feedback";
+/// 帯の往復を添えて作り直した。
+pub const FEEDBACK_ATTACH: &str = "attach";
+/// 「この記録は、この問いには関係が無い」の印。
+pub const FEEDBACK_IRRELEVANT: &str = "irrelevant";
+
+/// `recall_feedback` の本体 (v1)。出典の ID を本体にも持つ (03 §4.2 の規則 12)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecallFeedbackBody {
+    /// `attach`・`irrelevant`。知らない値は読んで残し、使わない。
+    pub op: String,
+    /// 問いの応答のターン。
+    pub answer: Id,
+    /// 対象の往復 (を代表するターン)。
+    pub target: Id,
+    /// その時のリランクの生の値 (リランクしていなければ無い)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// その時のリランカーの model_key。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<String>,
+}
 
 /// 副索引: セッションの更新時刻 (一覧を新しい順に並べる)。
 pub(crate) const LOOKUP_UPDATED_AT: &str = "updated_at";
@@ -54,6 +82,7 @@ pub fn kinds() -> Vec<KindSpec> {
         append(KIND_SESSION, derive_session),
         append(KIND_TURN, derive_turn),
         append(KIND_SIGNAL, derive_signal),
+        append(KIND_RECALL_FEEDBACK, derive_feedback),
         // 利用者の明示の操作なのでジャーナルに書く。関係も副索引も持たない (件数が少ないので全部読む)。
         KindSpec {
             name: KIND_SETTING,
@@ -222,6 +251,16 @@ fn derive_turn(e: &Envelope) -> Vec<WriteOp> {
     ops
 }
 
+fn derive_feedback(e: &Envelope) -> Vec<WriteOp> {
+    match e.body_as::<RecallFeedbackBody>() {
+        Ok(b) => vec![
+            link(e.id, REL_FEEDBACK_ANSWER, b.answer),
+            link(e.id, REL_FEEDBACK_TARGET, b.target),
+        ],
+        Err(_) => Vec::new(),
+    }
+}
+
 fn derive_signal(e: &Envelope) -> Vec<WriteOp> {
     match e.body_as::<SignalLinks>() {
         Ok(b) => vec![link(e.id, REL_TARGET, b.target)],
@@ -332,6 +371,9 @@ pub struct TurnObs {
     /// 帯に出した往復 (05 §3.4)。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub band: Vec<Id>,
+    /// 利用者が帯から選んで添えた往復 (05 §5.2 の「添えて作り直す」)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_attached: Vec<Id>,
     /// 縮退の理由 (`no_embed`・`no_rerank` など、05 §3.5)。値は足すだけで、知らない値はそのまま読む。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degraded: Vec<String>,

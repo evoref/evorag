@@ -109,6 +109,7 @@ fn turn_v1() {
                 reranker: Some(format!("{:032x}", 0x0fed_cba9_8765_4321_u128)),
                 threshold_version: Some(1),
                 band: vec![id("019a6a2b-0000-7000-8000-00000000000b")],
+                user_attached: vec![id("019a6a2b-0000-7000-8000-00000000000c")],
                 degraded: vec![DEGRADED_NO_EMBED.into()],
             }),
         },
@@ -199,6 +200,21 @@ fn threshold_v1() {
             threshold: Some(-4.09),
             band_low: Some(-5.52),
             stats: [("rank_ok".to_owned(), 33), ("rank_n".to_owned(), 36)].into(),
+        },
+    );
+}
+
+#[test]
+fn recall_feedback_v1() {
+    check(
+        KIND_RECALL_FEEDBACK,
+        id("019a6a2b-0000-7000-8000-00000000000d"),
+        RecallFeedbackBody {
+            op: FEEDBACK_IRRELEVANT.into(),
+            answer: id("019a6a2b-0000-7000-8000-000000000002"),
+            target: id("019a6a2b-0000-7000-8000-00000000000b"),
+            score: Some(-3.5),
+            reranker: Some(format!("{:032x}", 0x0fed_cba9_8765_4321_u128)),
         },
     );
 }

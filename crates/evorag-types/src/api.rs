@@ -35,6 +35,12 @@ pub enum Command {
     /// `/style` (FR-111、07 §3): `set` が無ければ今の答え方の既定を示し、あれば 1 つを変える。
     /// 値は `auto` などの名前で渡し、コアが確かめる。
     Style { set: Option<(StyleItem, String)> },
+    /// 応答 `answer` の帯の往復 `target` の詳細を照会する (05 §5.2)。
+    ShowBand { answer: Id, target: Id },
+    /// 帯の往復 `target` を添えて、最新の応答 `answer` を作り直す (05 §5.2 の「添えて作り直す」)。
+    AttachBand { answer: Id, target: Id },
+    /// 応答 `answer` の出典・帯の往復 `target` に「無関係」の印を付ける。付いていれば取り消す (05 §5.2)。
+    ToggleIrrelevant { answer: Id, target: Id },
 }
 
 /// 答え方の既定の項目 (07 §3)。
@@ -154,6 +160,23 @@ pub struct TurnView {
     /// 出典の番号の始まり (セッションの通し番号、05 §5.1)。応答の `[source_base]` から
     /// `[source_base + sources - 1]` までが、この応答で添えた出典。
     pub source_base: usize,
+    /// 候補の帯 (05 §3.4・§5.2)。同じセッションで「無関係」の印を付けた往復は除く。
+    pub band: Vec<BandItem>,
+    /// 帯が「近い記録 (自動では添えていません)」(しきい値が無いとき、05 §3.5 の `no_threshold`)。
+    pub band_nearby: bool,
+    /// この応答で「無関係」の印を付けた往復 (出典・帯の代表のターン)。
+    pub irrelevant: Vec<Id>,
+}
+
+/// 帯の 1 件 (05 §5.2): セッション名・日時・利用者の発話の冒頭。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BandItem {
+    /// 往復を代表するターン。
+    pub target: Id,
+    pub title: String,
+    pub at: Timestamp,
+    /// 利用者の発話の冒頭 (1 行、30 文字ほど)。
+    pub head: String,
 }
 
 /// イベント (コア → 画面)。順序を保つ 1 本の流れで届く (02 §3 の決めごと 4)。
@@ -195,7 +218,13 @@ pub enum Event {
     SourcesInfo { memory: bool },
     /// 出典の詳細 (FR-110)。
     SourceDetail {
+        /// 出典の番号。帯の往復なら 0。
         n: usize,
+        /// 問いの応答のターンと、往復を代表するターン (「無関係」の印の対象)。
+        answer: Id,
+        target: Id,
+        /// 「無関係」の印が付いている。
+        irrelevant: bool,
         /// 出典のセッションの名前。
         title: String,
         /// 出典の最初のターンの時刻。
@@ -214,6 +243,12 @@ pub enum Event {
     /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
     /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
     StyleInfo { values: [String; 3], changed: bool },
+    /// 「無関係」の印を付けた・取り消した (05 §5.2)。
+    IrrelevantChanged {
+        answer: Id,
+        target: Id,
+        irrelevant: bool,
+    },
     /// 想起の状態が変わった (較正が終わった、リランカーが繋がった、05 §3.7)。
     RecallStatus { state: RecallState },
     /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。

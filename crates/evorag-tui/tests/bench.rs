@@ -51,6 +51,9 @@ fn app() -> App {
             reply_to: None,
             created_at: Timestamp::from_millis(1_762_650_000_000 + i as i64 * 60_000),
             sources: usize::from(i % 2 == 1),
+            band: Vec::new(),
+            band_nearby: false,
+            irrelevant: Vec::new(),
             source_base: 1,
         })
         .collect();

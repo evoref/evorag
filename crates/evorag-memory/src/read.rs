@@ -196,6 +196,22 @@ pub fn load_bindings(tx: &ReadTxn<'_>) -> Result<Bindings, MemoryError> {
 }
 
 /// 保存した点検の結果 (役割・model_key・`build_info` が合うもののうち、新しいもの、06 §3.3)。
+/// 応答のターンへの、想起への操作 (05 §5.2)。
+pub fn feedback_for_answer(
+    tx: &ReadTxn<'_>,
+    answer: Id,
+) -> Result<Vec<(Envelope, RecallFeedbackBody)>, MemoryError> {
+    let mut out = Vec::new();
+    for (id, _) in tx.links_to(answer, REL_FEEDBACK_ANSWER)? {
+        if let Some(Read::Ok(e)) = tx.get(KIND_RECALL_FEEDBACK, id)?
+            && let Ok(b) = e.body_as::<RecallFeedbackBody>()
+        {
+            out.push((e, b));
+        }
+    }
+    Ok(out)
+}
+
 /// リランカーと対象の種類の、いちばん新しい版のしきい値の記録 (05 §3.7)。
 pub fn load_threshold(
     tx: &ReadTxn<'_>,

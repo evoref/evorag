@@ -325,6 +325,44 @@ impl Writes<'_> {
     }
 
     /// 信号 (評価・再生成、13 §2、FR-311)。
+    /// 想起への操作を記録する (05 §5.2)。
+    pub fn recall_feedback(
+        &self,
+        body: &RecallFeedbackBody,
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let id = self.ids.next_id();
+        let e = envelope(id, KIND_RECALL_FEEDBACK, self.clock.now(), body)?;
+        Ok((
+            id,
+            vec![
+                WriteOp::Put(e),
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_FEEDBACK_ANSWER.into(),
+                    to: body.answer,
+                    attrs: Vec::new(),
+                },
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_FEEDBACK_TARGET.into(),
+                    to: body.target,
+                    attrs: Vec::new(),
+                },
+            ],
+        ))
+    }
+
+    /// 想起への操作を取り消す (記録を消す。ジャーナルにも削除の行が書かれる)。
+    pub fn delete_feedback(&self, id: Id) -> Vec<WriteOp> {
+        vec![
+            WriteOp::Delete {
+                kind: KIND_RECALL_FEEDBACK.into(),
+                id,
+            },
+            WriteOp::DeleteLinksOf(id),
+        ]
+    }
+
     pub fn signal(
         &self,
         kind: SignalKind,
@@ -365,6 +403,7 @@ pub fn delete_session(
     session: &Envelope,
 ) -> Result<Vec<WriteOp>, crate::MemoryError> {
     let mut ops = Vec::new();
+    let mut feedback = std::collections::BTreeSet::new();
     for (turn, _) in tx.links_to(session.id, REL_IN_SESSION)? {
         for (signal, _) in tx.links_to(turn, REL_TARGET)? {
             ops.push(WriteOp::Delete {
@@ -372,6 +411,18 @@ pub fn delete_session(
                 id: signal,
             });
             ops.push(WriteOp::DeleteLinksOf(signal));
+        }
+        // 想起への操作は、問いの応答と対象の往復のどちらが消えても消す (出典の無い派生の記録、03 §4.2 の規則 12)。
+        for rel in [REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET] {
+            for (f, _) in tx.links_to(turn, rel)? {
+                if feedback.insert(f) {
+                    ops.push(WriteOp::Delete {
+                        kind: KIND_RECALL_FEEDBACK.into(),
+                        id: f,
+                    });
+                    ops.push(WriteOp::DeleteLinksOf(f));
+                }
+            }
         }
         ops.push(WriteOp::Delete {
             kind: KIND_TURN.into(),

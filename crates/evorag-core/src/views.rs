@@ -43,5 +43,9 @@ pub fn turn_of(e: &Envelope, b: &TurnBody) -> TurnView {
         created_at: e.created_at,
         sources: b.recall.as_ref().map_or(0, |r| r.sources.len()),
         source_base: crate::recall::source_base(b) as usize,
+        // 帯と印は、記録を読める呼び手が足す (`decorate`)。
+        band: Vec::new(),
+        band_nearby: false,
+        irrelevant: Vec::new(),
     }
 }

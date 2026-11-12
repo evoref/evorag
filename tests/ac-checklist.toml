@@ -910,6 +910,23 @@ id = "AC-FR-416-1"
 requirement = "FR-416"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-memory/tests/golden_kinds.rs::turn_v1"]
+tests = ["crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-memory/tests/golden_kinds.rs::turn_v1"]
 manual = ""
-note = "利用者が帯から選んで添えたこと (attach の印) は、帯の操作を入れる M2.3 の 3 つ目で足す。"
+note = "利用者が帯から選んで添えたこと (user_attached) は recall_feedback の試験。"
+[[ac]]
+id = "AC-FR-412-1"
+requirement = "FR-412"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rerank_recall.rs::below_the_threshold_nothing_is_attached_and_the_band_is_recorded", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer"]
+manual = ""
+note = "コアの側 (帯の選び方、帯の情報、添えて作り直すと新しい応答ができ前の応答も残る、最新の応答の帯だけ)。画面に帯を出し、Tab と a で操作するのは TUI (M2.3 の 4 つ目)。"
+
+[[ac]]
+id = "AC-FR-412-2"
+requirement = "FR-412"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_feedback.rs::the_irrelevant_mark_is_recorded_toggled_and_survives_a_lost_database", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-core/tests/recall_feedback.rs::deleting_a_session_removes_its_feedback", "crates/evorag-memory/tests/golden_kinds.rs::recall_feedback_v1"]
+manual = ""
+note = "記録・取り消し・ジャーナルから戻す・判定を変えない・再生成の信号を書かない・会話を消すと操作の記録も消える。印の表示と知らせの文言は TUI (M2.3 の 4 つ目)。"

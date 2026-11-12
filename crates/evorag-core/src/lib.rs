@@ -1299,6 +1299,11 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::Model { name } => show_model(inner, name),
         Command::Sources { memory } => sources(inner, memory).await,
         Command::ShowSource { turn, n } => show_source(inner, turn, n),
+        Command::ShowBand { answer, target } => show_band(inner, answer, target),
+        Command::AttachBand { answer, target } => attach_band(inner, answer, target).await,
+        Command::ToggleIrrelevant { answer, target } => {
+            toggle_irrelevant(inner, answer, target).await;
+        }
         Command::Style { set } => style(inner, set).await,
         _ => {}
     }
@@ -1482,7 +1487,17 @@ fn open_session(inner: &Inner, id: Id) {
         inner,
         Event::SessionOpened {
             session: views::session(&s),
-            turns: read.turns.iter().map(views::turn).collect(),
+            turns: {
+                let hidden = irrelevant_in_session(inner, &read.turns);
+                read.turns
+                    .iter()
+                    .map(|t| {
+                        let mut v = views::turn(t);
+                        decorate(inner, &mut v, &t.body, &hidden);
+                        v
+                    })
+                    .collect()
+            },
             unreadable: read.unreadable,
         },
     );
@@ -1542,7 +1557,7 @@ async fn send(inner: &Arc<Inner>, text: String) {
         );
     }
     index_turns(inner, vec![uid]);
-    start_generation(inner, sid, uid);
+    start_generation(inner, sid, uid, Vec::new());
 }
 
 /// 作り直す (`retry`) か、送り直す (`resend`)。対象は最後の発話。
@@ -1581,7 +1596,7 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
             let _ = write(inner, ops).await;
         }
     }
-    start_generation(inner, sid, uid);
+    start_generation(inner, sid, uid, Vec::new());
 }
 
 /// 書いたターンを裏で索引に足す。
@@ -1697,6 +1712,7 @@ async fn style(inner: &Arc<Inner>, set: Option<(evorag_types::api::StyleItem, St
 
 /// 応答の出典の詳細 (FR-110)。
 fn show_source(inner: &Inner, turn: Id, n: usize) {
+    let marks = irrelevant_marks(inner, turn);
     let found = read_env(inner, evorag_memory::KIND_TURN, turn)
         .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
         .and_then(|b| recall::source_turns(&inner.store, &b, n));
@@ -1710,6 +1726,13 @@ fn show_source(inner: &Inner, turn: Id, n: usize) {
         return;
     };
     let title = recall::session_title(&inner.store, turns[0].body.session).unwrap_or_default();
+    // 往復を代表するターン (利用者の発話) を、「無関係」の印の対象にする。
+    let target = turns
+        .iter()
+        .find(|t| t.body.role == TurnRole::User)
+        .unwrap_or(&turns[0])
+        .envelope
+        .id;
     let lines = turns
         .iter()
         .map(|t| (views::role(t.body.role), t.body.text.clone()))
@@ -1718,6 +1741,9 @@ fn show_source(inner: &Inner, turn: Id, n: usize) {
         inner,
         Event::SourceDetail {
             n,
+            answer: turn,
+            target,
+            irrelevant: marks.contains(&target),
             title,
             at: turns[0].envelope.created_at,
             lines,
@@ -1725,11 +1751,222 @@ fn show_source(inner: &Inner, turn: Id, n: usize) {
     );
 }
 
-fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id) {
+/// 応答 `answer` に付いた「無関係」の印の対象 (05 §5.2)。
+fn irrelevant_marks(inner: &Inner, answer: Id) -> Vec<Id> {
+    inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::feedback_for_answer(&r, answer).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, b)| b.op == evorag_memory::FEEDBACK_IRRELEVANT)
+        .map(|(_, b)| b.target)
+        .collect()
+}
+
+/// セッションの中で「無関係」の印を付けた往復 (同じセッションの帯には出さない、05 §5.2)。
+fn irrelevant_in_session(
+    inner: &Inner,
+    turns: &[evorag_memory::Turn],
+) -> std::collections::HashSet<Id> {
+    turns
+        .iter()
+        .filter(|t| t.body.role == TurnRole::Assistant)
+        .flat_map(|t| irrelevant_marks(inner, t.envelope.id))
+        .collect()
+}
+
+/// 応答の読み取り用の型に、帯と「無関係」の印を足す (05 §5.2)。
+fn decorate(
+    inner: &Inner,
+    view: &mut evorag_types::api::TurnView,
+    body: &evorag_memory::TurnBody,
+    hidden: &std::collections::HashSet<Id>,
+) {
+    if body.role != TurnRole::Assistant {
+        return;
+    }
+    view.irrelevant = irrelevant_marks(inner, view.id);
+    let Some(obs) = &body.obs else {
+        return;
+    };
+    view.band_nearby = obs
+        .degraded
+        .iter()
+        .any(|d| d == evorag_memory::DEGRADED_NO_THRESHOLD);
+    view.band = obs
+        .band
+        .iter()
+        // 同じセッションの別の応答で印を付けた往復は出さない。この応答で付けたものは、取り消せるよう残す。
+        .filter(|t| !hidden.contains(t) || view.irrelevant.contains(t))
+        .filter_map(|&target| {
+            let e = read_env(inner, evorag_memory::KIND_TURN, target)?;
+            let b = e.body_as::<evorag_memory::TurnBody>().ok()?;
+            let head: String = b
+                .text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(30)
+                .collect();
+            Some(evorag_types::api::BandItem {
+                target,
+                title: recall::session_title(&inner.store, b.session).unwrap_or_default(),
+                at: e.created_at,
+                head,
+            })
+        })
+        .collect();
+}
+
+/// 帯の往復の詳細 (05 §5.2)。
+fn show_band(inner: &Inner, answer: Id, target: Id) {
+    let Some(turns) = recall::exchange_turns(&inner.store, target) else {
+        reject(inner, MessageKey::BandUnknown);
+        return;
+    };
+    let title = recall::session_title(&inner.store, turns[0].body.session).unwrap_or_default();
+    let lines = turns
+        .iter()
+        .map(|t| (views::role(t.body.role), t.body.text.clone()))
+        .collect();
+    emit(
+        inner,
+        Event::SourceDetail {
+            n: 0,
+            answer,
+            target,
+            irrelevant: irrelevant_marks(inner, answer).contains(&target),
+            title,
+            at: turns[0].envelope.created_at,
+            lines,
+        },
+    );
+}
+
+/// その時のリランクの値とリランカー (想起への操作の記録に残す、03 §3.3)。
+fn feedback_body(
+    op: &str,
+    answer: Id,
+    target: Id,
+    body: &evorag_memory::TurnBody,
+) -> evorag_memory::RecallFeedbackBody {
+    let obs = body.obs.as_ref();
+    evorag_memory::RecallFeedbackBody {
+        op: op.to_owned(),
+        answer,
+        target,
+        score: obs
+            .and_then(|o| o.reranked.iter().find(|r| r.id == target))
+            .map(|r| r.score),
+        reranker: obs.and_then(|o| o.reranker.clone()),
+    }
+}
+
+/// 帯の往復を添えて、最新の応答を作り直す (05 §5.2)。再生成の信号は記録しない。
+async fn attach_band(inner: &Arc<Inner>, answer: Id, target: Id) {
+    if is_running(inner) {
+        reject(inner, MessageKey::Busy);
+        return;
+    }
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let turns = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, sid).ok())
+        .unwrap_or_default();
+    let Some(last_user) = turns.iter().rev().find(|t| t.body.role == TurnRole::User) else {
+        reject(inner, MessageKey::BandNotLatest);
+        return;
+    };
+    let uid = last_user.envelope.id;
+    let latest = turns.iter().rev().find(|t| t.body.reply_to == Some(uid));
+    let Some(latest) = latest.filter(|t| t.envelope.id == answer) else {
+        reject(inner, MessageKey::BandNotLatest);
+        return;
+    };
+    let obs = latest.body.obs.clone().unwrap_or_default();
+    if !obs.band.contains(&target) {
+        reject(inner, MessageKey::BandUnknown);
+        return;
+    }
+    let fb = feedback_body(evorag_memory::FEEDBACK_ATTACH, answer, target, &latest.body);
+    match writes(inner).recall_feedback(&fb) {
+        Ok((_, ops)) => {
+            if let Err(e) = write(inner, ops).await {
+                tracing::warn!(error = %e, "recall feedback not written");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "recall feedback not built"),
+    }
+    // 前に帯から添えたものに足す (05 §5.2 の「すでに添えた往復に足して」)。
+    let mut extra = obs.user_attached;
+    if !extra.contains(&target) {
+        extra.push(target);
+    }
+    start_generation(inner, sid, uid, extra);
+}
+
+/// 「無関係」の印を付ける・取り消す (05 §5.2)。記録するだけで、判定もしきい値も変えない。
+async fn toggle_irrelevant(inner: &Arc<Inner>, answer: Id, target: Id) {
+    let Some(body) = read_env(inner, evorag_memory::KIND_TURN, answer)
+        .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
+    else {
+        reject(inner, MessageKey::BandUnknown);
+        return;
+    };
+    let existing = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::feedback_for_answer(&r, answer).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(_, b)| b.op == evorag_memory::FEEDBACK_IRRELEVANT && b.target == target);
+    let w = writes(inner);
+    let (ops, irrelevant) = match existing {
+        Some((e, _)) => (Ok(w.delete_feedback(e.id)), false),
+        None => (
+            w.recall_feedback(&feedback_body(
+                evorag_memory::FEEDBACK_IRRELEVANT,
+                answer,
+                target,
+                &body,
+            ))
+            .map(|(_, ops)| ops),
+            true,
+        ),
+    };
+    let written = match ops {
+        Ok(ops) => write(inner, ops).await.is_ok(),
+        Err(_) => false,
+    };
+    if !written {
+        reject(inner, MessageKey::FeedbackNotSaved);
+        return;
+    }
+    emit(
+        inner,
+        Event::IrrelevantChanged {
+            answer,
+            target,
+            irrelevant,
+        },
+    );
+}
+
+/// 生成を始める。`extra` は利用者が帯から選んで添えた往復 (05 §5.2)。
+fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id, extra: Vec<Id>) {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        generate(&worker, session, user_turn, cancel_rx).await;
+        generate(&worker, session, user_turn, extra, cancel_rx).await;
     });
     let previous = inner
         .state
@@ -1849,6 +2086,7 @@ async fn generate(
     inner: &Arc<Inner>,
     session: Id,
     user_turn: Id,
+    extra: Vec<Id>,
     mut cancel: oneshot::Receiver<Cancel>,
 ) {
     emit(
@@ -1884,6 +2122,7 @@ async fn generate(
                 user_turn,
                 conv.next_source,
                 &inner.rerank_mode(),
+                &extra,
             )
             .await,
         )
@@ -1927,6 +2166,7 @@ async fn generate(
         reranker: recall_obs.reranker,
         threshold_version: recall_obs.threshold_version,
         band: recall_obs.band,
+        user_attached: recall_obs.user_attached,
         degraded: recall_obs.degraded,
     };
     let req = ChatRequest {
@@ -2054,13 +2294,16 @@ async fn generate(
         Some(env) => {
             index_turns(inner, vec![env.id]);
             if let Ok(t) = env.body_as::<evorag_memory::TurnBody>() {
-                emit(
-                    inner,
-                    Event::ResponseFinished {
-                        turn: views::turn_of(&env, &t),
-                        notice,
-                    },
-                );
+                let session_turns = inner
+                    .store
+                    .read()
+                    .ok()
+                    .and_then(|r| evorag_memory::session_turns(&r, t.session).ok())
+                    .unwrap_or_default();
+                let hidden = irrelevant_in_session(inner, &session_turns);
+                let mut view = views::turn_of(&env, &t);
+                decorate(inner, &mut view, &t, &hidden);
+                emit(inner, Event::ResponseFinished { turn: view, notice });
             }
         }
         None => emit(

@@ -25,6 +25,9 @@ model_changed = "llama-server のモデルが、このデータ根に記録し�
 delete_failed = "セッションを消せませんでした ({detail})。"
 source_not_found = "出典 [{n}] が見つかりません (消したセッションの出典かもしれません)。"
 style_unknown_value = "/style {item} に「{value}」は選べません。選べる値: {choices}"
+band_not_latest = "帯の記録を添えて作り直せるのは、最新の応答の帯だけです。"
+band_unknown = "その記録は、この応答の帯にありません。"
+feedback_not_saved = "印を記録できませんでした。もう一度試してください。"
 
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
