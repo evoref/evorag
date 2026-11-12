@@ -252,9 +252,9 @@ id = "AC-FR-402-1"
 requirement = "FR-402"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used"]
 manual = ""
-note = "recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
+note = "v0.2 はリランクで選ぶ経路 (rerank_recall) と、リランカーが無いときの v0.1 の規則 (recall_path・recall_cases)。recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
 
 [[ac]]
 id = "AC-FR-402-2"
@@ -758,9 +758,9 @@ id = "AC-FR-402-4"
 requirement = "FR-402"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::below_the_threshold_nothing_is_attached_and_the_band_is_recorded"]
 manual = ""
-note = "v0.2 の並べ方では、添えないときは今の発話に引用が付かない。"
+note = "v0.2 の並べ方では、添えないときは今の発話に引用が付かない。リランクでしきい値に届かないときも同じ。"
 
 [[ac]]
 id = "AC-FR-111-1"
@@ -884,9 +884,9 @@ id = "AC-FR-413-1"
 requirement = "FR-413"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once", "crates/evorag-retrieval/src/calibrate.rs::the_threshold_is_just_above_the_ninetieth_percentile_of_irrelevant_queries", "crates/evorag-retrieval/src/calibrate.rs::the_bundled_cases_load_with_gold_exchanges"]
+tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once", "crates/evorag-retrieval/src/calibrate.rs::the_threshold_is_just_above_the_ninetieth_percentile_of_irrelevant_queries", "crates/evorag-retrieval/src/calibrate.rs::the_bundled_cases_load_with_gold_exchanges", "crates/evorag-core/tests/rerank_recall.rs::without_a_passed_threshold_the_top_exchanges_only_go_to_the_band"]
 manual = "evorag setup で、本物のリランカー (japanese-bge-reranker-v2-m3) のしきい値が求まり記録されることを確かめた (2026-11-12、M2.3 の 1 つ目)"
-note = "求め方・合否・記録 (model_key・対象の種類・版・事例・合否)。落ちたときの「添えずに帯にだけ出す」は、応答の経路を作る M2.3 の 2 つ目で足す。setup の表示は bin。"
+note = "求め方・合否・記録 (model_key・対象の種類・版・事例・合否)。落ちたときは添えずに帯にだけ出す (rerank_recall)。帯の表示は M2.3 の 3 つ目。setup の表示は bin。"
 
 [[ac]]
 id = "AC-FR-413-2"
@@ -905,3 +905,11 @@ status = "test"
 tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once"]
 manual = ""
 note = "裏で較正し、終わると RecallStatus で状態 (標準・候補だけ) を知らせる。状態の行の表示は TUI。"
+[[ac]]
+id = "AC-FR-416-1"
+requirement = "FR-416"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-memory/tests/golden_kinds.rs::turn_v1"]
+manual = ""
+note = "利用者が帯から選んで添えたこと (attach の印) は、帯の操作を入れる M2.3 の 3 つ目で足す。"
