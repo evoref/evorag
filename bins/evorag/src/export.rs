@@ -47,13 +47,19 @@ fn copy_config(config_file: &Path, out: &Path) -> std::io::Result<bool> {
 }
 
 pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms: i64) -> ExitCode {
-    // 点検の結果は作り直せるので書き出さない (03 §11)。
+    // 書き出すのは 03 §11 の「含めるもの」だけ。作り直せる派生の記録 (チャンク・埋め込み・点検の結果) と
+    // 手順の記録 (job) は書き出さない。ノートは含める (OQ-37 の 9)。
     let report = match export(
         data_root,
         out,
         env!("CARGO_PKG_VERSION"),
         now_ms,
-        &[evorag_memory::KIND_MODEL_PROBE],
+        &[
+            evorag_memory::KIND_MODEL_PROBE,
+            evorag_memory::KIND_CHUNK,
+            evorag_memory::KIND_EMBEDDING,
+            evorag_memory::KIND_JOB,
+        ],
     ) {
         Ok(r) => r,
         Err(ExportError::NotEmpty(p)) => {
