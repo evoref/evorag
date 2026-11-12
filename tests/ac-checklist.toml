@@ -754,6 +754,42 @@ manual = ""
 note = "--index と全体の両方で、退避が作られ、モデルの記録・しきい値・想起への操作・ターンの数が変わらず、同じ問いで同じ往復が添えられる。"
 
 [[ac]]
+id = "AC-FR-302-1"
+requirement = "FR-302"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::long_turns_are_chunked_and_recalled_through_any_chunk", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-retrieval/src/chunk.rs::a_short_turn_is_one_chunk", "crates/evorag-retrieval/src/chunk.rs::paragraphs_are_merged_up_to_the_limit_and_split_beyond_it", "crates/evorag-retrieval/src/chunk.rs::a_long_paragraph_is_split_at_sentences_with_overlap", "crates/evorag-retrieval/src/chunk.rs::code_blocks_are_not_cut_unless_too_long", "crates/evorag-retrieval/src/chunk.rs::the_chunks_cover_every_character"]
+manual = ""
+note = "確定したターンはすぐ語彙の索引に入り (チャンクの後ろで当たっても添える)、埋め込みは裏の処理で作る。区切りの規則は単体試験。"
+
+[[ac]]
+id = "AC-FR-404-1"
+requirement = "FR-404"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::the_same_data_and_question_give_the_same_choice", "crates/evorag-core/src/recall.rs::rrf_prefers_turns_found_by_both_and_breaks_ties_by_recency"]
+manual = ""
+note = "同じ会話と問いで、添える往復・リランクの順位と値・帯が同じ。RRF の同点は新しいターンが先。"
+
+[[ac]]
+id = "AC-FR-404-2"
+requirement = "FR-404"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::each_missing_part_degrades_as_specified", "crates/evorag-core/tests/hybrid_recall.rs::a_late_query_embedding_falls_back_to_lexical_candidates", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used"]
+manual = ""
+note = "埋め込みが無い・リランカーが無い・どちらも無い・しきい値が無い・問いの埋め込みが遅い・リランカーが遅いのそれぞれで、05 §3.5 の理由が残る。"
+
+[[ac]]
+id = "AC-FR-505-1"
+requirement = "FR-505"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/notes.rs::a_grown_segment_is_redone_and_invalid_output_is_skipped", "crates/evorag-core/tests/notes.rs::a_note_is_made_once_the_segment_closes"]
+manual = ""
+note = "型に合わない答えは 1 回やり直し (要求が 2 回出る)、それでも合わない区切りは飛ばして前のノートを残す。"
+
+[[ac]]
 id = "AC-FR-414-1"
 requirement = "FR-414"
 level = "Must"
