@@ -141,6 +141,7 @@
 | `pr-source` | PR の出どころの検査 (`main` は `develop` からだけ、`develop` は作業ブランチ・Dependabot・`main` から) | v0.1 |
 | `no-network` | 通信の検査 (§3.7) | v0.1 |
 | `trace` | `xtask trace` (AC と試験の対応) | v0.2 |
+| `dist (linux)` | `cargo xtask dist --target x86_64-unknown-linux-musl` と `verify-release`、静的にリンクした実行ファイルが動くこと (リリースのワークフローはタグでしか動かないため、12 §5.1) | v0.2 |
 
 - 必須のチェックは、ジョブが存在してから加える (11 §9.1)。ジョブの名前に OS の役割だけを入れ、ランナーの名前を入れない。
 
