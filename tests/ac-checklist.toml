@@ -790,6 +790,15 @@ manual = ""
 note = "型に合わない答えは 1 回やり直し (要求が 2 回出る)、それでも合わない区切りは飛ばして前のノートを残す。"
 
 [[ac]]
+id = "AC-NFR-307-2"
+requirement = "NFR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/orphans.rs::records_left_by_an_older_version_are_cleaned_up"]
+manual = ""
+note = "古い版の削除を記録の直接の書き換えでまねる。出典の無いチャンク・ノート・埋め込み・想起への操作が DB と退避から消え、古い版で足した発話はチャンクと埋め込みが作られる。"
+
+[[ac]]
 id = "AC-FR-414-1"
 requirement = "FR-414"
 level = "Must"
