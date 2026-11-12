@@ -1564,6 +1564,7 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         }
         Command::Style { set } => style(inner, set).await,
         Command::InputIdle { text } => precompute::input_idle(inner, text),
+        Command::Memory => show_memory(inner),
         _ => {}
     }
 }
@@ -2254,6 +2255,147 @@ fn decorate(
             })
         })
         .collect();
+}
+
+/// 往復の代表のターンの、セッション名と利用者の発話の冒頭 (1 行、30 文字)。
+fn exchange_head(inner: &Inner, turn: &evorag_memory::Turn) -> (String, String) {
+    let head = turn
+        .body
+        .text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(30)
+        .collect();
+    (
+        recall::session_title(&inner.store, turn.body.session).unwrap_or_default(),
+        head,
+    )
+}
+
+/// `/memory` (FR-310、07 §3)。直前の応答の想起の観測値 (05 §3.6) と、このセッションの出典を示す。
+fn show_memory(inner: &Inner) {
+    use evorag_types::api::{MemoryItem, MemoryPlace, MemoryReport, MemorySource};
+    let Some(sid) = current_session(inner) else {
+        reject(inner, MessageKey::NoSession);
+        return;
+    };
+    let turns = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, sid).ok())
+        .unwrap_or_default();
+    // このセッションの出典 (番号、応答、往復のターン)。
+    let mut sources: Vec<(u32, Id, Vec<Id>, MemorySource)> = Vec::new();
+    for t in turns.iter().filter(|t| t.body.role == TurnRole::Assistant) {
+        let count = t.body.recall.as_ref().map_or(0, |r| r.sources.len()) as u32;
+        let base = recall::source_base(&t.body);
+        for n in base..base + count {
+            let Some(st) = recall::source_turns(&inner.store, &t.body, n as usize) else {
+                continue;
+            };
+            let rep = st
+                .iter()
+                .find(|x| x.body.role == TurnRole::User)
+                .unwrap_or(&st[0]);
+            let (title, head) = exchange_head(inner, rep);
+            let ids = st.iter().map(|x| x.envelope.id).collect();
+            sources.push((n, t.envelope.id, ids, MemorySource { n, title, head }));
+        }
+    }
+    sources.sort_by_key(|s| s.0);
+    let last = turns
+        .iter()
+        .rev()
+        .find(|t| t.body.role == TurnRole::Assistant);
+    let mut items = Vec::new();
+    let mut degraded = Vec::new();
+    if let Some(t) = last {
+        let obs = t.body.obs.clone().unwrap_or_default();
+        degraded = obs.degraded.clone();
+        // 応答のときのしきい値の記録が今も使えるなら、その値からの差を示す。
+        let thr = inner
+            .threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|b| Some(b.version) == obs.threshold_version)
+            .and_then(|b| calibration::usable(b).map(|(t, _)| t));
+        let mine: Vec<&(u32, Id, Vec<Id>, MemorySource)> =
+            sources.iter().filter(|s| s.1 == t.envelope.id).collect();
+        let source_of = |id: Id| mine.iter().find(|s| s.2.contains(&id)).map(|s| s.0);
+        let head_of = |id: Id| {
+            read_env(inner, evorag_memory::KIND_TURN, id)
+                .and_then(|e| {
+                    let body = e.body_as::<evorag_memory::TurnBody>().ok()?;
+                    Some(evorag_memory::Turn { envelope: e, body })
+                })
+                .map(|x| exchange_head(inner, &x))
+                .unwrap_or_default()
+        };
+        let milli = |x: f64| (x * 1000.0).round() as i32;
+        if obs.reranked.is_empty() {
+            for s in &mine {
+                items.push(MemoryItem {
+                    target: s.2[0],
+                    place: MemoryPlace::Attached,
+                    n: Some(s.0),
+                    title: s.3.title.clone(),
+                    head: s.3.head.clone(),
+                    score_milli: None,
+                    delta_milli: None,
+                });
+            }
+        }
+        for r in &obs.reranked {
+            let n = source_of(r.id);
+            let place = if n.is_some() {
+                MemoryPlace::Attached
+            } else if obs.band.contains(&r.id) {
+                MemoryPlace::Band
+            } else {
+                MemoryPlace::Below
+            };
+            let (title, head) = head_of(r.id);
+            items.push(MemoryItem {
+                target: r.id,
+                place,
+                n,
+                title,
+                head,
+                score_milli: Some(milli(f64::from(r.score))),
+                delta_milli: thr.map(|t| milli(f64::from(r.score) - t)),
+            });
+        }
+        if obs.reranked.is_empty() {
+            for b in &obs.band {
+                let (title, head) = head_of(*b);
+                items.push(MemoryItem {
+                    target: *b,
+                    place: MemoryPlace::Band,
+                    n: None,
+                    title,
+                    head,
+                    score_milli: None,
+                    delta_milli: None,
+                });
+            }
+        }
+    }
+    emit(
+        inner,
+        Event::MemoryInfo {
+            report: MemoryReport {
+                answer: last.map(|t| t.envelope.id),
+                items,
+                degraded,
+                recall: inner.recall_state(),
+                sources: sources.into_iter().map(|s| s.3).collect(),
+            },
+        },
+    );
 }
 
 /// 帯の往復の詳細 (05 §5.2)。

@@ -230,6 +230,86 @@ impl App {
         }
     }
 
+    /// `/memory` の答えを文にする (FR-310、07 §3)。
+    fn memory_text(&self, r: &evorag_types::api::MemoryReport) -> String {
+        use evorag_types::api::MemoryPlace;
+        let c = &self.catalog;
+        let mut lines = Vec::new();
+        if r.answer.is_none() {
+            lines.push(c.key(MessageKey::UiMemoryNoAnswer));
+        } else {
+            lines.push(c.key(MessageKey::UiMemoryHeader));
+            if r.items.is_empty() {
+                lines.push(c.key(MessageKey::UiMemoryNothing));
+            }
+            let num = |m: i32| format!("{:.2}", f64::from(m) / 1000.0);
+            for it in &r.items {
+                let score = match (it.score_milli, it.delta_milli) {
+                    (Some(raw), Some(d)) => c.with(
+                        MessageKey::UiMemoryScore,
+                        &[
+                            (
+                                "delta",
+                                &format!("{}{}", if d >= 0 { "+" } else { "" }, num(d)),
+                            ),
+                            ("raw", &num(raw)),
+                        ],
+                    ),
+                    (Some(raw), None) => {
+                        c.with(MessageKey::UiMemoryScoreRaw, &[("raw", &num(raw))])
+                    }
+                    _ => String::new(),
+                };
+                let args = [
+                    ("title", it.title.as_str()),
+                    ("head", it.head.as_str()),
+                    ("score", score.as_str()),
+                ];
+                lines.push(match it.place {
+                    MemoryPlace::Attached => {
+                        let n = it.n.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+                        let mut a = args.to_vec();
+                        a.push(("n", n.as_str()));
+                        c.with(MessageKey::UiMemoryAttached, &a)
+                    }
+                    MemoryPlace::Band => c.with(MessageKey::UiMemoryBand, &args),
+                    MemoryPlace::Below => c.with(MessageKey::UiMemoryBelow, &args),
+                });
+            }
+            for d in &r.degraded {
+                let k = match d.as_str() {
+                    "no_embed" => Some(MessageKey::UiMemoryDegradedNoEmbed),
+                    "embed_deadline" => Some(MessageKey::UiMemoryDegradedEmbedDeadline),
+                    "no_rerank" => Some(MessageKey::UiMemoryDegradedNoRerank),
+                    "rerank_slow" => Some(MessageKey::UiMemoryDegradedRerankSlow),
+                    "rerank_deadline" => Some(MessageKey::UiMemoryDegradedRerankDeadline),
+                    "rerank_error" => Some(MessageKey::UiMemoryDegradedRerankError),
+                    "no_threshold" => Some(MessageKey::UiMemoryDegradedNoThreshold),
+                    "no_index" => Some(MessageKey::UiMemoryDegradedNoIndex),
+                    _ => None,
+                };
+                lines.push(match k {
+                    Some(k) => c.key(k),
+                    None => c.with(MessageKey::UiMemoryDegradedOther, &[("reason", d)]),
+                });
+            }
+        }
+        if !r.sources.is_empty() {
+            lines.push(c.key(MessageKey::UiMemorySources));
+            for s in &r.sources {
+                lines.push(c.with(
+                    MessageKey::UiMemorySource,
+                    &[
+                        ("n", &s.n.to_string()),
+                        ("title", &s.title),
+                        ("head", &s.head),
+                    ],
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
     pub fn generating(&self) -> bool {
         self.streaming.is_some()
     }
@@ -344,6 +424,10 @@ impl App {
                 self.streaming = None;
                 let m = self.catalog.key(MessageKey::UiNoticeDeleted);
                 self.notice(m);
+            }
+            Event::MemoryInfo { report } => {
+                let text = self.memory_text(&report);
+                self.notice(text);
             }
             Event::ModelInfo { roles, n_ctx } => {
                 self.status.n_ctx = n_ctx;
@@ -928,6 +1012,7 @@ impl App {
             Slash::Quit => vec![Action::Quit],
             Slash::Model(name) => c(Command::Model { name }),
             Slash::Sources(memory) => c(Command::Sources { memory }),
+            Slash::Memory => c(Command::Memory),
             Slash::Style(set) => {
                 self.style_picker = set.is_none();
                 c(Command::Style { set })
@@ -1029,6 +1114,65 @@ mod tests {
         assert_eq!(a.idle_text(), None);
     }
 
+    /// verifies: AC-FR-310-1 (添えた往復と番号、帯、しきい値との差と生の値、縮退の理由、出典の対応を出す)
+    #[test]
+    fn memory_report_lists_items_reasons_and_sources() {
+        use evorag_types::api::{MemoryItem, MemoryPlace, MemoryReport, MemorySource, RecallState};
+        let a = app();
+        let item = |place, n, score, delta| MemoryItem {
+            target: id(1),
+            place,
+            n,
+            title: "観葉植物".into(),
+            head: "モンステラの水やり".into(),
+            score_milli: score,
+            delta_milli: delta,
+        };
+        let text = a.memory_text(&MemoryReport {
+            answer: Some(id(9)),
+            items: vec![
+                item(MemoryPlace::Attached, Some(3), Some(4200), Some(1200)),
+                item(MemoryPlace::Band, None, Some(2600), Some(-400)),
+                item(MemoryPlace::Below, None, Some(-5000), None),
+            ],
+            degraded: vec!["no_embed".into(), "mystery".into()],
+            recall: RecallState::Standard,
+            sources: vec![MemorySource {
+                n: 3,
+                title: "観葉植物".into(),
+                head: "モンステラの水やり".into(),
+            }],
+        });
+        assert!(
+            text.contains(
+                "[3] 観葉植物「モンステラの水やり」 添えた (しきい値との差 +1.20、値 4.20)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("帯 観葉植物「モンステラの水やり」 (しきい値との差 -0.40、値 2.60)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("下 観葉植物「モンステラの水やり」 (値 -5.00)"),
+            "{text}"
+        );
+        assert!(text.contains("evorag setup で埋め込みのサーバ"), "{text}");
+        assert!(text.contains("縮退: mystery"), "{text}");
+        assert!(
+            text.contains("このセッションの出典:\n  [3] 観葉植物「モンステラの水やり」"),
+            "{text}"
+        );
+        let none = a.memory_text(&MemoryReport {
+            answer: None,
+            items: Vec::new(),
+            degraded: Vec::new(),
+            recall: RecallState::Simple,
+            sources: Vec::new(),
+        });
+        assert_eq!(none, "このセッションには、まだ応答がありません。");
+    }
+
     #[test]
     fn enter_sends_and_creates_a_session_when_none_is_open() {
         let mut a = app();
@@ -1067,8 +1211,13 @@ mod tests {
             vec![Action::Command(Command::Retry)]
         );
         type_text(&mut a, "/memory");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Memory)]
+        );
+        type_text(&mut a, "/forget 1");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());
-        assert!(a.notices.last().unwrap().contains("/memory"));
+        assert!(a.notices.last().unwrap().contains("/forget"));
     }
 
     /// verifies: AC-FR-105-1 (画面の層: 確認の後にだけ消す)

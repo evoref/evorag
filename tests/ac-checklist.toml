@@ -736,6 +736,15 @@ manual = ""
 note = "鍵だけが合う問いで、出典の往復の原文が添えられ、鍵の文は添えられない (ノートが無ければ添わない)。鍵の検査は決定論の単体試験。"
 
 [[ac]]
+id = "AC-FR-310-1"
+requirement = "FR-310"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::memory_shows_what_the_last_answer_used", "crates/evorag-tui/src/app.rs::memory_report_lists_items_reasons_and_sources"]
+manual = ""
+note = "コアは添えた往復と出典の番号・帯・リランクの値としきい値との差・縮退の理由・このセッションの出典を返し、画面はそれを文にする。"
+
+[[ac]]
 id = "AC-FR-414-1"
 requirement = "FR-414"
 level = "Must"

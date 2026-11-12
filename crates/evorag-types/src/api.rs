@@ -44,6 +44,9 @@ pub enum Command {
     /// 入力欄の文字が約 500 ms 変わらなかった (05 §4.5 の先に済ませる処理の合図)。`text` は、そのまま送ったら
     /// 発話になる本文。コアは想起を先に済ませ、同じ発話が送られたら結果を使う。保存しない。
     InputIdle { text: String },
+    /// `/memory` (FR-310、07 §3): 直前の応答に添えたメモリ、候補の帯、リランクの値、縮退の理由と、
+    /// このセッションの出典の番号と往復の対応を照会する。
+    Memory,
 }
 
 /// 答え方の既定の項目 (07 §3)。
@@ -199,6 +202,57 @@ pub struct BandItem {
     pub head: String,
 }
 
+/// `/memory` の 1 件の置き場所 (しきい値との関係、07 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPlace {
+    /// 添えた。
+    Attached,
+    /// 候補の帯 (しきい値の少し下)。
+    Band,
+    /// 帯より下 (リランクしたが使わなかった)。
+    Below,
+}
+
+/// `/memory` の、直前の応答の往復 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryItem {
+    /// 往復を代表するターン。
+    pub target: Id,
+    pub place: MemoryPlace,
+    /// 添えた往復の出典の番号 (セッションの通し番号)。
+    pub n: Option<u32>,
+    pub title: String,
+    /// 利用者の発話の冒頭 (1 行、30 文字ほど)。
+    pub head: String,
+    /// リランクの生の値と、しきい値からの差 (どちらも 1000 倍した整数。リランクしていなければ無い。
+    /// 差は、応答のときのしきい値の記録が今も使えるときだけ)。
+    pub score_milli: Option<i32>,
+    pub delta_milli: Option<i32>,
+}
+
+/// `/memory` の、このセッションの出典 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySource {
+    pub n: u32,
+    pub title: String,
+    pub head: String,
+}
+
+/// `/memory` の答え (FR-310、07 §3)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReport {
+    /// 直前の応答 (このセッションにまだ応答が無ければ `None`)。
+    pub answer: Option<Id>,
+    /// リランクした往復 (値の高い順)。リランクしていなければ、添えた往復と帯。
+    pub items: Vec<MemoryItem>,
+    /// 縮退の理由 (05 §3.5 の名前)。
+    pub degraded: Vec<String>,
+    /// 今の想起の状態 (次にすることを示すため)。
+    pub recall: RecallState,
+    /// このセッションの出典の番号と往復 (番号の順)。
+    pub sources: Vec<MemorySource>,
+}
+
 /// イベント (コア → 画面)。順序を保つ 1 本の流れで届く (02 §3 の決めごと 4)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -260,6 +314,8 @@ pub enum Event {
     },
     /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
     BackgroundPaused { reason: Message },
+    /// `/memory` の答え (FR-310)。
+    MemoryInfo { report: MemoryReport },
     /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
     /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
     StyleInfo { values: [String; 3], changed: bool },

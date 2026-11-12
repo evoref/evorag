@@ -85,6 +85,7 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /good, /bad [理由]  直前の応答を評価する
 /model [名前]    使っているモデルの表示と、設定にある候補への切り替え
 /sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
+/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由と、このセッションの出典
 /style [項目 値]  答え方の既定 (言語・長さ・書式)。値なしで選ぶ窓を開く (すべてのセッションに効く)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
@@ -276,3 +277,25 @@ low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退�
 [probe]
 thinking_not_off = "補助の呼び出しで思考を切れません (設定 llm.chat.aux_request_extra を確かめてください)"
 structured_broken = "型縛りの出力が空か、型に合いません"
+
+
+[ui.memory]
+header = "直前の応答のメモリ:"
+no_answer = "このセッションには、まだ応答がありません。"
+nothing = "  添えた記録も候補もありません。"
+attached = "  [{n}] {title}「{head}」 添えた{score}"
+band = "  帯 {title}「{head}」{score}"
+below = "  下 {title}「{head}」{score}"
+score = " (しきい値との差 {delta}、値 {raw})"
+score_raw = " (値 {raw})"
+sources = "このセッションの出典:"
+source = "  [{n}] {title}「{head}」"
+degraded_no_embed = "縮退: 埋め込みを使っていません (埋め込みのサーバが無い・記録と違う・作り直し中)。→ evorag setup で埋め込みのサーバを設定します。"
+degraded_embed_deadline = "縮退: 問いの埋め込みが間に合わず、語彙の候補だけで選びました。"
+degraded_no_rerank = "縮退: リランカーを使っていません。→ evorag setup でリランカーのサーバを設定します。"
+degraded_rerank_slow = "縮退: リランカーが遅いので使っていません (点検の結果)。→ 軽いリランカーを evorag setup で選びます。"
+degraded_rerank_deadline = "縮退: リランクが間に合わず、語彙の規則で選びました。"
+degraded_rerank_error = "縮退: リランカーが答えなかったので、語彙の規則で選びました。"
+degraded_no_threshold = "縮退: リランカーのしきい値が無いので、自動では添えず候補だけを出しました。→ 較正が終わるのを待つか、evorag setup を使います。"
+degraded_no_index = "縮退: 以前の会話の索引を使えませんでした。→ evorag rebuild --index で作り直せます。"
+degraded_other = "縮退: {reason}"
