@@ -1,0 +1,14 @@
+{
+  "mean_ms": 375.65168666666665,
+  "p95_ms": 491.0016,
+  "sends": 30,
+  "target_mean_ms": 500,
+  "embed_all_s": 194.3152236,
+  "embed_url": "http://127.0.0.1:18081",
+  "rerank_url": "http://127.0.0.1:18082",
+  "id": "BM-102-v0.2",
+  "turns": 10000,
+  "evorag": "0.2.0",
+  "target": "x86_64",
+  "os": "windows"
+}
