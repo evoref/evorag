@@ -1,0 +1,169 @@
+# 訂正の候補と検証の関門 (04 §6)。書式は README.md。会話はすべて架空 (11 §9.7)。
+# llm は検証の LLM の出力を固定したもの。direction は訂正の型から決まる向き。
+
+[[case]]
+id = "K01"
+title = "「{old}じゃなくて{new}」の訂正を検証済みにする"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京です" }
+expect = "verified"
+
+[[case]]
+id = "K02"
+title = "固定の部分の長い型 (ではなくて) を先に当て、新しい値を「て東京」にしない"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪ではなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪ではなくて東京です" }
+expect = "verified"
+
+[[case]]
+id = "K03"
+title = "「{old}は{new}の間違い」は、否定の語が無くても向きを決める"
+spec = "04 §6"
+previous = "東京の天気は晴れです"
+text = "東京は大阪の間違いでした"
+expect_candidate = true
+direction = { old = "東京", new = "大阪" }
+llm = { target = "response", old = "東京", new = "大阪", e = "東京は大阪の間違いでした" }
+expect = "verified"
+
+[[case]]
+id = "K04"
+title = "英語の「{new}, not {old}」は新しい値が先に来る"
+spec = "04 §6"
+lang = "en"
+previous = "So you live in Tokyo."
+text = "It's Osaka, not Tokyo."
+expect_candidate = true
+direction = { old = "Tokyo", new = "Osaka" }
+llm = { target = "fact", old = "Tokyo", new = "Osaka", e = "It's Osaka, not Tokyo." }
+expect = "verified"
+
+[[case]]
+id = "K05"
+title = "英語の isn't を一次のふるいで拾う"
+spec = "04 §6、rules/en.toml"
+lang = "en"
+previous = "So you live in Tokyo."
+text = "It isn't Tokyo, it's Osaka."
+expect_candidate = true
+direction = { old = "Tokyo", new = "Osaka" }
+llm = { target = "fact", old = "Tokyo", new = "Osaka", e = "It isn't Tokyo, it's Osaka." }
+expect = "verified"
+
+[[case]]
+id = "K06"
+title = "古い値の無い型 (I meant {new}) は、古い値を LLM の出力から取り、直前の応答にあれば検証済みにする"
+spec = "04 §6"
+lang = "en"
+previous = "Here is the weather for Tokyo."
+text = "I meant Osaka."
+expect_candidate = true
+direction = { new = "Osaka" }
+llm = { target = "response", old = "Tokyo", new = "Osaka", e = "I meant Osaka." }
+expect = "verified"
+
+[[case]]
+id = "K07"
+title = "LLM の出力の向きが型の向きと逆なら捨てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね。東京にも近いですか"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "東京", new = "大阪", e = "大阪じゃなくて東京です" }
+expect = "direction"
+
+[[case]]
+id = "K08"
+title = "新しい値が発話に無い (言い換えた) 出力は捨てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京都", e = "大阪じゃなくて東京です" }
+expect = "new_not_in_utterance"
+
+[[case]]
+id = "K09"
+title = "古い値が直前の応答にも、それより前の発話にも、今の値にも無ければ捨てる"
+spec = "04 §6"
+previous = "今日は晴れです"
+text = "京都じゃなくて奈良です"
+expect_candidate = true
+direction = { old = "京都", new = "奈良" }
+llm = { target = "fact", old = "京都", new = "奈良", e = "京都じゃなくて奈良です" }
+expect = "old_not_found"
+
+[[case]]
+id = "K10"
+title = "引用の行の中の訂正は捨てる (前のふるいの後の本文に無いので、新しい値が無い理由で落ちる)"
+spec = "04 §6、§5.2 の前のふるい"
+previous = "大阪にお住まいなんですね"
+text = """
+> 大阪じゃなくて東京です
+と友人に言われました"""
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京です" }
+expect = "new_not_in_utterance"
+
+[[case]]
+id = "K11"
+title = "訂正の語の無い発話は候補にしない"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "東京に住んでいます"
+expect_candidate = false
+
+[[case]]
+id = "K12"
+title = "コーディングのセッションでは候補を探さない"
+spec = "04 §6、15 §4.5"
+mode = "coding"
+previous = "Build succeeded."
+text = "This is not working, it's failing on Windows, not Linux."
+expect_candidate = false
+
+[[case]]
+id = "K13"
+title = "読点のある型 ({old}じゃなくて、{new}) も、読点を区別せずに当てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて、東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて、東京です" }
+expect = "verified"
+
+[[case]]
+id = "K14"
+title = "古い値が、直前の応答に無くても、それより前の利用者の発話にあれば検証済みにする"
+spec = "04 §6"
+earlier = ["来週は京都に行きます"]
+previous = "楽しんできてください"
+text = "京都じゃなくて奈良でした"
+expect_candidate = true
+direction = { old = "京都", new = "奈良" }
+llm = { target = "fact", old = "京都", new = "奈良", e = "京都じゃなくて奈良でした" }
+expect = "verified"
+
+[[case]]
+id = "K15"
+title = "古い値が、今の Live の値にだけあっても検証済みにする"
+spec = "04 §6"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "今日は晴れです"
+text = "大阪じゃなくて東京に住んでいます"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京に住んでいます" }
+expect = "verified"
