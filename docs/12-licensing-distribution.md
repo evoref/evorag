@@ -20,7 +20,7 @@
 ## 2. 依存のライセンス
 
 - 許可リストは `deny.toml` が正本 (MIT、Apache-2.0、Apache-2.0 WITH LLVM-exception、BSD-2-Clause、BSD-3-Clause、ISC、Zlib、Unicode-3.0、Unicode-DFS-2016、0BSD、BSL-1.0、CC0-1.0)。GPL・AGPL・LGPL は使わない。
-- MPL-2.0 は個別に承認する。承認したら `deny.toml` の `exceptions` に crate 名つきで足し、理由を PR に書く。TLS の暗号の実装は純 Rust の graviola を使う (OQ-05。ライセンスは Apache-2.0 OR ISC OR MIT-0 で、許可リストの Apache-2.0 で通る)。証明書のルートの入手の方法 (OS の証明書ストアか、同梱のルートの一覧か) とそのライセンスは S-06 で決める。
+- MPL-2.0 は個別に承認する。承認したら `deny.toml` の `exceptions` に crate 名つきで足し、理由を PR に書く。TLS の暗号の実装は純 Rust の graviola を使う (OQ-05。ライセンスは Apache-2.0 OR ISC OR MIT-0 で、許可リストの Apache-2.0 で通る)。証明書のルートは、OS の検証器 (rustls-platform-verifier) を使い、同梱のルートの一覧 (webpki-roots・webpki-root-certs) は使わない (S-06。同梱の一覧のライセンス CDLA-Permissive-2.0 は許可リストの外)。
 
 ## 3. 寄稿
 
@@ -124,7 +124,9 @@
 - 確認の通信には、evorag の版と OS の種類以外を含めない。
 - 通信には HTTPS が要る。TLS は rustls と純 Rust の暗号の実装 (rustls-graviola) で組む (確定 (ユーザー回答、条件: S-06)、[OQ-05](10-decisions.md#oq-05-tls-と-c-を含む依存))。
 - **信頼の拠り所は署名**: 配布物が本物かどうかは、TLS ではなく minisign の署名つきのマニフェスト (§5.2) で確かめる。TLS が破られても、偽の配布物は署名の検証で拒否される。TLS が守るのは、通信の内容 (版と OS の種類) と、古いリリースの一覧を見せられる「凍結」への耐性である。凍結に備えて、`update check` は最新のリリースの公開の日付を表示し、`release.json` の日付が今の版より古ければ拒否する。
-- **CPU の機能が足りないとき**: graviola は x86_64 / aarch64 で特定の CPU の機能 (x86_64 は AES-NI・AVX2・ADX・BMI2 など) を必須とし、無い CPU での代替の実装を持たない。`evorag update` は通信の前に CPU の機能を確かめ、足りなければ通信せずに理由を示し、手作業の更新の手順 (§7.1) を案内する。
+- **CPU の機能が足りないとき**: graviola は x86_64 / aarch64 で特定の CPU の機能を必須とし、無い CPU での代替の実装を持たない。足りないと、最初の暗号の処理で panic する。`evorag update` は通信の前に CPU の機能を確かめ、足りなければ通信せずに理由を示し、手作業の更新の手順 (§7.1) を案内する。
+  - 確かめる機能 (graviola 0.4.5 の `is_cpu_supported` と同じ。S-06): x86_64 は aes・pclmulqdq・bmi1・adx・avx・avx2、aarch64 は neon・aes・pmull・sha2。graviola の版を上げるときは、この一覧を確かめ直す。
+- **証明書のルートが無いとき**: OS の検証器 (§2) は、Linux では OS の証明書ストア (`ca-certificates` など) を読む。見つからなければ通信せずに理由を示し、手作業の更新の手順 (§7.1) を案内する。
 - GitHub の API の匿名の呼び出しの回数の制限 (1 時間に 60 回) に当たったら、理由を示して終わる。
 
 ### 7.6 更新の対象の整理

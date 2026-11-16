@@ -266,7 +266,7 @@ PO 区分で残っている判断は、外部寄稿の受付の時期 ([OQ-28](#
 | 02 | 寄稿ポリシー | 確定 (ユーザー回答) | PO | 回答済み |
 | 03 | 版の割り当て | 確定 (ユーザー回答) | PO | 回答済み |
 | 04 | 更新機能の時期 | 確定 (ユーザー回答) | PO | 回答済み |
-| 05 | TLS と C を含む依存 | 条件付き確定 (S-06) | PO | 回答済み (S-06 は v0.3 の着手前) |
+| 05 | TLS と C を含む依存 | 条件付き確定 (S-06) | PO | 回答済み (S-06 は Windows・Linux を 2026-11-17 に実施。macOS は v0.6) |
 | 06 | v0.1 に語彙の想起を入れるか | 確定 (ユーザー回答) | PO | 回答済み |
 | 07 | 対応 OS の出荷の順序 | 確定 (ユーザー回答) | PO | 回答済み |
 | 08 | UI の言語とプロンプトの言語 | 確定 (ユーザー回答) | PO | 回答済み |
@@ -349,13 +349,14 @@ PO 区分で残っている判断は、外部寄稿の受付の時期 ([OQ-28](#
   | 点 | 内容 | 対策 |
   |---|---|---|
   | 成熟度 | graviola の README に「とても新しいので注意して使うこと」とあり、第三者の監査の記載が無い | 信頼の拠り所を TLS に置かない。配布物が本物かどうかは、minisign の署名つきのマニフェストで確かめる (12 §5.2・§7.5)。TLS が破られても、偽の配布物は署名の検証で拒否される。graviola の版を固定し、`cargo audit` と更新の通知を追う |
-  | CPU の機能 | x86_64 は AES-NI・SSSE3・AVX・AVX2・ADX・BMI2・PCLMULQDQ (おおむね 2014 年以降の CPU)、aarch64 は aes・sha2・pmull・neon を必須とし、無い CPU での代替の実装を持たない | 通信の前に CPU の機能を実行時に確かめ、足りなければ通信せずに手作業の更新 (12 §7.1) を案内する。ローカル LLM を動かす PC では、ほぼ満たす見込み |
+  | CPU の機能 | graviola 0.4.5 は x86_64 で aes・pclmulqdq・bmi1・adx・avx・avx2 (おおむね 2013 年以降の CPU)、aarch64 で neon・aes・pmull・sha2 を必須とし、無い CPU での代替の実装を持たない。足りないと panic する (S-06 でソースを確かめた) | 通信の前に CPU の機能を実行時に確かめ、足りなければ通信せずに手作業の更新 (12 §7.1) を案内する。ローカル LLM を動かす PC では、ほぼ満たす見込み |
   | 対応する CPU の種類 | x86_64 と aarch64 だけ | 配布の対象 (12 §5.1) は Windows x86_64・Linux x86_64・macOS aarch64 なので足りる |
-  | 対応する OS | README は OS を明記していない | S-06 で、Windows (MSVC)・Linux (musl)・macOS で作れて GitHub に繋がることを確かめる |
-  | 証明書のルート | rustls はルートの一覧を持たない。同梱の一覧 (webpki-roots) はライセンスが許可リストの外の可能性がある | OS の証明書ストアを使う方法 (rustls-platform-verifier など) と同梱の一覧を S-06 で比べ、C を含まずライセンスが通る方を選ぶ |
-  | HTTP のクライアント | reqwest は既定で aws-lc-rs を引く | 暗号の実装を自分で入れる構成 (reqwest の提供者なしの機能、または ureq) を S-06 で選ぶ |
+  | 対応する OS | README は OS を明記していない | S-06 (2026-11-17) で、Windows (MSVC) と Linux (musl、静的リンク) で作れて GitHub の Releases から取得できることを確かめた。macOS aarch64 は作れること (`cargo check`) だけを確かめ、実行は省いた (指示による) |
+  | 証明書のルート | rustls はルートの一覧を持たない。同梱の一覧 (webpki-roots・webpki-root-certs) のライセンス CDLA-Permissive-2.0 は許可リストの外 (S-06) | OS の検証器 (rustls-platform-verifier) を使う (S-06 で選んだ)。ライセンスは許可リストで通る。Windows・macOS は OS の方針で検証し、Linux は OS の証明書ストアを読む |
+  | HTTP のクライアント | reqwest は既定で aws-lc-rs を引く。提供者なしの構成でも、evorag-llm と同じ reqwest を使うと、配布物の中で機能がまとまり evorag-llm にも TLS が入る (S-06 で確かめた) | ureq 3 (`rustls-no-provider`・`platform-verifier`) を使う (S-06 で選んだ)。依存の数は reqwest の構成の 89 に対して 31〜32 で、TLS は ureq の中に閉じる (02 §4.3 の R3) |
 
 - **条件 (S-06)**: 上の 3 つの対象で GitHub の Releases から取得でき、`cargo xtask check-deps` (C を含む依存 0) が通ること。
+- **S-06 の結果** (2026-11-17、`spikes/S-06/REPORT.md`): Windows (MSVC) と Linux (musl) は条件を満たした (check-deps は 4 つの対象で通る。ring・aws-lc-rs・cc はビルドの依存の木に入らない)。macOS aarch64 は実行を省いた。macOS の配布物は v0.6 (12 §5.1) なので、そのときに macOS で取得できることを確かめ、`deps-policy.toml` と `deny.toml` の検査の対象に `aarch64-apple-darwin` を足す。それまで、この OQ は条件付き確定のまま置く。
 - **条件を満たさないとき**: ring を `evorag-update` に限った例外として認める案 (元の推奨) に戻し、PO に確認する。暗号の実装は rustls の提供者として差し替えられるので、戻すときの影響は `evorag-update` の中に閉じる。
 - **採らなかった案**: (b) 取得を OS の道具 (Windows の `curl.exe` など) に任せる (外部のプロセスの実行が増える)。
 

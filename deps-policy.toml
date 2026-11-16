@@ -39,8 +39,15 @@ only_in = ["evorag-store"]
 
 [[direct_only_in]]
 rule = "R3"
-crates = ["reqwest", "ureq", "hyper", "hyper-util", "isahc", "attohttpc", "minreq"]
-only_in = ["evorag-llm", "evorag-update"]
+# evorag-llm と evorag-update は別の HTTP のクライアントを使う。同じ crate だと、配布物の中で機能がまとまり、
+# evorag-llm にも TLS が入る (S-06)。
+crates = ["reqwest", "hyper", "hyper-util", "isahc", "attohttpc", "minreq"]
+only_in = ["evorag-llm"]
+
+[[direct_only_in]]
+rule = "R3"
+crates = ["ureq"]
+only_in = ["evorag-update"]
 
 [[direct_only_in]]
 rule = "R6"
@@ -52,7 +59,7 @@ only_in = ["evorag-tui"]
 [[tree_only_in]]
 rule = "R3, R5"
 # TLS を持ってよいのは evorag-update だけ。evorag-llm は TLS を持たない。
-crates = ["rustls", "rustls-graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "rustls-platform-verifier", "rustls-native-certs"]
+crates = ["rustls", "rustls-graviola", "graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "webpki-root-certs", "rustls-platform-verifier", "rustls-native-certs"]
 only_in = ["evorag-update"]
 
 # workspace の crate ごとに、直接の依存として使ってよいものを列挙する規則。

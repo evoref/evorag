@@ -66,7 +66,7 @@ flowchart TB
 | `evorag-retrieval` | 問いの準備、候補の収集と順位付け、文脈の組み立て | unicode-normalization | v0.1 |
 | `evorag-learn` | 回帰台帳、precept、提案、リプレイ、ゲート | — | v0.4 |
 | `evorag-cartridge` | カートリッジの形式・検証・導入・作成 | zip (圧縮なしの読み書きだけ、既定の機能を切る)、minisign-verify、encoding_rs | v0.5 |
-| `evorag-update` | 本体の更新の確認・取得・検証・適用 | HTTP のクライアント + rustls + rustls-graviola (純 Rust の暗号の実装、OQ-05)、minisign-verify | v0.3 |
+| `evorag-update` | 本体の更新の確認・取得・検証・適用 | ureq (`rustls-no-provider`・`platform-verifier`) + rustls + rustls-graviola (純 Rust の暗号の実装、OQ-05、S-06)、minisign-verify | v0.3 |
 | `evorag-core` | 上を組み立てるコア。コアの API の実装、sleep-time の進行 | tokio、tracing | v0.1 |
 | `evorag-tui` | TUI | ratatui、crossterm、unicode-width、unicode-segmentation | v0.1 |
 | `evorag` (bin) | サブコマンドの入口 | clap | v0.1 |
@@ -92,7 +92,7 @@ flowchart TB
 |---|---|
 | R1 | `evorag-tui` は `evorag-types` と `evorag-core` の公開 API だけを使う |
 | R2 | redb を直接使ってよいのは `evorag-store` だけ。他の crate は `evorag-store` の trait (記録の読み書き、関係、副索引、範囲の走査) を使う |
-| R3 | HTTP のクライアントを使ってよいのは `evorag-llm` と `evorag-update` だけ。`evorag-llm` は TLS を持たない |
+| R3 | HTTP のクライアントを使ってよいのは `evorag-llm` (reqwest) と `evorag-update` (ureq) だけ。`evorag-llm` は TLS を持たない。2 つは別の HTTP のクライアントにする。同じ crate を使うと、配布物の中で機能がまとまり、`evorag-llm` にも TLS が入るため (S-06)。crate ごとの依存の木では見えないので、配布物 (`evorag`) の木で reqwest に TLS の機能 (`__tls`) が無いことも検査する (`evorag-update` を置くときに check-deps に足す) |
 | R4 | `evorag-types` の外部依存は serde だけ |
 | R5 | C を含む依存は 0。例外は作らない。TLS を使ってよいのは `evorag-update` だけで、暗号の実装は純 Rust のもの (OQ-05) に限る。ring・aws-lc-rs・OpenSSL を依存の木に入れない |
 | R6 | 画面を扱う crate (ratatui、crossterm) を使ってよいのは `evorag-tui` だけ |
