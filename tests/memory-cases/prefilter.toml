@@ -1,0 +1,115 @@
+# 前のふるい (04 §5.2)。書式は README.md。会話はすべて架空 (11 §9.7)。
+
+[[case]]
+id = "P01"
+title = "挨拶だけの発話は送らない"
+spec = "04 §5.2"
+text = "ありがとう！"
+expect = "skip"
+reason = "greeting"
+
+[[case]]
+id = "P02"
+title = "相槌だけの発話は送らない"
+spec = "04 §5.2"
+text = "うん。"
+expect = "skip"
+reason = "greeting"
+
+[[case]]
+id = "P03"
+title = "日本語のデータ根でも、英語の挨拶を送らない (挨拶は全言語を合わせて当てる)"
+spec = "04 §5.2"
+text = "Thanks!"
+expect = "skip"
+reason = "greeting"
+
+[[case]]
+id = "P04"
+title = "内容の単位が 4 つ未満の短い発話は送らない (問いへの一語の答えは取りこぼす。既知の制約)"
+spec = "04 §5.2"
+text = "大阪"
+expect = "skip"
+reason = "short"
+
+[[case]]
+id = "P05"
+title = "短くても内容の単位が足りる発話は送る"
+spec = "04 §5.2"
+text = "大阪に住んでる"
+expect = "send"
+
+[[case]]
+id = "P06"
+title = "挨拶で始まっても、一覧と完全には一致しない発話は送る"
+spec = "04 §5.2"
+text = "おはようございます。今日から大阪勤務です"
+expect = "send"
+
+[[case]]
+id = "P07"
+title = "コードブロックだけの発話は送らない"
+spec = "04 §5.2"
+text = """
+```
+let city = "Tokyo";
+```"""
+expect = "skip"
+reason = "empty"
+
+[[case]]
+id = "P08"
+title = "引用の行を除いて、残りを送る"
+spec = "04 §5.2、OQ-20"
+text = """
+> 東京に住んでいます
+私は大阪に住んでいます"""
+expect = "send"
+sent = "私は大阪に住んでいます"
+
+[[case]]
+id = "P09"
+title = "コードブロックを除いて、残りを送る"
+spec = "04 §5.2、OQ-20"
+text = """
+```
+私は東京に住んでいます
+```
+大阪在住の会社員です"""
+expect = "send"
+sent = "大阪在住の会社員です"
+
+[[case]]
+id = "P10"
+title = "英語の 1 語だけの発話は送らない"
+spec = "04 §5.2"
+lang = "en"
+text = "Osaka."
+expect = "skip"
+reason = "short"
+
+[[case]]
+id = "P11"
+title = "英語の短い言い切りは送る"
+spec = "04 §5.2"
+lang = "en"
+text = "I live in Osaka."
+expect = "send"
+
+[[case]]
+id = "P12"
+title = "コーディングのセッションの発話は送らない"
+spec = "04 §5.2、15 §4.5"
+mode = "coding"
+text = "私は大阪に住んでいて、Rust を書いています"
+expect = "skip"
+reason = "mode"
+
+[[case]]
+id = "P13"
+title = "知らないモードのセッションの発話は送らない"
+spec = "04 §5.2"
+mode = "future_mode"
+text = "私は大阪に住んでいます"
+expect = "skip"
+reason = "mode"
