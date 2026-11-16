@@ -8,6 +8,7 @@
 mod kinds;
 mod note;
 mod read;
+mod rules;
 mod write;
 
 pub use kinds::{
@@ -33,6 +34,11 @@ pub use read::{
     embedding_bodies, embedding_vector, embeddings_of_chunk, embeddings_of_model,
     feedback_for_answer, list_sessions, load_bindings, load_probe, load_session, load_settings,
     load_threshold, pending_user_turns, session_turns, session_turns_counted,
+};
+pub use rules::{
+    Attribute, Attributes, Cardinality, CommonRules, CorrectionRules, LanguageRules,
+    MAX_VALUE_CHARS, Prefilter, Quote, RULE_LANGUAGES, ReadingRules, SafetyRules,
+    all_language_rules, attributes, common_rules, language_rules,
 };
 pub use write::{
     AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
