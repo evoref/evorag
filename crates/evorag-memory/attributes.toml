@@ -1,0 +1,200 @@
+# 事実の属性の一覧 (04 §5.1、OQ-12)。
+#
+# 規則:
+# - 属性は足すだけにする。名前を変えたり、消したり、意味を変えたりしない (名前は事実の記録に残るため)。
+#   意味を変えたいときは、新しい名前の属性を足す。`other_subjects` は false → true に広げてよいが、逆はしない。
+# - `version` は、属性を足したときに上げる。
+# - 機微な情報 (健康・病気、宗教、政治、性的指向、正確な住所) の属性は持たない。抽出のプロンプトでも、
+#   これらをほかの属性に入れないように指示する (04 §5.2)。
+#
+# 各属性の項目:
+#   name           属性の名前 (英小文字・数字・`_`)。記録とプロンプトの両方で使う。
+#   cardinality    "single" (単値: 今の値は 1 つ) か "multi" (多値: 並べて持つ)。
+#   max_chars      値の長さの上限 (文字数。1〜200)。
+#   priority       事実の表 (04 §5.4) に入れる優先の順。小さいほど先。属性ごとに違う値にする。
+#   other_subjects true なら、利用者本人 (`self`) 以外の主語 (「妻」「田中さん」など) にも使える。
+#   describe       抽出のプロンプトに書く説明 (プロンプトの言語ごと)。何を入れ、何を入れないかを短く書く。
+#                  値は発話の中の続いた語句をそのまま写す (関門 2、04 §5.2) ので、例も発話の写しの形で書く。
+
+version = 1
+
+[[attribute]]
+name = "name"
+cardinality = "single"
+max_chars = 40
+priority = 10
+other_subjects = true
+describe.ja = "名前・呼び名 (その人がそう呼ばれたい名を含む)。例: ケン"
+describe.en = "name, or the name the person wants to be called. e.g. Ken"
+
+[[attribute]]
+name = "relation"
+cardinality = "single"
+max_chars = 40
+priority = 15
+other_subjects = true
+describe.ja = "利用者以外の人が、利用者から見て誰か (続柄・関係)。例: 同僚、母、大学の友人"
+describe.en = "who someone other than the user is to the user (relation). e.g. coworker, mother, college friend"
+
+[[attribute]]
+name = "residence"
+cardinality = "single"
+max_chars = 60
+priority = 20
+other_subjects = true
+describe.ja = "主に住んでいる地域 (国・都道府県・市区町村まで。番地や建物名は入れない)。例: 大阪"
+describe.en = "area where the person mainly lives (country, region or city; no street address). e.g. Osaka"
+
+[[attribute]]
+name = "dietary"
+cardinality = "multi"
+max_chars = 80
+priority = 25
+other_subjects = true
+describe.ja = "食べないもの・食べられないもの (アレルギーの食材など)。食べ物だけを書き、理由 (病気・宗教など) は入れない。例: えび"
+describe.en = "food the person does not or cannot eat (e.g. an allergen). Only the food, never the reason (illness, religion, etc.). e.g. shrimp"
+
+[[attribute]]
+name = "occupation"
+cardinality = "single"
+max_chars = 80
+priority = 30
+other_subjects = true
+describe.ja = "主な仕事・職業・立場。例: 会社員、看護師、大学生"
+describe.en = "main job, occupation or role. e.g. office worker, nurse, college student"
+
+[[attribute]]
+name = "age"
+cardinality = "single"
+max_chars = 20
+priority = 35
+other_subjects = true
+describe.ja = "年齢 (言った時点のもの)。例: 30歳"
+describe.en = "age (as of when it was said). e.g. 30"
+
+[[attribute]]
+name = "household"
+cardinality = "multi"
+max_chars = 60
+priority = 40
+other_subjects = false
+describe.ja = "一緒に住んでいる人 (続柄)。別に住む家族は入れない (relation に入る)。例: 妻、5歳の娘"
+describe.en = "people the person lives with (relation). Family living elsewhere goes to relation. e.g. wife, 5-year-old daughter"
+
+[[attribute]]
+name = "pet"
+cardinality = "multi"
+max_chars = 60
+priority = 50
+other_subjects = false
+describe.ja = "飼っている動物。例: 柴犬、ポチという犬"
+describe.en = "animals the person keeps. e.g. a shiba dog, a cat named Momo"
+
+[[attribute]]
+name = "spoken_language"
+cardinality = "multi"
+max_chars = 40
+priority = 60
+other_subjects = false
+describe.ja = "話す・学んでいる言語 (日本語・英語などの自然言語。プログラミング言語は skill)。例: 英語"
+describe.en = "natural languages the person speaks or is learning (programming languages go to skill). e.g. Japanese"
+
+[[attribute]]
+name = "hometown"
+cardinality = "single"
+max_chars = 60
+priority = 80
+other_subjects = true
+describe.ja = "出身地・育った地域。例: 北海道"
+describe.en = "hometown or where the person grew up. e.g. Hokkaido"
+
+[[attribute]]
+name = "birthday"
+cardinality = "single"
+max_chars = 20
+priority = 90
+other_subjects = true
+describe.ja = "誕生日 (言った形のまま)。例: 3月14日"
+describe.en = "birthday (as stated). e.g. March 14"
+
+[[attribute]]
+name = "education"
+cardinality = "multi"
+max_chars = 80
+priority = 100
+other_subjects = true
+describe.ja = "学校・学部・専攻・学んでいる分野。立場としての「学生」は occupation。例: 情報工学"
+describe.en = "school, major or field of study (being a student as a role goes to occupation). e.g. computer science"
+
+[[attribute]]
+name = "skill"
+cardinality = "multi"
+max_chars = 80
+priority = 110
+other_subjects = false
+describe.ja = "できること・使える技能 (プログラミング言語、資格など)。例: Rust、簿記2級"
+describe.en = "skills (programming languages, certifications, etc.). e.g. Rust, a driving license"
+
+[[attribute]]
+name = "device"
+cardinality = "multi"
+max_chars = 80
+priority = 120
+other_subjects = false
+describe.ja = "使っている機器と OS (PC、スマートフォン、GPU など)。ソフトやサービスは software。例: RTX 4070"
+describe.en = "devices and OS the person uses (PC, phone, GPU, etc.). Software and services go to software. e.g. RTX 4070"
+
+[[attribute]]
+# "tool" にしない: コーディングモード (15) では「道具 (tool)」がエージェントの道具の呼び出しを指すため。
+name = "software"
+cardinality = "multi"
+max_chars = 80
+priority = 130
+other_subjects = false
+describe.ja = "よく使うソフト・サービス・アプリ。機器は device。例: VS Code"
+describe.en = "software, services or apps the person regularly uses. Devices go to device. e.g. VS Code"
+
+[[attribute]]
+name = "hobby"
+cardinality = "multi"
+max_chars = 80
+priority = 140
+other_subjects = true
+describe.ja = "趣味・定期的にする活動。好きな作品や食べ物は likes。例: 登山"
+describe.en = "hobbies or activities the person does regularly. Favorite works or food go to likes. e.g. hiking"
+
+[[attribute]]
+name = "likes"
+cardinality = "multi"
+max_chars = 80
+priority = 150
+other_subjects = true
+describe.ja = "好きなもの (食べ物、作品、場所など)。自分でする活動は hobby。例: 『鬼滅の刃』、ラーメン"
+describe.en = "things the person likes (food, works, places, etc.). Activities they do go to hobby. e.g. ramen"
+
+[[attribute]]
+name = "dislikes"
+cardinality = "multi"
+max_chars = 80
+priority = 160
+other_subjects = true
+describe.ja = "苦手なもの・嫌いなもの。食べないものは dietary。例: 人混み"
+describe.en = "things the person dislikes. Food they do not eat goes to dietary. e.g. crowds"
+
+[[attribute]]
+name = "goal"
+cardinality = "multi"
+max_chars = 120
+priority = 170
+other_subjects = true
+describe.ja = "続けている取り組み・目標 (資格の勉強、作っているものなど)。日付のある 1 回の出来事は event。例: 応用情報の勉強"
+describe.en = "ongoing efforts or goals (studying for a certification, a project being built, etc.). A one-time dated happening goes to event."
+
+[[attribute]]
+name = "event"
+cardinality = "multi"
+max_chars = 120
+priority = 180
+other_subjects = true
+describe.ja = "予定している 1 回の出来事 (旅行、試験など。日付を言っていれば含める)。住まいや仕事の変更の予定は入れない (residence・occupation の予定になる)。例: 来月の京都旅行"
+describe.en = "a one-time upcoming happening (trip, exam, etc.; with the date if stated). Planned moves or job changes do not go here. e.g. a trip to Kyoto next month"

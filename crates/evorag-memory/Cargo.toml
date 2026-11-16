@@ -13,6 +13,8 @@ evorag-types = { workspace = true }
 evorag-store = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [lints]
 workspace = true

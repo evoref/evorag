@@ -621,6 +621,8 @@ dependencies = [
  "evorag-types",
  "serde",
  "thiserror 2.0.21",
+ "toml",
+ "unicode-normalization",
 ]
 
 [[package]]
