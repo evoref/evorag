@@ -141,11 +141,12 @@ cardinality = "multi"
 max_chars = 80
 priority = 120
 other_subjects = false
-describe.ja = "使っている機器と OS (PC、スマートフォン、GPU など)。ソフトやサービスは tool。例: RTX 4070"
-describe.en = "devices and OS the person uses (PC, phone, GPU, etc.). Software and services go to tool. e.g. RTX 4070"
+describe.ja = "使っている機器と OS (PC、スマートフォン、GPU など)。ソフトやサービスは software。例: RTX 4070"
+describe.en = "devices and OS the person uses (PC, phone, GPU, etc.). Software and services go to software. e.g. RTX 4070"
 
 [[attribute]]
-name = "tool"
+# "tool" にしない: コーディングモード (15) では「道具 (tool)」がエージェントの道具の呼び出しを指すため。
+name = "software"
 cardinality = "multi"
 max_chars = 80
 priority = 130
