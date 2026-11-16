@@ -306,8 +306,11 @@ async fn on_battery_reduce_delays_the_embedding() {
     )
     .await
     .unwrap();
+    // 発話を送って応答を待つ間は、裏の処理を止めておく (遅い機械では、応答と後片付けだけで 5 倍の
+    // 1.5 秒を超え、時間を測り始める前に埋め込みが始まることがあった)。止めを解くと操作として数える。
+    core.hold(true);
     talk(&core, &mut rx, &TALK[..1]).await;
-    core.touch();
+    core.hold(false);
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(emb.aux_calls().0, 0, "not before 5 x idle");
     // 5 倍 (1.5 秒) を過ぎたら始まる (見直しは 1 秒ごとなので、締切つきで待つ)。
