@@ -179,7 +179,14 @@ fn bench(root: &Path, args: &[String]) -> bool {
                 return false;
             }
         },
-        [flag, dir] if flag == "--out" => PathBuf::from(dir),
+        // 試験は crate のフォルダで動くので、相対パスは起動したフォルダからの絶対パスにして渡す。
+        [flag, dir] if flag == "--out" => match std::env::current_dir() {
+            Ok(cwd) => cwd.join(dir),
+            Err(e) => {
+                eprintln!("bench: {e}");
+                return false;
+            }
+        },
         _ => {
             eprintln!("usage: cargo xtask bench [--out DIR]");
             return false;
