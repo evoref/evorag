@@ -11,7 +11,11 @@ use evorag_memory::attributes;
 use toml::Value;
 
 fn cases_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/memory-cases")
+    // 実行時の値を先に見る (no-network の CI は、nextest の --workspace-remap で写しの中で走らせる)。
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    dir.join("../../tests/memory-cases")
 }
 
 fn load(file: &str) -> Vec<Value> {
