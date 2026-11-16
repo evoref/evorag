@@ -2,7 +2,8 @@
 //!
 //! - `<出力先>/<kind>.jsonl`。先頭の行は形式名 `evorag-export` と形式の版、以降の行は封筒
 //!   (`body` は JSON に写す。JSON にそのまま写せない値は `{"$cbor": …}`)。
-//! - 含めないもの: `quarantine` の記録 (と、DB の外にある索引)。読めない記録は数えて飛ばす。
+//! - 含めないもの: `quarantine` の記録、呼ぶ側が挙げた作り直せる種類 (点検の結果など、03 §11)、
+//!   DB の外にある索引。読めない記録は数えて飛ばす。
 //! - 出力のフォルダとファイルは所有者だけの権限で作る。中身のあるフォルダには書かない。
 
 use std::collections::BTreeMap;
@@ -67,12 +68,14 @@ fn file_name(kind: &str) -> String {
     format!("{s}.jsonl")
 }
 
-/// データ根 `root` を `out` に書き出す。使っているプロセスがあれば断る。
+/// データ根 `root` を `out` に書き出す。使っているプロセスがあれば断る。`exclude` の種類は書かない
+/// (作り直せる派生の記録。種類の名前はストアの上の層が決める)。
 pub fn export(
     root: &Path,
     out: &Path,
     evorag_version: &str,
     now_ms: i64,
+    exclude: &[&str],
 ) -> Result<ExportReport, ExportError> {
     let _lock = DataRootLock::acquire_quiet(root).map_err(OpenError::from)?;
     if out.exists() && std::fs::read_dir(out)?.next().is_some() {
@@ -99,7 +102,7 @@ pub fn export(
                 report.skipped_corrupt += 1;
                 continue;
             };
-            if kind == KIND_QUARANTINE {
+            if kind == KIND_QUARANTINE || exclude.contains(&kind.as_str()) {
                 continue;
             }
             let env = match classify(&kind, id, k.value(), v.value()) {

@@ -30,7 +30,12 @@ pub const RESERVE_FILE: &str = "reserve.space";
 const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
-pub const FORMAT_VERSION: &str = "0.1";
+pub const FORMAT_VERSION: &str = "0.2";
+
+/// この形式の DB を読み書きするのに要る、evorag が知る形式の版の下限 (`format.min_read`・
+/// `format.min_write`、03 §3.1.1)。0.2 は 0.1 に種類と任意の項目を足しただけなので、0.1 のまま
+/// にし、v0.1.2 に戻しても読み書きできるようにする (03 §12.1)。
+pub const FORMAT_MIN: &str = "0.1";
 
 pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub(crate) const META: Raw = TableDefinition::new("meta");
@@ -708,6 +713,29 @@ impl Store {
             backups.unwrap_or(&default),
             self.clock.now().as_millis(),
         )
+    }
+
+    /// 作り直しなどの操作の前の退避 (03 §7.2)。DB の写しと `extra_files` (`config.toml` など) を、
+    /// `backups/pre-op/` に作る。作ったフォルダを返す。
+    pub fn pre_op_backup(
+        &self,
+        operation: &str,
+        extra_files: &[&Path],
+    ) -> Result<PathBuf, StoreError> {
+        crate::backup::pre_op(
+            &self.db,
+            &self.root,
+            self.clock.now().as_millis(),
+            operation,
+            "current",
+            extra_files,
+        )
+    }
+
+    /// その日の日次の退避がまだ無いか (03 §7.1)。
+    pub fn daily_backup_due(&self, backups: Option<&Path>) -> bool {
+        let default = self.root.join(crate::backup::BACKUPS_DIR);
+        crate::backup::daily_due(backups.unwrap_or(&default), self.clock.now().as_millis())
     }
 
     /// その種類をジャーナルにも書くか。

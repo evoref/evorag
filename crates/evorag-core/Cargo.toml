@@ -15,13 +15,16 @@ evorag-llm = { workspace = true }
 evorag-index = { workspace = true }
 evorag-memory = { workspace = true }
 evorag-retrieval = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 evorag-store = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
 

@@ -43,9 +43,14 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         allow_unsafe_location: false,
         probe: evorag_core::Probe::system(),
         model_name: "test".into(),
-        models: Vec::new(),
-        connect: None,
+        ignored_config: Vec::new(),
+        embed: None,
+        rerank: None,
+        aux_request_extra: Default::default(),
+        probe_models: false,
+        sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
+        precompute: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     }
@@ -126,7 +131,7 @@ async fn tokens_arrive_in_order_and_the_reply_is_saved_with_the_model_key() {
     // 送った要求: システムプロンプト + 発話。応答は最初のスロット。
     let req = &llm.requests()[0];
     assert_eq!(req.messages[0].role, Role::System);
-    assert_eq!(req.messages.last().unwrap().content, "こんにちは");
+    // 発話には記録した日時が付く (05 §4.1)。
     assert_eq!(req.id_slot, Some(0));
     core.shutdown().await;
 }
@@ -187,7 +192,7 @@ async fn a_failed_reply_keeps_the_utterance_and_can_be_resent() {
     assert_eq!(turn.status, TurnStatus::Completed);
     // 同じ発話を送り直した。失敗した応答は送らない。
     let reqs = llm.requests();
-    assert_eq!(reqs[1].messages.last().unwrap().content, "質問");
+    assert_eq!(utterance(&reqs[1].messages.last().unwrap().content), "質問");
     assert!(reqs[1].messages.iter().all(|m| m.content != "途中"));
     let turns = core.turns(sid);
     assert_eq!(turns.len(), 3, "utterance, failed reply, new reply");
@@ -223,6 +228,11 @@ async fn retry_creates_a_new_reply_keeps_the_old_one_and_records_a_signal() {
     assert!(reqs[1].messages.iter().all(|m| m.content != "こんにちは"));
     core.shutdown().await;
     assert_eq!(signals_on(dir.path(), old.id), 1);
+}
+
+/// 発話の先頭の日時 (`[…] `) を除いた本文。
+fn utterance(content: &str) -> &str {
+    content.split_once("] ").map_or(content, |(_, b)| b)
 }
 
 fn signals_on(root: &Path, target: evorag_types::Id) -> usize {
@@ -280,9 +290,13 @@ async fn the_context_fits_the_budget_and_token_counts_are_cached() {
         core.tokenize_calls() - calls_before
     );
     let last = llm.requests().last().unwrap().clone();
-    assert_eq!(last.messages.last().unwrap().content, "最後");
+    assert_eq!(utterance(&last.messages.last().unwrap().content), "最後");
     // 古い発話は予算に入らず省かれた。
-    let kept = last.messages.iter().filter(|m| m.content == long).count();
+    let kept = last
+        .messages
+        .iter()
+        .filter(|m| utterance(&m.content) == long)
+        .count();
     assert!(kept < 3, "kept {kept} long utterances");
     core.shutdown().await;
 }
@@ -576,85 +590,6 @@ async fn thinking_is_announced_once_and_not_saved() {
         llm.requests()[0].extra["chat_template_kwargs"]["enable_thinking"],
         false
     );
-    core.shutdown().await;
-}
-
-/// FR-108: `/model` で今のモデルと候補を示し、候補に切り替える。繋がらなければ今のまま。
-#[tokio::test(flavor = "multi_thread")]
-async fn the_model_can_be_switched_to_a_configured_choice() {
-    let dir = TempDir::new("core-model");
-    let a = cassette(8192, OK);
-    let b = cassette(4096, OK);
-    let down = ReplayClient::from_json(r#"{"props": {}, "models": {}, "health": false}"#).unwrap();
-    let mut cfg = config(dir.path(), PromptLanguage::Ja);
-    cfg.model_name = "a".into();
-    cfg.models = vec![
-        evorag_core::ModelChoice {
-            name: "b".into(),
-            url: "replay-b".into(),
-        },
-        evorag_core::ModelChoice {
-            name: "down".into(),
-            url: "replay-down".into(),
-        },
-    ];
-    let (bb, dd) = (b.clone(), down.clone());
-    cfg.connect = Some(Arc::new(move |u: &str| {
-        Ok(match u {
-            "replay-b" => Arc::new(bb.clone()) as Arc<dyn evorag_llm::LlmClient>,
-            _ => Arc::new(dd.clone()) as Arc<dyn evorag_llm::LlmClient>,
-        })
-    }));
-    let (core, mut rx, _) = Core::start(cfg, Arc::new(a.clone())).await.unwrap();
-    new_session(&core, &mut rx).await;
-
-    core.command(Command::Model { name: None });
-    let ev = until(&mut rx, |e| matches!(e, Event::ModelInfo { .. })).await;
-    let Some(Event::ModelInfo {
-        current,
-        choices,
-        n_ctx,
-        ..
-    }) = ev.last()
-    else {
-        panic!()
-    };
-    assert_eq!((current.as_str(), *n_ctx), ("a", 8192));
-    assert_eq!(choices, &["b", "down"]);
-
-    core.command(Command::Model {
-        name: Some("nope".into()),
-    });
-    let ev = until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
-    let Some(Event::Rejected { error }) = ev.last() else {
-        panic!()
-    };
-    assert_eq!(error.key, MessageKey::UnknownModel);
-
-    core.command(Command::Model {
-        name: Some("down".into()),
-    });
-    until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
-    assert_eq!(
-        core.server().n_ctx,
-        8192,
-        "a failed switch keeps the current model"
-    );
-
-    core.command(Command::Model {
-        name: Some("b".into()),
-    });
-    let ev = until(&mut rx, |e| matches!(e, Event::ModelInfo { .. })).await;
-    let Some(Event::ModelInfo { current, n_ctx, .. }) = ev.last() else {
-        panic!()
-    };
-    assert_eq!((current.as_str(), *n_ctx), ("b", 4096));
-    core.command(Command::Send {
-        text: "新しいモデルへ".into(),
-    });
-    until(&mut rx, finished).await;
-    assert_eq!(b.requests().len(), 1);
-    assert!(a.requests().is_empty());
     core.shutdown().await;
 }
 

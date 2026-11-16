@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use evorag_llm::{HttpClient, LlmClient};
+use evorag_memory::ModelProbeBody;
 use evorag_store::OpenError;
-use evorag_store::inspect::{DbState, inspect};
+use evorag_store::inspect::{DbState, inspect_collect};
 use evorag_store::restore::{BackupKind, list_backups as backups_of};
 use evorag_tui::catalog::Catalog;
 use evorag_types::MessageKey;
@@ -57,7 +58,12 @@ pub fn run(
     );
     let mut kinds = evorag_memory::kinds();
     kinds.sort_by_key(|k| k.name);
-    let report = match inspect(data_root, kinds, backup_dir) {
+    let report = match inspect_collect(
+        data_root,
+        kinds,
+        backup_dir,
+        &[evorag_memory::KIND_MODEL_PROBE],
+    ) {
         Ok(r) => r,
         Err(OpenError::Lock(evorag_store::lock::LockError::InUse { pid })) => {
             return crate::data_root_in_use(c, data_root, pid);
@@ -158,6 +164,7 @@ pub fn run(
             say(c, MessageKey::DoctorIndexRebuild, &[("detail", &d)]);
         }
     }
+    show_probes(c, &report);
     match report.backups.first() {
         Some(b) => say(
             c,
@@ -180,6 +187,83 @@ pub fn run(
         );
     }
     ExitCode::SUCCESS
+}
+
+/// モデルの点検の結果 (06 §3.3)。役割ごとに、いちばん新しいもの。
+fn show_probes(c: &Catalog, report: &evorag_store::inspect::Inspection) {
+    let mut newest: std::collections::BTreeMap<String, (evorag_types::Timestamp, ModelProbeBody)> =
+        Default::default();
+    for e in report
+        .collected
+        .get(evorag_memory::KIND_MODEL_PROBE)
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(b) = e.body_as::<ModelProbeBody>()
+            && newest
+                .get(&b.role)
+                .is_none_or(|(at, _)| *at <= e.updated_at)
+        {
+            newest.insert(b.role.clone(), (e.updated_at, b));
+        }
+    }
+    if newest.is_empty() {
+        say(c, MessageKey::DoctorProbeNone, &[]);
+    }
+    for (role, (_, p)) in &newest {
+        for line in probe_lines(c, role, p) {
+            println!("{line}");
+        }
+    }
+}
+
+/// 点検の結果を、利用者に見せる行にする (`doctor` と `setup` で使う)。
+pub fn probe_lines(c: &Catalog, role: &str, p: &ModelProbeBody) -> Vec<String> {
+    let num = |v: Option<String>| v.unwrap_or_else(|| "-".to_owned());
+    let mut out = Vec::new();
+    if let Some(e) = &p.error {
+        out.push(c.with(
+            MessageKey::DoctorProbeFailed,
+            &[("role", role), ("detail", e)],
+        ));
+    }
+    match role {
+        evorag_memory::ROLE_CHAT => {
+            let mut issues = Vec::new();
+            if p.thinking_off == Some(false) {
+                issues.push(c.key(MessageKey::UiProbeThinkingNotOff));
+            }
+            if p.structured_ok == Some(false) {
+                issues.push(c.key(MessageKey::UiProbeStructuredBroken));
+            }
+            let issues = if issues.is_empty() {
+                c.key(MessageKey::DoctorProbeNoIssue)
+            } else {
+                issues.join("。") + "。"
+            };
+            out.push(c.with(
+                MessageKey::DoctorProbeChat,
+                &[
+                    ("prompt", &num(p.prompt_tps.map(|v| v.to_string()))),
+                    ("gen", &num(p.gen_tps.map(|v| v.to_string()))),
+                    ("issues", &issues),
+                ],
+            ));
+        }
+        evorag_memory::ROLE_EMBED if p.error.is_none() => out.push(c.with(
+            MessageKey::DoctorProbeEmbed,
+            &[
+                ("dims", &num(p.dims.map(|v| v.to_string()))),
+                ("ms", &num(p.embed_ms.map(|v| v.to_string()))),
+            ],
+        )),
+        evorag_memory::ROLE_RERANK if p.error.is_none() => out.push(c.with(
+            MessageKey::DoctorProbeRerank,
+            &[("ms", &num(p.rerank6_ms.map(|v| v.to_string())))],
+        )),
+        _ => {}
+    }
+    out
 }
 
 pub fn list_backups(c: &Catalog, data_root: &Path, backup_dir: Option<&Path>) -> ExitCode {

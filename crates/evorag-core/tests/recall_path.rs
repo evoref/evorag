@@ -42,9 +42,14 @@ fn config(root: &Path, seed: u64) -> CoreConfig {
         allow_unsafe_location: false,
         probe: evorag_core::Probe::system(),
         model_name: "test".into(),
-        models: Vec::new(),
-        connect: None,
+        ignored_config: Vec::new(),
+        embed: None,
+        rerank: None,
+        aux_request_extra: Default::default(),
+        probe_models: false,
+        sleep: evorag_core::SleepConfig::immediate(),
         memory_enabled: true,
+        precompute: true,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),
     }
@@ -95,8 +100,14 @@ async fn say(core: &Core, rx: &mut UnboundedReceiver<Event>, text: &str) -> Turn
     turn.clone()
 }
 
+/// i 番目の要求のシステムプロンプト。
 fn system_prompt(llm: &ReplayClient, i: usize) -> String {
     llm.requests()[i].messages[0].content.clone()
+}
+
+/// i 番目の要求の今の発話 (想起の引用はここに入る、05 §4.1)。
+fn current(llm: &ReplayClient, i: usize) -> String {
+    llm.requests()[i].messages.last().unwrap().content.clone()
 }
 
 fn nonce_of(system: &str) -> Option<String> {
@@ -139,22 +150,32 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
 
     new_session(&core, &mut rx, "別の話").await;
     let answer = say(&core, &mut rx, ASK).await;
-    let system = system_prompt(&llm, 1);
-    let nonce = nonce_of(&system).expect("the quote frame");
-    assert!(system.contains("モンステラの水やりは"), "{system}");
-    assert!(system.contains("セッション「観葉植物の相談」"), "{system}");
-    // 枠の区切りは 2 回だけ (説明の文と、閉じるところ)。本文に区切りに似た並びがあっても外に出ない。
+    let sent = current(&llm, 1);
+    let nonce = nonce_of(&sent).expect("the quote frame");
+    assert!(sent.contains("モンステラの水やりは"), "{sent}");
+    assert!(sent.contains("セッション「観葉植物の相談」"), "{sent}");
+    // 枠を閉じるのは 1 回だけ。本文に区切りに似た並びがあっても外に出ない。
     assert_eq!(
-        system.matches(&format!("<</引用-{nonce}>>")).count(),
-        2,
-        "{system}"
+        sent.matches(&format!("<</引用-{nonce}>>")).count(),
+        1,
+        "{sent}"
     );
-    // 枠の後で、引用の中の指示に従わないことをもう一度述べる (AC-NFR-504-1 の対策)。
+    // 枠の後で、引用の中の指示に従わないことをもう一度述べ、その後に今の発話が来る (AC-NFR-504-1 の対策)。
+    let after = sent
+        .split_once("普段どおりに答えてください。")
+        .expect("the reminder")
+        .1;
+    assert!(after.trim_start().starts_with("[20"), "{sent}");
+    assert!(after.ends_with(ASK), "{sent}");
+    // システムプロンプトには引用も区切りの印も入らない (ADR-0017)。
+    let system = system_prompt(&llm, 1);
     assert!(
-        system.trim_end().ends_with("普段どおりに答えてください。"),
+        !system.contains(&nonce) && !system.contains("モンステラ"),
         "{system}"
     );
+    assert_eq!(system, system_prompt(&llm, 0));
     assert_eq!(answer.sources, 1);
+    assert_eq!(answer.source_base, 1);
 
     // 出典の詳細 (FR-110)。
     core.command(Command::ShowSource {
@@ -190,11 +211,24 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
     )
     .await;
     assert_eq!(again.sources, 1);
-    assert_ne!(nonce_of(&system_prompt(&llm, 2)), Some(nonce));
+    assert_ne!(nonce_of(&current(&llm, 2)), Some(nonce));
+    // 出典の番号はセッションの通し番号 (05 §5.1)。前のターンの引用は、次の要求の履歴に残らない。
+    assert_eq!(again.source_base, 2);
+    let req = &llm.requests()[2];
+    // 先頭はシステムプロンプト (枠の扱い方の説明がある)。その後から今の発話の前までが履歴。
+    let history = &req.messages[1..req.messages.len() - 1];
+    assert!(!history.is_empty());
+    assert!(history.iter().all(|m| !m.content.contains("<<引用-")));
+    core.command(Command::ShowSource {
+        turn: again.id,
+        n: 2,
+    });
+    let ev = until(&mut rx, |e| matches!(e, Event::SourceDetail { .. })).await;
+    assert!(matches!(ev.last(), Some(Event::SourceDetail { n: 2, .. })));
 
     // 関係の無い問いでは枠を入れず、Abstain と記録する。
     let none = say(&core, &mut rx, UNRELATED).await;
-    assert!(!system_prompt(&llm, 3).contains("<<引用-"));
+    assert!(!current(&llm, 3).contains("<<引用-"));
     assert_eq!(none.sources, 0);
     core.shutdown().await;
 
@@ -229,7 +263,7 @@ async fn sources_off_keeps_earlier_conversations_out() {
     let ev = until(&mut rx, |e| matches!(e, Event::SourcesInfo { .. })).await;
     assert_eq!(ev.last(), Some(&Event::SourcesInfo { memory: false }));
     let off = say(&core, &mut rx, ASK).await;
-    assert!(!system_prompt(&llm, 1).contains("<<引用-"));
+    assert!(!current(&llm, 1).contains("<<引用-"));
     assert_eq!(off.sources, 0);
 
     core.command(Command::Sources { memory: None });
@@ -238,13 +272,13 @@ async fn sources_off_keeps_earlier_conversations_out() {
     core.command(Command::Sources { memory: Some(true) });
     until(&mut rx, |e| matches!(e, Event::SourcesInfo { .. })).await;
     let on = say(&core, &mut rx, ASK).await;
-    assert!(system_prompt(&llm, 2).contains("<<引用-"));
+    assert!(current(&llm, 2).contains("<<引用-"));
     assert_eq!(on.sources, 1);
     core.shutdown().await;
     assert_eq!(turn_body(dir.path(), off.id).recall, None);
 }
 
-/// verifies: AC-FR-309-1 (語彙の索引の部分)
+/// verifies: AC-FR-309-1 (語彙の索引の部分), AC-FR-309-2 (チャンクが消え、以後の想起に出ない)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
     let dir = TempDir::new("recall-delete");
@@ -257,13 +291,13 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
 
     new_session(&core, &mut rx, "別の話").await;
     let after = say(&core, &mut rx, ASK).await;
-    assert!(!system_prompt(&llm, 1).contains("<<引用-"));
+    assert!(!current(&llm, 1).contains("<<引用-"));
     assert_eq!(after.sources, 0);
     core.settle().await;
     core.shutdown().await;
 
     // 索引のファイルにも、消したターンの ID が残らない。
-    let index = dir.path().join("index").join("memory").join("lex");
+    let index = dir.path().join("index").join("memory").join("chunk-lex");
     let needle = planted.id.as_bytes().to_vec();
     for e in walk(&index) {
         let b = std::fs::read(&e).unwrap();
@@ -280,10 +314,10 @@ async fn a_deleted_session_is_no_longer_recalled_even_after_a_restart() {
     let (core, mut rx) = start(dir.path(), &llm, 6).await;
     new_session(&core, &mut rx, "再び").await;
     let again = say(&core, &mut rx, ASK).await;
-    let system = system_prompt(&llm, 0);
-    assert!(!system.contains("観葉植物の相談"), "{system}");
-    assert!(!system.contains("モンステラの水やりは、"), "{system}");
-    assert_eq!(again.sources, 1, "{system}");
+    let sent = current(&llm, 0);
+    assert!(!sent.contains("観葉植物の相談"), "{sent}");
+    assert!(!sent.contains("モンステラの水やりは、"), "{sent}");
+    assert_eq!(again.sources, 1, "{sent}");
     core.shutdown().await;
 }
 
@@ -298,7 +332,7 @@ async fn a_lost_index_is_rebuilt_from_the_database() {
     say(&core, &mut rx, PLANT).await;
     core.shutdown().await;
 
-    let index = dir.path().join("index").join("memory").join("lex");
+    let index = dir.path().join("index").join("memory").join("chunk-lex");
     // ハッシュが合わないセグメントは捨てて作り直す。
     for e in walk(&index) {
         if e.ends_with("lex.bin") {
@@ -313,6 +347,74 @@ async fn a_lost_index_is_rebuilt_from_the_database() {
     core.shutdown().await;
 }
 
+fn chunks(root: &Path) -> Vec<evorag_memory::ChunkBody> {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
+    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.6".into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+        config_file: None,
+    })
+    .unwrap();
+    let rtx = store.read().unwrap();
+    let mut out = Vec::new();
+    rtx.for_each(evorag_memory::KIND_CHUNK, |r| {
+        if let Read::Ok(e) = r {
+            out.push(e.body_as().unwrap());
+        }
+        true
+    })
+    .unwrap();
+    out
+}
+
+/// verifies: AC-FR-402-1 (v0.2: 索引の単位はチャンク。長いターンの後ろのチャンクで当たっても、そのターンを添える)
+#[tokio::test(flavor = "multi_thread")]
+async fn long_turns_are_chunked_and_recalled_through_any_chunk() {
+    let dir = TempDir::new("recall-chunks");
+    // v0.1 の索引 (`lex/`) は使わず、最初の起動で消す (05 §2.3)。
+    let old = dir.path().join("index").join("memory").join("lex");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("CURRENT"), b"v0.1").unwrap();
+    let llm = cassette(3);
+    let (core, mut rx) = start(dir.path(), &llm, 11).await;
+    assert!(!old.exists());
+    new_session(&core, &mut rx, "長い相談").await;
+    let filler = "車の点検の予定を、来月の連休の前に入れておきたい。".repeat(20);
+    let long = format!("{filler}\n\n{PLANT}");
+    let first = say(&core, &mut rx, &long).await;
+    new_session(&core, &mut rx, "別の話").await;
+    let answer = say(&core, &mut rx, ASK).await;
+    assert_eq!(answer.sources, 1);
+    core.shutdown().await;
+    let user = first.reply_to.unwrap();
+    let of_user: Vec<_> = chunks(dir.path())
+        .into_iter()
+        .filter(|c| c.turn == user)
+        .collect();
+    assert!(of_user.len() >= 2, "{of_user:?}");
+    assert!(turn_body(dir.path(), answer.id).attached.contains(&user));
+    assert!(
+        dir.path()
+            .join("index")
+            .join("memory")
+            .join("chunk-lex")
+            .is_dir()
+    );
+
+    // セッションを消すと、そのターンのチャンクも消える (03 §4.2 の規則 12)。
+    let llm = cassette(0);
+    let (core, mut rx) = start(dir.path(), &llm, 12).await;
+    core.command(Command::OpenSession { id: first.session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.shutdown().await;
+    assert!(chunks(dir.path()).iter().all(|c| c.turn != user));
+}
 fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir).unwrap().flatten() {

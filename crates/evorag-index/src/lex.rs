@@ -252,6 +252,11 @@ pub struct DocRef {
 }
 
 impl Snapshot {
+    /// ファイルに書かない、手元だけの索引 (較正の同梱の事例など、05 §3.7)。
+    pub fn in_memory(docs: &[DocInput]) -> Self {
+        Self::new(vec![Arc::new(Segment::build("memory".into(), docs))])
+    }
+
     fn new(segments: Vec<Arc<Segment>>) -> Self {
         let docs = segments.iter().map(|s| s.docs.len() as u64).sum();
         let total_len = segments

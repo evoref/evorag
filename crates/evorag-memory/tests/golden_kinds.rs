@@ -97,6 +97,21 @@ fn turn_v1() {
                 decision: RecallDecision::Fire,
                 sources: vec![1],
             }),
+            obs: Some(TurnObs {
+                source_base: Some(3),
+                history_from: Some(id("019a6a2b-0000-7000-8000-000000000003")),
+                recall_position: Some(RECALL_BEFORE_UTTERANCE.into()),
+                answer: [("language".to_owned(), "auto".to_owned())].into(),
+                reranked: vec![Reranked {
+                    id: id("019a6a2b-0000-7000-8000-00000000000a"),
+                    score: -2.5,
+                }],
+                reranker: Some(format!("{:032x}", 0x0fed_cba9_8765_4321_u128)),
+                threshold_version: Some(1),
+                band: vec![id("019a6a2b-0000-7000-8000-00000000000b")],
+                user_attached: vec![id("019a6a2b-0000-7000-8000-00000000000c")],
+                degraded: vec![DEGRADED_NO_EMBED.into()],
+            }),
         },
     );
 }
@@ -110,6 +125,142 @@ fn signal_v1() {
             kind: SignalKind::Retry,
             target: id("019a6a2b-0000-7000-8000-000000000002"),
             reason: None,
+        },
+    );
+}
+
+#[test]
+fn setting_v1() {
+    check(
+        KIND_SETTING,
+        id("019a6a2b-0000-7000-8000-000000000006"),
+        SettingBody {
+            name: SETTING_ANSWER_LENGTH.into(),
+            value: "short".into(),
+        },
+    );
+}
+
+#[test]
+fn model_binding_v1() {
+    let origin = |key: &str, file: &str| ModelOrigin {
+        model_key: key.into(),
+        file_name: file.into(),
+        model_name: "qwen".into(),
+        n_params: Some(8_953_803_264),
+        size: Some(5_669_554_176),
+        n_vocab: Some(248_320),
+        build_info: "b1-138789d".into(),
+    };
+    check(
+        KIND_MODEL_BINDING,
+        id("019a6a2b-0000-7000-8000-000000000007"),
+        ModelBindingBody {
+            role: ROLE_CHAT.into(),
+            current: origin("0123456789abcdef0123456789abcdef", "qwen-b.gguf"),
+            history: vec![origin("fedcba9876543210fedcba9876543210", "qwen-a.gguf")],
+        },
+    );
+}
+
+#[test]
+fn model_probe_v1() {
+    check(
+        KIND_MODEL_PROBE,
+        id("019a6a2b-0000-7000-8000-000000000008"),
+        ModelProbeBody {
+            role: ROLE_CHAT.into(),
+            // 16 進の 32 文字 (秘密情報の検査に、鍵と見なされないように式で作る)。
+            model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
+            build_info: "b1-138789d".into(),
+            prompt_tps: Some(812.5),
+            gen_tps: Some(41.2),
+            thinking_off: Some(true),
+            structured_ok: Some(false),
+            dims: None,
+            embed_ms: None,
+            rerank6_ms: None,
+            error: Some("speed: timed out".into()),
+        },
+    );
+}
+
+#[test]
+fn threshold_v1() {
+    check(
+        KIND_THRESHOLD,
+        id("019a6a2b-0000-7000-8000-000000000009"),
+        ThresholdBody {
+            reranker_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
+            target: TARGET_CONVERSATION.into(),
+            version: 2,
+            method: METHOD_BUNDLED.into(),
+            cases: "ja-1".into(),
+            passed: true,
+            threshold: Some(-4.09),
+            band_low: Some(-5.52),
+            stats: [("rank_ok".to_owned(), 33), ("rank_n".to_owned(), 36)].into(),
+        },
+    );
+}
+
+#[test]
+fn recall_feedback_v1() {
+    check(
+        KIND_RECALL_FEEDBACK,
+        id("019a6a2b-0000-7000-8000-00000000000d"),
+        RecallFeedbackBody {
+            op: FEEDBACK_IRRELEVANT.into(),
+            answer: id("019a6a2b-0000-7000-8000-000000000002"),
+            target: id("019a6a2b-0000-7000-8000-00000000000b"),
+            score: Some(-3.5),
+            reranker: Some(format!("{:032x}", 0x0fed_cba9_8765_4321_u128)),
+        },
+    );
+}
+
+#[test]
+fn chunk_v1() {
+    check(
+        KIND_CHUNK,
+        id("019a6a2b-0000-7000-8000-00000000000e"),
+        ChunkBody {
+            turn: id("019a6a2b-0000-7000-8000-000000000003"),
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            start: 0,
+            end: 398,
+            rules: 1,
+        },
+    );
+}
+
+#[test]
+fn embedding_v1() {
+    check(
+        KIND_EMBEDDING,
+        id("019a6a2b-0000-7000-8000-00000000000f"),
+        EmbeddingBody {
+            target: id("019a6a2b-0000-7000-8000-00000000000e"),
+            unit: UNIT_CHUNK.into(),
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            model_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
+            dim: 1024,
+            key: None,
+        },
+    );
+}
+
+#[test]
+fn note_v1() {
+    check(
+        KIND_NOTE,
+        id("019a6a2b-0000-7000-8000-000000000010"),
+        NoteBody {
+            session: id("019a6a2b-0000-7000-8000-000000000001"),
+            exchanges: vec![id("019a6a2b-0000-7000-8000-000000000002")],
+            keys: vec!["観葉植物の水やり".into(), "モンステラ".into()],
+            model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
+            rules: 1,
         },
     );
 }

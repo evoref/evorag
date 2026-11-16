@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::types::ModelMeta;
 
 /// `model_path` のファイル名 (`/` と `\` のどちらも区切りとみなす)。
-fn file_name(model_path: &str) -> &str {
+pub fn file_name(model_path: &str) -> &str {
     model_path.rsplit(['/', '\\']).next().unwrap_or(model_path)
 }
 

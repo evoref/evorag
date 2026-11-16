@@ -20,9 +20,14 @@ busy = "応答を生成しています。Esc で中断してから送ってく�
 no_session = "セッションが開いていません。"
 nothing_to_retry = "作り直す発話がありません。"
 nothing_to_rate = "評価する応答がありません。"
-unknown_model = "モデルの候補「{name}」は設定にありません (設定の [[llm.chat.models]] に名前と url を書きます)。"
+model_switch_in_setup = "モデルの切り替えは、evorag を閉じてから evorag setup で行います (/model は今のモデルを示すだけです)。"
+model_changed = "llama-server のモデルが、このデータ根に記録したモデルと違うので、送りませんでした (記録: {recorded}、今: {connected})。入力した文章は残してあります。記録したモデルで llama-server を起動し直すか、evorag を閉じて evorag setup で切り替えてください。"
 delete_failed = "セッションを消せませんでした ({detail})。"
 source_not_found = "出典 [{n}] が見つかりません (消したセッションの出典かもしれません)。"
+style_unknown_value = "/style {item} に「{value}」は選べません。選べる値: {choices}"
+band_not_latest = "帯の記録を添えて作り直せるのは、最新の応答の帯だけです。"
+band_unknown = "その記録は、この応答の帯にありません。"
+feedback_not_saved = "印を記録できませんでした。もう一度試してください。"
 
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
@@ -42,6 +47,16 @@ no_reply = "(応答なし)"
 
 [ui.status]
 idle = "待機中"
+limited = "一部の機能を止めています (evorag doctor)"
+working = "整理中"
+paused_battery = "電池のため休止"
+paused_low_space = "空き不足のため休止"
+recall_standard = "想起: 標準"
+recall_simple = "想起: 簡易"
+recall_candidates = "想起: 候補だけ"
+recall_calibrating = "想起: 候補だけ (較正中)"
+recall_failed = "想起: 候補だけ → evorag setup"
+recall_rebuilding = "想起: 作り直し中 {percent}%"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
 
@@ -59,7 +74,7 @@ confirm = "セッション「{title}」を消しますか? このセッション
 [ui.help]
 title = "ヘルプ (Esc で閉じる)"
 body = """
-Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典の番号を選ぶ (Enter で表示) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
+Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外部のエディタ / Tab 出典と関係しそうな記録を選ぶ (Enter で詳細。詳細で a 添えて作り直す・x 無関係の印) / PageUp・PageDown スクロール / Ctrl+C 中断 (入力欄が空なら 2 回で終了) / Ctrl+Q 終了
 
 /help            この一覧
 /new [題名]      セッションを作る
@@ -70,6 +85,8 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /good, /bad [理由]  直前の応答を評価する
 /model [名前]    使っているモデルの表示と、設定にある候補への切り替え
 /sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
+/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由と、このセッションの出典
+/style [項目 値]  答え方の既定 (言語・長さ・書式)。値なしで選ぶ窓を開く (すべてのセッションに効く)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
 
@@ -80,12 +97,45 @@ deleted = "セッションを消しました。"
 renamed = "セッションの名前を「{title}」にしました。"
 unreadable_turns = "このセッションには、この版では読めない記録が {count} 件あります (新しい版の evorag で書かれた記録)。表示していませんが、記録は残っています。"
 draft_restored = "前回の書きかけを入力欄に戻しました。"
-model = "モデル: {current} ({model}、n_ctx {n_ctx})。候補: {choices}"
+model_role = "{role}: 記録 {recorded} / 今 {connected} ({status})"
+role_ready = "{role} の llama-server に繋がりました ({file})。"
 sources_on = "このセッションでは、以前の会話を応答に添えます (/sources off で止めます)。"
 sources_off = "このセッションでは、以前の会話を応答に添えません (/sources on で戻します)。"
 source_selected = "出典 [{n}] を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
 source = "[{n}] {title} ({at})\n{excerpt}"
-no_sources = "出典の付いた応答がありません。"
+no_sources = "出典や関係しそうな記録の付いた応答がありません。"
+band_selected = "関係しそうな記録「{title}」を選んでいます (Enter で表示、Tab で次へ、Esc でやめる)。"
+irrelevant_marked = "「無関係」の印を記録しました。今の版では、想起の判定は変わりません (後の版で調整に使います)。もう一度選ぶと取り消せます。"
+irrelevant_cleared = "「無関係」の印を取り消しました。"
+style = "答え方: 言語 {language}・長さ {length}・書式 {format} (/style で選び直せます)。"
+calibrated = "リランカーの較正が終わりました。以前の会話を、関係が高いと判断したときに自動で添えます。"
+calibration_failed = "リランカーが較正の基準に届かなかったので、以前の会話は自動では添えず、候補として示します。別のリランカーを evorag setup で選べます。"
+probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
+style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
+
+[ui.band]
+related = "関係しそうな記録 (この応答には使っていません)"
+nearby = "近い記録 (自動では添えていません)"
+item = "・{title} {at}「{head}」"
+marked = " [無関係]"
+detail = "{title} ({at})\n{excerpt}"
+detail_source = "出典 [{n}]"
+action_attach = "a  この記録を添えて、直前の応答を作り直す"
+action_irrelevant = "x  この問いには関係が無い (無関係の印を付ける)"
+action_irrelevant_undo = "x  無関係の印を取り消す"
+
+[ui.role_status]
+unset = "未設定"
+waiting = "接続待ち"
+ready = "使っている"
+mismatch = "記録と違うので使っていない"
+
+[ui.style]
+title = "答え方の既定 (↑↓ 項目、←→ 値、Enter で決める、Esc でやめる)"
+language = "言語"
+length = "長さ"
+format = "書式"
+hint = "auto: 指定なし (言語は発話の言語で答える) / ja・en: 常にその言語で / short: 短く / long: 詳しく / plain: 見出しや箇条書きを使わない / structured: 見出しと箇条書きで整える"
 
 [ui.error]
 unknown_command = "知らないコマンドです: {name} (/help で一覧を表示します)"
@@ -93,6 +143,23 @@ not_yet = "{name} は、この版ではまだ使えません。"
 editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
 [cli]
+model_mismatch = """応答のモデルが、このデータ根に記録したモデルと違います。
+  記録したモデル: {recorded}
+  繋がっているモデル: {connected}
+会話のデータには触れていないので、無事です。次のどれかを選んでください。
+  1. 記録したモデル ({recorded}) で llama-server を起動し直す。
+  2. evorag setup で切り替える (応答のモデルの切り替えでは、やり直すものはありません)。
+  3. 試すだけなら、別のデータ根を使う: evorag --data-root <別のフォルダ>{hint}"""
+model_mismatch_same_meta = """
+ファイル名だけが違い、モデルの値 (パラメータ数・大きさ・語彙数) は同じです。同じモデルの可能性が高いので、evorag setup で「同じモデルとして扱う」を選べます。"""
+model_recorded = "応答のモデル ({file}) を、このデータ根に記録しました。以後、違うモデルでは起動しません (切り替えは evorag setup で行います)。"
+model_recorded_unusual = "応答のモデル ({file}) を、このデータ根に記録しました。これまでの会話で多く使っていたモデルとは違います。違うなら、evorag を閉じて evorag setup で直せます。"
+role_recorded = "{role} のモデル ({file}) を、このデータ根に記録しました。"
+role_mismatch = "{role} のモデルが、このデータ根に記録したモデルと違うので、使いません (記録: {recorded}、今: {connected})。記録したモデルで llama-server を起動し直すか、evorag を閉じて evorag setup で切り替えてください。それまでは {role} を使わずに動きます。"
+role_waiting = "{role} の llama-server に繋がりません。繋がるまで使わずに動き、30 秒ごとに試します。"
+router_needs_model = "{url} の llama-server はルーターモード (1 つの URL で複数のモデルを扱う) です。設定の llm.chat.model に、使うモデルの名前 ({models} のどれか) を書いてください。evorag setup でも選べます。"
+router_model = "{url} のルーターで、モデル {model} を使えません ({detail})。設定の llm.chat.model の名前と、ルーターのプリセットを確かめてください。"
+config_obsolete = "設定の {key} は、この版では使いません (読んで無視します)。消してかまいません (v0.1 に戻す予定なら残してください)。"
 llm_unreachable = "llama-server ({url}) に接続できません: {detail}\n会話のデータには触れていないので、無事です。llama-server を起動してから、もう一度 evorag を起動してください。接続先の設定は evorag setup で作れます。"
 llm_unauthorized = "llama-server ({url}) が API キーを受け付けませんでした (HTTP {status})。\n会話のデータには触れていないので、無事です。llama-server は動いています。設定の llm.chat.api_key_env に書いた環境変数 ({env}) に、llama-server の --api-key と同じキーが入っているかを確かめてください。"
 data_root_in_use = "データ根 ({path}) は、ほかの evorag (pid {pid}) が使っています。\n会話のデータは無事です。先に起動した evorag を終えてから、もう一度実行してください。"
@@ -107,6 +174,9 @@ location_warning = "置き場所の注意: {detail}"
 broken = "データベースのファイルが壊れていたので、消さずに {moved_to} へ移しました ({reason})。"
 ask_restore = "最新の退避とジャーナルから会話を戻しますか?"
 restored = "退避 {from} から戻しました。その後の会話はジャーナルから足します。"
+rebuilt = "派生データを作り直しました (退避: {backup}、消した派生の記録 {removed} 件、語彙の索引の項目 {docs} 件)。ノート・埋め込み・モデルの点検は、次に evorag を開いたときに裏の処理で作ります。"
+rebuilt_index = "索引を作り直しました (退避: {backup}、語彙の索引の項目 {docs} 件)。ベクトルの索引は、次に evorag を開いたときに埋め込みの記録から作り直します。"
+rebuild_failed = "作り直せませんでした: {detail}"
 restored_from_journal = "退避が無いので、ジャーナルだけから会話を作り直します。"
 exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました。設定は API キーを除いて config.toml に写しました。"
 export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
@@ -131,6 +201,48 @@ setup_written = "設定を {path} に書きました。evorag で会話を始め
 setup_unchanged = "設定 {path} は今のままで使えます。"
 setup_not_written = "設定 {path} は書き換えませんでした。"
 
+[cli.setup]
+tui_running = "evorag が動いています (このデータ根を使っています)。設定ファイルだけを書けます。モデルの記録を書き換えるには、evorag を閉じてから evorag setup を実行し直してください。"
+role_found = "{role}: {url} で {file} が動いています。"
+role_missing = """{role} の llama-server が見つかりません (勧める構成。無くても動きます)。起動の例:
+  {example}"""
+embed_example = "llama-server -m <埋め込みのモデル>.gguf --embedding --pooling last --host 127.0.0.1 --port 8081 --api-key <キー>"
+rerank_example = "llama-server -m <リランカー>.gguf --reranking --host 127.0.0.1 --port 8082 --api-key <キー>"
+extra_chat = "{url} は応答用 (chat) の llama-server のようです (v0.1 の /model の候補だったかもしれません)。v0.2 では使いません。"
+model_recorded = "{role} のモデル ({file}) を、このデータ根に記録しました。"
+model_diff = """{role} のモデルが、このデータ根の記録と違います。
+  記録: {recorded}
+  今:   {connected}"""
+redo_chat = "応答のモデルの切り替えでは、やり直すものはありません。"
+redo_embed = "埋め込みのモデルを切り替えると、ベクトルの索引を作り直します。作り直しは裏で、操作していない間だけ進みます。その間は語彙の検索とリランクで答えます。"
+redo_rerank = "リランカーを切り替えると、しきい値を同梱の事例で求め直します。"
+ask_same = "ファイル名だけが違い、モデルの値は同じです。同じモデルとして扱いますか (記録だけを直し、作り直しをしません)? [y/N]"
+ask_switch = "{role} のモデルを、今のモデルに切り替えますか? [y/N]"
+switched = "{role} のモデルを切り替えました ({file})。"
+kept_chat = "応答のモデルは切り替えませんでした。このままでは次の起動で止まります。llama-server を {recorded} で起動し直してください。"
+kept = "{role} のモデルは切り替えませんでした。切り替えるまで、{role} を使わずに動きます。"
+needs_confirm = "モデルの切り替えには、対話での確認が要ります (--yes では切り替えません)。"
+router_found = "{url} はルーターモード (1 つの URL で複数のモデルを扱う) の llama-server です。モデル: {models}"
+router_checking = "  {model} の役割を確かめています (読み込んでいなければ読み込みます)…"
+router_choose = "{role} に使うモデルを、番号で選んでください: {choices}"
+preset_example = """1 つの llama-server で 3 つの役割を動かすこともできます (ルーターモード)。プリセットの例 (evorag.ini):
+  version = 1
+  [chat]
+  model = <応答のモデル>.gguf
+  [embed]
+  model = <埋め込みのモデル>.gguf
+  embedding = true
+  pooling = last
+  [rerank]
+  model = <リランカー>.gguf
+  reranking = true
+起動の例: llama-server --models-preset evorag.ini --host 127.0.0.1 --port 8080 --api-key <キー>
+その後でもう一度 evorag setup を実行すると、役割ごとのモデルを見分けて設定に書きます。"""
+calibrating = "リランカーのしきい値を、同梱の事例で求めています… {done}/{total}"
+calibrated = "リランカーのしきい値を記録しました: {threshold} (帯の下限 {band})。順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。"
+calibration_failed = "リランカーが較正の基準に届きませんでした (順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。どちらも 8 割以上が要ります)。以前の会話は自動では添えず、候補として示します。別のリランカーを勧めます。"
+probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
+
 [doctor]
 config = "設定: {path} (読めました)"
 llm_ok = "llama-server: {url} に接続できます (モデル {model}、n_ctx {n_ctx}、{build})"
@@ -147,6 +259,12 @@ quarantine = "quarantine の記録: {count} 件"
 journal = "ジャーナル: {files} ファイル、{lines} 行 (読めない行 {bad}、新しい版の行 {newer}、書きかけ {partial} バイト、次の起動で取り込む行 {pending})"
 backups = "退避: {count} 個 (最新 {latest})"
 backups_none = "退避: まだありません"
+probe_chat = "モデルの点検 (chat): プロンプトの処理 {prompt} トークン/秒、生成 {gen} トークン/秒。{issues}"
+probe_no_issue = "思考を切れ、型縛りの出力も使えます。"
+probe_embed = "モデルの点検 (embed): {dims} 次元、問い 1 件の埋め込み {ms} ms"
+probe_rerank = "モデルの点検 (rerank): 往復 6 件のリランク {ms} ms"
+probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
+probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
@@ -158,3 +276,29 @@ none = "退避はありません。"
 
 [notice]
 low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"
+
+[probe]
+thinking_not_off = "補助の呼び出しで思考を切れません (設定 llm.chat.aux_request_extra を確かめてください)"
+structured_broken = "型縛りの出力が空か、型に合いません"
+
+
+[ui.memory]
+header = "直前の応答のメモリ:"
+no_answer = "このセッションには、まだ応答がありません。"
+nothing = "  添えた記録も候補もありません。"
+attached = "  [{n}] {title}「{head}」 添えた{score}"
+band = "  帯 {title}「{head}」{score}"
+below = "  下 {title}「{head}」{score}"
+score = " (しきい値との差 {delta}、値 {raw})"
+score_raw = " (値 {raw})"
+sources = "このセッションの出典:"
+source = "  [{n}] {title}「{head}」"
+degraded_no_embed = "縮退: 埋め込みを使っていません (埋め込みのサーバが無い・記録と違う・作り直し中)。→ evorag setup で埋め込みのサーバを設定します。"
+degraded_embed_deadline = "縮退: 問いの埋め込みが間に合わず、語彙の候補だけで選びました。"
+degraded_no_rerank = "縮退: リランカーを使っていません。→ evorag setup でリランカーのサーバを設定します。"
+degraded_rerank_slow = "縮退: リランカーが遅いので使っていません (点検の結果)。→ 軽いリランカーを evorag setup で選びます。"
+degraded_rerank_deadline = "縮退: リランクが間に合わず、語彙の規則で選びました。"
+degraded_rerank_error = "縮退: リランカーが答えなかったので、語彙の規則で選びました。"
+degraded_no_threshold = "縮退: リランカーのしきい値が無いので、自動では添えず候補だけを出しました。→ 較正が終わるのを待つか、evorag setup を使います。"
+degraded_no_index = "縮退: 以前の会話の索引を使えませんでした。→ evorag rebuild --index で作り直せます。"
+degraded_other = "縮退: {reason}"

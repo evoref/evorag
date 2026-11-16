@@ -12,7 +12,8 @@
 - 作業ブランチは **`develop` から作る**。種別は `feat/` `fix/` `spec/` (docs) `chore/` `spike/`。名前は `<種別>/<crate>-<短い説明>` (例: `feat/evorag-store-envelope`、`spec/05-retrieval-budget`)。エージェントの作業は `agent/<名前>/<Issue 番号>-<短い説明>`。
 - **1 タスク = 1 作業ブランチ = 1 PR**。PR は `develop` 宛て、squash で入れる。マージ後に作業ブランチを削除する。rebase は作業ブランチ内でだけ自由。
 - `dev/<版>`、`release/*`、`hotfix/*` ブランチは使わない。
-- merge は人間が行う。`gh pr merge` は実行前に確認が出る。
+- merge するかどうかは人間が決め、PR ごとに指示する。実行は、指示を受けた私が `gh pr merge` で行う (作業の PR は `--squash`、`develop` ↔ `main` の PR は `--merge`。`--delete-branch` は付けない)。指示の無い PR は入れない。`gh pr merge` は実行前に確認が出る。
+- 入れた後に、取り込んだコミットに `Signed-off-by:` があることと、`develop` の CI が通ることを確かめる ([docs/11 §9.1](docs/11-dev-workflow.md#91-ブランチ) の「merge の実行」)。
 
 ## リリースと版
 
@@ -44,7 +45,7 @@
   - `v*` タグの作成と push
   - `git stash` (作業ツリーを動かし、改行コードや未追跡の変更を壊しやすいため)
   - `git reset --hard` / `git clean -f` / `git restore` / `git checkout -- <path>` (確認が出る)
-  - `gh pr merge` (確認)
+  - `gh pr merge` (確認。利用者が手元に `.claude/auto-merge-squash` を置いたときは、`gh pr merge <番号> --squash` の形だけ確認を省く)
 - GitHub のブランチ保護 (`main` と `develop`) も併用する。
 - hook に拒否されたら、回避せずに理由を人間に伝えて指示を待つ。
 - hook はコマンドの文字列を見て判定するので、heredoc や文字列の中の `git ...` にも反応する。文書を書くときは Write / Edit を使う。

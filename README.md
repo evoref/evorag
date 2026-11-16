@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. Later versions will remember facts about you and improve from your ratings and corrections. It never trains model weights.
 
-> **The latest release is v0.1.2 (2026-11-11).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
+> **The latest release is v0.2.0 (2026-11-12).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64) and a tar.gz for Linux (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
 
 ## Status
 
@@ -14,7 +14,13 @@ A chat and long-term memory tool written in Rust. It runs against your own llama
   - Conversations are kept as sessions. They are written to a database and a journal, so they survive a forced exit. A backup is taken once a day, and `evorag restore` brings one back.
   - It finds related remarks in earlier conversations (a lexical index) and attaches them to the answer with source numbers.
   - Linux and macOS are not supported yet.
-- **v0.2** is being specified. It shortens the wait before an answer starts, uses a reranker to stop unrelated memories from being attached, adds embeddings and vector search, organizes conversations while you are away, and adds Linux support.
+- **v0.2 (recall)** was released as v0.2.0 on 2026-11-12.
+  - It shortens the wait before an answer starts: the context keeps the same prefix from turn to turn, and the next turn is processed ahead of time.
+  - With an embedding server and a reranker (optional), it finds earlier conversations by meaning as well as by words, and attaches only the one exchange the reranker judges relevant. Nearly relevant ones are shown below the answer, and `/memory` explains the choice.
+  - While you are away, it embeds earlier conversations and writes search keys for each topic (notes).
+  - You can choose the default answer language, length and format (`/style`).
+  - Linux (x86_64, GNOME Terminal and tmux) is supported.
+  - The storage format moved to 0.2; a v0.1 data root is backed up and migrated on the first start.
 
 The plan for each version up to v0.6 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
 
@@ -24,7 +30,7 @@ Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Japanese).
 
 ## Requirements
 
-evorag does not include a model or an inference engine. You need a running llama-server from [llama.cpp](https://github.com/ggml-org/llama.cpp) and a chat model in GGUF format. `evorag setup` finds the server, checks what it can do, and writes the configuration.
+evorag does not include a model or an inference engine. You need a running llama-server from [llama.cpp](https://github.com/ggml-org/llama.cpp) and a chat model in GGUF format. From v0.2, an embedding model and a reranker (each served by its own llama-server, for example bge-m3 and bge-reranker-v2-m3) are recommended but optional. `evorag setup` finds the servers, checks what they can do, and writes the configuration.
 
 By default evorag connects only to a llama-server on the same PC (loopback).
 

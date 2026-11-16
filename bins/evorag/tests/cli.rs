@@ -335,7 +335,7 @@ fn backups_list_shows_the_backups() {
     assert!(text.contains("daily"), "{text}");
 }
 
-/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定)
+/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)
 #[test]
 fn export_writes_records_and_the_config_without_api_keys() {
     use evorag_store::{WriteRequest, Writer};
@@ -359,10 +359,43 @@ fn export_writes_records_and_the_config_without_api_keys() {
             clock: &*clock,
             ids: &**store.ids(),
         };
+        let mut session = None;
         for title in ["一つ目", "二つ目"] {
-            let (_, ops) = writes.create_session(title).unwrap();
+            let (id, ops) = writes.create_session(title).unwrap();
             h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+            session = Some(id);
         }
+        // 派生の記録: ノートは書き出し、チャンクと job は書き出さない (03 §11)。
+        let session = session.unwrap();
+        let (_, ops) = writes
+            .note(
+                &[],
+                &[],
+                &evorag_memory::NoteBody {
+                    session,
+                    exchanges: vec![session],
+                    keys: vec!["鍵".into()],
+                    model_key: "k".into(),
+                    rules: 1,
+                },
+            )
+            .unwrap();
+        h.submit_wait(WriteRequest::background(ops)).unwrap();
+        let (_, ops) = writes
+            .chunks(
+                &[],
+                &[evorag_memory::ChunkBody {
+                    turn: session,
+                    session,
+                    start: 0,
+                    end: 1,
+                    rules: 1,
+                }],
+            )
+            .unwrap();
+        h.submit_wait(WriteRequest::background(ops)).unwrap();
+        let (_, op) = evorag_memory::purge_job(&writes, vec![session]).unwrap();
+        h.submit_wait(WriteRequest::background(vec![op])).unwrap();
         h.shutdown();
         t.join().unwrap();
     }
@@ -376,7 +409,10 @@ fn export_writes_records_and_the_config_without_api_keys() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
-    assert!(stdout.contains("2 件の記録"), "{stdout}");
+    assert!(stdout.contains("3 件の記録"), "{stdout}");
+    assert!(out.join("note.jsonl").is_file());
+    assert!(!out.join("chunk.jsonl").exists());
+    assert!(!out.join("job.jsonl").exists());
     let sessions = std::fs::read_to_string(out.join("session.jsonl")).unwrap();
     assert_eq!(sessions.lines().count(), 3, "the header and two sessions");
     assert!(sessions.contains("二つ目"));

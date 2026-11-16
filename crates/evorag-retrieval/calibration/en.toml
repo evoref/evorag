@@ -1,0 +1,711 @@
+# Reranker threshold calibration cases (05 §3.7, S-14). Prompt language: en.
+# The conversations and queries are separate from the evaluation cases in tests/retrieval/
+# (calibrating and measuring on the same cases would make the results look too good).
+# All conversations are fictional and contain no real persons or personal information (11 §9.7).
+#
+# [[session]]: id, date, title, and turns ("U: " is the user, "A: " is the assistant).
+#   A turn ID is "<id>-tMM" (MM starts at 1; odd is the user, even is the assistant).
+# [[case]]: id, category (easy / variant / para / none), the session the query is asked in
+#   ("new", or a session to exclude from the candidates), the correct turns (empty for an
+#   irrelevant query), and the query.
+#   Irrelevant queries (none) N01-N12 share a theme with one of the sessions but ask
+#   something the past conversations never covered (near-topic hard negatives).
+#   N13-N24 are ordinary off-topic requests that need no past conversation.
+
+[[session]]
+id = "s01"
+date = "2026-03-14"
+title = "Long weekend in Lisbon"
+turns = [
+  "U: I'm heading to Lisbon for four days in April. Is the Lisboa Card worth getting?",
+  "A: If you plan to ride trams and visit two or three museums a day, yes. The 72-hour card is about 54 euros and covers public transport plus entry to Jerónimos Monastery and Belém Tower. If you mostly plan to wander and eat, a rechargeable Viva Viagem card is cheaper.",
+  "U: How do I avoid the huge line for Tram 28?",
+  "A: Board at the Martim Moniz end before 9 a.m.; by mid-morning the queue there can be 45 minutes. Or ride it in the late afternoon from the Prazeres end, which is quieter. Keep your bag in front of you, since pickpockets work that route.",
+  "U: Where should I try pastéis de nata?",
+  "A: The bakery in Belém is the classic, and its takeaway line moves faster than the sit-down one. Eat them warm with cinnamon and powdered sugar. Plenty of neighborhood bakeries in Baixa sell them for about 1.30 euros each.",
+  "U: Is a day trip to Sintra doable without a car?",
+  "A: Yes. Trains leave Rossio station roughly every 20 minutes and take about 40 minutes. From Sintra station, the 434 bus loops up to Pena Palace and the Moorish Castle. Book a timed Pena ticket online and aim for the first entry slot at 9:30.",
+  "U: What shoes should I pack? I heard the streets are slippery.",
+  "A: The limestone cobbles get slick, especially when wet or on the steep hills of Alfama. Bring shoes with rubber soles and decent tread rather than smooth leather. Sandals are fine on dry days, but not for the climb up to the castle.",
+  "U: Any tips for hearing fado?",
+  "A: Pick a small tavern in Alfama or Mouraria rather than a dinner show. Many have a minimum spend of around 25 euros, and you're expected to stay quiet during the songs. Sets usually start after 9 p.m.",
+]
+
+[[session]]
+id = "s02"
+date = "2026-06-02"
+title = "Road trip to the Isle of Skye"
+turns = [
+  "U: We're driving from Edinburgh up to the Isle of Skye in July. How long does that take?",
+  "A: About five and a half hours without stops, via Perth, Pitlochry, and the A87. Realistically, plan a full day with breaks. Fill the tank in Fort William or Kyle of Lochalsh, since petrol stations thin out after that.",
+  "U: I've never driven on single-track roads. Are there rules?",
+  "A: Use the passing places: pull into one on your left, or wait opposite one on your right, and let the oncoming car through. Also let faster cars behind you overtake. Never park in a passing place.",
+  "U: Where should we stay on Skye?",
+  "A: Portree is the most convenient base, with shops and restaurants. Book at least three months ahead for July, because rooms sell out. Broadford is a cheaper alternative about 40 minutes south.",
+  "U: Which walks are worth it if we only have two days?",
+  "A: The Old Man of Storr is a 3.8 km return walk, about 1.5 hours; go early before the car park fills. The Fairy Pools near Glenbrittle are an easy 2.4 km walk. The Quiraing is longer and exposed, so save it for a clear day.",
+  "U: People keep warning me about midges.",
+  "A: They're worst on still, damp evenings from June to August. Bring a repellent such as Smidge and a head net for walks near water. A breeze above about 7 mph usually keeps them away.",
+  "U: Should we stop at Glencoe on the way?",
+  "A: Definitely. It's on the A82 if you route via Fort William instead of Pitlochry. The Three Sisters viewpoint has a lay-by; allow 30 minutes for photos. The visitor centre has toilets and a café.",
+]
+
+[[session]]
+id = "s03"
+date = "2026-01-10"
+title = "Homemade pizza night"
+turns = [
+  "U: I want to make pizza dough from scratch for four people. What ratio should I use?",
+  "A: For four 10-inch pizzas: 500 g bread flour, 325 g water (65% hydration), 10 g salt, and 3 g instant yeast. Mix, knead for about 8 minutes until smooth, then let it rise.",
+  "U: How long should the dough rise?",
+  "A: Two hours at room temperature works, but a cold ferment tastes better: put the dough balls in the fridge for 24 to 48 hours. Take them out 2 hours before baking so they relax.",
+  "U: My oven only goes up to 500°F. Is that hot enough?",
+  "A: Yes. Put a pizza steel or stone on the top rack and preheat for a full 45 minutes. Bake for 6 to 8 minutes, then switch to the broiler for the last minute to char the top.",
+  "U: What's a simple tomato sauce for it?",
+  "A: Don't cook it. Crush a 28-ounce can of whole peeled tomatoes by hand and add 1 teaspoon of salt and a splash of olive oil. That's it; it cooks on the pizza.",
+  "U: The cheese always gets watery.",
+  "A: Fresh mozzarella holds a lot of water. Tear it and let it drain on paper towels for 30 minutes, or use low-moisture mozzarella instead. Add the basil after baking so it doesn't burn.",
+  "U: How do I stretch the dough without tearing it?",
+  "A: Press from the center outward with your fingertips, leaving a 1-inch rim. Then drape it over your knuckles and rotate it, letting gravity do the stretching. If it springs back, rest it for 10 minutes. Skip the rolling pin, which pushes out the air.",
+]
+
+[[session]]
+id = "s04"
+date = "2025-11-18"
+title = "Roasting the Thanksgiving turkey"
+turns = [
+  "U: I'm hosting Thanksgiving for ten. How big a turkey do I need?",
+  "A: Plan on about 1.5 pounds per person, so a 14 to 16 pound bird gives you enough for dinner plus leftovers.",
+  "U: It's frozen. When should I start thawing it?",
+  "A: Thaw it in the fridge, allowing one day for every 4 to 5 pounds. A 15-pound turkey needs about 3 to 4 days, so move it to the fridge by Sunday for a Thursday dinner.",
+  "U: Should I brine it?",
+  "A: A dry brine is easier than a wet one. Rub 1 tablespoon of kosher salt per 4 pounds all over the bird, then leave it uncovered in the fridge for 1 to 3 days. The skin dries out and crisps nicely in the oven.",
+  "U: What temperature, and for how long?",
+  "A: Roast at 325°F for roughly 13 minutes per pound, which is about 3 to 3.5 hours for 15 pounds. Start checking early. It's done when the thickest part of the thigh reads 165°F on an instant-read thermometer.",
+  "U: How long should it rest before carving?",
+  "A: Rest it for at least 30 minutes, loosely tented with foil. It stays hot, and that frees up the oven for the stuffing and rolls.",
+  "U: How do I make gravy from the drippings?",
+  "A: Pour the drippings into a fat separator. Cook 4 tablespoons of the fat with 4 tablespoons of flour for 2 minutes, then whisk in 4 cups of stock plus the defatted juices. Simmer for 10 minutes and season to taste.",
+]
+
+[[session]]
+id = "s05"
+date = "2026-02-15"
+title = "Patching a hole in the drywall"
+turns = [
+  "U: The door handle punched a hole in our drywall, about the size of a fist. Can I fix it myself?",
+  "A: Yes. For a hole that size, use a self-adhesive mesh patch or make a California patch. You'll need a utility knife, joint compound, a 6-inch putty knife, and 120-grit sandpaper.",
+  "U: What's a California patch?",
+  "A: Cut a piece of drywall 2 inches bigger than the hole on every side. Score the back and snap off the gypsum around the edges, leaving the paper face intact as a flange. Square up the hole, press the patch in, and mud over the paper.",
+  "U: How many coats of compound does it need?",
+  "A: Usually three. Apply a thin first coat and let it dry overnight, then feather each following coat a little wider than the last. Lightweight compound dries faster but shrinks a bit.",
+  "U: How do I sand it without making a huge mess?",
+  "A: Use a damp sanding sponge instead of sandpaper; it cuts the dust dramatically. If you dry sand, close the room, cover the vents, and wear a dust mask.",
+  "U: Will the patch show through the paint?",
+  "A: It will if you skip primer. Joint compound absorbs paint differently from the rest of the wall, so spot-prime the patch first, then paint the whole wall corner to corner to avoid a shiny spot.",
+  "U: How do I stop this from happening again?",
+  "A: Install a door stop. A spring stop on the baseboard or a hinge-pin stop costs a few dollars and keeps the handle from hitting the wall.",
+]
+
+[[session]]
+id = "s06"
+date = "2026-04-18"
+title = "Repainting the bedroom"
+turns = [
+  "U: I want to repaint our bedroom. It's about 12 by 14 feet with 8-foot ceilings. How much paint do I need?",
+  "A: The walls come to roughly 400 square feet. One gallon covers about 350 to 400 square feet, so buy 2 gallons for two coats, plus a quart for touch-ups.",
+  "U: The walls are dark navy right now and I want a light gray.",
+  "A: Going from dark to light, start with a tinted primer. Ask the store to tint the primer gray; it usually saves you a third coat of the finish paint.",
+  "U: Which sheen should I pick?",
+  "A: Eggshell is the usual choice for bedrooms. It's washable but doesn't highlight wall imperfections the way satin or semi-gloss does. Use semi-gloss on the trim and doors.",
+  "U: How do I get clean lines where the wall meets the ceiling?",
+  "A: Use painter's tape, and seal its edge by brushing a thin layer of the wall color over it first. Pull the tape while the last coat is still slightly wet, at a 45-degree angle.",
+  "U: Roller or brush?",
+  "A: Cut in the edges with a 2.5-inch angled brush, then roll the walls with a 3/8-inch nap roller. Roll in a W pattern and keep a wet edge so you don't get lap marks.",
+  "U: How long until we can sleep in there again?",
+  "A: With low-VOC paint, the room is usually fine after 24 hours with the window open. The paint is dry to the touch in an hour but takes about two weeks to fully cure, so don't push furniture against the walls right away.",
+]
+
+[[session]]
+id = "s07"
+date = "2026-05-09"
+title = "Caring for two rabbits"
+turns = [
+  "U: We just adopted two rabbits. What should their main diet be?",
+  "A: About 80% should be unlimited grass hay, like timothy or orchard grass. Add a cup of leafy greens per 2 pounds of body weight daily and about a quarter cup of plain pellets per 5 pounds. Fruit and carrots are treats only.",
+  "U: How big should their enclosure be?",
+  "A: For a bonded pair, aim for at least 8 square feet of enclosure plus 24 square feet of exercise space for several hours a day. An exercise pen often works better than a pet-store cage.",
+  "U: Can rabbits be litter trained?",
+  "A: Yes. Put a large litter box in the corner they already use, filled with paper-based litter with a pile of hay on top, since rabbits like to eat while they go. Avoid clay and pine litter.",
+  "U: How do I trim their nails?",
+  "A: Every 6 to 8 weeks. Hold the rabbit securely and clip just the tip, avoiding the pink quick you can see in light nails. With dark nails, shine a flashlight behind the nail to find it.",
+  "U: What's a warning sign I shouldn't ignore?",
+  "A: If a rabbit stops eating or producing droppings for more than 12 hours, call a vet the same day. That can be GI stasis, which is an emergency.",
+  "U: How do I rabbit-proof the living room?",
+  "A: Cover electrical cords with split plastic tubing, block access behind furniture, and give them cardboard boxes and willow toys to chew instead of the baseboards.",
+]
+
+[[session]]
+id = "s08"
+date = "2026-03-22"
+title = "Starting a backyard compost bin"
+turns = [
+  "U: I want to start composting in my backyard. What kind of bin should I get?",
+  "A: A simple 3-by-3-foot bin is a good size, big enough to heat up. A plastic bin with a lid works well in a small yard; a tumbler is easier to turn but holds less.",
+  "U: What's the right mix of materials?",
+  "A: Aim for roughly 3 parts browns to 1 part greens by volume. Browns are dry leaves, shredded cardboard, and straw; greens are vegetable scraps, coffee grounds, and fresh grass clippings.",
+  "U: Can I put meat or dairy in?",
+  "A: Not in a backyard pile. Meat, fish, dairy, and oily food attract rats and smell. Also leave out pet waste and diseased plants.",
+  "U: How often should I turn it?",
+  "A: Every one to two weeks with a garden fork. Turning adds oxygen and speeds things up. A well-managed pile can be finished in 2 to 3 months; one that is never turned takes about a year.",
+  "U: It smells like rotten eggs.",
+  "A: That means it's too wet and short of air. Mix in a bucket of shredded cardboard or dry leaves and turn it. It should feel like a wrung-out sponge.",
+  "U: How do I know when it's ready?",
+  "A: Finished compost is dark and crumbly, smells like soil, and you can't recognize the original scraps. Sift it through half-inch hardware cloth and put the chunks back in the bin.",
+]
+
+[[session]]
+id = "s09"
+date = "2026-07-05"
+title = "Building an emergency fund"
+turns = [
+  "U: I want to build an emergency fund. How much should I aim for?",
+  "A: A common target is three to six months of essential expenses: rent, utilities, groceries, insurance, and minimum debt payments. If your essentials are $2,800 a month, that's $8,400 to $16,800.",
+  "U: That feels huge. Where do I start?",
+  "A: Start with a mini-goal of $1,000, which covers most car repairs or vet bills. Set up an automatic transfer of a fixed amount on payday so the money never sits in your checking account.",
+  "U: Where should I keep it?",
+  "A: In a high-yield savings account at a different bank from your checking account. It's insured, earns more interest than a regular account, and the extra step makes impulse spending less tempting.",
+  "U: Should I pay off my credit card first?",
+  "A: Get the $1,000 starter fund first, then put extra money toward the card, since its 24% interest outweighs anything your savings earn. Once the card is paid off, go back to building the full fund.",
+  "U: How do I find money to save?",
+  "A: Track every expense for 30 days. Most people find $100 to $200 a month in unused subscriptions, food delivery, and bank fees. Redirect that amount into the automatic transfer.",
+  "U: What actually counts as an emergency?",
+  "A: Job loss, medical bills, urgent car or home repairs, and unexpected travel for family. Vacations, holiday gifts, and sales don't; budget for those in separate sinking funds.",
+]
+
+[[session]]
+id = "s10"
+date = "2026-10-11"
+title = "Learning to knit"
+turns = [
+  "U: I want to learn to knit. What should I buy first?",
+  "A: Get a pair of US size 8 (5 mm) wooden or bamboo needles and a skein of smooth, light-colored worsted-weight yarn. Light colors make it easier to see your stitches; avoid fuzzy or dark yarn at first.",
+  "U: What should my first project be?",
+  "A: A garter-stitch scarf or a dishcloth. Garter stitch is just the knit stitch on every row, so you can focus on keeping your tension even.",
+  "U: My knitting keeps getting wider.",
+  "A: You're probably adding stitches by accident, either by wrapping the yarn over the needle or by knitting into the loop below. Count your stitches at the end of each row, and put a stitch marker after the first stitch.",
+  "U: How do I fix a dropped stitch?",
+  "A: Use a crochet hook to ladder it back up: insert the hook into the loose loop, catch the horizontal bar above it, and pull it through, repeating until you reach the needle.",
+  "U: When should I learn to purl?",
+  "A: Once knitting feels natural, practice purling on its own for a few rows, then try stockinette: one row knit, one row purl. Bring the yarn to the front before each purl stitch.",
+  "U: How do I finish the scarf?",
+  "A: Bind off loosely: knit two stitches, pass the first over the second, and repeat to the end. Leave a 6-inch tail and weave it in with a tapestry needle.",
+]
+
+[[session]]
+id = "s11"
+date = "2026-08-16"
+title = "Backing up family photos"
+turns = [
+  "U: All our family photos are on one laptop. How should I back them up?",
+  "A: Follow the 3-2-1 rule: three copies, on two different kinds of storage, with one copy off-site. For example, the laptop, an external drive at home, and a cloud backup.",
+  "U: What size external drive do I need?",
+  "A: Check how much space your photo library uses, say 600 GB, and buy at least double that, so a 2 TB drive. Portable hard drives of that size are inexpensive; an SSD is faster but costs more.",
+  "U: How do I make the backup automatic?",
+  "A: On a Mac, Time Machine backs up every hour while the drive is plugged in. On Windows, use File History and set it to run hourly. Either way, leave the drive connected or plug it in at least once a week.",
+  "U: Which cloud service is best for photos?",
+  "A: Pick one that keeps the original resolution. Compare the yearly price of 2 TB plans; many charge around $100 a year. Turn on two-factor authentication for that account.",
+  "U: How do I check that the backup actually works?",
+  "A: Every few months, restore a handful of random photos to a different folder and open them. A backup you have never restored from is just a hope.",
+  "U: Should I also print some?",
+  "A: For the most important photos, yes. Prints and a yearly photo book survive changes in file formats. Store them away from sunlight and humidity.",
+]
+
+[[session]]
+id = "s12"
+date = "2026-09-06"
+title = "Cutting back on coffee"
+turns = [
+  "U: I drink about five cups of coffee a day and want to cut back. How fast should I go?",
+  "A: Cut about one cup every three to four days. Quitting abruptly often brings headaches and fatigue that last 2 to 9 days.",
+  "U: What about the afternoon slump?",
+  "A: Take a 10-minute walk outside or drink a big glass of water first; many slumps are partly dehydration. If you still want a hot drink, switch to decaf or herbal tea after noon.",
+  "U: How late can I have caffeine without it hurting my sleep?",
+  "A: Caffeine's half-life is around five hours, so stopping by 2 p.m. is a sensible rule if you go to bed at 11. Some people need an even earlier cutoff.",
+  "U: Is green tea a good substitute?",
+  "A: Yes. A cup of green tea has about 30 mg of caffeine, compared with roughly 95 mg in a cup of brewed coffee, so it's a good step down.",
+  "U: The headaches are bad.",
+  "A: That's withdrawal, and it usually peaks in the first two days. Slow the taper, stay hydrated, and an over-the-counter pain reliever can help. If the headaches are severe or unusual, check with a doctor.",
+  "U: How will I know it's working?",
+  "A: Track your cups, sleep, and energy in a notebook for two weeks. Most people fall asleep faster and have fewer mid-afternoon crashes after about 10 days at the lower intake.",
+]
+
+[[session]]
+id = "s13"
+date = "2026-06-23"
+title = "Presenting quarterly results"
+turns = [
+  "U: I have to present our team's quarterly results to the leadership team next week, in 15 minutes. How should I structure it?",
+  "A: Lead with the conclusion: one slide with the three key takeaways. Then results against targets, what drove them, risks, and your asks. Plan about 10 slides for 15 minutes and leave 5 minutes for questions.",
+  "U: Our revenue missed the target by 8%. How do I present that?",
+  "A: State it plainly on the results slide, explain the main cause in one sentence, and show what you're doing about it. Leaders react worse to buried bad news than to the miss itself.",
+  "U: How much text should go on each slide?",
+  "A: One message per slide, written as a full-sentence headline such as 'Churn fell to 3.1% after the onboarding change.' Keep the body text under about 30 words and let a chart carry the data.",
+  "U: Which chart should I use for monthly revenue versus target?",
+  "A: A column chart for actual revenue with the target as a line across it. Highlight the months that missed in a contrasting color and label only those values.",
+  "U: How should I rehearse?",
+  "A: Do two full timed run-throughs out loud, one of them in front of a colleague. Write down the three toughest questions you expect and prepare a one-sentence answer for each.",
+  "U: What if they ask something I don't know?",
+  "A: Say you'll check and follow up by a specific day, and write it down in front of them. Send the follow-up email within 24 hours.",
+]
+
+[[session]]
+id = "s14"
+date = "2026-02-28"
+title = "A science-themed seventh birthday"
+turns = [
+  "U: My daughter turns seven in April and wants a party at home with about 12 kids. Where do I start?",
+  "A: Set the date and a 2-hour window; for seven-year-olds, 2 to 4 p.m. on a Saturday works well. Pick a theme, then send invitations three weeks ahead with an RSVP date one week before the party.",
+  "U: She wants a science theme.",
+  "A: Great choice. Plan three stations: a baking-soda-and-vinegar volcano, slime-making, and a mystery box touch station. Have the kids rotate every 15 minutes in groups of four.",
+  "U: What slime recipe is safe for kids?",
+  "A: Mix 1/2 cup of clear school glue with 1/2 teaspoon of baking soda, then add saline contact lens solution a tablespoon at a time until it stops sticking. Have adults handle the solution, and send the slime home in zip bags.",
+  "U: How much food do I need?",
+  "A: For a 2 p.m. party, skip a full meal and plan snacks: two slices of pizza per child, a fruit tray, popcorn, and juice boxes. Six large pizzas cover 12 kids plus the adults.",
+  "U: What about allergies?",
+  "A: Ask about allergies on the RSVP. Label every food and keep one nut-free table. If a child has a severe allergy, ask the parent to stay.",
+  "U: How do I keep things from getting chaotic?",
+  "A: Write out a schedule: 20 minutes of arrival and free play, 45 minutes of stations, 30 minutes of food and cake, then a group game and goodbyes. Recruit two other adults to run stations.",
+  "U: What should go in the goodie bags?",
+  "A: Keep them small and on theme: a mini magnifying glass, kid-size safety goggles, a sticker sheet, and a small bag of the slime they made. Budget about $5 per bag.",
+]
+
+# --- Relevant queries (easy) ---
+
+[[case]]
+id = "E01"
+category = "easy"
+session = "new"
+gold = ["s01-t01", "s01-t02"]
+query = "Is the Lisboa Card worth it, and how much was the 72-hour one?"
+
+[[case]]
+id = "E02"
+category = "easy"
+session = "new"
+gold = ["s02-t03", "s02-t04"]
+query = "What were the rules for driving on single-track roads again?"
+
+[[case]]
+id = "E03"
+category = "easy"
+session = "new"
+gold = ["s03-t01", "s03-t02"]
+query = "What ratio did you give me for pizza dough for four people?"
+
+[[case]]
+id = "E04"
+category = "easy"
+session = "new"
+gold = ["s04-t03", "s04-t04"]
+query = "How many days does a frozen 15-pound turkey take to thaw in the fridge?"
+
+[[case]]
+id = "E05"
+category = "easy"
+session = "new"
+gold = ["s05-t03", "s05-t04"]
+query = "How do you make a California patch for drywall?"
+
+[[case]]
+id = "E06"
+category = "easy"
+session = "new"
+gold = ["s14-t07", "s14-t08"]
+query = "How many pizzas should I order for the birthday party with 12 kids?"
+
+[[case]]
+id = "E07"
+category = "easy"
+session = "new"
+gold = ["s07-t05", "s07-t06"]
+query = "How do I litter train my rabbits?"
+
+[[case]]
+id = "E08"
+category = "easy"
+session = "new"
+gold = ["s08-t03", "s08-t04"]
+query = "What's the right mix of browns and greens for my compost?"
+
+[[case]]
+id = "E09"
+category = "easy"
+session = "new"
+gold = ["s09-t01", "s09-t02"]
+query = "How big should my emergency fund be?"
+
+[[case]]
+id = "E10"
+category = "easy"
+session = "new"
+gold = ["s10-t07", "s10-t08"]
+query = "How do I fix a dropped stitch in my knitting?"
+
+[[case]]
+id = "E11"
+category = "easy"
+session = "new"
+gold = ["s11-t03", "s11-t04"]
+query = "What size external drive did you recommend for backing up the photos?"
+
+[[case]]
+id = "E12"
+category = "easy"
+session = "new"
+gold = ["s12-t07", "s12-t08"]
+query = "How much caffeine does green tea have compared with coffee?"
+
+# --- Relevant queries (variant: different wording) ---
+
+[[case]]
+id = "V01"
+category = "variant"
+session = "new"
+gold = ["s01-t03", "s01-t04"]
+query = "When's the best time to catch the famous yellow tram without waiting forever?"
+
+[[case]]
+id = "V02"
+category = "variant"
+session = "new"
+gold = ["s02-t09", "s02-t10"]
+query = "How do I keep the biting insects off on Skye in the evenings?"
+
+[[case]]
+id = "V03"
+category = "variant"
+session = "new"
+gold = ["s03-t07", "s03-t08"]
+query = "Remind me how to make the no-cook sauce for the pies."
+
+[[case]]
+id = "V04"
+category = "variant"
+session = "new"
+gold = ["s04-t07", "s04-t08"]
+query = "What internal reading means the bird is cooked, and how many minutes per pound?"
+
+[[case]]
+id = "V05"
+category = "variant"
+session = "new"
+gold = ["s05-t07", "s05-t08"]
+query = "How can I smooth down the joint compound without dust going everywhere?"
+
+[[case]]
+id = "V06"
+category = "variant"
+session = "new"
+gold = ["s06-t07", "s06-t08"]
+query = "What was the trick for a crisp edge at the top of the wall by the ceiling?"
+
+[[case]]
+id = "V07"
+category = "variant"
+session = "new"
+gold = ["s07-t09", "s07-t10"]
+query = "Which symptom in a bunny means I need to see the vet right away?"
+
+[[case]]
+id = "V08"
+category = "variant"
+session = "new"
+gold = ["s08-t07", "s08-t08"]
+query = "How frequently should I mix up the compost pile, and how long until it's done?"
+
+[[case]]
+id = "V09"
+category = "variant"
+session = "new"
+gold = ["s09-t05", "s09-t06"]
+query = "Where's the best place to park my rainy-day savings?"
+
+[[case]]
+id = "V10"
+category = "variant"
+session = "new"
+gold = ["s11-t05", "s11-t06"]
+query = "Which built-in tools on Mac and Windows run the backup on their own?"
+
+[[case]]
+id = "V11"
+category = "variant"
+session = "new"
+gold = ["s13-t03", "s13-t04"]
+query = "Sales came in below goal this quarter. How should I break that to the executives?"
+
+[[case]]
+id = "V12"
+category = "variant"
+session = "new"
+gold = ["s14-t05", "s14-t06"]
+query = "Is there a kid-safe way to make slime for the party?"
+
+# --- Relevant queries (para: paraphrase or indirect reference) ---
+
+[[case]]
+id = "P01"
+category = "para"
+session = "new"
+gold = ["s01-t07", "s01-t08"]
+query = "For the palace day out from the Portuguese capital, which station did the train leave from?"
+
+[[case]]
+id = "P02"
+category = "para"
+session = "new"
+gold = ["s02-t07", "s02-t08"]
+query = "On the island, which short hikes did you suggest if we only have a couple of days?"
+
+[[case]]
+id = "P03"
+category = "para"
+session = "new"
+gold = ["s03-t11", "s03-t12"]
+query = "The base keeps ripping when I shape it by hand. What did you say to do?"
+
+[[case]]
+id = "P04"
+category = "para"
+session = "new"
+gold = ["s04-t11", "s04-t12"]
+query = "Walk me through turning the pan juices into a sauce for the holiday bird again."
+
+[[case]]
+id = "P05"
+category = "para"
+session = "new"
+gold = ["s05-t11", "s05-t12"]
+query = "After the wall repair, what cheap gadget did you suggest so the handle doesn't smash it again?"
+
+[[case]]
+id = "P06"
+category = "para"
+session = "new"
+gold = ["s06-t11", "s06-t12"]
+query = "When was it safe to move back into the freshly redone room for the night?"
+
+[[case]]
+id = "P07"
+category = "para"
+session = "new"
+gold = ["s07-t11", "s07-t12"]
+query = "They keep gnawing on the cables and the skirting. What did you advise?"
+
+[[case]]
+id = "P08"
+category = "para"
+session = "new"
+gold = ["s08-t09", "s08-t10"]
+query = "My heap stinks like sulfur. What's the fix?"
+
+[[case]]
+id = "P09"
+category = "para"
+session = "new"
+gold = ["s09-t07", "s09-t08"]
+query = "Should the plastic debt or the savings cushion come first?"
+
+[[case]]
+id = "P10"
+category = "para"
+session = "new"
+gold = ["s10-t05", "s10-t06"]
+query = "My scarf is slowly turning into a triangle. Why?"
+
+[[case]]
+id = "P11"
+category = "para"
+session = "new"
+gold = ["s12-t09", "s12-t10"]
+query = "My head has been pounding ever since I started drinking less of my morning brew."
+
+[[case]]
+id = "P12"
+category = "para"
+session = "new"
+gold = ["s13-t09", "s13-t10"]
+query = "How should I practice before standing up in front of the bosses?"
+
+# --- Irrelevant queries (none: near-topic hard negatives) ---
+
+[[case]]
+id = "N01"
+category = "none"
+session = "new"
+gold = []
+query = "What's the best way to get from Lisbon to Porto by train?"
+
+[[case]]
+id = "N02"
+category = "none"
+session = "new"
+gold = []
+query = "Do I need to book the ferry from Skye to the Outer Hebrides in advance?"
+
+[[case]]
+id = "N03"
+category = "none"
+session = "new"
+gold = []
+query = "How do I make a gluten-free pizza crust?"
+
+[[case]]
+id = "N04"
+category = "none"
+session = "new"
+gold = []
+query = "How do I deep-fry a turkey safely?"
+
+[[case]]
+id = "N05"
+category = "none"
+session = "new"
+gold = []
+query = "How do I fix a crack in a plaster ceiling?"
+
+[[case]]
+id = "N06"
+category = "none"
+session = "new"
+gold = []
+query = "What's the easiest way to strip old wallpaper before painting?"
+
+[[case]]
+id = "N07"
+category = "none"
+session = "new"
+gold = []
+query = "Should I get my rabbits spayed and neutered, and at what age?"
+
+[[case]]
+id = "N08"
+category = "none"
+session = "new"
+gold = []
+query = "How do I set up an indoor worm bin for kitchen scraps?"
+
+[[case]]
+id = "N09"
+category = "none"
+session = "new"
+gold = []
+query = "Should I open a Roth IRA or a traditional IRA?"
+
+[[case]]
+id = "N10"
+category = "none"
+session = "new"
+gold = []
+query = "How do I knit socks on double-pointed needles?"
+
+[[case]]
+id = "N11"
+category = "none"
+session = "new"
+gold = []
+query = "How can I recover photos I accidentally deleted from an SD card?"
+
+[[case]]
+id = "N12"
+category = "none"
+session = "new"
+gold = []
+query = "How do I write my annual performance self-review?"
+
+# --- Irrelevant queries (none: ordinary off-topic requests) ---
+
+[[case]]
+id = "N13"
+category = "none"
+session = "new"
+gold = []
+query = "How long should I boil an egg for a jammy yolk?"
+
+[[case]]
+id = "N14"
+category = "none"
+session = "new"
+gold = []
+query = "What's the difference between weather and climate?"
+
+[[case]]
+id = "N15"
+category = "none"
+session = "new"
+gold = []
+query = "Can you suggest a few names for a neighborhood book club?"
+
+[[case]]
+id = "N16"
+category = "none"
+session = "new"
+gold = []
+query = "How do I convert Celsius to Fahrenheit in my head?"
+
+[[case]]
+id = "N17"
+category = "none"
+session = "new"
+gold = []
+query = "What are some good warm-up stretches before playing tennis?"
+
+[[case]]
+id = "N18"
+category = "none"
+session = "new"
+gold = []
+query = "Write a short thank-you note to a neighbor who watered my plants."
+
+[[case]]
+id = "N19"
+category = "none"
+session = "new"
+gold = []
+query = "How do I get a red wine stain out of a carpet?"
+
+[[case]]
+id = "N20"
+category = "none"
+session = "new"
+gold = []
+query = "When should I use 'fewer' instead of 'less'?"
+
+[[case]]
+id = "N21"
+category = "none"
+session = "new"
+gold = []
+query = "How does a heat pump work?"
+
+[[case]]
+id = "N22"
+category = "none"
+session = "new"
+gold = []
+query = "Recommend a beginner-friendly board game for four adults."
+
+[[case]]
+id = "N23"
+category = "none"
+session = "new"
+gold = []
+query = "How do I change a flat tire on a car?"
+
+[[case]]
+id = "N24"
+category = "none"
+session = "new"
+gold = []
+query = "Why is the sky blue?"

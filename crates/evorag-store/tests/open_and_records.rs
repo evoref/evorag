@@ -97,7 +97,12 @@ fn creates_and_reopens_with_the_same_meta() {
     let root_id = store.meta(meta::DATA_ROOT_ID).unwrap().unwrap();
     assert_eq!(
         store.meta(meta::FORMAT_VERSION).unwrap().as_deref(),
-        Some("0.1")
+        Some(evorag_store::FORMAT_VERSION)
+    );
+    // 0.2 は 0.1 に足しただけなので、v0.1 の evorag も読み書きできる (03 §12.1)。
+    assert_eq!(
+        store.meta(meta::FORMAT_MIN_WRITE).unwrap().as_deref(),
+        Some(evorag_store::FORMAT_MIN)
     );
     assert_eq!(
         store.meta(meta::MIGRATION_STATE).unwrap().as_deref(),
@@ -160,8 +165,8 @@ fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
     set_meta(
         dir.path(),
         &[
-            (meta::FORMAT_VERSION, "0.2"),
-            (meta::FORMAT_MIN_WRITE, "0.2"),
+            (meta::FORMAT_VERSION, "0.9"),
+            (meta::FORMAT_MIN_WRITE, "0.9"),
         ],
     );
 
@@ -170,7 +175,7 @@ fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
     assert_eq!(
         report.read_only,
         Some(ReadOnlyReason::NewerFormat {
-            min_write: "0.2".into()
+            min_write: "0.9".into()
         })
     );
     assert!(matches!(
@@ -192,7 +197,7 @@ fn a_database_in_a_newer_format_opens_read_only_and_refuses_writes() {
 fn a_newer_format_that_still_allows_older_writers_stays_writable() {
     let dir = TempDir::new("store-newer-compat");
     drop(open(dir.path()));
-    set_meta(dir.path(), &[(meta::FORMAT_VERSION, "0.2")]);
+    set_meta(dir.path(), &[(meta::FORMAT_VERSION, "0.9")]);
     let (store, report) = Store::open(opts(dir.path(), "0.0.2")).unwrap();
     let tok = store.take_write_token().unwrap();
     assert_eq!(report.read_only, None);

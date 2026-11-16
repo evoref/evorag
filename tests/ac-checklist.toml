@@ -252,9 +252,9 @@ id = "AC-FR-402-1"
 requirement = "FR-402"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded"]
+tests = ["crates/evorag-retrieval/tests/recall_cases.rs::recall_cases_reach_80_percent", "crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used", "crates/evorag-core/tests/recall_path.rs::long_turns_are_chunked_and_recalled_through_any_chunk", "crates/evorag-core/tests/hybrid_recall.rs::vector_candidates_join_the_lexical_ones", "crates/evorag-core/tests/hybrid_recall.rs::a_late_query_embedding_falls_back_to_lexical_candidates", "crates/evorag-core/src/recall.rs::rrf_prefers_turns_found_by_both_and_breaks_ties_by_recency"]
 manual = ""
-note = "recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
+note = "v0.2 は索引の単位がチャンク (recall_path の長いターンの試験)。v0.2 はリランクで選ぶ経路 (rerank_recall) と、リランカーが無いときの v0.1 の規則 (recall_path・recall_cases)。recall_cases は verifies: の注記が無い (注記を足すこと)。recall_path は出典の添付を判定する。事例は tests/retrieval/recall-v0.1.toml。"
 
 [[ac]]
 id = "AC-FR-402-2"
@@ -603,7 +603,7 @@ id = "AC-NFR-306-1"
 requirement = "NFR-306"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-index/src/lex.rs::a_bad_hash_or_other_rules_ask_for_a_rebuild", "crates/evorag-core/tests/recall_path.rs::a_lost_index_is_rebuilt_from_the_database"]
+tests = ["crates/evorag-index/src/lex.rs::a_bad_hash_or_other_rules_ask_for_a_rebuild", "crates/evorag-core/tests/recall_path.rs::a_lost_index_is_rebuilt_from_the_database", "crates/evorag-index/src/vec.rs::a_broken_segment_or_another_dimension_needs_a_rebuild"]
 manual = ""
 note = "ハッシュが合わない索引は起動時に捨てて DB から作り直す。v0.1 は索引の全体を作り直す (作り直しの間は想起が Skip)。"
 
@@ -723,3 +723,396 @@ status = "test"
 tests = [".github/workflows/ci.yml#test (windows)", ".github/workflows/ci.yml#test (linux)", ".github/workflows/ci.yml#dco"]
 manual = ""
 note = ""
+
+# v0.2 (01 §5.5)。M2.1 から足していく。
+
+[[ac]]
+id = "AC-FR-303-1"
+requirement = "FR-303"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/notes.rs::a_key_hit_attaches_the_original_exchange", "crates/evorag-core/tests/notes.rs::a_note_is_made_once_the_segment_closes", "crates/evorag-memory/src/note.rs::keys_are_cut_filtered_and_capped"]
+manual = ""
+note = "鍵だけが合う問いで、出典の往復の原文が添えられ、鍵の文は添えられない (ノートが無ければ添わない)。鍵の検査は決定論の単体試験。"
+
+[[ac]]
+id = "AC-FR-310-1"
+requirement = "FR-310"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::memory_shows_what_the_last_answer_used", "crates/evorag-tui/src/app.rs::memory_report_lists_items_reasons_and_sources"]
+manual = ""
+note = "コアは添えた往復と出典の番号・帯・リランクの値としきい値との差・縮退の理由・このセッションの出典を返し、画面はそれを文にする。"
+
+[[ac]]
+id = "AC-FR-212-1"
+requirement = "FR-212"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebuild.rs::rebuild_keeps_the_originals_and_recalls_the_same"]
+manual = ""
+note = "--index と全体の両方で、退避が作られ、モデルの記録・しきい値・想起への操作・ターンの数が変わらず、同じ問いで同じ往復が添えられる。"
+
+[[ac]]
+id = "AC-FR-302-1"
+requirement = "FR-302"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::long_turns_are_chunked_and_recalled_through_any_chunk", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-retrieval/src/chunk.rs::a_short_turn_is_one_chunk", "crates/evorag-retrieval/src/chunk.rs::paragraphs_are_merged_up_to_the_limit_and_split_beyond_it", "crates/evorag-retrieval/src/chunk.rs::a_long_paragraph_is_split_at_sentences_with_overlap", "crates/evorag-retrieval/src/chunk.rs::code_blocks_are_not_cut_unless_too_long", "crates/evorag-retrieval/src/chunk.rs::the_chunks_cover_every_character"]
+manual = ""
+note = "確定したターンはすぐ語彙の索引に入り (チャンクの後ろで当たっても添える)、埋め込みは裏の処理で作る。区切りの規則は単体試験。"
+
+[[ac]]
+id = "AC-FR-404-1"
+requirement = "FR-404"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::the_same_data_and_question_give_the_same_choice", "crates/evorag-core/src/recall.rs::rrf_prefers_turns_found_by_both_and_breaks_ties_by_recency"]
+manual = ""
+note = "同じ会話と問いで、添える往復・リランクの順位と値・帯が同じ。RRF の同点は新しいターンが先。"
+
+[[ac]]
+id = "AC-FR-404-2"
+requirement = "FR-404"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/hybrid_recall.rs::each_missing_part_degrades_as_specified", "crates/evorag-core/tests/hybrid_recall.rs::a_late_query_embedding_falls_back_to_lexical_candidates", "crates/evorag-core/tests/rerank_recall.rs::without_a_usable_reranker_the_lexical_rule_is_used"]
+manual = ""
+note = "埋め込みが無い・リランカーが無い・どちらも無い・しきい値が無い・問いの埋め込みが遅い・リランカーが遅いのそれぞれで、05 §3.5 の理由が残る。"
+
+[[ac]]
+id = "AC-FR-505-1"
+requirement = "FR-505"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/notes.rs::a_grown_segment_is_redone_and_invalid_output_is_skipped", "crates/evorag-core/tests/notes.rs::a_note_is_made_once_the_segment_closes"]
+manual = ""
+note = "型に合わない答えは 1 回やり直し (要求が 2 回出る)、それでも合わない区切りは飛ばして前のノートを残す。"
+
+[[ac]]
+id = "AC-NFR-307-2"
+requirement = "NFR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/orphans.rs::records_left_by_an_older_version_are_cleaned_up"]
+manual = ""
+note = "古い版の削除を記録の直接の書き換えでまねる。出典の無いチャンク・ノート・埋め込み・想起への操作が DB と退避から消え、古い版で足した発話はチャンクと埋め込みが作られる。"
+
+[[ac]]
+id = "AC-FR-402-3"
+requirement = "FR-402"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/live_recall.rs::live_recall_cases_with_a_reranker"]
+manual = ""
+note = "LLM のサーバを使う試験 (cargo xtask live-llm)。2026-11-12、bge-m3 + bge-reranker-v2-m3 (Q8_0) で、正しく添えた 33/37、関係の無い問いで何も添えなかった 11/11。"
+
+[[ac]]
+id = "AC-FR-403-1"
+requirement = "FR-403"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/live_recall.rs::live_paraphrases_reach_the_right_exchange_through_vectors"]
+manual = ""
+note = "LLM のサーバを使う試験。漢字と英数字を共有しない言い換え 5 件で、正しい往復がリランクの最上位 5/5 (添えたのは 1/5。値がしきい値に届かない、AC の文を直した)。"
+
+[[ac]]
+id = "AC-FR-412-3"
+requirement = "FR-412"
+level = "Must"
+status = "manual"
+tests = []
+manual = "docs/compat/0.2.0/acceptance.md §2"
+note = "日本語入力を有効にしたまま、詳細の窓を矢印と Enter で操作する。v0.2.0 のゲートで記録する。"
+
+[[ac]]
+id = "AC-NFR-102-2"
+requirement = "NFR-102"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/bench.rs::bm_102_send_to_request_with_embed_and_rerank"]
+manual = ""
+note = "計測 (cargo xtask bench、埋め込みとリランカーの URL を渡す)。2026-11-12、1 万ターン、bge-m3 + bge-reranker-v2-m3 (GPU) で平均 349 ms、p95 469 ms。"
+
+[[ac]]
+id = "AC-NFR-106-1"
+requirement = "NFR-106"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-index/tests/bench.rs::bm_106_vector_scan"]
+manual = ""
+note = "計測 (cargo xtask bench)。2026-11-12、10 万件・1024 次元・上位 50 件で中央値 10.3 ms。"
+
+[[ac]]
+id = "AC-NFR-402-1"
+requirement = "NFR-402"
+level = "Must"
+status = "manual"
+tests = []
+manual = "docs/compat/0.2.0/acceptance.md §1・§3"
+note = "GNOME Terminal + fcitx5・ibus、tmux。v0.2.0 のゲートで記録する (Linux の実機が要る)。"
+
+[[ac]]
+id = "AC-FR-414-1"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::consecutive_requests_share_their_prefix_even_after_a_recall"]
+manual = ""
+note = "想起を添えたターンの次の要求を含めて、前の要求の今の発話までが次の要求の先頭と一致する (引用は外れる)。"
+
+[[ac]]
+id = "AC-FR-415-1"
+requirement = "FR-415"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/precompute.rs::the_next_turn_is_processed_ahead_and_stopped_by_a_send", "crates/evorag-core/tests/precompute.rs::an_idle_input_is_reranked_ahead_and_reused_when_sent", "crates/evorag-tui/src/app.rs::idle_input_is_signalled_once_per_text_after_500_ms", "crates/evorag-tui/src/app.rs::only_sendable_text_is_offered_for_precompute"]
+manual = ""
+note = "1 トークンの要求は応答のスロットへ出て、次の発話の要求と空の発話の前までが同じ。入力の分は、問いの埋め込みとリランクのキャッシュに残り、同じ発話なら使う。"
+
+[[ac]]
+id = "AC-FR-415-2"
+requirement = "FR-415"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/src/config.rs::precompute_defaults_to_off_only_when_remote_servers_are_allowed", "crates/evorag-core/tests/precompute.rs::idle_precompute_respects_the_setting_and_the_battery"]
+manual = ""
+note = "設定の既定は llm.allow_remote の逆。コアは切られていれば要求を出さない。電池の reduce・stop も確かめる。"
+
+[[ac]]
+id = "AC-FR-414-2"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::old_turns_are_dropped_in_bulk_and_the_cut_stays_put"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-414-3"
+requirement = "FR-414"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/context_order.rs::consecutive_requests_share_their_prefix_even_after_a_recall"]
+manual = ""
+note = "時計を進めても、前の発話の日時が変わらない。"
+
+[[ac]]
+id = "AC-FR-402-4"
+requirement = "FR-402"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_path.rs::earlier_turns_are_attached_with_sources_and_recorded", "crates/evorag-core/tests/rerank_recall.rs::below_the_threshold_nothing_is_attached_and_the_band_is_recorded"]
+manual = ""
+note = "v0.2 の並べ方では、添えないときは今の発話に引用が付かない。リランクでしきい値に届かないときも同じ。"
+
+[[ac]]
+id = "AC-FR-111-1"
+requirement = "FR-111"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/style.rs::a_chosen_style_takes_effect_at_once_and_survives_a_restart_and_a_lost_database", "crates/evorag-core/tests/style.rs::an_unknown_stored_value_reads_as_auto", "crates/evorag-tui/src/app.rs::style_opens_a_picker_and_sends_only_the_changed_items"]
+manual = ""
+note = "コアの層 (次の要求の既定の文、データ根とジャーナルの記録、知らない値は auto) と画面の層 (選ぶ窓、変えた項目だけ送る、知らせ) で判定する。"
+
+[[ac]]
+id = "AC-NFR-307-1"
+requirement = "NFR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/tests/format_0_2.rs::a_v0_1_database_is_backed_up_and_moved_to_0_2_and_v0_1_can_still_write_to_it"]
+manual = ""
+note = "ストアの層。配布物どうしの行き来 (v0.1.2 と v0.2) は、リリースの受入で確かめる (09 §3.6)。"
+
+[[ac]]
+id = "AC-FR-512-1"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::a_different_chat_model_stops_the_start_and_says_whether_it_may_be_the_same"]
+manual = ""
+note = "コアの層 (起動を止め、記録を書き換えない、同じモデルの可能性を見分ける)。終了コード 6 と案内は bin で出す。"
+
+[[ac]]
+id = "AC-FR-512-2"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::recording_a_model_unlike_the_usual_one_is_flagged", "crates/evorag-core/tests/model_binding.rs::embed_and_rerank_are_recorded_and_a_different_one_is_not_used", "crates/evorag-core/tests/model_binding.rs::a_role_that_was_down_at_start_is_used_once_it_comes_up"]
+manual = ""
+note = "embed・rerank の記録と、後から繋がった役割の記録も判定する。"
+
+[[ac]]
+id = "AC-FR-512-3"
+requirement = "FR-512"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::a_model_swapped_while_running_is_noticed_before_sending"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-108-2"
+requirement = "FR-108"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::the_first_start_records_the_chat_model_and_model_only_shows_it", "crates/evorag-core/tests/model_binding.rs::ignored_config_keys_are_announced_once_per_content"]
+manual = ""
+note = ""
+
+[[ac]]
+id = "AC-FR-502-1"
+requirement = "FR-502"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/model_binding.rs::embed_and_rerank_are_recorded_and_a_different_one_is_not_used", "bins/evorag/src/config.rs::keys_of_later_versions_are_ignored_with_a_warning"]
+manual = ""
+note = "ループバック以外の接続先の拒否は、chat と同じ Endpoint の検査 (AC-FR-509-1) を使う。"
+
+[[ac]]
+id = "AC-FR-513-1"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::setup_switches_the_recorded_model_only_while_the_tui_is_closed"]
+manual = ""
+note = "DB の側 (記録の書き換え、前のモデルの履歴、切り替えた後の起動)。違いの中身と時間の目安の表示、確認が無いときは設定だけを書くことは、bin の setup で行う (対話は手動の受入で確かめる)。やり直しの job は M2.3・M2.5 で足す。"
+
+[[ac]]
+id = "AC-FR-513-2"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::the_same_model_choice_is_offered_only_when_the_values_match"]
+manual = ""
+note = "埋め込みのモデルの、ベクトルを埋め込み直して比べる確かめは、ベクトルを保存する M2.5 で足す。"
+
+[[ac]]
+id = "AC-FR-513-3"
+requirement = "FR-513"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rebind.rs::setup_switches_the_recorded_model_only_while_the_tui_is_closed"]
+manual = ""
+note = "TUI が動いている間はデータ根を開けない (DB の側)。先に示す文言は bin の setup。"
+
+[[ac]]
+id = "AC-FR-514-1"
+requirement = "FR-514"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/probe.rs::the_chat_probe_checks_structured_output_thinking_and_speed", "crates/evorag-core/tests/probe.rs::the_embed_and_rerank_probes_measure_dims_and_time", "crates/evorag-core/tests/probe.rs::the_core_probes_once_per_model_and_reports_issues"]
+manual = ""
+note = "点検・保存・同じモデルでは繰り返さないこと・使えない機能の知らせ。状態の行の印と doctor の表示は bin と TUI。型縛りの補助の呼び出し (ノートの鍵など) は M2.3 から入るので、止める側はそこで probe_result を見る。rerank の締切 (rerank_slow) は M2.5。"
+
+[[ac]]
+id = "AC-FR-511-1"
+requirement = "FR-511"
+level = "Should"
+status = "test"
+tests = ["crates/evorag-llm/tests/http_client.rs::a_router_gets_the_model_name_on_every_request", "crates/evorag-llm/tests/http_client.rs::a_router_without_a_model_name_lists_its_models", "crates/evorag-llm/tests/http_client.rs::a_plain_server_gets_no_model_name"]
+manual = ""
+note = "クライアントの層。embed・rerank に名前が無いときは、繋がらない役割と同じく使わずに動く (30 秒ごとに試す)。setup でルーターのモデルから役割を選ぶのは次の変更。本物のルーター (S-15 のプリセット) で、照合・読み込み待ち・応答を確かめた。"
+
+[[ac]]
+id = "AC-FR-511-2"
+requirement = "FR-511"
+level = "Should"
+status = "test"
+tests = ["bins/evorag/src/setup.rs::a_router_is_written_with_a_model_name_per_role", "bins/evorag/src/setup.rs::a_role_is_chosen_from_the_router_candidates"]
+manual = ""
+note = "設定の書き方と選び方。ルーターの探索と役割の見分けは、本物のルーター (S-15 のプリセット) で setup --yes を流して確かめた (対話で選ぶ手順は手動の受入)。"
+
+[[ac]]
+id = "AC-FR-413-1"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once", "crates/evorag-retrieval/src/calibrate.rs::the_threshold_is_just_above_the_ninetieth_percentile_of_irrelevant_queries", "crates/evorag-retrieval/src/calibrate.rs::the_bundled_cases_load_with_gold_exchanges", "crates/evorag-core/tests/rerank_recall.rs::without_a_passed_threshold_the_top_exchanges_only_go_to_the_band"]
+manual = "evorag setup で、本物のリランカー (japanese-bge-reranker-v2-m3) のしきい値が求まり記録されることを確かめた (2026-11-12、M2.3 の 1 つ目)"
+note = "求め方・合否・記録 (model_key・対象の種類・版・事例・合否)。落ちたときは添えずに帯にだけ出す (rerank_recall)。帯の表示は M2.3 の 3 つ目。setup の表示は bin。"
+
+[[ac]]
+id = "AC-FR-413-2"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::switching_rerankers_keeps_each_threshold"]
+manual = ""
+note = "コアの側 (切り替えた後の起動で求め直し、前の記録が残り、戻すとそれを使う)。setup の中で求めるのは bin (本物のリランカーで確かめた)。"
+
+[[ac]]
+id = "AC-FR-413-3"
+requirement = "FR-413"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/calibration.rs::a_new_reranker_is_calibrated_in_the_background_once"]
+manual = ""
+note = "裏で較正し、終わると RecallStatus で状態 (標準・候補だけ) を知らせる。状態の行の表示は TUI。"
+[[ac]]
+id = "AC-FR-416-1"
+requirement = "FR-416"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rerank_recall.rs::the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_the_band", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-memory/tests/golden_kinds.rs::turn_v1"]
+manual = ""
+note = "利用者が帯から選んで添えたこと (user_attached) は recall_feedback の試験。"
+[[ac]]
+id = "AC-FR-412-1"
+requirement = "FR-412"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/rerank_recall.rs::below_the_threshold_nothing_is_attached_and_the_band_is_recorded", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-tui/src/app.rs::the_band_is_picked_after_the_sources_and_attached_with_a", "crates/evorag-tui/src/render.rs::the_band_is_drawn_under_the_answer"]
+manual = ""
+note = "コアの側 (帯の選び方、帯の情報、添えて作り直すと新しい応答ができ前の応答も残る、最新の応答の帯だけ) と画面の側 (帯の表示、Tab、詳細の窓の a・x)。"
+
+[[ac]]
+id = "AC-FR-412-2"
+requirement = "FR-412"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/recall_feedback.rs::the_irrelevant_mark_is_recorded_toggled_and_survives_a_lost_database", "crates/evorag-core/tests/recall_feedback.rs::attaching_from_the_band_regenerates_with_that_exchange_and_keeps_the_old_answer", "crates/evorag-core/tests/recall_feedback.rs::deleting_a_session_removes_its_feedback", "crates/evorag-memory/tests/golden_kinds.rs::recall_feedback_v1"]
+manual = ""
+note = "記録・取り消し・ジャーナルから戻す・判定を変えない・再生成の信号を書かない・会話を消すと操作の記録も消える。印の表示と知らせの文言は TUI の試験 (the_band_is_picked_after_the_sources_and_attached_with_a)。"
+[[ac]]
+id = "AC-FR-301-1"
+requirement = "FR-301"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database"]
+manual = ""
+note = "枠組みと手順 (点検・較正・埋め込み・退避)。較正は済んだ問いを覚えて続きから、埋め込みは足りない分を状態から求めて続きから (job を書かない、04 §4)。chat の裏の要求 (M2.7 のノート) も同じ枠組みに載せる。"
+
+[[ac]]
+id = "AC-FR-301-2"
+requirement = "FR-301"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::on_battery_the_background_work_is_reduced_or_stopped", "bins/evorag/src/config.rs::sleep_settings_are_read_and_checked", "crates/evorag-core/tests/embeddings.rs::on_battery_reduce_delays_the_embedding"]
+manual = ""
+note = "部分: 電源の状態を注入して確かめる。stop は起動後の点検も止める。reduce は sleep-time の手順 (埋め込み) の待ち時間を 5 倍にする (embeddings の試験)、先に済ませる処理 (05 §4.5) への効き方は M2.6 で足す。"
+
+[[ac]]
+id = "AC-FR-504-1"
+requirement = "FR-504"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+manual = ""
+note = "裏の要求は、応答の生成の間と入力の間は出ず、キー入力と発話の送信で落とされる (試験は両方)。chat の裏の要求は最後のスロット (probe.rs の試験)。/slots の is_processing を見るのは、chat を長く使う M2.7 のノートで足す (08 §2.3 の注)。"
+[[ac]]
+id = "AC-NFR-105-1"
+requirement = "NFR-105"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/sleep_time.rs::background_work_yields_to_the_user_and_resumes_to_the_same_result"]
+manual = ""
+note = "操作から、動いている裏の要求が落とされるまでの時間を測る (再生の試験。本物の llama-server が接続を切られて止まるまでの 0.2 秒は S-02)。"
+[[ac]]
+id = "AC-FR-410-1"
+requirement = "FR-410"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/embeddings.rs::switching_the_embedding_model_rebuilds_and_keeps_one_previous_generation", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-core/tests/model_binding.rs"]
+manual = ""
+note = "記録と違う埋め込みのモデルでは役割を使わない (model_binding の試験、M2.2)。切り替えると全件を作り直し、前のモデルの索引を 1 世代残す。作り直しの間の状態の行は「想起: 作り直し中 N%」。ベクトルの検索を想起に使うのは M2.6 (それまでは語彙の候補とリランクで答える)。"

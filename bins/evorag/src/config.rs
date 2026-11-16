@@ -179,14 +179,26 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         ));
     }
     let mut ignored = Vec::new();
-    if config.llm.embed.is_some() {
-        ignored.push("llm.embed".to_owned());
-    }
-    if config.llm.rerank.is_some() {
-        ignored.push("llm.rerank".to_owned());
-    }
-    if config.llm.chat.aux_request_extra.is_some() {
-        ignored.push("llm.chat.aux_request_extra".to_owned());
+    for (name, t) in [
+        ("llm.embed", &config.llm.embed),
+        ("llm.rerank", &config.llm.rerank),
+    ] {
+        if let Some(t) = t {
+            for k in ["url", "model", "api_key", "api_key_env"] {
+                if t.get(k).is_some_and(|v| !v.is_str()) {
+                    return Err(format!(
+                        "line {}: {name}.{k} must be a string",
+                        line_of(text, k)
+                    ));
+                }
+            }
+            for k in t
+                .keys()
+                .filter(|k| !["url", "model", "api_key", "api_key_env"].contains(&k.as_str()))
+            {
+                ignored.push(format!("{name}.{k}"));
+            }
+        }
     }
     for (name, t) in [
         ("learning", &config.learning),
@@ -204,9 +216,44 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
                 line_of(text, "enabled")
             ));
         }
-        for k in m.keys().filter(|k| k.as_str() != "enabled") {
+        if m.get("sleep_time").is_some_and(|v| !v.is_bool()) {
+            return Err(format!(
+                "line {}: memory.sleep_time must be true or false",
+                line_of(text, "sleep_time")
+            ));
+        }
+        if m.get("idle_seconds")
+            .is_some_and(|v| v.as_integer().is_none_or(|n| !(1..=86_400).contains(&n)))
+        {
+            return Err(format!(
+                "line {}: memory.idle_seconds must be an integer from 1 to 86400",
+                line_of(text, "idle_seconds")
+            ));
+        }
+        if m.get("on_battery")
+            .is_some_and(|v| v.as_str().and_then(evorag_core::OnBattery::parse).is_none())
+        {
+            return Err(format!(
+                "line {}: memory.on_battery must be \"reduce\", \"normal\" or \"stop\"",
+                line_of(text, "on_battery")
+            ));
+        }
+        for k in m.keys().filter(|k| {
+            !["enabled", "sleep_time", "idle_seconds", "on_battery"].contains(&k.as_str())
+        }) {
             ignored.push(format!("memory.{k}"));
         }
+    }
+    if config
+        .retrieval
+        .as_ref()
+        .and_then(|r| r.get("precompute"))
+        .is_some_and(|v| !v.is_bool())
+    {
+        return Err(format!(
+            "line {}: retrieval.precompute must be true or false",
+            line_of(text, "precompute")
+        ));
     }
     Ok(Loaded {
         config,
@@ -216,6 +263,36 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
 }
 
 impl Config {
+    /// 裏の処理の設定 (`memory.sleep_time`・`idle_seconds`・`on_battery`、07 §4.2)。値は読むときに確かめた。
+    pub fn sleep(&self) -> evorag_core::SleepConfig {
+        let d = evorag_core::SleepConfig::default();
+        let m = self.memory.as_ref();
+        let get = |k: &str| m.and_then(|m| m.get(k));
+        evorag_core::SleepConfig {
+            enabled: get("sleep_time")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(d.enabled),
+            idle: get("idle_seconds")
+                .and_then(toml::Value::as_integer)
+                .and_then(|n| u64::try_from(n).ok())
+                .map_or(d.idle, std::time::Duration::from_secs),
+            on_battery: get("on_battery")
+                .and_then(toml::Value::as_str)
+                .and_then(evorag_core::OnBattery::parse)
+                .unwrap_or(d.on_battery),
+        }
+    }
+
+    /// `retrieval.precompute` (07 §4.2)。書かないときは、ループバック以外を許した設定では切る (送っていない
+    /// 入力が別の機械へ出るため、05 §4.5)。
+    pub fn precompute(&self) -> bool {
+        self.retrieval
+            .as_ref()
+            .and_then(|r| r.get("precompute"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(!self.llm.allow_remote)
+    }
+
     /// `memory.enabled` (既定は true、07 §4.2)。
     pub fn memory_enabled(&self) -> bool {
         self.memory
@@ -278,6 +355,60 @@ pub fn default_places() -> Option<Places> {
     }
 }
 
+/// embed・rerank の役割の接続先の設定 (07 §4.2)。`url` が無ければ、その役割は無い。
+pub struct RoleConfig {
+    pub url: String,
+    pub api_key: Option<String>,
+    /// ルーターモードのときのモデルの名前 (06 §2)。
+    pub model: Option<String>,
+}
+
+impl Config {
+    pub fn role(&self, role: &str) -> Option<RoleConfig> {
+        let t = match role {
+            "embed" => self.llm.embed.as_ref()?,
+            "rerank" => self.llm.rerank.as_ref()?,
+            _ => return None,
+        };
+        let s = |k: &str| t.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+        let url = s("url").filter(|u| !u.trim().is_empty())?;
+        let api_key = s("api_key").or_else(|| s("api_key_env").and_then(|v| std::env::var(v).ok()));
+        Some(RoleConfig {
+            url,
+            api_key,
+            model: s("model"),
+        })
+    }
+}
+
+/// v0.2 で使わなくなったキーと、その内容のハッシュ (07 §4.2・§4.1)。読んで無視し、内容が変わった
+/// ときだけ知らせる (知らせたかはデータ根に記録する)。
+pub fn obsolete(config: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(models) = &config.llm.chat.models {
+        let text = models
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push(("llm.chat.models".to_owned(), fnv(&text)));
+    }
+    if let Some(t) = config.retrieval.as_ref().and_then(|r| r.get("thresholds")) {
+        out.push(("retrieval.thresholds".to_owned(), fnv(&t.to_string())));
+    }
+    out
+}
+
+/// 版をまたいで変わらないハッシュ (FNV-1a、64 ビット)。
+fn fnv(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,12 +452,79 @@ enabled = true
         assert!(l.ignored.is_empty());
     }
 
+    /// verifies: AC-FR-301-2 (設定の層: memory.sleep_time・idle_seconds・on_battery)
+    #[test]
+    fn sleep_settings_are_read_and_checked() {
+        let d = parse("").unwrap().config.sleep();
+        assert_eq!(d, evorag_core::SleepConfig::default());
+        let s = parse("[memory]\nsleep_time = false\nidle_seconds = 120\non_battery = \"stop\"\n")
+            .unwrap()
+            .config
+            .sleep();
+        assert!(!s.enabled);
+        assert_eq!(s.idle, std::time::Duration::from_secs(120));
+        assert_eq!(s.on_battery, evorag_core::OnBattery::Stop);
+        for bad in [
+            "[memory]\non_battery = \"sometimes\"\n",
+            "[memory]\nidle_seconds = 0\n",
+            "[memory]\nsleep_time = \"yes\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn keys_of_later_versions_are_ignored_with_a_warning() {
+        // v0.2 から llm.embed の url は使う。知らないキーだけを警告して無視する。
+        let l = parse(
+            "[llm.embed]\nurl = \"http://127.0.0.1:8081\"\nfuture = 1\n[memory]\nsleep_time = true\nfuture = 2\n",
+        )
+        .unwrap();
+        assert_eq!(l.ignored, ["llm.embed.future", "memory.future"]);
+        let r = l.config.role("embed").unwrap();
+        assert_eq!(r.url, "http://127.0.0.1:8081");
+        assert!(l.config.role("rerank").is_none());
+    }
+
+    /// verifies: AC-FR-415-2 (ループバック以外を許した設定では、書かなければ入力が止まったときの処理を切る)
+    #[test]
+    fn precompute_defaults_to_off_only_when_remote_servers_are_allowed() {
+        assert!(parse("").unwrap().config.precompute());
+        assert!(
+            !parse("[llm]\nallow_remote = true\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        assert!(
+            parse("[llm]\nallow_remote = true\n[retrieval]\nprecompute = true\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        assert!(
+            !parse("[retrieval]\nprecompute = false\n")
+                .unwrap()
+                .config
+                .precompute()
+        );
+        let e = parse("[retrieval]\nprecompute = \"yes\"\n").unwrap_err();
+        assert!(
+            e.contains("line 2") && e.contains("retrieval.precompute"),
+            "{e}"
+        );
+    }
+
+    /// verifies: AC-FR-108-2 (使わなくなったキーを見つける)
+    #[test]
+    fn obsolete_keys_are_found_with_a_stable_hash() {
         let l =
-            parse("[llm.embed]\nurl = \"http://127.0.0.1:8081\"\n[memory]\nsleep_time = true\n")
-                .unwrap();
-        assert_eq!(l.ignored, ["llm.embed", "memory.sleep_time"]);
+            parse("[[llm.chat.models]]\nname = \"a\"\nurl = \"http://127.0.0.1:8081\"\n").unwrap();
+        let o = obsolete(&l.config);
+        assert_eq!(o.len(), 1);
+        assert_eq!(o[0].0, "llm.chat.models");
+        assert_eq!(o, obsolete(&l.config));
+        assert!(obsolete(&parse("").unwrap().config).is_empty());
     }
 
     /// FR-904: 読めないキー・型の誤り・範囲外の値は、行番号つきのエラー。

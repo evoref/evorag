@@ -192,6 +192,16 @@ pub const WEEKLY_KEEP: usize = 4;
 ///
 /// `backups/daily/<YYYYMMDD>/` に一貫した写しを作り、その週の最初の退避なら `backups/weekly/` にも
 /// 残す。新しいものから日次 7 世代・週次 4 世代を残す。日付は UTC。
+/// その日の日次の退避がまだ無いか (裏の処理が作るかを決める、03 §7.1)。
+pub fn daily_due(backups: &Path, now_ms: i64) -> bool {
+    let day = stamp(now_ms)[..8].to_owned();
+    !backups
+        .join(DAILY_DIR)
+        .join(day)
+        .join(crate::store::DB_FILE)
+        .is_file()
+}
+
 pub fn daily(src: &Database, backups: &Path, now_ms: i64) -> Result<Option<PathBuf>, StoreError> {
     let io = |e: std::io::Error| StoreError::Io(e.to_string());
     let day = stamp(now_ms)[..8].to_owned();

@@ -105,9 +105,9 @@ const TO_03: Migration = Migration {
     counts_change: &[],
 };
 
-/// 今の形式 (0.1) の DB に、記録を 3 件書く。
+/// 形式の版 0.1 の DB に、記録を 3 件書く (移行の枠組みの試験は、0.1 から試験用の版へ移す)。
 fn seed(root: &Path) -> Vec<evorag_types::Id> {
-    let (store, _) = Store::open(opts(root)).unwrap();
+    let (store, _) = Store::open_with(opts(root), plan("0.1", Vec::new())).unwrap();
     let tok = store.take_write_token().unwrap();
     let mut ids = Vec::new();
     let mut tx = store.write(&tok, Durability::Immediate).unwrap();
@@ -350,7 +350,8 @@ fn a_migration_that_loses_rows_of_another_table_is_rejected() {
     let dir = TempDir::new("migrate-lost-links");
     let ids = seed(dir.path());
     {
-        let (store, _) = Store::open(opts(dir.path())).unwrap();
+        // 0.1 のまま開いて書く (今の版の移行を当てない)。
+        let (store, _) = Store::open_with(opts(dir.path()), plan("0.1", Vec::new())).unwrap();
         let tok = store.take_write_token().unwrap();
         let mut tx = store.write(&tok, Durability::Immediate).unwrap();
         tx.put_link(ids[0], "next", ids[1], b"").unwrap();

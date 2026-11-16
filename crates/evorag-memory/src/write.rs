@@ -6,6 +6,9 @@ use evorag_types::{Clock, Id, IdGen, Timestamp};
 
 use crate::kinds::*;
 
+/// 書いたチャンク (ID と本体)。
+pub type Chunk = (Id, ChunkBody);
+
 /// 書き込みの操作を組み立てる。
 ///
 /// セッションの封筒を受け取る関数には、読み直した最新の封筒を渡す (一覧の副索引を付け替えるため。
@@ -25,6 +28,7 @@ pub struct AssistantTurn {
     pub attached: Vec<Id>,
     pub error: Option<String>,
     pub recall: Option<RecallRecord>,
+    pub obs: Option<TurnObs>,
 }
 
 fn envelope<T: serde::Serialize>(
@@ -117,6 +121,119 @@ impl Writes<'_> {
         Ok(ops)
     }
 
+    /// 設定を書く (03 §3.3 の `setting`)。同じ名前の記録があれば上書きし、重複していれば消す。
+    pub fn set_setting(
+        &self,
+        current: &crate::read::Settings,
+        name: &str,
+        value: &str,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let body = SettingBody {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        };
+        let mut ops = Vec::new();
+        let e = match current.by_name.get(name) {
+            Some(s) => {
+                let mut e = s.envelope.clone();
+                e.set_body(&body)?;
+                e.updated_at = now;
+                e
+            }
+            None => envelope(self.ids.next_id(), KIND_SETTING, now, &body)?,
+        };
+        ops.push(WriteOp::Put(e));
+        for d in &current.duplicates {
+            if d.body_as::<SettingBody>().is_ok_and(|b| b.name == name) {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_SETTING.into(),
+                    id: d.id,
+                });
+            }
+        }
+        Ok(ops)
+    }
+
+    /// 役割のモデルを記録する (06 §3.1)。記録があれば、前のモデルを履歴に移して書き換える。
+    pub fn bind_model(
+        &self,
+        current: &crate::read::Bindings,
+        role: &str,
+        origin: ModelOrigin,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let mut ops = Vec::new();
+        let e = match current.by_role.get(role) {
+            Some(b) => {
+                let mut body = b.body.clone();
+                if body.current.model_key != origin.model_key {
+                    body.history.push(body.current.clone());
+                }
+                body.current = origin;
+                let mut e = b.envelope.clone();
+                e.set_body(&body)?;
+                e.updated_at = now;
+                e
+            }
+            None => envelope(
+                self.ids.next_id(),
+                KIND_MODEL_BINDING,
+                now,
+                &ModelBindingBody {
+                    role: role.to_owned(),
+                    current: origin,
+                    history: Vec::new(),
+                },
+            )?,
+        };
+        ops.push(WriteOp::Put(e));
+        for d in &current.duplicates {
+            if d.body_as::<ModelBindingBody>()
+                .is_ok_and(|b| b.role == role)
+            {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_MODEL_BINDING.into(),
+                    id: d.id,
+                });
+            }
+        }
+        Ok(ops)
+    }
+
+    /// しきい値の記録を足す (05 §3.7)。版は呼ぶ側が前の版 + 1 にする。前の版は消さない。
+    pub fn save_threshold(&self, body: &ThresholdBody) -> Result<Vec<WriteOp>, BodyError> {
+        Ok(vec![WriteOp::Put(envelope(
+            self.ids.next_id(),
+            KIND_THRESHOLD,
+            self.clock.now(),
+            body,
+        )?)])
+    }
+
+    /// 点検の結果を書く (06 §3.3)。同じ役割・model_key・`build_info` の古い結果は消す。
+    pub fn save_probe(
+        &self,
+        old: Option<&Envelope>,
+        body: &ModelProbeBody,
+    ) -> Result<Vec<WriteOp>, BodyError> {
+        let now = self.clock.now();
+        let mut ops = Vec::new();
+        if let Some(o) = old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_MODEL_PROBE.into(),
+                id: o.id,
+            });
+        }
+        ops.push(WriteOp::Put(envelope(
+            self.ids.next_id(),
+            KIND_MODEL_PROBE,
+            now,
+            body,
+        )?));
+        Ok(ops)
+    }
+
     /// 発話のターン (状態「応答待ち」)。LLM に送る前に書く (04 §3 の 1、FR-201)。
     pub fn user_turn(
         &self,
@@ -140,6 +257,7 @@ impl Writes<'_> {
                 reply_to: None,
                 error: None,
                 recall: None,
+                obs: None,
             },
         )?;
         let mut ops = vec![
@@ -179,6 +297,7 @@ impl Writes<'_> {
                 reply_to: Some(user_turn.id),
                 error: turn.error,
                 recall: turn.recall,
+                obs: turn.obs,
             },
         )?;
         let mut ops = vec![
@@ -209,6 +328,145 @@ impl Writes<'_> {
     }
 
     /// 信号 (評価・再生成、13 §2、FR-311)。
+    /// ターンのチャンクを書く (05 §2.4)。前のチャンク `old` は消す。返すのは新しいチャンクの ID と本体。
+    pub fn chunks(
+        &self,
+        old: &[Id],
+        bodies: &[ChunkBody],
+    ) -> Result<(Vec<Chunk>, Vec<WriteOp>), BodyError> {
+        let mut ops = Vec::new();
+        for id in old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_CHUNK.into(),
+                id: *id,
+            });
+            ops.push(WriteOp::DeleteLinksOf(*id));
+        }
+        let now = self.clock.now();
+        let mut made = Vec::new();
+        for b in bodies {
+            let id = self.ids.next_id();
+            ops.push(WriteOp::Put(envelope(id, KIND_CHUNK, now, b)?));
+            ops.push(WriteOp::PutLink {
+                from: id,
+                rel: REL_CHUNK_OF.into(),
+                to: b.turn,
+                attrs: Vec::new(),
+            });
+            made.push((id, *b));
+        }
+        Ok((made, ops))
+    }
+
+    /// 埋め込みを書く (05 §2.2)。ベクトルは `blobs` の part 0 に、f32 のリトルエンディアンで置く。
+    pub fn embedding(
+        &self,
+        body: &EmbeddingBody,
+        vector: &[f32],
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let id = self.ids.next_id();
+        let bytes: Vec<u8> = vector.iter().flat_map(|x| x.to_le_bytes()).collect();
+        Ok((
+            id,
+            vec![
+                WriteOp::Put(envelope(id, KIND_EMBEDDING, self.clock.now(), body)?),
+                WriteOp::PutBlob { id, part: 0, bytes },
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_EMBEDDING_OF.into(),
+                    to: body.target,
+                    attrs: Vec::new(),
+                },
+            ],
+        ))
+    }
+
+    /// ノートを書く (04 §2)。同じ区切りの前のノート `old` (とその埋め込み `old_embeddings`) は消す。
+    pub fn note(
+        &self,
+        old: &[Id],
+        old_embeddings: &[Id],
+        body: &NoteBody,
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let mut ops = Vec::new();
+        for e in old_embeddings {
+            ops.extend(self.delete_embedding(*e));
+        }
+        for id in old {
+            ops.push(WriteOp::Delete {
+                kind: KIND_NOTE.into(),
+                id: *id,
+            });
+            ops.push(WriteOp::DeleteLinksOf(*id));
+        }
+        let id = self.ids.next_id();
+        ops.push(WriteOp::Put(envelope(
+            id,
+            KIND_NOTE,
+            self.clock.now(),
+            body,
+        )?));
+        for turn in &body.exchanges {
+            ops.push(WriteOp::PutLink {
+                from: id,
+                rel: REL_NOTE_OF.into(),
+                to: *turn,
+                attrs: Vec::new(),
+            });
+        }
+        Ok((id, ops))
+    }
+
+    /// 埋め込みを消す (記録・ベクトル・関係)。
+    pub fn delete_embedding(&self, id: Id) -> Vec<WriteOp> {
+        vec![
+            WriteOp::Delete {
+                kind: KIND_EMBEDDING.into(),
+                id,
+            },
+            WriteOp::DeleteBlobs(id),
+            WriteOp::DeleteLinksOf(id),
+        ]
+    }
+
+    /// 想起への操作を記録する (05 §5.2)。
+    pub fn recall_feedback(
+        &self,
+        body: &RecallFeedbackBody,
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        let id = self.ids.next_id();
+        let e = envelope(id, KIND_RECALL_FEEDBACK, self.clock.now(), body)?;
+        Ok((
+            id,
+            vec![
+                WriteOp::Put(e),
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_FEEDBACK_ANSWER.into(),
+                    to: body.answer,
+                    attrs: Vec::new(),
+                },
+                WriteOp::PutLink {
+                    from: id,
+                    rel: REL_FEEDBACK_TARGET.into(),
+                    to: body.target,
+                    attrs: Vec::new(),
+                },
+            ],
+        ))
+    }
+
+    /// 想起への操作を取り消す (記録を消す。ジャーナルにも削除の行が書かれる)。
+    pub fn delete_feedback(&self, id: Id) -> Vec<WriteOp> {
+        vec![
+            WriteOp::Delete {
+                kind: KIND_RECALL_FEEDBACK.into(),
+                id,
+            },
+            WriteOp::DeleteLinksOf(id),
+        ]
+    }
+
     pub fn signal(
         &self,
         kind: SignalKind,
@@ -249,13 +507,62 @@ pub fn delete_session(
     session: &Envelope,
 ) -> Result<Vec<WriteOp>, crate::MemoryError> {
     let mut ops = Vec::new();
+    let mut feedback = std::collections::BTreeSet::new();
+    let mut notes = std::collections::BTreeSet::new();
     for (turn, _) in tx.links_to(session.id, REL_IN_SESSION)? {
+        // ノートは出典の往復と一緒に消す (鍵の埋め込みを含む、03 §4.2 の規則 12)。
+        for (n, _) in tx.links_to(turn, REL_NOTE_OF)? {
+            if notes.insert(n) {
+                for (emb, _) in tx.links_to(n, REL_EMBEDDING_OF)? {
+                    ops.push(WriteOp::Delete {
+                        kind: KIND_EMBEDDING.into(),
+                        id: emb,
+                    });
+                    ops.push(WriteOp::DeleteBlobs(emb));
+                    ops.push(WriteOp::DeleteLinksOf(emb));
+                }
+                ops.push(WriteOp::Delete {
+                    kind: KIND_NOTE.into(),
+                    id: n,
+                });
+                ops.push(WriteOp::DeleteLinksOf(n));
+            }
+        }
         for (signal, _) in tx.links_to(turn, REL_TARGET)? {
             ops.push(WriteOp::Delete {
                 kind: KIND_SIGNAL.into(),
                 id: signal,
             });
             ops.push(WriteOp::DeleteLinksOf(signal));
+        }
+        // チャンクは元のターンと一緒に消す (出典の無い派生の記録、03 §4.2 の規則 12)。
+        for (c, _) in tx.links_to(turn, REL_CHUNK_OF)? {
+            // チャンクの埋め込みも消す (ベクトルを含む)。
+            for (emb, _) in tx.links_to(c, REL_EMBEDDING_OF)? {
+                ops.push(WriteOp::Delete {
+                    kind: KIND_EMBEDDING.into(),
+                    id: emb,
+                });
+                ops.push(WriteOp::DeleteBlobs(emb));
+                ops.push(WriteOp::DeleteLinksOf(emb));
+            }
+            ops.push(WriteOp::Delete {
+                kind: KIND_CHUNK.into(),
+                id: c,
+            });
+            ops.push(WriteOp::DeleteLinksOf(c));
+        }
+        // 想起への操作は、問いの応答と対象の往復のどちらが消えても消す (出典の無い派生の記録、03 §4.2 の規則 12)。
+        for rel in [REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET] {
+            for (f, _) in tx.links_to(turn, rel)? {
+                if feedback.insert(f) {
+                    ops.push(WriteOp::Delete {
+                        kind: KIND_RECALL_FEEDBACK.into(),
+                        id: f,
+                    });
+                    ops.push(WriteOp::DeleteLinksOf(f));
+                }
+            }
         }
         ops.push(WriteOp::Delete {
             kind: KIND_TURN.into(),

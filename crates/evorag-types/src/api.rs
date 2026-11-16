@@ -30,8 +30,57 @@ pub enum Command {
     Model { name: Option<String> },
     /// `/sources [on|off]` (FR-409): このセッションでメモリを添えるかを示す・変える。
     Sources { memory: Option<bool> },
-    /// 応答 `turn` の出典 `n` (1 から) の詳細を照会する (FR-110)。
+    /// 応答 `turn` の出典 `n` (セッションの通し番号) の詳細を照会する (FR-110)。
     ShowSource { turn: Id, n: usize },
+    /// `/style` (FR-111、07 §3): `set` が無ければ今の答え方の既定を示し、あれば 1 つを変える。
+    /// 値は `auto` などの名前で渡し、コアが確かめる。
+    Style { set: Option<(StyleItem, String)> },
+    /// 応答 `answer` の帯の往復 `target` の詳細を照会する (05 §5.2)。
+    ShowBand { answer: Id, target: Id },
+    /// 帯の往復 `target` を添えて、最新の応答 `answer` を作り直す (05 §5.2 の「添えて作り直す」)。
+    AttachBand { answer: Id, target: Id },
+    /// 応答 `answer` の出典・帯の往復 `target` に「無関係」の印を付ける。付いていれば取り消す (05 §5.2)。
+    ToggleIrrelevant { answer: Id, target: Id },
+    /// 入力欄の文字が約 500 ms 変わらなかった (05 §4.5 の先に済ませる処理の合図)。`text` は、そのまま送ったら
+    /// 発話になる本文。コアは想起を先に済ませ、同じ発話が送られたら結果を使う。保存しない。
+    InputIdle { text: String },
+    /// `/memory` (FR-310、07 §3): 直前の応答に添えたメモリ、候補の帯、リランクの値、縮退の理由と、
+    /// このセッションの出典の番号と往復の対応を照会する。
+    Memory,
+}
+
+/// 答え方の既定の項目 (07 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleItem {
+    Language,
+    Length,
+    Format,
+}
+
+impl StyleItem {
+    pub const ALL: [StyleItem; 3] = [StyleItem::Language, StyleItem::Length, StyleItem::Format];
+
+    /// `/style <項目>` の名前。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StyleItem::Language => "language",
+            StyleItem::Length => "length",
+            StyleItem::Format => "format",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|i| i.as_str() == s)
+    }
+
+    /// 選べる値 (先頭が既定の `auto`)。
+    pub fn choices(self) -> &'static [&'static str] {
+        match self {
+            StyleItem::Language => &["auto", "ja", "en"],
+            StyleItem::Length => &["auto", "short", "long"],
+            StyleItem::Format => &["auto", "plain", "structured"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +100,62 @@ pub enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
+}
+
+/// 1 つの役割の、記録したモデルと繋がっているモデル (ファイル名と model_key、06 §3.1)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRoleInfo {
+    /// `chat`・`embed`・`rerank`。
+    pub role: String,
+    pub recorded: Option<(String, String)>,
+    pub connected: Option<(String, String)>,
+    pub status: RoleStatus,
+}
+
+/// 役割の状態 (06 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleStatus {
+    /// 設定していない (その役割は無いものとして縮退する)。
+    Unset,
+    /// 繋がらない。繋がるまで使わず、ときどき試す (06 §3 の表)。
+    Waiting,
+    /// 記録と同じモデルで、使える。
+    Ready,
+    /// 記録と違うモデル。使わない (`evorag setup` で切り替える)。
+    Mismatch,
+}
+
+/// 裏の処理の状態 (07 §2.1 の状態の行、04 §4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundState {
+    /// 待機中 (操作の無い時間を待っている、または要る手順が無い)。
+    Idle,
+    /// 整理中 (手順が動いている)。
+    Working,
+    /// 電池のため休止 (`memory.on_battery = "stop"`)。
+    PausedBattery,
+    /// 空きが足りないので休止 (03 §8)。
+    PausedLowSpace,
+    /// 設定で切っている (`memory.sleep_time = false`)。
+    Off,
+}
+
+/// 想起の状態 (07 §2.1 の状態の行の「想起」の欄、05 §3.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallState {
+    /// リランカーと、合格したしきい値がある。
+    Standard,
+    /// リランカーが無い・使えない (語彙の規則などで動く)。
+    Simple,
+    /// 埋め込みを作り直している (進み具合の百分率)。その間は語彙の候補とリランクで答える (FR-410)。
+    Rebuilding { percent: u8 },
+    /// リランカーはあるが、しきい値が無い (自動では添えず、候補だけを出す)。
+    CandidatesOnly {
+        /// 較正の途中。
+        calibrating: bool,
+        /// 較正に落ちた (`evorag setup` で別のリランカーを勧める)。
+        failed: bool,
+    },
 }
 
 /// 読み取り用のセッション。
@@ -73,8 +178,79 @@ pub struct TurnView {
     pub model_key: Option<String>,
     pub reply_to: Option<Id>,
     pub created_at: Timestamp,
-    /// 添えた以前の会話の出典の数 (応答の `[1]`〜`[n]`、FR-110)。
+    /// 添えた以前の会話の出典の数 (FR-110)。
     pub sources: usize,
+    /// 出典の番号の始まり (セッションの通し番号、05 §5.1)。応答の `[source_base]` から
+    /// `[source_base + sources - 1]` までが、この応答で添えた出典。
+    pub source_base: usize,
+    /// 候補の帯 (05 §3.4・§5.2)。同じセッションで「無関係」の印を付けた往復は除く。
+    pub band: Vec<BandItem>,
+    /// 帯が「近い記録 (自動では添えていません)」(しきい値が無いとき、05 §3.5 の `no_threshold`)。
+    pub band_nearby: bool,
+    /// この応答で「無関係」の印を付けた往復 (出典・帯の代表のターン)。
+    pub irrelevant: Vec<Id>,
+}
+
+/// 帯の 1 件 (05 §5.2): セッション名・日時・利用者の発話の冒頭。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BandItem {
+    /// 往復を代表するターン。
+    pub target: Id,
+    pub title: String,
+    pub at: Timestamp,
+    /// 利用者の発話の冒頭 (1 行、30 文字ほど)。
+    pub head: String,
+}
+
+/// `/memory` の 1 件の置き場所 (しきい値との関係、07 §3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPlace {
+    /// 添えた。
+    Attached,
+    /// 候補の帯 (しきい値の少し下)。
+    Band,
+    /// 帯より下 (リランクしたが使わなかった)。
+    Below,
+}
+
+/// `/memory` の、直前の応答の往復 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryItem {
+    /// 往復を代表するターン。
+    pub target: Id,
+    pub place: MemoryPlace,
+    /// 添えた往復の出典の番号 (セッションの通し番号)。
+    pub n: Option<u32>,
+    pub title: String,
+    /// 利用者の発話の冒頭 (1 行、30 文字ほど)。
+    pub head: String,
+    /// リランクの生の値と、しきい値からの差 (どちらも 1000 倍した整数。リランクしていなければ無い。
+    /// 差は、応答のときのしきい値の記録が今も使えるときだけ)。
+    pub score_milli: Option<i32>,
+    pub delta_milli: Option<i32>,
+}
+
+/// `/memory` の、このセッションの出典 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySource {
+    pub n: u32,
+    pub title: String,
+    pub head: String,
+}
+
+/// `/memory` の答え (FR-310、07 §3)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReport {
+    /// 直前の応答 (このセッションにまだ応答が無ければ `None`)。
+    pub answer: Option<Id>,
+    /// リランクした往復 (値の高い順)。リランクしていなければ、添えた往復と帯。
+    pub items: Vec<MemoryItem>,
+    /// 縮退の理由 (05 §3.5 の名前)。
+    pub degraded: Vec<String>,
+    /// 今の想起の状態 (次にすることを示すため)。
+    pub recall: RecallState,
+    /// このセッションの出典の番号と往復 (番号の順)。
+    pub sources: Vec<MemorySource>,
 }
 
 /// イベント (コア → 画面)。順序を保つ 1 本の流れで届く (02 §3 の決めごと 4)。
@@ -116,7 +292,13 @@ pub enum Event {
     SourcesInfo { memory: bool },
     /// 出典の詳細 (FR-110)。
     SourceDetail {
+        /// 出典の番号。帯の往復なら 0。
         n: usize,
+        /// 問いの応答のターンと、往復を代表するターン (「無関係」の印の対象)。
+        answer: Id,
+        target: Id,
+        /// 「無関係」の印が付いている。
+        irrelevant: bool,
         /// 出典のセッションの名前。
         title: String,
         /// 出典の最初のターンの時刻。
@@ -124,15 +306,41 @@ pub enum Event {
         /// 出典のターン (役割と本文)。
         lines: Vec<(Role, String)>,
     },
-    /// 今のモデルと切り替えの候補 (`/model` の答え、切り替えた後)。
+    /// 役割ごとの、記録したモデルと繋がっているモデル (`/model` の答え、v0.2 は表示だけ、FR-108)。
     ModelInfo {
-        /// 候補の名前 (設定の名前。候補から選んでいなければ接続先)。
-        current: String,
-        /// llama-server が返したモデルの名前。
-        model: String,
+        roles: Vec<ModelRoleInfo>,
+        /// 応答のモデルのスロットごとの文脈の長さ。
         n_ctx: u32,
-        choices: Vec<String>,
     },
     /// 裏の処理 (退避・退避の整理) を止めた (空きの不足など、03 §8)。会話は続けられる。
     BackgroundPaused { reason: Message },
+    /// `/memory` の答え (FR-310)。
+    MemoryInfo { report: MemoryReport },
+    /// 答え方の既定 (`/style` の答え)。`values` は `StyleItem::ALL` の順の値。`changed` は、
+    /// この命令で変えたか (変えたら、次の応答は始まるまで少し長くかかる、07 §3)。
+    StyleInfo { values: [String; 3], changed: bool },
+    /// 「無関係」の印を付けた・取り消した (05 §5.2)。
+    IrrelevantChanged {
+        answer: Id,
+        target: Id,
+        irrelevant: bool,
+    },
+    /// 裏の処理の状態が変わった (04 §4)。
+    BackgroundState { state: BackgroundState },
+    /// 想起の状態が変わった (較正が終わった、リランカーが繋がった、05 §3.7)。
+    RecallStatus { state: RecallState },
+    /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。
+    ProbeIssues {
+        role: String,
+        /// 思考を切れない。
+        thinking_not_off: bool,
+        /// 型縛りの出力が空、または型に合わない (型縛りの補助の呼び出しを止める)。
+        structured_broken: bool,
+    },
+    /// embed・rerank の役割の状態が変わった (繋がった、記録と違った、記録した、06 §3)。
+    RoleChanged {
+        info: ModelRoleInfo,
+        /// この変化でモデルを初めて記録した。
+        recorded_now: bool,
+    },
 }

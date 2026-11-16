@@ -76,6 +76,8 @@ struct DistArgs {
     target: String,
     out: PathBuf,
     skip_build: bool,
+    /// 配布物を作らず、`out` にある配布物の目録だけを書き直す (別の機械で作った配布物をまとめる)。
+    manifest_only: bool,
     /// リリースのタグ (`v0.1.0`)。`v<workspace の版>` と同じであることを確かめる (プレリリースは出さない、09 §9.1)。
     tag: Option<String>,
 }
@@ -84,6 +86,7 @@ fn parse_args(root: &Path, args: &[String]) -> Result<DistArgs, String> {
     let mut target = None;
     let mut out = None;
     let mut skip_build = false;
+    let mut manifest_only = false;
     let mut tag = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -91,6 +94,7 @@ fn parse_args(root: &Path, args: &[String]) -> Result<DistArgs, String> {
             "--target" => target = it.next().cloned(),
             "--out" => out = it.next().map(PathBuf::from),
             "--skip-build" => skip_build = true,
+            "--manifest-only" => manifest_only = true,
             "--tag" => tag = it.next().cloned(),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -102,8 +106,68 @@ fn parse_args(root: &Path, args: &[String]) -> Result<DistArgs, String> {
         },
         out: out.unwrap_or_else(|| root.join("target").join("dist")),
         skip_build,
+        manifest_only,
         tag,
     })
+}
+
+/// 配布物の名前 (`evorag-<版>-<ターゲット>.zip` / `.tar.gz`) からターゲットを取る。
+fn target_of(name: &str, version: &str) -> Option<String> {
+    let rest = name.strip_prefix(&format!("evorag-{version}-"))?;
+    let target = rest
+        .strip_suffix(".zip")
+        .or_else(|| rest.strip_suffix(".tar.gz"))?;
+    (!target.is_empty() && !target.contains(['/', '\\'])).then(|| target.to_owned())
+}
+
+/// `out` にある、この版の配布物すべての `SHA256SUMS` と `release.json` を書く (ターゲットごとに別の機械で
+/// 作った配布物を、1 つの目録にまとめる、12 §5)。`release.json` の SHA-256 を返す。
+fn write_manifest(out: &Path, version: &str) -> Result<String, String> {
+    let mut names: Vec<(String, String)> = std::fs::read_dir(out)
+        .map_err(|e| format!("{}: {e}", out.display()))?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            target_of(&name, version).map(|t| (name, t))
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Err(format!(
+            "no archive for {version} in {} (evorag-{version}-<target>.zip or .tar.gz)",
+            out.display()
+        ));
+    }
+    let mut artifacts = Vec::new();
+    let mut sums = String::new();
+    for (name, target) in &names {
+        let bytes = std::fs::read(out.join(name)).map_err(|e| e.to_string())?;
+        let sum = sha256_hex(&bytes);
+        sums.push_str(&format!("{sum}  {name}\n"));
+        artifacts.push(serde_json::json!({
+            "target": target,
+            "name": name,
+            "sha256": sum,
+            "size": bytes.len(),
+        }));
+    }
+    let release = serde_json::json!({
+        "name": "evorag",
+        "version": version,
+        "date": today(),
+        "artifacts": artifacts,
+        // 移行の情報 (03 §12)。
+        "db_format": evorag_store::FORMAT_VERSION,
+        // 対応する llama-server の build 番号の下限 (06 §10)。決めたらリリースノートと合わせて書く。
+        "llama_server_min_build": serde_json::Value::Null,
+    });
+    let release_text = serde_json::to_string_pretty(&release).map_err(|e| e.to_string())? + "\n";
+    std::fs::write(out.join("release.json"), &release_text).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("SHA256SUMS"), &sums).map_err(|e| e.to_string())?;
+    for (name, _) in &names {
+        println!("dist: {}", out.join(name).display());
+    }
+    Ok(sha256_hex(release_text.as_bytes()))
 }
 
 /// `cargo xtask dist [--target T] [--out DIR] [--skip-build]`
@@ -116,6 +180,16 @@ pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(format!(
             "the tag {tag} must be exactly v{version} (pre-releases are not used, 09 §9.1)"
         ));
+    }
+    if a.manifest_only {
+        let release_sum = write_manifest(&a.out, &version)?;
+        println!("  release.json sha256 {release_sum}");
+        println!("sign on your own machine (12 §5.2):");
+        println!(
+            "  minisign -S -s <secret key> -t \"evorag {version} release.json sha256 {release_sum}\" -m SHA256SUMS release.json"
+        );
+        println!("then: cargo xtask verify-release {}", a.out.display());
+        return Ok(());
     }
     let windows = a.target.contains("windows");
     let exe = if windows { "evorag.exe" } else { "evorag" };
@@ -193,31 +267,8 @@ pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
         file
     };
     let bytes = std::fs::read(a.out.join(&archive)).map_err(|e| e.to_string())?;
-    let sum = sha256_hex(&bytes);
-
-    let release = serde_json::json!({
-        "name": "evorag",
-        "version": version,
-        "date": today(),
-        "artifacts": [{
-            "target": a.target,
-            "name": archive,
-            "sha256": sum,
-            "size": bytes.len(),
-        }],
-        // 移行の情報 (03 §12)。
-        "db_format": evorag_store::FORMAT_VERSION,
-        // 対応する llama-server の build 番号の下限 (06 §10)。決めたらリリースノートと合わせて書く。
-        "llama_server_min_build": serde_json::Value::Null,
-    });
-    let release_text = serde_json::to_string_pretty(&release).map_err(|e| e.to_string())? + "\n";
-    std::fs::write(a.out.join("release.json"), &release_text).map_err(|e| e.to_string())?;
-    let sums = format!("{sum}  {archive}\n");
-    std::fs::write(a.out.join("SHA256SUMS"), &sums).map_err(|e| e.to_string())?;
-
-    let release_sum = sha256_hex(release_text.as_bytes());
-    println!("dist: {}", a.out.join(&archive).display());
-    println!("  sha256 {sum}");
+    println!("  sha256 {} ({archive})", sha256_hex(&bytes));
+    let release_sum = write_manifest(&a.out, &version)?;
     println!("  release.json sha256 {release_sum}");
     println!("sign on your own machine (12 §5.2):");
     println!(
@@ -363,6 +414,50 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
             "timestamp:1556193335\tfile:test"
         );
         assert!(verify_signature(key, b"tampered", sig).is_err());
+    }
+
+    #[test]
+    fn the_manifest_lists_every_archive_of_the_version() {
+        assert_eq!(
+            target_of("evorag-0.2.0-x86_64-unknown-linux-musl.tar.gz", "0.2.0").as_deref(),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert_eq!(
+            target_of("evorag-0.2.0-x86_64-pc-windows-msvc.zip", "0.2.0").as_deref(),
+            Some("x86_64-pc-windows-msvc")
+        );
+        assert_eq!(
+            target_of("evorag-0.1.2-x86_64-pc-windows-msvc.zip", "0.2.0"),
+            None
+        );
+        assert_eq!(target_of("SHA256SUMS", "0.2.0"), None);
+        let dir = std::env::temp_dir().join(format!("evorag-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("evorag-0.2.0-x86_64-pc-windows-msvc.zip"), b"win").unwrap();
+        std::fs::write(
+            dir.join("evorag-0.2.0-x86_64-unknown-linux-musl.tar.gz"),
+            b"linux",
+        )
+        .unwrap();
+        std::fs::write(dir.join("evorag-0.1.2-x86_64-pc-windows-msvc.zip"), b"old").unwrap();
+        write_manifest(&dir, "0.2.0").unwrap();
+        let sums = std::fs::read_to_string(dir.join("SHA256SUMS")).unwrap();
+        assert_eq!(sums.lines().count(), 2, "{sums}");
+        let release: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("release.json")).unwrap()).unwrap();
+        let targets: Vec<&str> = release["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["target"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            targets,
+            ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-musl"]
+        );
+        verify_release(Path::new("."), &[dir.display().to_string()]).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

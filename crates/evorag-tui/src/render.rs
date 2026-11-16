@@ -1,7 +1,7 @@
 //! 描画 (07 §2.1)。描画のたびに、端末の本当のカーソルを入力欄の入力位置に置く (07 §2.3)。
 
 use evorag_types::MessageKey;
-use evorag_types::api::{Role, TurnStatus, TurnView};
+use evorag_types::api::{BackgroundState, RecallState, Role, StyleItem, TurnStatus, TurnView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -80,6 +80,7 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         ));
         if t.role == Role::Assistant {
             lines.extend(crate::markdown::render(&t.text, body_w, "  "));
+            band_lines(app, t, body_w, &mut lines);
         } else {
             for l in wrap(&t.text, body_w) {
                 lines.push(Line::from(format!("  {l}")));
@@ -108,6 +109,43 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// 応答の下の候補の帯 (05 §5.2): セッション名・日時・発話の冒頭を薄く出す。選んでいるものは反転する。
+fn band_lines(app: &App, t: &TurnView, width: usize, lines: &mut Vec<Line<'static>>) {
+    if t.band.is_empty() {
+        return;
+    }
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let head = app.catalog.key(if t.band_nearby {
+        MessageKey::UiBandNearby
+    } else {
+        MessageKey::UiBandRelated
+    });
+    lines.push(Line::styled(format!("  {head}"), dim));
+    for b in &t.band {
+        let at = evorag_core::localtime::datetime(b.at.as_millis());
+        let mut text = app.catalog.with(
+            MessageKey::UiBandItem,
+            &[("title", &b.title), ("at", &at), ("head", &b.head)],
+        );
+        if t.irrelevant.contains(&b.target) {
+            text.push_str(&app.catalog.key(MessageKey::UiBandMarked));
+        }
+        let picked = app.pick
+            == Some(crate::app::Pick::Band {
+                answer: t.id,
+                target: b.target,
+            });
+        let style = if picked {
+            dim.add_modifier(Modifier::REVERSED)
+        } else {
+            dim
+        };
+        for l in wrap(&text, width.saturating_sub(2)) {
+            lines.push(Line::styled(format!("    {l}"), style));
+        }
+    }
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -173,13 +211,48 @@ pub fn draw(app: &App, f: &mut Frame) {
     } else if app.generating() {
         app.catalog.key(MessageKey::UiStatusGenerating)
     } else {
-        app.catalog.key(MessageKey::UiStatusIdle)
+        app.catalog.key(match app.status.background {
+            Some(BackgroundState::Working) => MessageKey::UiStatusWorking,
+            Some(BackgroundState::PausedBattery) => MessageKey::UiStatusBattery,
+            Some(BackgroundState::PausedLowSpace) => MessageKey::UiStatusLowSpace,
+            _ => MessageKey::UiStatusIdle,
+        })
     };
     let st = &app.status;
+    // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
+    // 想起の欄 (07 §2.1)。較正に落ちたときは「→ evorag setup」を添える。
+    let recall = st.recall.map(|r| {
+        if let RecallState::Rebuilding { percent } = r {
+            let text = app.catalog.with(
+                MessageKey::UiRecallRebuilding,
+                &[("percent", &percent.to_string())],
+            );
+            return format!(" {text} │");
+        }
+        let k = match r {
+            RecallState::Rebuilding { .. } => MessageKey::UiRecallStandard,
+            RecallState::Standard => MessageKey::UiRecallStandard,
+            RecallState::Simple => MessageKey::UiRecallSimple,
+            RecallState::CandidatesOnly {
+                calibrating: true, ..
+            } => MessageKey::UiRecallCalibrating,
+            RecallState::CandidatesOnly { failed: true, .. } => MessageKey::UiRecallFailed,
+            RecallState::CandidatesOnly { .. } => MessageKey::UiRecallCandidates,
+        };
+        format!(" {} │", app.catalog.key(k))
+    });
+    let limited = if st.limited {
+        format!(" │ {}", app.catalog.key(MessageKey::UiStatusLimited))
+    } else {
+        String::new()
+    };
     f.render_widget(
         Paragraph::new(format!(
-            " {} │ {} │ n_ctx {} │ {state}",
-            st.endpoint, st.model, st.n_ctx
+            " {} │ {} │{} n_ctx {} │ {state}{limited}",
+            st.endpoint,
+            st.model,
+            recall.unwrap_or_default(),
+            st.n_ctx
         )),
         status,
     );
@@ -200,6 +273,35 @@ pub fn draw(app: &App, f: &mut Frame) {
                 r,
             );
         }
+        Mode::Detail {
+            band,
+            irrelevant,
+            title,
+            body,
+            row,
+            ..
+        } => {
+            let r = centered(area, 78, 18);
+            f.render_widget(Clear, r);
+            let mut text = format!("{body}\n");
+            for (i, a) in crate::app::DetailAction::list(*band).iter().enumerate() {
+                let label = app.catalog.key(match a {
+                    crate::app::DetailAction::Attach => MessageKey::UiActionAttach,
+                    crate::app::DetailAction::Irrelevant if *irrelevant => {
+                        MessageKey::UiActionIrrelevantUndo
+                    }
+                    crate::app::DetailAction::Irrelevant => MessageKey::UiActionIrrelevant,
+                });
+                let cursor = if i == *row { "▶" } else { " " };
+                text.push_str(&format!("\n{cursor} {label}"));
+            }
+            f.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .block(Block::new().borders(Borders::ALL).title(title.clone())),
+                r,
+            );
+        }
         Mode::ConfirmDelete => {
             let r = centered(area, 60, 6);
             f.render_widget(Clear, r);
@@ -211,6 +313,50 @@ pub fn draw(app: &App, f: &mut Frame) {
                 )
                 .wrap(Wrap { trim: false })
                 .block(Block::new().borders(Borders::ALL)),
+                r,
+            );
+        }
+        Mode::Style { row, choice, .. } => {
+            let r = centered(area, 72, 9);
+            f.render_widget(Clear, r);
+            let labels = [
+                MessageKey::UiStyleLanguage,
+                MessageKey::UiStyleLength,
+                MessageKey::UiStyleFormat,
+            ];
+            let mut lines: Vec<Line> = StyleItem::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let values = item
+                        .choices()
+                        .iter()
+                        .enumerate()
+                        .map(|(j, v)| {
+                            if j == choice[i] {
+                                format!("[{v}]")
+                            } else {
+                                format!(" {v} ")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let text = format!(" {}: {values}", app.catalog.key(labels[i]));
+                    if i == *row {
+                        Line::styled(text, Style::new().add_modifier(Modifier::REVERSED))
+                    } else {
+                        Line::raw(text)
+                    }
+                })
+                .collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(app.catalog.key(MessageKey::UiStyleHint)));
+            f.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .title(app.catalog.key(MessageKey::UiStyleTitle)),
+                ),
                 r,
             );
         }
@@ -275,6 +421,9 @@ mod tests {
                 endpoint: "127.0.0.1:8080".into(),
                 model: "qwen".into(),
                 n_ctx: 8192,
+                limited: false,
+                recall: None,
+                background: None,
             },
         );
         let sid = Id::from_bytes([1; 16]);
@@ -287,6 +436,7 @@ mod tests {
             },
             turns: vec![TurnView {
                 sources: 0,
+                source_base: 1,
                 id: Id::from_bytes([2; 16]),
                 session: sid,
                 role: Role::User,
@@ -295,6 +445,9 @@ mod tests {
                 model_key: None,
                 reply_to: None,
                 created_at: Timestamp::from_millis(36_000_000),
+                band: Vec::new(),
+                band_nearby: false,
+                irrelevant: Vec::new(),
             }],
             unreadable: 0,
         });
@@ -324,5 +477,45 @@ mod tests {
         // 入力欄は下から 4 行目 (枠の中の 1 行目)、全角 2 文字の後ろ (幅 4) にカーソル。
         let cursor = term.get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (1 + 4, 12 - 1 - 3 + 1));
+    }
+    /// verifies: AC-FR-412-1 (画面の層: 応答の下に帯を薄く出し、印を付けたものに印を出す)
+    #[test]
+    fn the_band_is_drawn_under_the_answer() {
+        let mut app = App::new(Catalog::load("ja"), Status::default());
+        let target = Id::from_bytes([5; 16]);
+        app.turns = vec![TurnView {
+            id: Id::from_bytes([2; 16]),
+            session: Id::from_bytes([1; 16]),
+            role: Role::Assistant,
+            status: TurnStatus::Completed,
+            text: "答え".into(),
+            model_key: None,
+            reply_to: None,
+            created_at: Timestamp::from_millis(0),
+            sources: 0,
+            source_base: 1,
+            band: vec![evorag_types::api::BandItem {
+                target,
+                title: "観葉植物".into(),
+                at: Timestamp::from_millis(0),
+                head: "モンステラの水やり".into(),
+            }],
+            band_nearby: false,
+            irrelevant: vec![target],
+        }];
+        let text: Vec<String> = conversation_lines(&app, 80)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("関係しそうな記録 (この応答には使っていません)"),
+            "{joined}"
+        );
+        assert!(joined.contains("観葉植物"), "{joined}");
+        assert!(
+            joined.contains("「モンステラの水やり」 [無関係]"),
+            "{joined}"
+        );
     }
 }

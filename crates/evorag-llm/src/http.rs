@@ -1,5 +1,6 @@
 //! HTTP の実装 (reqwest、TLS なし、プロキシなし)。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -28,10 +29,17 @@ impl Default for RetryPolicy {
     }
 }
 
+/// ルーターモードで、読み込みの終わりを待つ長さ (06 §2。`meta` が出るまで)。
+const LOAD_WAIT: Duration = Duration::from_secs(120);
+
 pub struct HttpClient {
     endpoint: Endpoint,
     http: reqwest::Client,
     retry: RetryPolicy,
+    /// ルーターモードで使うモデルの名前 (設定の `llm.<役割>.model`、06 §2)。
+    model: Option<String>,
+    /// 繋いだ先がルーターだった (`server_info` で見分ける)。真のときだけ、すべての要求に名前を付ける。
+    router: AtomicBool,
 }
 
 impl HttpClient {
@@ -46,11 +54,100 @@ impl HttpClient {
             endpoint,
             http,
             retry,
+            model: None,
+            router: AtomicBool::new(false),
         })
     }
 
+    /// ルーターモードのときに使うモデルの名前を付ける。ルーターでない llama-server では使わない。
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model.filter(|m| !m.trim().is_empty());
+        self
+    }
+
+    /// ルーターに付けるモデルの名前 (ルーターと分かった後だけ)。
+    fn routed(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .filter(|_| self.router.load(Ordering::Relaxed))
+    }
+
+    /// GET。ルーターなら `?model=` を付ける。
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        let mut url = self.endpoint.join(path);
+        if let Some(m) = self.routed() {
+            url.query_pairs_mut().append_pair("model", m);
+        }
+        self.auth(self.http.get(url))
+    }
+
+    /// 名前を付けない GET (ルーターそのものの `/props` と `/v1/models`)。
+    fn get_plain(&self, path: &str) -> reqwest::RequestBuilder {
         self.auth(self.http.get(self.endpoint.join(path)))
+    }
+
+    /// POST の本文に、ルーターならモデルの名前を足す。
+    fn body(&self, mut v: Value) -> Value {
+        if let (Some(m), Some(o)) = (self.routed(), v.as_object_mut()) {
+            o.entry("model").or_insert_with(|| m.into());
+        }
+        v
+    }
+
+    /// ルーターの `/v1/models` の、名前の一覧。
+    fn model_ids(models: &Value) -> Vec<String> {
+        models
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    /// ルーターが持つモデルの名前 (setup が役割の候補を出すため)。ルーターでなければ `None`。
+    pub async fn router_models(&self) -> Result<Option<Vec<String>>, LlmError> {
+        let props = self.json(|| self.get_plain("/props")).await?;
+        if !is_router(&props) {
+            return Ok(None);
+        }
+        let models = self.json(|| self.get_plain("/v1/models")).await?;
+        Ok(Some(Self::model_ids(&models)))
+    }
+
+    /// ルーターの、名前を付けたモデルの能力を読む。読み込んでいなければ、読み込みを待つ (06 §2)。
+    async fn routed_server_info(&self, name: &str) -> Result<ServerInfo, LlmError> {
+        let started = std::time::Instant::now();
+        loop {
+            // `/props?model=…` が読み込みを始める (autoload)。知らない名前は 400。
+            let props = match self.json(|| self.get("/props")).await {
+                Ok(p) => p,
+                Err(LlmError::Http { status: 400, body }) => {
+                    return Err(LlmError::RouterModel {
+                        model: name.to_owned(),
+                        detail: body,
+                    });
+                }
+                Err(e) => return Err(e),
+            };
+            let models = self.json(|| self.get_plain("/v1/models")).await?;
+            let entry = models.get("data").and_then(Value::as_array).and_then(|d| {
+                d.iter()
+                    .find(|m| m.get("id").and_then(Value::as_str) == Some(name))
+            });
+            if entry.is_some_and(|m| m.get("meta").is_some_and(Value::is_object)) {
+                let only = json!({"data": [entry.cloned().unwrap_or_default()]});
+                return parse_server_info(&props, &only);
+            }
+            if started.elapsed() >= LOAD_WAIT {
+                return Err(LlmError::RouterModel {
+                    model: name.to_owned(),
+                    detail: "the model did not finish loading".into(),
+                });
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
@@ -104,6 +201,11 @@ impl HttpClient {
             .map_err(|e| LlmError::Protocol(e.to_string()))?;
         serde_json::from_slice(&bytes).map_err(|e| LlmError::Protocol(format!("bad JSON: {e}")))
     }
+}
+
+/// `/props` (名前を付けない) が、ルーターモードの llama-server のものか (06 §2)。
+fn is_router(props: &Value) -> bool {
+    props.get("role").and_then(Value::as_str) == Some("router")
 }
 
 /// `/props` と `/v1/models` の JSON から能力を読む (06 §3)。
@@ -186,6 +288,59 @@ pub(crate) fn chat_body(req: &ChatRequest) -> Value {
     body
 }
 
+/// `/v1/embeddings` の応答から、入力の順のベクトルを取り出す (`data[].index` で並べ直す)。
+pub(crate) fn parse_embeddings(v: &Value, n: usize) -> Result<Vec<Vec<f32>>, LlmError> {
+    let bad = |m: &str| LlmError::Protocol(format!("/v1/embeddings: {m}"));
+    let data = v
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("missing data"))?;
+    let mut out = vec![Vec::new(); n];
+    for (i, d) in data.iter().enumerate() {
+        let index = d
+            .get("index")
+            .and_then(Value::as_u64)
+            .map_or(i, |x| x as usize);
+        let e = d
+            .get("embedding")
+            .and_then(Value::as_array)
+            .ok_or_else(|| bad("missing embedding"))?;
+        let vec: Option<Vec<f32>> = e.iter().map(|x| x.as_f64().map(|f| f as f32)).collect();
+        *out.get_mut(index)
+            .ok_or_else(|| bad("index out of range"))? =
+            vec.ok_or_else(|| bad("non-numeric embedding"))?;
+    }
+    if out.iter().any(Vec::is_empty) {
+        return Err(bad("some inputs have no embedding"));
+    }
+    Ok(out)
+}
+
+/// `/v1/rerank` の応答から、文書の順の生のスコアを取り出す (`results[].index` で並べ直す)。
+pub(crate) fn parse_rerank(v: &Value, n: usize) -> Result<Vec<f32>, LlmError> {
+    let bad = |m: &str| LlmError::Protocol(format!("/v1/rerank: {m}"));
+    let results = v
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("missing results"))?;
+    let mut out = vec![None; n];
+    for r in results {
+        let index = r
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| bad("missing index"))? as usize;
+        let score = r
+            .get("relevance_score")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| bad("missing relevance_score"))?;
+        *out.get_mut(index)
+            .ok_or_else(|| bad("index out of range"))? = Some(score as f32);
+    }
+    out.into_iter()
+        .map(|s| s.ok_or_else(|| bad("some documents have no score")))
+        .collect()
+}
+
 impl LlmClient for HttpClient {
     fn health(&self) -> BoxFuture<'_, Result<(), LlmError>> {
         Box::pin(async move {
@@ -198,8 +353,21 @@ impl LlmClient for HttpClient {
 
     fn server_info(&self) -> BoxFuture<'_, Result<ServerInfo, LlmError>> {
         Box::pin(async move {
-            let props = self.json(|| self.get("/props")).await?;
-            let models = self.json(|| self.get("/v1/models")).await?;
+            let props = self.json(|| self.get_plain("/props")).await?;
+            let router = is_router(&props);
+            self.router.store(router, Ordering::Relaxed);
+            if router {
+                return match self.model.as_deref() {
+                    Some(name) => self.routed_server_info(name).await,
+                    None => {
+                        let models = self.json(|| self.get_plain("/v1/models")).await?;
+                        Err(LlmError::RouterNeedsModel {
+                            models: Self::model_ids(&models),
+                        })
+                    }
+                };
+            }
+            let models = self.json(|| self.get_plain("/v1/models")).await?;
             parse_server_info(&props, &models)
         })
     }
@@ -207,7 +375,10 @@ impl LlmClient for HttpClient {
     fn count_tokens<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<usize, LlmError>> {
         Box::pin(async move {
             let v = self
-                .json(|| self.post("/tokenize").json(&json!({"content": text})))
+                .json(|| {
+                    self.post("/tokenize")
+                        .json(&self.body(json!({"content": text})))
+                })
                 .await?;
             v.get("tokens")
                 .and_then(Value::as_array)
@@ -216,9 +387,44 @@ impl LlmClient for HttpClient {
         })
     }
 
+    fn embed<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, LlmError>> {
+        Box::pin(async move {
+            let v = self
+                .json(|| {
+                    self.post("/v1/embeddings")
+                        .json(&self.body(json!({"input": inputs})))
+                })
+                .await?;
+            parse_embeddings(&v, inputs.len())
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<f32>, LlmError>> {
+        Box::pin(async move {
+            let v = self
+                .json(|| {
+                    self.post("/v1/rerank")
+                        .json(&self.body(json!({"query": query, "documents": documents})))
+                })
+                .await?;
+            parse_rerank(&v, documents.len())
+        })
+    }
+
+    fn slots(&self) -> BoxFuture<'_, Result<Vec<crate::SlotState>, LlmError>> {
+        Box::pin(async move {
+            let v = self.json(|| self.get("/slots")).await?;
+            crate::parse_slots(&v)
+        })
+    }
+
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
         Box::pin(async move {
-            let body = chat_body(&req);
+            let body = self.body(chat_body(&req));
             let resp = self
                 .send(|| self.post("/v1/chat/completions").json(&body))
                 .await?;
@@ -268,6 +474,29 @@ impl ChatStream for HttpChatStream {
 mod tests {
     use super::*;
     use crate::types::{ChatMessage, Generation, Role};
+
+    #[test]
+    fn embeddings_and_rerank_results_are_put_back_in_input_order() {
+        let v = json!({"data": [
+            {"index": 1, "embedding": [0.5, 0.5]},
+            {"index": 0, "embedding": [1.0, 0.0]}
+        ]});
+        assert_eq!(
+            parse_embeddings(&v, 2).unwrap(),
+            [vec![1.0, 0.0], vec![0.5, 0.5]]
+        );
+        assert!(
+            parse_embeddings(&v, 3).is_err(),
+            "a missing input is an error"
+        );
+        let r = json!({"results": [
+            {"index": 2, "relevance_score": -10.9},
+            {"index": 0, "relevance_score": -5.06},
+            {"index": 1, "relevance_score": -10.92}
+        ]});
+        assert_eq!(parse_rerank(&r, 3).unwrap(), [-5.06, -10.92, -10.9]);
+        assert!(parse_rerank(&json!({"results": []}), 1).is_err());
+    }
 
     #[test]
     fn server_info_is_read_from_props_and_models() {

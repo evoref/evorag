@@ -19,6 +19,13 @@
 //!
 //! `chats` は要求の順に 1 つずつ使う。`hang` は落とされるまで待ち続ける (中断の試験)。
 //! トークンの数は、文字の数で数える (決定的にするため)。
+//!
+//! embed と rerank の役割のサーバ (v0.2) は、次を足す。どちらも本文から決定的に作る。
+//!
+//! ```json
+//! { "embed": {"dim": 8} }       // /v1/embeddings: 文字の bi-gram から作った、長さ 1 のベクトル
+//! { "rerank": true }            // /v1/rerank: 問いと文書で共通の文字の数 − 10 を生のスコアにする
+//! ```
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -40,6 +47,47 @@ pub struct Cassette {
     pub health: bool,
     #[serde(default)]
     pub chats: Vec<ChatScript>,
+    /// `/v1/embeddings` に答える (embed の役割)。無ければ 501。
+    #[serde(default)]
+    pub embed: Option<EmbedScript>,
+    /// `/v1/rerank` に答える (rerank の役割)。無ければ 501。
+    #[serde(default)]
+    pub rerank: bool,
+    /// 生成を 1 トークンに限った要求 (次のターンを先に処理させる要求、05 §4.5) への答え。`chats` を使わず、
+    /// 要求は `warm_requests` に分けて記録する。無ければすぐに終える。
+    #[serde(default)]
+    pub warm: Option<Vec<Step>>,
+    /// `/slots` の答え (無ければ、使えないサーバとして断る)。
+    #[serde(default)]
+    pub slots: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbedScript {
+    pub dim: usize,
+}
+
+/// 文字の bi-gram を `dim` 個の箱に数えて、長さ 1 にしたベクトル (決定的)。
+pub fn toy_embedding(text: &str, dim: usize) -> Vec<f32> {
+    let n = dim.max(1);
+    let mut v = vec![0f32; n];
+    let chars: Vec<char> = text.chars().collect();
+    for w in chars.windows(2) {
+        let h = (u32::from(w[0]).wrapping_mul(31)).wrapping_add(u32::from(w[1]));
+        v[h as usize % n] += 1.0;
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        v.iter_mut().for_each(|x| *x /= norm);
+    }
+    v
+}
+
+/// 問いと文書で共通の文字の数 − 10 (生のスコアの形、決定的)。
+pub fn toy_rerank(query: &str, document: &str) -> f32 {
+    let q: std::collections::HashSet<char> = query.chars().collect();
+    let d: std::collections::HashSet<char> = document.chars().collect();
+    q.intersection(&d).count() as f32 - 10.0
 }
 
 fn yes() -> bool {
@@ -89,6 +137,12 @@ struct State {
     requests: Vec<ChatRequest>,
     /// 終わる前に落とされた (接続を閉じた) 応答の数。
     dropped_early: usize,
+    /// `/v1/embeddings` と `/v1/rerank` を呼んだ回数。
+    embed_calls: usize,
+    rerank_calls: usize,
+    /// 生成を 1 トークンに限った要求と、終わる前に落とされた数。
+    warm: Vec<ChatRequest>,
+    warm_dropped: usize,
 }
 
 /// 記録を流す `LlmClient`。複製すると同じ状態を共有する。
@@ -133,6 +187,22 @@ impl ReplayClient {
         self.lock().dropped_early
     }
 
+    /// 生成を 1 トークンに限った要求 (順に)。`requests` には入らない。
+    pub fn warm_requests(&self) -> Vec<ChatRequest> {
+        self.lock().warm.clone()
+    }
+
+    /// 生成を 1 トークンに限った要求のうち、終わる前に落とされた数。
+    pub fn warm_dropped(&self) -> usize {
+        self.lock().warm_dropped
+    }
+
+    /// `/v1/embeddings` と `/v1/rerank` を呼んだ回数。
+    pub fn aux_calls(&self) -> (usize, usize) {
+        let st = self.lock();
+        (st.embed_calls, st.rerank_calls)
+    }
+
     /// まだ使っていない chat の記録の数。
     pub fn remaining(&self) -> usize {
         self.lock().chats.len()
@@ -163,8 +233,71 @@ impl LlmClient for ReplayClient {
         Box::pin(async move { Ok(text.chars().count()) })
     }
 
+    fn embed<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Result<Vec<Vec<f32>>, LlmError>> {
+        Box::pin(async move {
+            if !self.cassette.health {
+                return Err(LlmError::Connect("replay: server is down".into()));
+            }
+            self.lock().embed_calls += 1;
+            match &self.cassette.embed {
+                Some(e) => Ok(inputs.iter().map(|t| toy_embedding(t, e.dim)).collect()),
+                None => Err(LlmError::Http {
+                    status: 501,
+                    body: "replay: no embeddings".into(),
+                }),
+            }
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFuture<'a, Result<Vec<f32>, LlmError>> {
+        Box::pin(async move {
+            if !self.cassette.health {
+                return Err(LlmError::Connect("replay: server is down".into()));
+            }
+            self.lock().rerank_calls += 1;
+            if self.cassette.rerank {
+                Ok(documents.iter().map(|d| toy_rerank(query, d)).collect())
+            } else {
+                Err(LlmError::Http {
+                    status: 501,
+                    body: "replay: no rerank".into(),
+                })
+            }
+        })
+    }
+
+    fn slots(&self) -> BoxFuture<'_, Result<Vec<crate::SlotState>, LlmError>> {
+        Box::pin(async move {
+            match &self.cassette.slots {
+                Some(v) => crate::parse_slots(v),
+                None => Err(LlmError::Http {
+                    status: 501,
+                    body: "replay: no slots".into(),
+                }),
+            }
+        })
+    }
+
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
         Box::pin(async move {
+            if req.generation.max_tokens == Some(1) {
+                self.lock().warm.push(req);
+                let steps = self.cassette.warm.clone().unwrap_or_else(|| {
+                    vec![Step::Done {
+                        done: DoneStep::default(),
+                    }]
+                });
+                return Ok(Box::new(ReplayStream {
+                    steps: steps.into(),
+                    finished: false,
+                    warm: true,
+                    state: self.state.clone(),
+                }) as Box<dyn ChatStream>);
+            }
             let script = {
                 let mut st = self.lock();
                 st.requests.push(req);
@@ -182,6 +315,7 @@ impl LlmClient for ReplayClient {
                 Some(ChatScript::Events { events }) => Ok(Box::new(ReplayStream {
                     steps: events.into(),
                     finished: false,
+                    warm: false,
                     state: self.state.clone(),
                 })
                     as Box<dyn ChatStream>),
@@ -193,16 +327,19 @@ impl LlmClient for ReplayClient {
 struct ReplayStream {
     steps: VecDeque<Step>,
     finished: bool,
+    warm: bool,
     state: Arc<Mutex<State>>,
 }
 
 impl Drop for ReplayStream {
     fn drop(&mut self) {
         if !self.finished {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .dropped_early += 1;
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if self.warm {
+                st.warm_dropped += 1;
+            } else {
+                st.dropped_early += 1;
+            }
         }
     }
 }

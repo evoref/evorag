@@ -1,8 +1,10 @@
 # 配布物を作る (docs/09-testing-quality.md §6.1・§9.2、docs/12-licensing-distribution.md §5)。
 #
-# - build: 人間が main のマージコミットに付けた署名付きタグ vX.Y.Z で動く (09 §9.2 の手順 4〜6)。
-#   最初にタグを検証し (cargo xtask verify-tag: 署名、版、main のマージコミット、判定コミットとの差分)、
-#   配布物・SHA256SUMS・release.json を作り、下書きのリリースに置く。プレリリースは出さない (09 §9.1)。
+# - draft → build → manifest: 人間が main のマージコミットに付けた署名付きタグ vX.Y.Z で動く (09 §9.2 の
+#   手順 4〜6)。最初にタグを検証し (cargo xtask verify-tag: 署名、版、main のマージコミット、判定コミット
+#   との差分) 下書きのリリースを作る。ターゲット (Windows・Linux musl、12 §5.1) ごとに配布物を作って下書きに
+#   足し、最後にすべての配布物の SHA256SUMS と release.json を作って確かめ、下書きに足す。プレリリースは
+#   出さない (09 §9.1)。
 # - 署名は人間が手元で行う (秘密鍵を CI に置かない、docs/11-dev-workflow.md §9.7)。
 #   SHA256SUMS.minisig と release.json.minisig を下書きに足してから、verify を手で動かす。
 # - verify: 下書き (または公開済み) のリリースの配布物を取得し、ハッシュと署名を確かめる。
@@ -26,10 +28,11 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  build:
-    name: build (windows)
+  # タグを検証し、空の下書きのリリースを作る (09 §9.2 の手順 4)。
+  draft:
+    name: draft
     if: github.event_name == 'push'
-    runs-on: windows-2025
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # 下書きのリリースを作る
     steps:
@@ -48,14 +51,6 @@ jobs:
       - name: verify the tag (09 §9.2 step 4)
         shell: bash
         run: cargo xtask verify-tag "$GITHUB_REF_NAME"
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-about
-      - name: build the archive
-        shell: bash
-        run: cargo xtask dist --target x86_64-pc-windows-msvc --out dist-out --tag "$GITHUB_REF_NAME"
-      - name: check the archive
-        run: cargo xtask verify-release dist-out
       - name: create a draft release
         shell: bash
         env:
@@ -66,9 +61,75 @@ jobs:
           gh release create "$TAG" --draft --verify-tag \
             --repo "$GITHUB_REPOSITORY" \
             --title "evorag $TAG" \
-            --notes "変更点は CHANGELOG.md、入れ方・更新と巻き戻しは同梱の README.md を見てください。署名 (.minisig) は公開の前に人間が足します。" \
-            dist-out/*.zip dist-out/SHA256SUMS dist-out/release.json
+            --notes "変更点は CHANGELOG.md、入れ方・更新と巻き戻しは同梱の README.md を見てください。署名 (.minisig) は公開の前に人間が足します。"
 
+  # ターゲットごとに配布物を作り、下書きに足す (12 §5.1)。
+  build:
+    name: build (${{ matrix.target }})
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # 下書きに配布物を足す
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install the toolchain and the target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about
+      - name: build the archive
+        shell: bash
+        run: cargo xtask dist --target "${{ matrix.target }}" --out dist-out --tag "$GITHUB_REF_NAME"
+      - name: add the archive to the draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist-out/evorag-*.zip dist-out/evorag-*.tar.gz)
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${files[@]}"
+
+  # すべての配布物の SHA256SUMS と release.json を作り、確かめてから下書きに足す (12 §5.2)。
+  manifest:
+    name: manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # 下書きに目録を足す
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: download the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'evorag-*' --dir dist-out
+      - name: write SHA256SUMS and release.json
+        run: cargo xtask dist --manifest-only --out dist-out --tag "$GITHUB_REF_NAME"
+      - name: check the archives
+        run: cargo xtask verify-release dist-out
+      - name: add the manifest to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist-out/SHA256SUMS dist-out/release.json
   verify:
     name: verify
     if: github.event_name == 'workflow_dispatch'

@@ -30,6 +30,9 @@ fn app() -> App {
             endpoint: "127.0.0.1:8080".into(),
             model: "bench".into(),
             n_ctx: 8192,
+            limited: false,
+            recall: None,
+            background: None,
         },
     );
     let turns = (0..TURNS)
@@ -49,6 +52,10 @@ fn app() -> App {
             reply_to: None,
             created_at: Timestamp::from_millis(1_762_650_000_000 + i as i64 * 60_000),
             sources: usize::from(i % 2 == 1),
+            band: Vec::new(),
+            band_nearby: false,
+            irrelevant: Vec::new(),
+            source_base: 1,
         })
         .collect();
     a.on_event(Event::SessionOpened {

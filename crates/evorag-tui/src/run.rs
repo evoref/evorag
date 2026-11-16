@@ -116,6 +116,7 @@ fn event_loop(
     mut draft: Option<&mut Draft>,
 ) -> io::Result<()> {
     let mut last_save = Instant::now();
+    let mut idle = crate::app::IdleWatch::new(Instant::now());
     loop {
         // 下書きを 5 秒ごとに保存する (04 §3)。
         if last_save.elapsed() >= Duration::from_secs(5) {
@@ -127,17 +128,31 @@ fn event_loop(
         while let Ok(ev) = events.try_recv() {
             app.on_event(ev);
         }
+        // 入力が止まったら、想起を先に済ませてもらう (05 §4.5)。
+        if idle.due(app.input.text(), Instant::now())
+            && let Some(text) = app.idle_text()
+        {
+            core.command(Command::InputIdle { text });
+            idle.sent();
+        }
         term.draw(|f| render::draw(app, f))?;
         // トークンの受信から描画までを短く保つ (NFR-104 の 50 ms)。
         if event::poll(Duration::from_millis(16))? {
             let mut actions = Vec::new();
+            let mut touched = false;
             if let Some(k) = key_of(event::read()?) {
+                touched = true;
                 actions.extend(app.on_key(k));
             }
             while event::poll(Duration::ZERO)? {
                 if let Some(k) = key_of(event::read()?) {
+                    touched = true;
                     actions.extend(app.on_key(k));
                 }
+            }
+            // キー入力は裏の処理を止める (04 §4、FR-301)。
+            if touched {
+                core.touch();
             }
             for a in actions {
                 match a {
@@ -151,7 +166,12 @@ fn event_loop(
                         core.command(c);
                     }
                     Action::OpenEditor => match draft.as_deref_mut() {
-                        Some(d) => edit_outside(term, app, d),
+                        Some(d) => {
+                            // 外部のエディタで書いている間は、裏の処理を出さない (06 §4)。
+                            core.hold(true);
+                            edit_outside(term, app, d);
+                            core.hold(false);
+                        }
                         None => {
                             let m = app
                                 .catalog

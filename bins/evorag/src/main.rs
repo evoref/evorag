@@ -83,6 +83,12 @@ enum Sub {
         /// 書き出すフォルダ (空か、まだ無いフォルダ)
         out: PathBuf,
     },
+    /// 派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)
+    Rebuild {
+        /// 索引だけを作り直す
+        #[arg(long)]
+        index: bool,
+    },
     /// 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
         /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
@@ -94,6 +100,55 @@ enum Sub {
 enum BackupsAction {
     /// 退避の一覧 (新しい順)
     List,
+}
+
+/// `evorag rebuild [--index]` (03 §10、FR-212)。
+fn rebuild(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+    config_file: &std::path::Path,
+    index_only: bool,
+    clock: Arc<dyn evorag_types::Clock>,
+) -> ExitCode {
+    let ids = Arc::new(UuidV7Gen::new(clock.clone()));
+    match evorag_core::rebuild::run(evorag_core::rebuild::RebuildOptions {
+        data_root: data_root.to_path_buf(),
+        evorag_version: VERSION.to_owned(),
+        config_file: Some(config_file.to_path_buf()),
+        index_only,
+        clock,
+        ids,
+    }) {
+        Ok(r) => {
+            let backup = r.backup.display().to_string();
+            let m = if index_only {
+                catalog.with(
+                    MessageKey::CliRebuiltIndex,
+                    &[("backup", &backup), ("docs", &r.docs.to_string())],
+                )
+            } else {
+                catalog.with(
+                    MessageKey::CliRebuilt,
+                    &[
+                        ("backup", &backup),
+                        ("removed", &r.removed.to_string()),
+                        ("docs", &r.docs.to_string()),
+                    ],
+                )
+            };
+            eprintln!("{m}");
+            ExitCode::SUCCESS
+        }
+        Err(evorag_core::rebuild::RebuildError::Open(OpenError::Lock(LockError::InUse {
+            pid,
+        }))) => data_root_in_use(catalog, data_root, pid),
+        Err(e) => fail(
+            catalog,
+            1,
+            MessageKey::CliRebuildFailed,
+            &[("detail", &e.to_string())],
+        ),
+    }
 }
 
 /// y / n を尋ねる。端末でなければ n。
@@ -203,8 +258,9 @@ fn main() -> ExitCode {
             );
         }
     };
+    // ルーターモードでは、設定の llm.chat.model をすべての要求に付ける (06 §2)。
     let llm = match HttpClient::new(endpoint, RetryPolicy::default()) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(c.with_model(cfg.llm.chat.model.clone())),
         Err(e) => {
             return fail(
                 &catalog,
@@ -294,6 +350,9 @@ fn main() -> ExitCode {
             clock.now().as_millis(),
         );
     }
+    if let Some(Sub::Rebuild { index }) = &args.command {
+        return rebuild(&catalog, &data_root, &config_file, *index, clock.clone());
+    }
     if let Some(Sub::Restore { backup }) = &args.command {
         return match evorag_store::restore::restore(
             &data_root,
@@ -338,40 +397,40 @@ fn main() -> ExitCode {
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    // `/model` の候補 (07 §4.2 の `llm.chat.models`: 名前と url)。
-    let mut models = Vec::new();
-    for t in cfg.llm.chat.models.iter().flatten() {
-        let (Some(name), Some(url)) = (
-            t.get("name").and_then(|v| v.as_str()),
-            t.get("url").and_then(|v| v.as_str()),
-        ) else {
-            return fail(
-                &catalog,
-                4,
-                MessageKey::CliConfigError,
-                &[("detail", "each [[llm.chat.models]] needs name and url")],
-            );
+    // 補助の呼び出しに足す JSON (06 §6)。
+    let aux_request_extra: evorag_llm::RequestExtra = cfg
+        .llm
+        .chat
+        .aux_request_extra
+        .as_ref()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    // v0.2 で使わなくなったキー (07 §4.2): 読んで無視し、知らせる。v0.1 の `/model` の候補は、
+    // 切り替えを setup でだけ行うようにしたので使わない (ADR-0018)。
+    let ignored_config = config::obsolete(&cfg);
+    // embed と rerank の役割 (06 §2)。接続先の誤り (ループバック以外など) は設定の誤りとして止める。
+    let mut aux: Vec<Option<Arc<dyn evorag_llm::LlmClient>>> = Vec::new();
+    for role in ["embed", "rerank"] {
+        let client = match cfg.role(role) {
+            None => None,
+            Some(r) => match Endpoint::new(&r.url, r.api_key, cfg.llm.allow_remote)
+                .and_then(|e| HttpClient::new(e, RetryPolicy::default()))
+            {
+                Ok(c) => Some(Arc::new(c.with_model(r.model)) as Arc<dyn evorag_llm::LlmClient>),
+                Err(e) => {
+                    return fail(
+                        &catalog,
+                        4,
+                        MessageKey::CliConfigError,
+                        &[("detail", &format!("llm.{role}: {e}"))],
+                    );
+                }
+            },
         };
-        models.push(evorag_core::ModelChoice {
-            name: name.to_owned(),
-            url: url.to_owned(),
-        });
+        aux.push(client);
     }
-    let (key_for_switch, allow_remote) = (
-        cfg.llm.chat.api_key.clone().or_else(|| {
-            cfg.llm
-                .chat
-                .api_key_env
-                .as_ref()
-                .and_then(|v| std::env::var(v).ok())
-        }),
-        cfg.llm.allow_remote,
-    );
-    let connect: evorag_core::Connector = Arc::new(move |u: &str| {
-        let endpoint = Endpoint::new(u, key_for_switch.clone(), allow_remote)?;
-        let c = HttpClient::new(endpoint, RetryPolicy::default())?;
-        Ok(Arc::new(c) as Arc<dyn evorag_llm::LlmClient>)
-    });
+    let (embed, rerank) = (aux[0].clone(), aux[1].clone());
     let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
@@ -385,9 +444,14 @@ fn main() -> ExitCode {
         allow_unsafe_location: cfg.storage.allow_unsafe_location.unwrap_or(false),
         probe: evorag_core::Probe::system(),
         model_name: model_name.clone(),
-        models: models.clone(),
-        connect: Some(connect.clone()),
+        ignored_config: ignored_config.clone(),
+        embed: embed.clone(),
+        rerank: rerank.clone(),
+        aux_request_extra: aux_request_extra.clone(),
+        probe_models: true,
+        sleep: cfg.sleep(),
         memory_enabled: cfg.memory_enabled(),
+        precompute: cfg.precompute(),
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::new(clock.clone())),
     };
@@ -462,6 +526,23 @@ fn main() -> ExitCode {
                 ],
             );
         }
+        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterNeedsModel { models })) => {
+            // ルーターモードの llama-server に、名前を付けずに繋いだ (06 §2)。
+            return fail(
+                &catalog,
+                4,
+                MessageKey::CliRouterNeedsModel,
+                &[("url", &url), ("models", &models.join(", "))],
+            );
+        }
+        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterModel { model, detail })) => {
+            return fail(
+                &catalog,
+                3,
+                MessageKey::CliRouterModel,
+                &[("url", &url), ("model", &model), ("detail", &detail)],
+            );
+        }
         Err(StartError::LlmUnreachable(e)) => {
             // TUI を開かずに案内を出して終わる (AC-FR-503-1)。
             return fail(
@@ -469,6 +550,27 @@ fn main() -> ExitCode {
                 3,
                 MessageKey::CliLlmUnreachable,
                 &[("url", &url), ("detail", &e.to_string())],
+            );
+        }
+        Err(StartError::ModelMismatch {
+            recorded,
+            connected,
+        }) => {
+            // 画面を開かずに、違いと取れる手を示して終わる (06 §3、終了コード 6)。
+            let hint = if evorag_core::same_meta(&recorded, &connected) {
+                catalog.key(MessageKey::CliModelMismatchSameMeta)
+            } else {
+                String::new()
+            };
+            return fail(
+                &catalog,
+                6,
+                MessageKey::CliModelMismatch,
+                &[
+                    ("recorded", &recorded.file_name),
+                    ("connected", &connected.file_name),
+                    ("hint", &hint),
+                ],
             );
         }
         Err(StartError::UnsafeLocation(d)) => {
@@ -510,12 +612,53 @@ fn main() -> ExitCode {
             endpoint: url.trim_start_matches("http://").to_owned(),
             model: report.server.model_name.clone(),
             n_ctx: report.server.n_ctx,
+            // 前の点検で止めた機能 (06 §3.3)。まだ点検していなければ、点検の後に知らせが来る。
+            limited: core
+                .probe_result(evorag_memory::ROLE_CHAT)
+                .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
+            recall: Some(report.recall),
+            background: None,
         },
     );
     for w in &report.location_warnings {
         let m = app
             .catalog
             .with(MessageKey::CliLocationWarning, &[("detail", w)]);
+        app.notices.push(m);
+    }
+    if let Some(unusual) = report.chat_model_recorded {
+        let key = if unusual {
+            MessageKey::CliModelRecordedUnusual
+        } else {
+            MessageKey::CliModelRecorded
+        };
+        let file = evorag_llm::file_name(&report.server.model_path).to_owned();
+        let m = app.catalog.with(key, &[("file", &file)]);
+        app.notices.push(m);
+    }
+    for role in &report.recorded_roles {
+        let file = report
+            .roles
+            .iter()
+            .find(|r| &r.role == role)
+            .and_then(|r| r.connected.as_ref())
+            .map(|c| c.0.clone())
+            .unwrap_or_default();
+        let m = app.catalog.with(
+            MessageKey::CliRoleRecorded,
+            &[("role", role), ("file", &file)],
+        );
+        app.notices.push(m);
+    }
+    for r in &report.roles {
+        if let Some(m) = evorag_tui::app::role_notice(&app.catalog, r) {
+            app.notices.push(m);
+        }
+    }
+    for key in &report.ignored_config {
+        let m = app
+            .catalog
+            .with(MessageKey::CliConfigObsolete, &[("key", key)]);
         app.notices.push(m);
     }
     if report.prompt_language_mismatch {

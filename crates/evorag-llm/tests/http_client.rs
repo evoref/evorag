@@ -315,3 +315,92 @@ async fn health_needs_no_key_and_props_sends_the_key() {
     assert!(reqs[1].contains("Bearer k3y") || reqs[1].contains("bearer k3y"));
     assert!(reqs[3].starts_with("POST /tokenize"));
 }
+
+const ROUTER: &str = r#"{"role":"router","max_instances":4,"models_autoload":true,"build_info":"b1-abc","model_path":"none","default_generation_settings":{"n_ctx":0}}"#;
+const CHAT_PROPS: &str = r#"{"build_info":"b1-abc","model_path":"/m/q.gguf","total_slots":2,"default_generation_settings":{"n_ctx":8192}}"#;
+
+fn router_models(chat_loaded: bool) -> String {
+    let meta = if chat_loaded {
+        r#","meta":{"n_params":1,"size":2,"n_vocab":3}"#
+    } else {
+        ""
+    };
+    format!(
+        r#"{{"data":[{{"id":"chat"{meta}}},{{"id":"embed","meta":{{"n_params":4,"size":5,"n_vocab":6}}}}]}}"#
+    )
+}
+
+/// verifies: AC-FR-511-1 (名前を付けた役割は、すべての要求に名前を付け、読み込みを待って照合する)
+#[tokio::test]
+async fn a_router_gets_the_model_name_on_every_request() {
+    let (url, seen) = serve(vec![
+        Reply::Json(200, ROUTER.into()),
+        // 読み込み中は meta が無い。読み込みが終わるまで待つ。
+        Reply::Json(200, CHAT_PROPS.into()),
+        Reply::Json(200, router_models(false)),
+        Reply::Json(200, CHAT_PROPS.into()),
+        Reply::Json(200, router_models(true)),
+        Reply::Json(200, "{\"tokens\":[1,2]}".into()),
+        Reply::Sse {
+            chunks: vec![sse("はい")],
+            close: false,
+        },
+    ])
+    .await;
+    let c = client(&url, None).with_model(Some("chat".into()));
+    let info = c.server_info().await.unwrap();
+    assert_eq!(info.model_name, "chat");
+    assert_eq!((info.n_ctx, info.total_slots), (8192, 2));
+    assert_eq!(info.meta.size, Some(2));
+    assert_eq!(c.count_tokens("ab").await.unwrap(), 2);
+    collect(&c).await.unwrap();
+    let reqs = seen.requests.lock().unwrap().clone();
+    assert!(reqs[0].starts_with("GET /props HTTP"), "{}", reqs[0]);
+    assert!(reqs[1].starts_with("GET /props?model=chat "), "{}", reqs[1]);
+    assert!(reqs[2].starts_with("GET /v1/models HTTP"), "{}", reqs[2]);
+    assert!(reqs[5].starts_with("POST /tokenize") && reqs[5].contains(r#""model":"chat""#));
+    assert!(
+        reqs[6].starts_with("POST /v1/chat/completions") && reqs[6].contains(r#""model":"chat""#)
+    );
+}
+
+/// verifies: AC-FR-511-1 (名前を付けずに繋ぐと、ルーターのモデルの名前を示す。知らない名前は断る)
+#[tokio::test]
+async fn a_router_without_a_model_name_lists_its_models() {
+    let (url, _) = serve(vec![
+        Reply::Json(200, ROUTER.into()),
+        Reply::Json(200, router_models(true)),
+        Reply::Json(200, ROUTER.into()),
+        Reply::Json(400, "model 'nope' not found".into()),
+    ])
+    .await;
+    match client(&url, None).server_info().await {
+        Err(LlmError::RouterNeedsModel { models }) => assert_eq!(models, ["chat", "embed"]),
+        other => panic!("{other:?}"),
+    }
+    let c = client(&url, None).with_model(Some("nope".into()));
+    assert!(matches!(
+        c.server_info().await,
+        Err(LlmError::RouterModel { model, .. }) if model == "nope"
+    ));
+}
+
+/// verifies: AC-FR-511-1 (ルーターでない llama-server には名前を付けない)
+#[tokio::test]
+async fn a_plain_server_gets_no_model_name() {
+    let models = r#"{"data":[{"id":"q","meta":{"n_params":1,"size":2,"n_vocab":3}}]}"#;
+    let (url, seen) = serve(vec![
+        Reply::Json(200, CHAT_PROPS.into()),
+        Reply::Json(200, models.into()),
+        Reply::Json(200, "{\"tokens\":[1]}".into()),
+    ])
+    .await;
+    let c = client(&url, None).with_model(Some("chat".into()));
+    assert_eq!(c.server_info().await.unwrap().model_name, "q");
+    c.count_tokens("a").await.unwrap();
+    let reqs = seen.requests.lock().unwrap().clone();
+    assert!(
+        reqs.iter()
+            .all(|r| !r.contains("model=chat") && !r.contains(r#""model""#))
+    );
+}

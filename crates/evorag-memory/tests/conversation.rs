@@ -85,6 +85,7 @@ fn reply(text: &str, state: TurnState) -> AssistantTurn {
         attached: Vec::new(),
         error: None,
         recall: None,
+        obs: None,
     }
 }
 

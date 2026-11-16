@@ -6,6 +6,7 @@ mod deps;
 mod dist;
 mod i18n;
 mod metadata;
+mod trace;
 mod verify_tag;
 
 use std::path::{Path, PathBuf};
@@ -18,11 +19,14 @@ commands:
   check-deps               dependency rules (02 §4.3) and transitive count (NFR-203)
       [--manifest-path P]  measure another workspace (C-code check and count only)
   i18n                     message keys in code vs locales/*.toml (NFR-602)
+  trace [--version X.Y]    every Must AC up to X.Y (default 0.2) has a test or steps (NFR-702)
   dist                     build the release archive, SHA256SUMS and release.json (12 §5)
-      [--target T] [--out DIR] [--skip-build]
-  bench [--out DIR]        benchmarks BM-101..104, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
+      [--target T] [--out DIR] [--skip-build] [--tag vX.Y.Z]
+      [--manifest-only]    only rewrite SHA256SUMS and release.json for the archives in --out
+  bench [--out DIR]        benchmarks BM-101..104, 106, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
   verify-tag TAG           check a release tag before building (09 §9.2 step 4)
-  live-llm                 tests against a real llama-server at EVORAG_LIVE_LLM_URL (09 §3.4)
+  live-llm                 tests against real llama-servers (09 §3.4): chat at EVORAG_LIVE_LLM_URL,
+                           recall at EVORAG_LIVE_EMBED_URL and EVORAG_LIVE_RERANK_URL
   verify-release DIR       check SHA256SUMS, release.json and the minisign signatures (AC-FR-801-1)
       [--pubkey FILE] [--require-signatures]";
 
@@ -37,6 +41,7 @@ fn main() -> ExitCode {
         Some("check") => check(&root),
         Some("check-deps") => check_deps(&root, &args[1..]),
         Some("i18n") => report("i18n", i18n::run(&root)),
+        Some("trace") => report("trace", trace::run(&root, &args[1..])),
         Some("bench") => bench(&root, &args[1..]),
         Some("live-llm") => live_llm(&root),
         Some("dist") => done("dist", dist::dist(&root, &args[1..])),
@@ -192,6 +197,8 @@ fn bench(root: &Path, args: &[String]) -> bool {
             "evorag-core",
             "-p",
             "evorag-tui",
+            "-p",
+            "evorag-index",
             "--run-ignored",
             "only",
             "--test-threads",
@@ -207,25 +214,38 @@ fn bench(root: &Path, args: &[String]) -> bool {
 
 /// 実際の llama-server を使う試験 (09 §3.4)。接続先は EVORAG_LIVE_LLM_URL。
 fn live_llm(root: &Path) -> bool {
-    if std::env::var_os("EVORAG_LIVE_LLM_URL").is_none() {
-        eprintln!("live-llm: set EVORAG_LIVE_LLM_URL (e.g. http://127.0.0.1:8080)");
+    let chat = std::env::var_os("EVORAG_LIVE_LLM_URL").is_some();
+    let recall = std::env::var_os("EVORAG_LIVE_EMBED_URL").is_some()
+        && std::env::var_os("EVORAG_LIVE_RERANK_URL").is_some();
+    if !chat && !recall {
+        eprintln!(
+            "live-llm: set EVORAG_LIVE_LLM_URL (e.g. http://127.0.0.1:8080) for the chat tests, \
+             and/or EVORAG_LIVE_EMBED_URL and EVORAG_LIVE_RERANK_URL for the recall tests"
+        );
         return false;
     }
-    println!("==> live-llm");
-    Command::new("cargo")
-        .current_dir(root)
-        .args([
-            "nextest",
-            "run",
-            "--locked",
-            "-p",
-            "evorag-core",
-            "--test",
-            "live_llm",
-            "--run-ignored",
-            "only",
-            "--no-capture",
-        ])
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut ok = true;
+    for (on, test) in [(chat, "live_llm"), (recall, "live_recall")] {
+        if !on {
+            continue;
+        }
+        println!("==> live-llm: {test}");
+        ok &= Command::new("cargo")
+            .current_dir(root)
+            .args([
+                "nextest",
+                "run",
+                "--locked",
+                "-p",
+                "evorag-core",
+                "--test",
+                test,
+                "--run-ignored",
+                "only",
+                "--no-capture",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+    }
+    ok
 }

@@ -60,11 +60,86 @@ message_keys! {
     /// 引数: `detail`。
     CliLocationWarning => "cli.location_warning",
     /// 引数: `name`。
-    UnknownModel => "error.unknown_model",
+    ModelSwitchInSetup => "error.model_switch_in_setup",
+    ModelChanged => "error.model_changed",
+    CliModelMismatch => "cli.model_mismatch",
+    CliModelMismatchSameMeta => "cli.model_mismatch_same_meta",
+    CliModelRecorded => "cli.model_recorded",
+    CliModelRecordedUnusual => "cli.model_recorded_unusual",
+    CliConfigObsolete => "cli.config_obsolete",
+    UiModelRole => "ui.notice.model_role",
+    CliRoleRecorded => "cli.role_recorded",
+    CliSetupTuiRunning => "cli.setup.tui_running",
+    CliSetupRoleFound => "cli.setup.role_found",
+    CliSetupRoleMissing => "cli.setup.role_missing",
+    CliSetupEmbedExample => "cli.setup.embed_example",
+    CliSetupRerankExample => "cli.setup.rerank_example",
+    CliSetupExtraChat => "cli.setup.extra_chat",
+    CliSetupModelRecorded => "cli.setup.model_recorded",
+    CliSetupModelDiff => "cli.setup.model_diff",
+    CliSetupRedoChat => "cli.setup.redo_chat",
+    CliSetupRedoEmbed => "cli.setup.redo_embed",
+    CliSetupRedoRerank => "cli.setup.redo_rerank",
+    CliSetupAskSame => "cli.setup.ask_same",
+    CliSetupAskSwitch => "cli.setup.ask_switch",
+    CliSetupSwitched => "cli.setup.switched",
+    CliSetupKeptChat => "cli.setup.kept_chat",
+    CliSetupKept => "cli.setup.kept",
+    CliSetupNeedsConfirm => "cli.setup.needs_confirm",
+    /// 引数: `url`, `models`。
+    CliSetupRouterFound => "cli.setup.router_found",
+    /// 引数: `model`。
+    CliSetupRouterChecking => "cli.setup.router_checking",
+    /// 引数: `role`, `choices`。
+    CliSetupRouterChoose => "cli.setup.router_choose",
+    CliSetupPresetExample => "cli.setup.preset_example",
+    /// 引数: `role`。
+    CliSetupProbing => "cli.setup.probing",
+    CliRoleMismatch => "cli.role_mismatch",
+    CliRoleWaiting => "cli.role_waiting",
+    /// 引数: `url`, `models`。
+    CliRouterNeedsModel => "cli.router_needs_model",
+    /// 引数: `url`, `model`, `detail`。
+    CliRouterModel => "cli.router_model",
+    UiRoleReady => "ui.notice.role_ready",
+    UiRoleStatusUnset => "ui.role_status.unset",
+    UiRoleStatusWaiting => "ui.role_status.waiting",
+    UiRoleStatusReady => "ui.role_status.ready",
+    UiRoleStatusMismatch => "ui.role_status.mismatch",
+    /// モデルの点検で使えない機能が見つかった (06 §3.3)。引数: `role`, `reasons`。
+    UiProbeIssues => "ui.notice.probe_issues",
+    UiProbeThinkingNotOff => "probe.thinking_not_off",
+    UiProbeStructuredBroken => "probe.structured_broken",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
-    UiModelInfo => "ui.notice.model",
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",
+    StyleUnknownValue => "error.style_unknown_value",
+    BandNotLatest => "error.band_not_latest",
+    BandUnknown => "error.band_unknown",
+    FeedbackNotSaved => "error.feedback_not_saved",
+    UiStyleInfo => "ui.notice.style",
+    /// 引数: `title`。
+    UiBandSelected => "ui.notice.band_selected",
+    UiIrrelevantMarked => "ui.notice.irrelevant_marked",
+    UiIrrelevantCleared => "ui.notice.irrelevant_cleared",
+    UiBandRelated => "ui.band.related",
+    UiBandNearby => "ui.band.nearby",
+    /// 引数: `title`, `at`, `head`。
+    UiBandItem => "ui.band.item",
+    UiBandMarked => "ui.band.marked",
+    /// 引数: `title`, `at`, `excerpt`。
+    UiBandDetail => "ui.band.detail",
+    /// 引数: `n`。
+    UiDetailSource => "ui.band.detail_source",
+    UiActionAttach => "ui.band.action_attach",
+    UiActionIrrelevant => "ui.band.action_irrelevant",
+    UiActionIrrelevantUndo => "ui.band.action_irrelevant_undo",
+    UiStyleChanged => "ui.notice.style_changed",
+    UiStyleTitle => "ui.style.title",
+    UiStyleLanguage => "ui.style.language",
+    UiStyleLength => "ui.style.length",
+    UiStyleFormat => "ui.style.format",
+    UiStyleHint => "ui.style.hint",
     UiSourcesOn => "ui.notice.sources_on",
     UiSourcesOff => "ui.notice.sources_off",
     /// 引数: `n`。
@@ -72,6 +147,32 @@ message_keys! {
     /// 引数: `n`、`title`、`at`、`excerpt`。
     UiSourceDetail => "ui.notice.source",
     UiNoSources => "ui.notice.no_sources",
+    /// `/memory` (FR-310)。
+    UiMemoryHeader => "ui.memory.header",
+    UiMemoryNoAnswer => "ui.memory.no_answer",
+    UiMemoryNothing => "ui.memory.nothing",
+    /// 引数: `n`・`title`・`head`・`score`。
+    UiMemoryAttached => "ui.memory.attached",
+    /// 引数: `title`・`head`・`score`。
+    UiMemoryBand => "ui.memory.band",
+    UiMemoryBelow => "ui.memory.below",
+    /// 引数: `delta`・`raw`。
+    UiMemoryScore => "ui.memory.score",
+    /// 引数: `raw`。
+    UiMemoryScoreRaw => "ui.memory.score_raw",
+    UiMemorySources => "ui.memory.sources",
+    /// 引数: `n`・`title`・`head`。
+    UiMemorySource => "ui.memory.source",
+    UiMemoryDegradedNoEmbed => "ui.memory.degraded_no_embed",
+    UiMemoryDegradedEmbedDeadline => "ui.memory.degraded_embed_deadline",
+    UiMemoryDegradedNoRerank => "ui.memory.degraded_no_rerank",
+    UiMemoryDegradedRerankSlow => "ui.memory.degraded_rerank_slow",
+    UiMemoryDegradedRerankDeadline => "ui.memory.degraded_rerank_deadline",
+    UiMemoryDegradedRerankError => "ui.memory.degraded_rerank_error",
+    UiMemoryDegradedNoThreshold => "ui.memory.degraded_no_threshold",
+    UiMemoryDegradedNoIndex => "ui.memory.degraded_no_index",
+    /// 引数: `reason`。
+    UiMemoryDegradedOther => "ui.memory.degraded_other",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。
@@ -81,6 +182,25 @@ message_keys! {
     UiMarkFailed => "ui.mark.failed",
     UiMarkNoReply => "ui.mark.no_reply",
     UiStatusIdle => "ui.status.idle",
+    UiStatusLimited => "ui.status.limited",
+    UiStatusWorking => "ui.status.working",
+    UiStatusBattery => "ui.status.paused_battery",
+    UiStatusLowSpace => "ui.status.paused_low_space",
+    UiRecallStandard => "ui.status.recall_standard",
+    UiRecallSimple => "ui.status.recall_simple",
+    UiRecallCandidates => "ui.status.recall_candidates",
+    UiRecallCalibrating => "ui.status.recall_calibrating",
+    UiRecallFailed => "ui.status.recall_failed",
+    /// 引数: `percent`。
+    UiRecallRebuilding => "ui.status.recall_rebuilding",
+    UiCalibrated => "ui.notice.calibrated",
+    UiCalibrationFailed => "ui.notice.calibration_failed",
+    /// 引数: `done`, `total`。
+    CliSetupCalibrating => "cli.setup.calibrating",
+    /// 引数: `threshold`, `band`, `rank_ok`, `rank_n`, `value_ok`, `value_n`。
+    CliSetupCalibrated => "cli.setup.calibrated",
+    /// 引数: `rank_ok`, `rank_n`, `value_ok`, `value_n`。
+    CliSetupCalibrationFailed => "cli.setup.calibration_failed",
     UiStatusGenerating => "ui.status.generating",
     UiStatusThinking => "ui.status.thinking",
     UiThinking => "ui.thinking",
@@ -127,6 +247,12 @@ message_keys! {
     CliAskRestore => "cli.ask_restore",
     /// 引数: `from`。
     CliRestored => "cli.restored",
+    /// 引数: `backup`・`removed`・`docs`。
+    CliRebuilt => "cli.rebuilt",
+    /// 引数: `backup`・`docs`。
+    CliRebuiltIndex => "cli.rebuilt_index",
+    /// 引数: `detail`。
+    CliRebuildFailed => "cli.rebuild_failed",
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
     CliLlmUnauthorized => "cli.llm_unauthorized",
@@ -186,6 +312,16 @@ message_keys! {
     /// 引数: `count`, `latest`。
     DoctorBackups => "doctor.backups",
     DoctorBackupsNone => "doctor.backups_none",
+    /// 引数: `prompt`, `gen`, `issues`。
+    DoctorProbeChat => "doctor.probe_chat",
+    DoctorProbeNoIssue => "doctor.probe_no_issue",
+    /// 引数: `dims`, `ms`。
+    DoctorProbeEmbed => "doctor.probe_embed",
+    /// 引数: `ms`。
+    DoctorProbeRerank => "doctor.probe_rerank",
+    /// 引数: `role`, `detail`。
+    DoctorProbeFailed => "doctor.probe_failed",
+    DoctorProbeNone => "doctor.probe_none",
     /// 引数: `count`, `path`。
     DoctorBroken => "doctor.broken",
     /// 引数: `docs`, `segments`。

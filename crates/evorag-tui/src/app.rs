@@ -2,7 +2,10 @@
 //!
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
-use evorag_types::api::{Command, Event, Role, SessionView, TurnStatus, TurnView};
+use evorag_types::api::{
+    BackgroundState, Command, Event, ModelRoleInfo, RecallState, Role, RoleStatus, SessionView,
+    StyleItem, TurnStatus, TurnView,
+};
 use evorag_types::{Id, MessageKey};
 
 use crate::catalog::Catalog;
@@ -47,6 +50,33 @@ pub enum Action {
     Quit,
 }
 
+/// 役割の状態の名前の文言キー。
+fn status_key(s: RoleStatus) -> MessageKey {
+    match s {
+        RoleStatus::Unset => MessageKey::UiRoleStatusUnset,
+        RoleStatus::Waiting => MessageKey::UiRoleStatusWaiting,
+        RoleStatus::Ready => MessageKey::UiRoleStatusReady,
+        RoleStatus::Mismatch => MessageKey::UiRoleStatusMismatch,
+    }
+}
+
+/// embed・rerank の役割が、使えない理由の知らせ (繋がらない、記録と違う、06 §3)。使えれば `None`。
+pub fn role_notice(catalog: &Catalog, r: &ModelRoleInfo) -> Option<String> {
+    let file = |m: &Option<(String, String)>| m.as_ref().map(|c| c.0.clone()).unwrap_or_default();
+    match r.status {
+        RoleStatus::Waiting => Some(catalog.with(MessageKey::CliRoleWaiting, &[("role", &r.role)])),
+        RoleStatus::Mismatch => Some(catalog.with(
+            MessageKey::CliRoleMismatch,
+            &[
+                ("role", &r.role),
+                ("recorded", &file(&r.recorded)),
+                ("connected", &file(&r.connected)),
+            ],
+        )),
+        RoleStatus::Unset | RoleStatus::Ready => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Chat,
@@ -56,6 +86,51 @@ pub enum Mode {
     },
     ConfirmDelete,
     Help,
+    /// 出典・帯の往復の詳細の窓 (FR-110、05 §5.2)。`row` は窓の下の操作の位置。
+    Detail {
+        answer: Id,
+        target: Id,
+        /// 帯の往復 (「添えて作り直す」を選べる)。出典なら偽。
+        band: bool,
+        irrelevant: bool,
+        title: String,
+        body: String,
+        row: usize,
+    },
+    /// 答え方の既定を選ぶ窓 (07 §3 の `/style`)。`choice` は項目ごとの値の位置。
+    Style {
+        row: usize,
+        choice: [usize; 3],
+        initial: [usize; 3],
+    },
+}
+
+/// Tab で選んでいるもの (07 §2.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// 応答 `answer` の出典 `n` (セッションの通し番号)。
+    Source { answer: Id, n: usize },
+    /// 応答 `answer` の帯の往復 `target`。
+    Band { answer: Id, target: Id },
+}
+
+/// 詳細の窓の下の操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailAction {
+    /// 添えて作り直す (帯だけ)。
+    Attach,
+    /// 「無関係」の印を付ける・取り消す。
+    Irrelevant,
+}
+
+impl DetailAction {
+    pub fn list(band: bool) -> &'static [DetailAction] {
+        if band {
+            &[DetailAction::Attach, DetailAction::Irrelevant]
+        } else {
+            &[DetailAction::Irrelevant]
+        }
+    }
 }
 
 /// 状態の行に出す接続の情報。
@@ -64,6 +139,12 @@ pub struct Status {
     pub endpoint: String,
     pub model: String,
     pub n_ctx: u32,
+    /// モデルの点検で、使えない機能を止めた (06 §3.3)。
+    pub limited: bool,
+    /// 想起の状態 (07 §2.1。v0.1 のコアは送らない)。
+    pub recall: Option<RecallState>,
+    /// 裏の処理の状態 (07 §2.1、04 §4)。
+    pub background: Option<BackgroundState>,
 }
 
 /// 生成中の応答。
@@ -73,6 +154,43 @@ pub struct Streaming {
     pub text: String,
     /// モデルが思考している (本文がまだ来ていない)。
     pub thinking: bool,
+}
+
+/// 入力が止まったとみなす長さ (05 §4.5)。
+pub const INPUT_IDLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 入力が止まったことの判定 (05 §4.5)。入力欄の文字が `INPUT_IDLE` の間変わらなければ、その文字について
+/// 1 回だけ知らせる。
+pub struct IdleWatch {
+    text: String,
+    since: std::time::Instant,
+    sent: bool,
+}
+
+impl IdleWatch {
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            text: String::new(),
+            since: now,
+            sent: false,
+        }
+    }
+
+    /// 今の入力欄の文字を見る。止まってから `INPUT_IDLE` が過ぎ、まだ知らせていなければ `true`。
+    pub fn due(&mut self, text: &str, now: std::time::Instant) -> bool {
+        if text != self.text {
+            text.clone_into(&mut self.text);
+            self.since = now;
+            self.sent = false;
+            return false;
+        }
+        !self.sent && now.duration_since(self.since) >= INPUT_IDLE
+    }
+
+    /// 知らせた (同じ文字では、もう知らせない)。
+    pub fn sent(&mut self) {
+        self.sent = true;
+    }
 }
 
 pub struct App {
@@ -87,8 +205,10 @@ pub struct App {
     pub scroll: usize,
     pub mode: Mode,
     pub status: Status,
-    /// 選んでいる出典 (応答の ID と番号、FR-110)。
-    pub source: Option<(Id, usize)>,
+    /// Tab で選んでいる出典か帯の往復 (FR-110、05 §5.2)。
+    pub pick: Option<Pick>,
+    /// 次の答え方の既定の知らせで、選ぶ窓を開く (`/style` を値なしで打った)。
+    style_picker: bool,
     ctrl_c_armed: bool,
 }
 
@@ -104,13 +224,108 @@ impl App {
             scroll: 0,
             mode: Mode::Chat,
             status,
-            source: None,
+            pick: None,
+            style_picker: false,
             ctrl_c_armed: false,
         }
     }
 
+    /// `/memory` の答えを文にする (FR-310、07 §3)。
+    fn memory_text(&self, r: &evorag_types::api::MemoryReport) -> String {
+        use evorag_types::api::MemoryPlace;
+        let c = &self.catalog;
+        let mut lines = Vec::new();
+        if r.answer.is_none() {
+            lines.push(c.key(MessageKey::UiMemoryNoAnswer));
+        } else {
+            lines.push(c.key(MessageKey::UiMemoryHeader));
+            if r.items.is_empty() {
+                lines.push(c.key(MessageKey::UiMemoryNothing));
+            }
+            let num = |m: i32| format!("{:.2}", f64::from(m) / 1000.0);
+            for it in &r.items {
+                let score = match (it.score_milli, it.delta_milli) {
+                    (Some(raw), Some(d)) => c.with(
+                        MessageKey::UiMemoryScore,
+                        &[
+                            (
+                                "delta",
+                                &format!("{}{}", if d >= 0 { "+" } else { "" }, num(d)),
+                            ),
+                            ("raw", &num(raw)),
+                        ],
+                    ),
+                    (Some(raw), None) => {
+                        c.with(MessageKey::UiMemoryScoreRaw, &[("raw", &num(raw))])
+                    }
+                    _ => String::new(),
+                };
+                let args = [
+                    ("title", it.title.as_str()),
+                    ("head", it.head.as_str()),
+                    ("score", score.as_str()),
+                ];
+                lines.push(match it.place {
+                    MemoryPlace::Attached => {
+                        let n = it.n.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+                        let mut a = args.to_vec();
+                        a.push(("n", n.as_str()));
+                        c.with(MessageKey::UiMemoryAttached, &a)
+                    }
+                    MemoryPlace::Band => c.with(MessageKey::UiMemoryBand, &args),
+                    MemoryPlace::Below => c.with(MessageKey::UiMemoryBelow, &args),
+                });
+            }
+            for d in &r.degraded {
+                let k = match d.as_str() {
+                    "no_embed" => Some(MessageKey::UiMemoryDegradedNoEmbed),
+                    "embed_deadline" => Some(MessageKey::UiMemoryDegradedEmbedDeadline),
+                    "no_rerank" => Some(MessageKey::UiMemoryDegradedNoRerank),
+                    "rerank_slow" => Some(MessageKey::UiMemoryDegradedRerankSlow),
+                    "rerank_deadline" => Some(MessageKey::UiMemoryDegradedRerankDeadline),
+                    "rerank_error" => Some(MessageKey::UiMemoryDegradedRerankError),
+                    "no_threshold" => Some(MessageKey::UiMemoryDegradedNoThreshold),
+                    "no_index" => Some(MessageKey::UiMemoryDegradedNoIndex),
+                    _ => None,
+                };
+                lines.push(match k {
+                    Some(k) => c.key(k),
+                    None => c.with(MessageKey::UiMemoryDegradedOther, &[("reason", d)]),
+                });
+            }
+        }
+        if !r.sources.is_empty() {
+            lines.push(c.key(MessageKey::UiMemorySources));
+            for s in &r.sources {
+                lines.push(c.with(
+                    MessageKey::UiMemorySource,
+                    &[
+                        ("n", &s.n.to_string()),
+                        ("title", &s.title),
+                        ("head", &s.head),
+                    ],
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
     pub fn generating(&self) -> bool {
         self.streaming.is_some()
+    }
+
+    /// 入力が止まったときに先に済ませる処理へ渡す本文 (05 §4.5)。そのまま Enter で送れば発話になる
+    /// ときだけ (空・スラッシュコマンド・生成中・セッションが無いときは `None`)。
+    pub fn idle_text(&self) -> Option<String> {
+        let text = self.input.text();
+        if text.trim().is_empty()
+            || slash::parse(text).is_some()
+            || self.generating()
+            || self.session.is_none()
+        {
+            return None;
+        }
+        Some(slash::unescape(text).to_owned())
     }
 
     fn notice(&mut self, text: String) {
@@ -210,27 +425,90 @@ impl App {
                 let m = self.catalog.key(MessageKey::UiNoticeDeleted);
                 self.notice(m);
             }
-            Event::ModelInfo {
-                current,
-                model,
-                n_ctx,
-                choices,
-            } => {
-                self.status.model.clone_from(&model);
+            Event::MemoryInfo { report } => {
+                let text = self.memory_text(&report);
+                self.notice(text);
+            }
+            Event::ModelInfo { roles, n_ctx } => {
                 self.status.n_ctx = n_ctx;
-                let choices = if choices.is_empty() {
-                    "-".to_owned()
-                } else {
-                    choices.join(", ")
+                // 役割ごとに「記録 / 今」を示す (ファイル名と model_key の先頭、06 §3.1)。
+                let show = |m: &Option<(String, String)>| match m {
+                    Some((file, key)) => format!("{file} ({})", &key[..key.len().min(8)]),
+                    None => "-".to_owned(),
                 };
+                let lines: Vec<String> = roles
+                    .iter()
+                    .map(|r| {
+                        let status = self.catalog.key(status_key(r.status));
+                        self.catalog.with(
+                            MessageKey::UiModelRole,
+                            &[
+                                ("role", &r.role),
+                                ("recorded", &show(&r.recorded)),
+                                ("connected", &show(&r.connected)),
+                                ("status", &status),
+                            ],
+                        )
+                    })
+                    .collect();
+                self.notice(lines.join("\n"));
+            }
+            Event::RoleChanged { info, recorded_now } => {
+                let file = info
+                    .connected
+                    .as_ref()
+                    .map(|c| c.0.clone())
+                    .unwrap_or_default();
+                let m = match info.status {
+                    RoleStatus::Ready if recorded_now => self.catalog.with(
+                        MessageKey::CliRoleRecorded,
+                        &[("role", &info.role), ("file", &file)],
+                    ),
+                    RoleStatus::Ready => self.catalog.with(
+                        MessageKey::UiRoleReady,
+                        &[("role", &info.role), ("file", &file)],
+                    ),
+                    _ => match role_notice(&self.catalog, &info) {
+                        Some(m) => m,
+                        None => return,
+                    },
+                };
+                self.notice(m);
+            }
+            Event::BackgroundState { state } => {
+                self.status.background = Some(state);
+            }
+            Event::RecallStatus { state } => {
+                let before = self.status.recall.replace(state);
+                // 較正が終わったときだけ知らせる (状態の行は常に今の状態を出す)。
+                if let Some(RecallState::CandidatesOnly {
+                    calibrating: true, ..
+                }) = before
+                {
+                    let k = match state {
+                        RecallState::Standard => MessageKey::UiCalibrated,
+                        _ => MessageKey::UiCalibrationFailed,
+                    };
+                    let m = self.catalog.key(k);
+                    self.notice(m);
+                }
+            }
+            Event::ProbeIssues {
+                role,
+                thinking_not_off,
+                structured_broken,
+            } => {
+                let mut reasons = Vec::new();
+                if thinking_not_off {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeThinkingNotOff));
+                }
+                if structured_broken {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeStructuredBroken));
+                }
+                self.status.limited = true;
                 let m = self.catalog.with(
-                    MessageKey::UiModelInfo,
-                    &[
-                        ("current", &current),
-                        ("model", &model),
-                        ("n_ctx", &n_ctx.to_string()),
-                        ("choices", &choices),
-                    ],
+                    MessageKey::UiProbeIssues,
+                    &[("role", &role), ("reasons", &reasons.join("、"))],
                 );
                 self.notice(m);
             }
@@ -243,8 +521,39 @@ impl App {
                 let m = self.catalog.key(k);
                 self.notice(m);
             }
+            Event::IrrelevantChanged {
+                answer,
+                target,
+                irrelevant,
+            } => {
+                if let Some(t) = self.turns.iter_mut().find(|t| t.id == answer) {
+                    t.irrelevant.retain(|x| *x != target);
+                    if irrelevant {
+                        t.irrelevant.push(target);
+                    }
+                }
+                if let Mode::Detail {
+                    target: shown,
+                    irrelevant: flag,
+                    ..
+                } = &mut self.mode
+                    && *shown == target
+                {
+                    *flag = irrelevant;
+                }
+                let k = if irrelevant {
+                    MessageKey::UiIrrelevantMarked
+                } else {
+                    MessageKey::UiIrrelevantCleared
+                };
+                let m = self.catalog.key(k);
+                self.notice(m);
+            }
             Event::SourceDetail {
                 n,
+                answer,
+                target,
+                irrelevant,
                 title,
                 at,
                 lines,
@@ -265,13 +574,64 @@ impl App {
 ",
                     );
                 let at = evorag_core::localtime::datetime(at.as_millis());
-                let m = self.catalog.with(
-                    MessageKey::UiSourceDetail,
+                let band = n == 0;
+                let body = self.catalog.with(
+                    if band {
+                        MessageKey::UiBandDetail
+                    } else {
+                        MessageKey::UiSourceDetail
+                    },
                     &[
                         ("n", &n.to_string()),
                         ("title", &title),
                         ("at", &at),
                         ("excerpt", &excerpt),
+                    ],
+                );
+                let title = if band {
+                    self.catalog.key(MessageKey::UiBandRelated)
+                } else {
+                    self.catalog
+                        .with(MessageKey::UiDetailSource, &[("n", &n.to_string())])
+                };
+                self.mode = Mode::Detail {
+                    answer,
+                    target,
+                    band,
+                    irrelevant,
+                    title,
+                    body,
+                    row: 0,
+                };
+            }
+            Event::StyleInfo { values, changed } => {
+                if std::mem::take(&mut self.style_picker) {
+                    let mut choice = [0; 3];
+                    for (i, item) in StyleItem::ALL.into_iter().enumerate() {
+                        // 知らない値 (新しい版で足した値) は auto (先頭) として扱う。
+                        choice[i] = item
+                            .choices()
+                            .iter()
+                            .position(|c| *c == values[i])
+                            .unwrap_or(0);
+                    }
+                    self.mode = Mode::Style {
+                        row: 0,
+                        choice,
+                        initial: choice,
+                    };
+                    return;
+                }
+                if changed {
+                    let m = self.catalog.key(MessageKey::UiStyleChanged);
+                    self.notice(m);
+                }
+                let m = self.catalog.with(
+                    MessageKey::UiStyleInfo,
+                    &[
+                        ("language", &values[0]),
+                        ("length", &values[1]),
+                        ("format", &values[2]),
                     ],
                 );
                 self.notice(m);
@@ -307,6 +667,55 @@ impl App {
             Mode::Help => {
                 if matches!(key, Key::Esc | Key::Enter { .. } | Key::Char('q')) {
                     self.mode = Mode::Chat;
+                }
+                Vec::new()
+            }
+            Mode::Style {
+                row,
+                mut choice,
+                initial,
+            } => {
+                let n = |i: usize| StyleItem::ALL[i].choices().len();
+                match key {
+                    Key::Esc => self.mode = Mode::Chat,
+                    Key::Up | Key::Down => {
+                        let row = if key == Key::Up {
+                            row.saturating_sub(1)
+                        } else {
+                            (row + 1).min(2)
+                        };
+                        self.mode = Mode::Style {
+                            row,
+                            choice,
+                            initial,
+                        };
+                    }
+                    Key::Left | Key::Right => {
+                        choice[row] = if key == Key::Left {
+                            (choice[row] + n(row) - 1) % n(row)
+                        } else {
+                            (choice[row] + 1) % n(row)
+                        };
+                        self.mode = Mode::Style {
+                            row,
+                            choice,
+                            initial,
+                        };
+                    }
+                    Key::Enter { newline: false } => {
+                        self.mode = Mode::Chat;
+                        // 変えた項目だけを送る。
+                        return (0..3)
+                            .filter(|&i| choice[i] != initial[i])
+                            .map(|i| {
+                                let item = StyleItem::ALL[i];
+                                Action::Command(Command::Style {
+                                    set: Some((item, item.choices()[choice[i]].to_owned())),
+                                })
+                            })
+                            .collect();
+                    }
+                    _ => {}
                 }
                 Vec::new()
             }
@@ -346,44 +755,120 @@ impl App {
                 }
                 _ => Vec::new(),
             },
+            Mode::Detail { .. } => self.on_detail_key(key),
             Mode::Chat => self.on_chat_key(key),
         }
     }
 
-    /// Tab: 出典の付いた最後の応答の、次の番号を選ぶ。
-    fn next_source(&mut self) {
+    /// Tab: 出典か帯の付いた最後の応答の、次の出典・帯の往復を選ぶ (07 §2.5)。
+    fn next_pick(&mut self) {
         let Some(t) = self
             .turns
             .iter()
             .rev()
-            .find(|t| t.role == Role::Assistant && t.sources > 0)
+            .find(|t| t.role == Role::Assistant && (t.sources > 0 || !t.band.is_empty()))
         else {
             let m = self.catalog.key(MessageKey::UiNoSources);
             self.notice(m);
             return;
         };
-        let n = match self.source {
-            Some((id, n)) if id == t.id => n % t.sources + 1,
-            _ => 1,
+        // 番号はセッションの通し番号 (05 §5.1)。この応答の出典を巡り、続けて帯を巡る。
+        let first = t.source_base.max(1);
+        let mut all: Vec<Pick> = (first..first + t.sources)
+            .map(|n| Pick::Source { answer: t.id, n })
+            .collect();
+        all.extend(t.band.iter().map(|b| Pick::Band {
+            answer: t.id,
+            target: b.target,
+        }));
+        let next = match self.pick.and_then(|p| all.iter().position(|x| *x == p)) {
+            Some(i) => all[(i + 1) % all.len()],
+            None => all[0],
         };
-        self.source = Some((t.id, n));
-        let m = self
-            .catalog
-            .with(MessageKey::UiSourceSelected, &[("n", &n.to_string())]);
+        self.pick = Some(next);
+        let m = match next {
+            Pick::Source { n, .. } => self
+                .catalog
+                .with(MessageKey::UiSourceSelected, &[("n", &n.to_string())]),
+            Pick::Band { target, .. } => {
+                let title = t
+                    .band
+                    .iter()
+                    .find(|b| b.target == target)
+                    .map(|b| b.title.clone())
+                    .unwrap_or_default();
+                self.catalog
+                    .with(MessageKey::UiBandSelected, &[("title", &title)])
+            }
+        };
         self.notice(m);
     }
 
+    /// 詳細の窓の操作 (05 §5.2)。
+    fn on_detail_key(&mut self, key: Key) -> Vec<Action> {
+        let Mode::Detail {
+            answer,
+            target,
+            band,
+            row,
+            ..
+        } = self.mode.clone()
+        else {
+            return Vec::new();
+        };
+        let actions = DetailAction::list(band);
+        let run = |a: DetailAction| match a {
+            DetailAction::Attach => Command::AttachBand { answer, target },
+            DetailAction::Irrelevant => Command::ToggleIrrelevant { answer, target },
+        };
+        let chosen = match key {
+            Key::Esc => {
+                self.mode = Mode::Chat;
+                return Vec::new();
+            }
+            Key::Up | Key::Down => {
+                let n = actions.len();
+                let next = if key == Key::Up {
+                    (row + n - 1) % n
+                } else {
+                    (row + 1) % n
+                };
+                if let Mode::Detail { row, .. } = &mut self.mode {
+                    *row = next;
+                }
+                return Vec::new();
+            }
+            Key::Enter { .. } => actions.get(row).copied(),
+            Key::Char('a') if band => Some(DetailAction::Attach),
+            Key::Char('x') => Some(DetailAction::Irrelevant),
+            _ => None,
+        };
+        match chosen {
+            Some(DetailAction::Attach) => {
+                // 作り直しが始まるので、窓を閉じる。
+                self.mode = Mode::Chat;
+                vec![Action::Command(run(DetailAction::Attach))]
+            }
+            Some(a) => vec![Action::Command(run(a))],
+            None => Vec::new(),
+        }
+    }
+
     fn on_chat_key(&mut self, key: Key) -> Vec<Action> {
-        // 出典を選んでいる間は、Enter で表示し、Esc でやめる。ほかのキーでも選ぶのをやめる。
-        if let Some((turn, n)) = self.source.take() {
+        // 出典・帯を選んでいる間は、Enter で表示し、Esc でやめる。ほかのキーでも選ぶのをやめる。
+        if let Some(p) = self.pick.take() {
             match key {
                 Key::Tab => {
-                    self.source = Some((turn, n));
-                    self.next_source();
+                    self.pick = Some(p);
+                    self.next_pick();
                     return Vec::new();
                 }
                 Key::Enter { newline: false } if self.input.is_empty() => {
-                    return vec![Action::Command(Command::ShowSource { turn, n })];
+                    let c = match p {
+                        Pick::Source { answer, n } => Command::ShowSource { turn: answer, n },
+                        Pick::Band { answer, target } => Command::ShowBand { answer, target },
+                    };
+                    return vec![Action::Command(c)];
                 }
                 Key::Esc if !self.generating() => return Vec::new(),
                 _ => {}
@@ -391,7 +876,7 @@ impl App {
         }
         match key {
             Key::Tab => {
-                self.next_source();
+                self.next_pick();
                 Vec::new()
             }
             Key::CtrlQ => vec![Action::Quit],
@@ -527,6 +1012,11 @@ impl App {
             Slash::Quit => vec![Action::Quit],
             Slash::Model(name) => c(Command::Model { name }),
             Slash::Sources(memory) => c(Command::Sources { memory }),
+            Slash::Memory => c(Command::Memory),
+            Slash::Style(set) => {
+                self.style_picker = set.is_none();
+                c(Command::Style { set })
+            }
             Slash::NotYet(name) => {
                 let m = self.catalog.with(MessageKey::UiNotYet, &[("name", &name)]);
                 self.notice(m);
@@ -567,6 +1057,10 @@ mod tests {
             reply_to,
             created_at: Timestamp::from_millis(0),
             sources: 0,
+            source_base: 1,
+            band: Vec::new(),
+            band_nearby: false,
+            irrelevant: Vec::new(),
         }
     }
 
@@ -583,6 +1077,100 @@ mod tests {
         for ch in s.chars() {
             a.on_key(Key::Char(ch));
         }
+    }
+
+    /// verifies: AC-FR-415-1 (入力欄の文字が 500 ms 変わらなければ、その文字で 1 回だけ知らせる)
+    #[test]
+    fn idle_input_is_signalled_once_per_text_after_500_ms() {
+        let t0 = std::time::Instant::now();
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let mut w = IdleWatch::new(t0);
+        assert!(!w.due("あ", ms(0)));
+        assert!(!w.due("あ", ms(499)));
+        assert!(w.due("あ", ms(500)));
+        w.sent();
+        assert!(!w.due("あ", ms(2000)));
+        // 変わったら数え直す。
+        assert!(!w.due("あい", ms(2100)));
+        assert!(!w.due("あい", ms(2500)));
+        assert!(w.due("あい", ms(2600)));
+        // 知らせなかった (送れない文字だった) ときは、次に見たときにまた `true`。
+        assert!(w.due("あい", ms(2700)));
+    }
+
+    /// verifies: AC-FR-415-1 (送れば発話になる文字だけを知らせる)
+    #[test]
+    fn only_sendable_text_is_offered_for_precompute() {
+        let mut a = app();
+        type_text(&mut a, "こんにちは");
+        assert_eq!(a.idle_text(), None, "no session yet");
+        a.session = Some(session());
+        assert_eq!(a.idle_text().as_deref(), Some("こんにちは"));
+        a.input.take();
+        type_text(&mut a, "/help");
+        assert_eq!(a.idle_text(), None);
+        a.input.take();
+        type_text(&mut a, "   ");
+        assert_eq!(a.idle_text(), None);
+    }
+
+    /// verifies: AC-FR-310-1 (添えた往復と番号、帯、しきい値との差と生の値、縮退の理由、出典の対応を出す)
+    #[test]
+    fn memory_report_lists_items_reasons_and_sources() {
+        use evorag_types::api::{MemoryItem, MemoryPlace, MemoryReport, MemorySource, RecallState};
+        let a = app();
+        let item = |place, n, score, delta| MemoryItem {
+            target: id(1),
+            place,
+            n,
+            title: "観葉植物".into(),
+            head: "モンステラの水やり".into(),
+            score_milli: score,
+            delta_milli: delta,
+        };
+        let text = a.memory_text(&MemoryReport {
+            answer: Some(id(9)),
+            items: vec![
+                item(MemoryPlace::Attached, Some(3), Some(4200), Some(1200)),
+                item(MemoryPlace::Band, None, Some(2600), Some(-400)),
+                item(MemoryPlace::Below, None, Some(-5000), None),
+            ],
+            degraded: vec!["no_embed".into(), "mystery".into()],
+            recall: RecallState::Standard,
+            sources: vec![MemorySource {
+                n: 3,
+                title: "観葉植物".into(),
+                head: "モンステラの水やり".into(),
+            }],
+        });
+        assert!(
+            text.contains(
+                "[3] 観葉植物「モンステラの水やり」 添えた (しきい値との差 +1.20、値 4.20)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("帯 観葉植物「モンステラの水やり」 (しきい値との差 -0.40、値 2.60)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("下 観葉植物「モンステラの水やり」 (値 -5.00)"),
+            "{text}"
+        );
+        assert!(text.contains("evorag setup で埋め込みのサーバ"), "{text}");
+        assert!(text.contains("縮退: mystery"), "{text}");
+        assert!(
+            text.contains("このセッションの出典:\n  [3] 観葉植物「モンステラの水やり」"),
+            "{text}"
+        );
+        let none = a.memory_text(&MemoryReport {
+            answer: None,
+            items: Vec::new(),
+            degraded: Vec::new(),
+            recall: RecallState::Simple,
+            sources: Vec::new(),
+        });
+        assert_eq!(none, "このセッションには、まだ応答がありません。");
     }
 
     #[test]
@@ -623,8 +1211,13 @@ mod tests {
             vec![Action::Command(Command::Retry)]
         );
         type_text(&mut a, "/memory");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Memory)]
+        );
+        type_text(&mut a, "/forget 1");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());
-        assert!(a.notices.last().unwrap().contains("/memory"));
+        assert!(a.notices.last().unwrap().contains("/forget"));
     }
 
     /// verifies: AC-FR-105-1 (画面の層: 確認の後にだけ消す)
@@ -787,30 +1380,46 @@ mod tests {
     fn tab_selects_a_source_and_enter_shows_it() {
         let mut a = app();
         assert!(a.on_key(Key::Tab).is_empty());
-        assert!(a.notices.last().unwrap().contains("出典の付いた応答"));
+        assert!(a.notices.last().unwrap().contains("出典や関係しそうな記録"));
         let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
         answer.sources = 2;
         a.turns = vec![turn(1, Role::User, TurnStatus::Confirmed, None), answer];
         a.on_key(Key::Tab);
         a.on_key(Key::Tab);
-        assert_eq!(a.source, Some((id(2), 2)));
+        assert_eq!(
+            a.pick,
+            Some(Pick::Source {
+                answer: id(2),
+                n: 2
+            })
+        );
         a.on_key(Key::Tab);
-        assert_eq!(a.source, Some((id(2), 1)), "wraps around");
+        assert_eq!(
+            a.pick,
+            Some(Pick::Source {
+                answer: id(2),
+                n: 1
+            }),
+            "wraps around"
+        );
         assert_eq!(
             a.on_key(Key::Enter { newline: false }),
             vec![Action::Command(Command::ShowSource { turn: id(2), n: 1 })]
         );
-        assert_eq!(a.source, None);
+        assert_eq!(a.pick, None);
         // Esc でやめる。ほかのキーは普通に効く。
         a.on_key(Key::Tab);
         assert!(a.on_key(Key::Esc).is_empty());
-        assert_eq!(a.source, None);
+        assert_eq!(a.pick, None);
         a.on_key(Key::Tab);
         a.on_key(Key::Char('x'));
-        assert_eq!((a.source, a.input.text()), (None, "x"));
+        assert_eq!((a.pick, a.input.text()), (None, "x"));
 
         a.on_event(Event::SourceDetail {
             n: 1,
+            answer: id(9),
+            target: id(8),
+            irrelevant: false,
             title: "旅行の計画".into(),
             at: Timestamp::from_millis(0),
             lines: vec![
@@ -818,9 +1427,113 @@ mod tests {
                 (Role::Assistant, "町家です".into()),
             ],
         });
-        let shown = a.notices.last().unwrap();
-        assert!(shown.starts_with("[1] 旅行の計画 ("), "{shown}");
-        assert!(shown.contains("あなた: 宿はどこ？"), "{shown}");
+        let Mode::Detail {
+            body, band, title, ..
+        } = &a.mode
+        else {
+            panic!("{:?}", a.mode)
+        };
+        assert!(body.starts_with("[1] 旅行の計画 ("), "{body}");
+        assert!(body.contains("あなた: 宿はどこ？"), "{body}");
+        assert!(!band);
+        assert_eq!(title, "出典 [1]");
+        // 出典の詳細でも「無関係」の印を付けられる (x)。添えて作り直すは帯だけ。
+        assert!(a.on_key(Key::Char('a')).is_empty());
+        assert_eq!(
+            a.on_key(Key::Char('x')),
+            vec![Action::Command(Command::ToggleIrrelevant {
+                answer: id(9),
+                target: id(8)
+            })]
+        );
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
+    fn band_item(n: u8) -> evorag_types::api::BandItem {
+        evorag_types::api::BandItem {
+            target: id(n),
+            title: format!("会話 {n}"),
+            at: Timestamp::from_millis(0),
+            head: "モンステラの水やり".into(),
+        }
+    }
+
+    /// verifies: AC-FR-412-1 (画面の層: 帯を Tab で選び、詳細で a を選ぶと作り直しの命令が出る)
+    #[test]
+    fn the_band_is_picked_after_the_sources_and_attached_with_a() {
+        let mut a = app();
+        let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        answer.sources = 1;
+        answer.band = vec![band_item(5), band_item(6)];
+        a.turns = vec![turn(1, Role::User, TurnStatus::Confirmed, None), answer];
+        a.on_key(Key::Tab);
+        a.on_key(Key::Tab);
+        assert_eq!(
+            a.pick,
+            Some(Pick::Band {
+                answer: id(2),
+                target: id(5)
+            })
+        );
+        assert!(a.notices.last().unwrap().contains("会話 5"));
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ShowBand {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        a.on_event(Event::SourceDetail {
+            n: 0,
+            answer: id(2),
+            target: id(5),
+            irrelevant: false,
+            title: "会話 5".into(),
+            at: Timestamp::from_millis(0),
+            lines: vec![(Role::User, "モンステラの水やり".into())],
+        });
+        assert!(matches!(
+            a.mode,
+            Mode::Detail {
+                band: true,
+                row: 0,
+                ..
+            }
+        ));
+        // ↓ と Enter で 2 つ目の操作 (無関係の印)。
+        a.on_key(Key::Down);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ToggleIrrelevant {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        // 印が付くと、知らせを出し、帯に印を出し、窓の操作が「取り消す」になる。
+        a.on_event(Event::IrrelevantChanged {
+            answer: id(2),
+            target: id(5),
+            irrelevant: true,
+        });
+        assert!(a.notices.last().unwrap().contains("判定は変わりません"));
+        assert_eq!(a.turns[1].irrelevant, [id(5)]);
+        assert!(matches!(
+            a.mode,
+            Mode::Detail {
+                irrelevant: true,
+                ..
+            }
+        ));
+        // a で添えて作り直す。窓は閉じる。
+        assert_eq!(
+            a.on_key(Key::Char('a')),
+            vec![Action::Command(Command::AttachBand {
+                answer: id(2),
+                target: id(5)
+            })]
+        );
+        assert_eq!(a.mode, Mode::Chat);
     }
 
     /// verifies: AC-FR-409-1 (画面の層)
@@ -838,6 +1551,58 @@ mod tests {
         assert!(a.notices.last().unwrap().contains("添えません"));
     }
 
+    /// verifies: AC-FR-111-1 (画面の層)
+    #[test]
+    fn style_opens_a_picker_and_sends_only_the_changed_items() {
+        let mut a = app();
+        type_text(&mut a, "/style");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style { set: None })]
+        );
+        // 知らない値 (新しい版で足した値) は auto として選び始める。
+        a.on_event(Event::StyleInfo {
+            values: ["ja".into(), "auto".into(), "odd".into()],
+            changed: false,
+        });
+        assert!(matches!(a.mode, Mode::Style { row: 0, .. }));
+        a.on_key(Key::Down);
+        a.on_key(Key::Right);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style {
+                set: Some((StyleItem::Length, "short".into()))
+            })]
+        );
+        assert_eq!(a.mode, Mode::Chat);
+        // 変えた後の知らせ: すべてのセッションに効くことと、次の応答が少し遅いこと。
+        a.on_event(Event::StyleInfo {
+            values: ["ja".into(), "short".into(), "auto".into()],
+            changed: true,
+        });
+        let n = a.notices.join("\n");
+        assert!(n.contains("すべてのセッションに効きます"), "{n}");
+        assert!(n.contains("長さ short"), "{n}");
+
+        // 値を付けて打てば、窓を開かずに送る。Esc で窓を閉じると何も送らない。
+        type_text(&mut a, "/style language en");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::Style {
+                set: Some((StyleItem::Language, "en".into()))
+            })]
+        );
+        type_text(&mut a, "/style");
+        a.on_key(Key::Enter { newline: false });
+        a.on_event(Event::StyleInfo {
+            values: ["en".into(), "short".into(), "auto".into()],
+            changed: false,
+        });
+        a.on_key(Key::Right);
+        assert_eq!(a.on_key(Key::Esc), Vec::new());
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
     /// verifies: AC-FR-903-1 (07 §3 の v0.1 のコマンドがすべて /help に出て、使える)
     #[test]
     fn help_lists_every_command() {
@@ -853,6 +1618,7 @@ mod tests {
             ("/good", "/good"),
             ("/bad", "/bad 理由"),
             ("/sources", "/sources off"),
+            ("/style", "/style length short"),
             ("/model", "/model"),
             ("/quit", "/quit"),
         ] {
