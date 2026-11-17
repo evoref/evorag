@@ -1,10 +1,8 @@
 //! 読み取りの規則 (04 §5.3) を根拠の文字列に当てる: 主語を明示する語・変化を示す語・否定で今の値を
 //! 終える語。規則は根拠の文字種から決めた言語のものを選ぶ (04 §5.2 の「読み取りの規則」)。
 //!
-//! 照合は NFKC と小文字化の後に行う (規則の語もこの形で書く、rules.rs の `fold`)。日本語は部分一致、
+//! 照合は NFKC と完全な case folding の後に行う (規則の語もこの形で書く、rules.rs の `fold`)。日本語は部分一致、
 //! 英語は ASCII の英数字で決めた語の境界で当てる。除外の語に当たった箇所は、照合の前に伏せる。
-
-use unicode_normalization::UnicodeNormalization;
 
 use crate::rules::{ReadingRules, language_rules};
 use crate::value_key::normalize_v1;
@@ -48,20 +46,21 @@ pub fn signals(evidence: &str, subject: &str) -> Signals {
         let masked = mask(&text, &r.subject_self_exclude, word_bounded);
         any_match(&masked, &r.subject_self, word_bounded)
     } else {
-        // ほかの主語は、呼び名そのものが根拠にあれば明示とみなす。
+        // ほかの主語は、呼び名そのものが根拠にあれば明示とみなす (英語は語の境界で、04 §5.2)。
         let name = normalize_v1(subject);
-        !name.is_empty() && normalize_v1(evidence).contains(&name)
+        !name.is_empty() && !find_all(&normalize_v1(evidence), &name, word_bounded).is_empty()
     };
+    let unchanged = mask(&text, &r.change_exclude, word_bounded);
     Signals {
         explicit_subject,
-        change: any_match(&text, &r.change, word_bounded),
+        change: any_match(&unchanged, &r.change, word_bounded),
         negation_change: any_match(&text, &r.negation_change, word_bounded),
     }
 }
 
-/// 規則の語と同じ形にそろえる (NFKC → 小文字)。
+/// 規則の語と同じ形にそろえる (NFKC → 完全な case folding、04 §5.2)。
 fn fold(s: &str) -> String {
-    s.nfkc().flat_map(char::to_lowercase).collect()
+    crate::rules::fold(s)
 }
 
 fn is_word_char(c: char) -> bool {
@@ -145,6 +144,16 @@ mod tests {
     fn another_subject_is_explicit_when_named() {
         assert!(signals("妻は京都に住んでいます", "妻").explicit_subject);
         assert!(!signals("京都に住んでいます", "妻").explicit_subject);
+        assert!(signals("Ken lives in Kyoto", "ken").explicit_subject);
+        // 英語の呼び名は語の境界で当てる ("ken" は "Kenji" に当たらない)。
+        assert!(!signals("Kenji lives in Kyoto", "ken").explicit_subject);
+    }
+
+    #[test]
+    fn change_words_have_exclusions() {
+        assert!(signals("住所が変わりました", "self").change);
+        assert!(!signals("相変わらず東京に住んでる", "self").change);
+        assert!(!signals("着替えて東京に行った", "self").change);
     }
 
     #[test]

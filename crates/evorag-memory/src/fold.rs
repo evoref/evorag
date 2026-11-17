@@ -214,28 +214,33 @@ impl Directives {
         self.list.iter()
     }
 
-    fn cancelled(&self, id: Id) -> bool {
-        self.list.iter().any(|d| match d.kind {
-            DirectiveKind::PrivateOff { target } | DirectiveKind::Unblock { target } => {
-                target == id
-            }
-            _ => false,
-        })
+    /// private の指示 `id` が解かれたか。解くのは `PrivateOff` だけ (04 §7.5 の「解く指示の相手」)。
+    fn private_cancelled(&self, id: Id) -> bool {
+        self.list
+            .iter()
+            .any(|d| matches!(d.kind, DirectiveKind::PrivateOff { target } if target == id))
     }
 
-    /// 事実が private か (04 §7.5)。`successors` は、同じ (主語, 属性) で、出典の最も古いターンが指示より
-    /// 後の事実にも効く。
+    /// 忘れるの指示 `id` の印が解かれたか。解くのは `Unblock` だけ。
+    fn forget_cancelled(&self, id: Id) -> bool {
+        self.list
+            .iter()
+            .any(|d| matches!(d.kind, DirectiveKind::Unblock { target } if target == id))
+    }
+
+    /// 事実が private か (04 §7.5)。`successors` は、同じ (主語, 属性) で、出典の最も新しいターンが指示
+    /// より後の事実 (指示の後に言われた値) にも効く。
     pub fn is_private(&self, f: &Fact) -> bool {
         self.list.iter().any(|d| {
             let DirectiveKind::Private { scope } = d.kind else {
                 return false;
             };
-            if d.subject != f.subject || d.attribute != f.attribute || self.cancelled(d.id) {
+            if d.subject != f.subject || d.attribute != f.attribute || self.private_cancelled(d.id)
+            {
                 return false;
             }
             let same_value = d.vk.is_some() && d.vk == f.vk;
-            let successor =
-                scope == Scope::Successors && f.earliest_turn().is_some_and(|t| t > d.id);
+            let successor = scope == Scope::Successors && f.latest_turn().is_some_and(|t| t > d.id);
             same_value || successor
         })
     }
@@ -243,10 +248,18 @@ impl Directives {
     /// 再び覚えない印に当たるか (04 §7.6)。解かれた印は当てない。知らない指示の印も当てる。
     pub fn is_blocked(&self, mark: &BlockMark) -> bool {
         self.list.iter().any(|d| match &d.kind {
-            DirectiveKind::Forget { marks } => marks.contains(mark) && !self.cancelled(d.id),
+            DirectiveKind::Forget { marks } => marks.contains(mark) && !self.forget_cancelled(d.id),
             DirectiveKind::Unknown { marks } => marks.contains(mark),
             _ => false,
         })
+    }
+
+    /// 新しい版の知らない指示の数 (印だけを当て、ほかは当てずに数える、04 §7.5)。
+    pub fn unknown_count(&self) -> usize {
+        self.list
+            .iter()
+            .filter(|d| matches!(d.kind, DirectiveKind::Unknown { .. }))
+            .count()
     }
 
     /// 位置を持つ出来事 (採る・戻す) を、作り直しのときに混ぜて並べるために取り出す。
@@ -296,35 +309,70 @@ pub enum Event {
 }
 
 /// 並べる位置 (04 §5.3 の入力の順)。
-type Pos = (Id, u32, u32, String, String, String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Pos {
+    at: Id,
+    start: u32,
+    end: u32,
+    /// 訂正 (0) を候補 (1) より先に当てる。
+    kind: u8,
+    subject: String,
+    attribute: String,
+    /// `current` (0) → `planned` (1) → `past` (2)。値の綴りに依らず、置き換えの連鎖にするため。
+    tense: u8,
+    /// 言い切り (0) → 否定 (1)。
+    mood: u8,
+    value: String,
+    has_old: bool,
+}
+
+fn tense_rank(t: Tense) -> u8 {
+    match t {
+        Tense::Current => 0,
+        Tense::Planned => 1,
+        Tense::Past => 2,
+    }
+}
 
 impl Event {
-    fn pos(&self) -> Pos {
+    pub(crate) fn pos(&self) -> Pos {
         match self {
-            Event::Candidate(c) => (
-                c.source.turn,
-                c.source.start,
-                c.source.end,
-                c.subject.clone(),
-                c.attribute.clone(),
-                normalize_v1(&c.value),
-            ),
-            Event::Correction(c) => (
-                c.source.turn,
-                c.source.start,
-                c.source.end,
-                String::new(),
-                String::new(),
-                normalize_v1(&c.new_value),
-            ),
-            Event::Choose { directive, .. } => (
-                *directive,
-                0,
-                0,
-                String::new(),
-                String::new(),
-                String::new(),
-            ),
+            Event::Candidate(c) => Pos {
+                at: c.source.turn,
+                start: c.source.start,
+                end: c.source.end,
+                kind: 1,
+                subject: c.subject.clone(),
+                attribute: c.attribute.clone(),
+                tense: tense_rank(c.tense),
+                mood: u8::from(c.mood == Mood::Negated),
+                value: normalize_v1(&c.value),
+                has_old: c.old_vk.is_some(),
+            },
+            Event::Correction(c) => Pos {
+                at: c.source.turn,
+                start: c.source.start,
+                end: c.source.end,
+                kind: 0,
+                subject: String::new(),
+                attribute: String::new(),
+                tense: 0,
+                mood: 0,
+                value: normalize_v1(&c.new_value),
+                has_old: true,
+            },
+            Event::Choose { directive, .. } => Pos {
+                at: *directive,
+                start: 0,
+                end: 0,
+                kind: 0,
+                subject: String::new(),
+                attribute: String::new(),
+                tense: 0,
+                mood: 0,
+                value: String::new(),
+                has_old: false,
+            },
         }
     }
 }
@@ -448,14 +496,23 @@ pub fn fold(
     for e in events {
         match e {
             Event::Candidate(c) => apply_candidate(set, directives, &c, env, &mut report),
-            Event::Correction(c) => apply_correction(set, &c, env, &mut report),
+            Event::Correction(c) => apply_correction(set, directives, &c, env, &mut report),
             Event::Choose {
                 directive,
                 subject,
                 attribute,
                 vk,
                 choice,
-            } => apply_choice(set, directive, &subject, &attribute, &vk, choice, env),
+            } => {
+                let ch = Chosen {
+                    directive,
+                    subject: &subject,
+                    attribute: &attribute,
+                    vk: &vk,
+                    choice,
+                };
+                apply_choice(set, directives, &ch, env);
+            }
         }
     }
     refresh_private(set, directives);
@@ -533,9 +590,10 @@ fn apply_candidate(
                 let f = &set.facts[i];
                 f.state == FactState::Live && f.tense == Tense::Current && f.vk == Some(c.vk)
             });
+            // 同じ値の `Superseded` の記録 (時制を問わない) があれば、そこにまとめる (04 §5.3 の時制)。
             let history = group.iter().copied().find(|&i| {
                 let f = &set.facts[i];
-                f.tense == Tense::Past && f.vk == Some(c.vk)
+                matches!(f.state, FactState::Superseded { .. }) && f.vk == Some(c.vk)
             });
             if let Some(i) = live {
                 // 過去形で今の値を終える (置き換えではない)。終えた発言を出典に足す。
@@ -560,6 +618,10 @@ fn apply_candidate(
             if let Some(i) = set.find_open(&group, &c.vk) {
                 set.facts[i].sources.insert(c.source);
                 report.merged += 1;
+                // 同じ値の矛盾の出典が 2 つの別のターンになったら今の値にする (04 §5.3)。
+                if card == Cardinality::Single {
+                    promote_if_repeated(set, &group, i, turn, report);
+                }
                 return;
             }
             if card == Cardinality::Single {
@@ -608,7 +670,11 @@ fn apply_single_current(
                 // 予定の値が実現した: 同じ記録の時制を current にする (04 §5.3 の時制)。
                 set.facts[s].tense = Tense::Current;
                 match cur {
-                    None => report.merged += 1,
+                    None => {
+                        // 今の値になったので、残りの矛盾の相手を付け替える。
+                        set.make_live(None, s, turn);
+                        report.merged += 1;
+                    }
                     Some(o) if cond => {
                         set.make_live(Some(o), s, turn);
                         report.replaced += 1;
@@ -617,6 +683,7 @@ fn apply_single_current(
                         let against = set.facts[o].id;
                         set.facts[s].state = FactState::Contested { against };
                         report.contested += 1;
+                        promote_if_repeated(set, group, s, turn, report);
                     }
                 }
             }
@@ -636,7 +703,8 @@ fn apply_single_current(
     let n = set.push(new_fact(env, c, Tense::Current, FactState::Live));
     report.added += 1;
     match cur {
-        None => {}
+        // 今の値が無ければ今の値にし、残りの矛盾の相手を付け替える (04 §5.3)。
+        None => set.make_live(None, n, turn),
         Some(o) if cond => {
             set.make_live(Some(o), n, turn);
             report.replaced += 1;
@@ -646,6 +714,23 @@ fn apply_single_current(
             set.facts[n].state = FactState::Contested { against };
             report.contested += 1;
         }
+    }
+}
+
+/// 単値の属性で、矛盾の値 `i` の出典が 2 つ以上の別のターンになっていれば、今の値にする (04 §5.3)。
+fn promote_if_repeated(
+    set: &mut FactSet,
+    group: &[usize],
+    i: usize,
+    turn: Id,
+    report: &mut Report,
+) {
+    if matches!(set.facts[i].state, FactState::Contested { .. })
+        && set.facts[i].distinct_turns() >= 2
+    {
+        let cur = set.live_current(group).filter(|&o| o != i);
+        set.make_live(cur, i, turn);
+        report.replaced += 1;
     }
 }
 
@@ -688,18 +773,12 @@ fn apply_multi_current(
 
 fn apply_correction(
     set: &mut FactSet,
+    directives: &Directives,
     c: &VerifiedCorrection,
     env: &mut FoldEnv<'_>,
     report: &mut Report,
 ) {
-    if set
-        .facts
-        .iter()
-        .any(|f| f.vk == Some(c.new_vk) && f.sources.contains(&c.source))
-    {
-        report.already += 1;
-        return;
-    }
+    // 訂正は出典では当て済みを判定しない。古い値がもう今の値でなければ、下で効かない (04 §5.3)。
     // 古い値の値の鍵が、今の値のちょうど 1 件と一致するときだけ事実を変える (04 §6)。
     let hits: Vec<usize> = (0..set.facts.len())
         .filter(|&i| {
@@ -716,6 +795,11 @@ fn apply_correction(
         report.correction_no_effect += 1;
         return;
     };
+    // 新しい値が忘れた値なら、訂正でも蘇らせない (04 §7.5 の「再び覚えない印と訂正・戻す」)。
+    if directives.is_blocked(&block_mark(env.key, &subject, &attribute, &c.new_vk)) {
+        report.blocked += 1;
+        return;
+    }
     let turn = c.source.turn;
     let group = set.group(&subject, &attribute);
     let n = match set.find_open(&group, &c.new_vk) {
@@ -757,16 +841,41 @@ fn apply_correction(
     report.replaced += 1;
 }
 
-fn apply_choice(
-    set: &mut FactSet,
+/// 採る・戻すの出来事の中身 (`apply_choice` に渡す形)。
+struct Chosen<'a> {
     directive: Id,
-    subject: &str,
-    attribute: &str,
-    vk: &ValueKey,
+    subject: &'a str,
+    attribute: &'a str,
+    vk: &'a ValueKey,
     choice: Choice,
-    env: &FoldEnv<'_>,
-) {
+}
+
+fn apply_choice(set: &mut FactSet, directives: &Directives, ch: &Chosen<'_>, env: &FoldEnv<'_>) {
+    let Chosen {
+        directive,
+        subject,
+        attribute,
+        vk,
+        choice,
+    } = *ch;
+    // 忘れた値は、戻すでも蘇らせない (04 §7.5)。
+    if directives.is_blocked(&block_mark(env.key, subject, attribute, vk)) {
+        return;
+    }
     let group = set.group(subject, attribute);
+    let card = cardinality(env, attribute);
+    // 同じ値の開いた記録があれば、履歴の記録は戻さない (04 §7.5 の「戻すの重なり」)。
+    if choice == Choice::Revert
+        && let Some(open) = set.find_open(&group, vk)
+    {
+        if card == Some(Cardinality::Single)
+            && matches!(set.facts[open].state, FactState::Contested { .. })
+        {
+            let cur = set.live_current(&group).filter(|&i| i != open);
+            set.make_live(cur, open, directive);
+        }
+        return;
+    }
     let target = group.iter().copied().find(|&i| {
         let f = &set.facts[i];
         f.vk.as_ref() == Some(vk)
@@ -780,7 +889,7 @@ fn apply_choice(
     };
     let t_id = set.facts[t].id;
     set.facts[t].tense = Tense::Current;
-    match cardinality(env, attribute) {
+    match card {
         Some(Cardinality::Single) => {
             let cur = set.live_current(&group).filter(|&i| i != t);
             set.make_live(cur, t, directive);
@@ -808,4 +917,339 @@ pub fn table_order<'a>(set: &'a FactSet, attributes: &Attributes) -> Vec<&'a Fac
         (prio, f.subject != "self", f.subject.clone(), f.id)
     });
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::signals;
+    use crate::rules::attributes;
+    use crate::value_key::value_key;
+
+    const KEY: ForgetKey = ForgetKey::from_bytes_const([9; 32]);
+
+    fn id(n: u64) -> Id {
+        let mut b = [0u8; 16];
+        b[8..].copy_from_slice(&n.to_be_bytes());
+        Id::from_bytes(b)
+    }
+
+    /// 1 つの事例の道具: ターンは `turn(n)`、指示は `id(n)` で、n の順に並ぶ。
+    struct T {
+        set: FactSet,
+        dirs: Directives,
+        next: u64,
+    }
+
+    impl T {
+        fn new() -> Self {
+            Self {
+                set: FactSet::default(),
+                dirs: Directives::default(),
+                next: 10_000,
+            }
+        }
+
+        fn cand(turn: u64, a: &str, v: &str, e: &str) -> Candidate {
+            Candidate {
+                source: Source {
+                    turn: id(turn),
+                    start: 0,
+                    end: u32::try_from(e.len()).expect("short"),
+                    rev: 0,
+                },
+                subject: "self".into(),
+                attribute: a.into(),
+                value: v.into(),
+                vk: value_key(&KEY, v),
+                mood: Mood::Fact,
+                tense: Tense::Current,
+                old_vk: None,
+                signals: signals(e, "self"),
+            }
+        }
+
+        fn fold(&mut self, events: Vec<Event>) -> Report {
+            let mut next = self.next;
+            let mut new_id = || {
+                next += 1;
+                id(next)
+            };
+            let mut env = FoldEnv {
+                key: &KEY,
+                attributes: attributes(),
+                new_id: &mut new_id,
+            };
+            let r = fold(&mut self.set, &self.dirs, events, &mut env);
+            self.next = next;
+            r
+        }
+
+        fn state_of(&self, a: &str, v: &str) -> Vec<FactState> {
+            let vk = value_key(&KEY, v);
+            self.set
+                .facts
+                .iter()
+                .filter(|f| f.attribute == a && f.vk == Some(vk))
+                .map(|f| f.state)
+                .collect()
+        }
+
+        fn live(&self, a: &str) -> Vec<String> {
+            self.set
+                .facts
+                .iter()
+                .filter(|f| f.attribute == a && f.state == FactState::Live)
+                .filter_map(|f| f.value.clone())
+                .collect()
+        }
+    }
+
+    fn forget(dir: u64, a: &str, v: &str) -> Directive {
+        let vk = value_key(&KEY, v);
+        Directive {
+            id: id(dir),
+            kind: DirectiveKind::Forget {
+                marks: vec![block_mark(&KEY, "self", a, &vk)],
+            },
+            subject: "self".into(),
+            attribute: a.into(),
+            vk: None,
+        }
+    }
+
+    #[test]
+    fn a_correction_does_not_bring_back_a_forgotten_value() {
+        let mut t = T::new();
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "residence",
+            "大阪",
+            "大阪に住んでます",
+        ))]);
+        t.dirs.push(forget(2, "residence", "東京"));
+        let c = VerifiedCorrection::assume_verified(
+            Source {
+                turn: id(3),
+                start: 0,
+                end: 6,
+                rev: 0,
+            },
+            value_key(&KEY, "大阪"),
+            "東京".into(),
+            value_key(&KEY, "東京"),
+        );
+        let r = t.fold(vec![Event::Correction(c)]);
+        assert_eq!(r.blocked, 1);
+        assert_eq!(t.live("residence"), ["大阪"]);
+    }
+
+    #[test]
+    fn a_revert_does_not_bring_back_a_forgotten_value_nor_duplicate_an_open_one() {
+        let mut t = T::new();
+        t.fold(vec![
+            Event::Candidate(T::cand(1, "residence", "大阪", "私は大阪に住んでいます")),
+            Event::Candidate(T::cand(2, "residence", "東京", "私は東京に住んでいます")),
+        ]);
+        // 戻す値が忘れた値なら戻さない。
+        t.dirs.push(forget(3, "residence", "大阪"));
+        let revert = |dir: u64, v: &str| Event::Choose {
+            directive: id(dir),
+            subject: "self".into(),
+            attribute: "residence".into(),
+            vk: value_key(&KEY, v),
+            choice: Choice::Revert,
+        };
+        t.fold(vec![revert(4, "大阪")]);
+        assert_eq!(t.live("residence"), ["東京"]);
+
+        // 多値: 同じ値の開いた記録があれば、履歴の記録は戻さない。
+        let mut t = T::new();
+        let mut c = T::cand(1, "likes", "うどん", "ラーメンじゃなくてうどんが好き");
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "likes",
+            "ラーメン",
+            "ラーメンが好き",
+        ))]);
+        c.source.turn = id(2);
+        c.old_vk = Some(value_key(&KEY, "ラーメン"));
+        t.fold(vec![Event::Candidate(c)]);
+        t.fold(vec![Event::Candidate(T::cand(
+            3,
+            "likes",
+            "ラーメン",
+            "ラーメンも好き",
+        ))]);
+        t.fold(vec![Event::Choose {
+            directive: id(4),
+            subject: "self".into(),
+            attribute: "likes".into(),
+            vk: value_key(&KEY, "ラーメン"),
+            choice: Choice::Revert,
+        }]);
+        let open = t
+            .state_of("likes", "ラーメン")
+            .into_iter()
+            .filter(|s| *s == FactState::Live)
+            .count();
+        assert_eq!(open, 1, "one open record of the same value");
+    }
+
+    #[test]
+    fn a_planned_value_said_again_on_another_turn_replaces_the_current_one() {
+        let mut t = T::new();
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "residence",
+            "大阪",
+            "大阪に住んでます",
+        ))]);
+        let mut plan = T::cand(2, "residence", "東京", "東京に住む予定");
+        plan.tense = Tense::Planned;
+        t.fold(vec![Event::Candidate(plan)]);
+        // 主語の語も変化の語も無い言い切りでも、予定と合わせて 2 つの別のターンになれば置き換える。
+        t.fold(vec![Event::Candidate(T::cand(
+            3,
+            "residence",
+            "東京",
+            "東京に住んでるよ",
+        ))]);
+        assert_eq!(t.live("residence"), ["東京"]);
+    }
+
+    #[test]
+    fn a_new_current_value_repoints_the_remaining_contested_values() {
+        let mut t = T::new();
+        t.fold(vec![
+            Event::Candidate(T::cand(1, "residence", "大阪", "大阪に住んでます")),
+            Event::Candidate(T::cand(2, "residence", "東京", "東京に住んでるよ")),
+        ]);
+        let mut neg = T::cand(3, "residence", "大阪", "もう大阪には住んでいない");
+        neg.mood = Mood::Negated;
+        t.fold(vec![Event::Candidate(neg)]);
+        t.fold(vec![Event::Candidate(T::cand(
+            4,
+            "residence",
+            "名古屋",
+            "名古屋に住んでる",
+        ))]);
+        let nagoya = t
+            .set
+            .facts
+            .iter()
+            .find(|f| f.value.as_deref() == Some("名古屋"))
+            .expect("名古屋")
+            .id;
+        assert_eq!(
+            t.state_of("residence", "東京"),
+            [FactState::Contested { against: nagoya }]
+        );
+    }
+
+    #[test]
+    fn a_past_value_merges_into_the_same_superseded_record() {
+        let mut t = T::new();
+        t.fold(vec![
+            Event::Candidate(T::cand(1, "residence", "大阪", "私は大阪に住んでいます")),
+            Event::Candidate(T::cand(2, "residence", "東京", "私は東京に引っ越しました")),
+        ]);
+        let mut past = T::cand(3, "residence", "大阪", "以前は大阪に住んでた");
+        past.tense = Tense::Past;
+        t.fold(vec![Event::Candidate(past)]);
+        assert_eq!(
+            t.state_of("residence", "大阪").len(),
+            1,
+            "no duplicate history"
+        );
+    }
+
+    #[test]
+    fn moving_from_one_place_to_another_in_one_sentence_makes_a_chain() {
+        // 「大阪から東京に引っ越した」の {大阪, past} と {東京, current} は同じ範囲。値の綴りに依らず、
+        // 東京が大阪を置き換える。
+        let e = "大阪から東京に引っ越した";
+        let mut t = T::new();
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "residence",
+            "大阪",
+            "私は大阪に住んでいます",
+        ))]);
+        let mut past = T::cand(2, "residence", "大阪", e);
+        past.tense = Tense::Past;
+        t.fold(vec![
+            Event::Candidate(past),
+            Event::Candidate(T::cand(2, "residence", "東京", e)),
+        ]);
+        let tokyo = t
+            .set
+            .facts
+            .iter()
+            .find(|f| f.value.as_deref() == Some("東京"))
+            .expect("東京");
+        assert_eq!(tokyo.state, FactState::Live);
+        assert!(matches!(
+            t.state_of("residence", "大阪")[..],
+            [FactState::Superseded { by: Some(b), .. }] if b == tokyo.id
+        ));
+    }
+
+    #[test]
+    fn a_cancel_only_cancels_its_own_kind() {
+        let mut t = T::new();
+        let vk = value_key(&KEY, "えび");
+        t.dirs.push(Directive {
+            id: id(1),
+            kind: DirectiveKind::Private {
+                scope: Scope::ValueOnly,
+            },
+            subject: "self".into(),
+            attribute: "dietary".into(),
+            vk: Some(vk),
+        });
+        // 印を解く指示が private の指示を指していても、private は解けない。
+        t.dirs.push(Directive {
+            id: id(2),
+            kind: DirectiveKind::Unblock { target: id(1) },
+            subject: "self".into(),
+            attribute: "dietary".into(),
+            vk: None,
+        });
+        t.fold(vec![Event::Candidate(T::cand(
+            3,
+            "dietary",
+            "えび",
+            "えびは食べられない",
+        ))]);
+        assert!(t.set.facts[0].private);
+    }
+
+    #[test]
+    fn a_successor_stays_private_when_an_older_source_is_added_later() {
+        let mut t = T::new();
+        t.dirs.push(Directive {
+            id: id(5),
+            kind: DirectiveKind::Private {
+                scope: Scope::Successors,
+            },
+            subject: "self".into(),
+            attribute: "dietary".into(),
+            vk: Some(value_key(&KEY, "えび")),
+        });
+        t.fold(vec![Event::Candidate(T::cand(
+            6,
+            "dietary",
+            "かに",
+            "かにも食べられない",
+        ))]);
+        // 抽出が遅れた、指示より前のターンの出典が足される。
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "dietary",
+            "かに",
+            "かにが苦手",
+        ))]);
+        assert!(t.set.facts.iter().all(|f| f.private));
+    }
 }

@@ -291,15 +291,6 @@ impl Runner {
         Ok(())
     }
 
-    fn value_of(&self, fid: Id) -> String {
-        self.set
-            .facts
-            .iter()
-            .find(|f| f.id == fid)
-            .and_then(|f| f.value.clone())
-            .unwrap_or_else(|| "(deleted)".into())
-    }
-
     fn turn_name(&self, tid: Id) -> String {
         self.turns
             .iter()
@@ -308,43 +299,75 @@ impl Runner {
             .expect("a known turn")
     }
 
+    /// 事実を、期待と同じ形の文字列の並び (整列済み) にする。重複も見えるように集合にしない。
+    fn describe(&self, set: &FactSet) -> Vec<String> {
+        let value_of = |fid: Id| {
+            set.facts
+                .iter()
+                .find(|f| f.id == fid)
+                .and_then(|f| f.value.clone())
+                .unwrap_or_else(|| "(deleted)".into())
+        };
+        let mut out: Vec<String> = set
+            .facts
+            .iter()
+            .map(|f| {
+                let (state, extra) = match f.state {
+                    FactState::Live => ("Live", String::new()),
+                    FactState::Contested { against } => {
+                        ("Contested", format!(" against={}", value_of(against)))
+                    }
+                    FactState::Superseded { by, .. } => (
+                        "Superseded",
+                        by.map(|b| format!(" by={}", value_of(b)))
+                            .unwrap_or_default(),
+                    ),
+                    FactState::Retracted => ("Retracted", String::new()),
+                };
+                let tense = match f.tense {
+                    Tense::Current => "current",
+                    Tense::Past => "past",
+                    Tense::Planned => "planned",
+                };
+                let sources: BTreeSet<String> =
+                    f.sources.iter().map(|s| self.turn_name(s.turn)).collect();
+                format!(
+                    "{}/{}/{} {state}{extra} tn={tense} private={} sources={sources:?}",
+                    f.subject,
+                    f.attribute,
+                    f.value.clone().unwrap_or_default(),
+                    f.private
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// 束の分け方に依らないこと: それまでの出来事を位置の順に並べ、1 件ずつ別の束で当てても、
+    /// 1 つの束で当て直したのと同じになる (状態が記録に出し切れているか)。
+    fn check_batch_independence(&mut self, id: &str) {
+        let mut events = self.history.clone();
+        events.extend(self.dirs.choices());
+        events.sort_by_cached_key(Event::pos);
+        let mut whole = FactSet::default();
+        self.fold_events(&mut whole, events.clone());
+        let mut one_by_one = FactSet::default();
+        for e in events {
+            self.fold_events(&mut one_by_one, vec![e]);
+        }
+        assert_eq!(
+            self.describe(&one_by_one),
+            self.describe(&whole),
+            "{id}: folding one event at a time must equal one batch"
+        );
+    }
+
     fn check(&self, id: &str, body: &Value) {
         if let Some(facts) = body.get("facts").and_then(Value::as_array) {
-            // 実際の事実を、期待と同じ形の文字列にして、集合として比べる。
-            let actual: BTreeSet<String> = self
-                .set
-                .facts
-                .iter()
-                .map(|f| {
-                    let (state, extra) = match f.state {
-                        FactState::Live => ("Live", String::new()),
-                        FactState::Contested { against } => {
-                            ("Contested", format!(" against={}", self.value_of(against)))
-                        }
-                        FactState::Superseded { by, .. } => (
-                            "Superseded",
-                            by.map(|b| format!(" by={}", self.value_of(b)))
-                                .unwrap_or_default(),
-                        ),
-                        FactState::Retracted => ("Retracted", String::new()),
-                    };
-                    let tense = match f.tense {
-                        Tense::Current => "current",
-                        Tense::Past => "past",
-                        Tense::Planned => "planned",
-                    };
-                    let sources: BTreeSet<String> =
-                        f.sources.iter().map(|s| self.turn_name(s.turn)).collect();
-                    format!(
-                        "{}/{}/{} {state}{extra} tn={tense} private={} sources={sources:?}",
-                        f.subject,
-                        f.attribute,
-                        f.value.clone().unwrap_or_default(),
-                        f.private
-                    )
-                })
-                .collect();
-            let expected: BTreeSet<String> = facts
+            // 実際の事実を、期待と同じ形の文字列にして、並び (重複を含む) として比べる。
+            let actual = self.describe(&self.set);
+            let mut expected: Vec<String> = facts
                 .iter()
                 .map(|f| {
                     let state = s(f, "state").expect("state");
@@ -369,6 +392,7 @@ impl Runner {
                     )
                 })
                 .collect();
+            expected.sort();
             assert_eq!(actual, expected, "{id}: facts");
         }
         if let Some(table) = body.get("table").and_then(Value::as_array) {
@@ -416,6 +440,7 @@ fn consolidation_cases_hold_on_the_pure_core() {
                     !PENDING.iter().any(|(p, _)| *p == id),
                     "{id} passes now: remove it from PENDING"
                 );
+                r.check_batch_independence(&id);
                 passed += 1;
             }
             Outcome::Pending(why) => {

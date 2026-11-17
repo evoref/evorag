@@ -27,9 +27,11 @@ const GENERAL_CATEGORIES: &[&str] = &[
     "Pf", "Po", "Sm", "Sc", "Sk", "So", "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co", "Cn",
 ];
 
-/// 規則の語を照合の前にそろえる形 (NFKC → 小文字)。規則の語はこの形で変わらないように書く。
-fn fold(s: &str) -> String {
-    s.nfkc().flat_map(char::to_lowercase).collect()
+/// 規則の語を照合の前にそろえる形 (NFKC → 完全な case folding、04 §5.2)。規則の語はこの形で変わらない
+/// ように書く。
+pub(crate) fn fold(s: &str) -> String {
+    let nfkc: String = s.nfkc().collect();
+    unicase::UniCase::unicode(nfkc.as_str()).to_folded_case()
 }
 
 /// 単値か多値か (04 §5.3)。
@@ -189,7 +191,7 @@ fn check_entries(out: &mut Vec<String>, at: &dyn Fn(&str) -> String, name: &str,
         }
         if fold(w) != *w {
             out.push(at(&format!(
-                "{name} entry `{w}` changes under NFKC and lowercasing (it would never match)"
+                "{name} entry `{w}` changes under NFKC and case folding (it would never match)"
             )));
         }
     }
@@ -243,6 +245,9 @@ pub struct ReadingRules {
     pub subject_self_exclude: Vec<String>,
     /// 変化を示す語。
     pub change: Vec<String>,
+    /// `change` に当たっても変化の語とみなさない語 (照合の前に伏せる。「相変わらず」など)。
+    #[serde(default)]
+    pub change_exclude: Vec<String>,
     /// 否定の候補で、今の値を終わらせてよい語。
     pub negation_change: Vec<String>,
 }
@@ -318,6 +323,7 @@ impl LanguageRules {
                 &self.reading.subject_self_exclude,
             ),
             ("reading.change", &self.reading.change),
+            ("reading.change_exclude", &self.reading.change_exclude),
             ("reading.negation_change", &self.reading.negation_change),
             ("correction.triggers", &self.correction.triggers),
             ("correction.patterns", &self.correction.patterns),
