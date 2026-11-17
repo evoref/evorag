@@ -1120,26 +1120,7 @@ pub fn drop_sources(
         }
     }
     set.facts.retain(|f| !emptied.contains(&f.id));
-    for (subject, attribute, latest) in ended {
-        let group = set.group(&subject, &attribute);
-        if set.live_current(&group).is_some() {
-            continue;
-        }
-        let next = group
-            .iter()
-            .copied()
-            .filter(|&i| matches!(set.facts[i].state, FactState::Contested { .. }))
-            .filter_map(|i| {
-                let t = set.facts[i].latest_turn()?;
-                (Some(t) > latest).then_some((t, set.facts[i].id, i))
-            })
-            .max();
-        if let Some((turn, id, i)) = next {
-            set.make_live(None, i, turn);
-            out.promoted.push(id);
-        }
-    }
-    out.promoted.sort_unstable();
+    out.promoted = promote_after(set, ended);
     // private でなくなる事実に、その値だけの private の指示を足す (04 §7.5 の「後継」)。
     for f in &set.facts {
         if !was_private.contains(&f.id) || directives.is_private(f) {
@@ -1163,6 +1144,81 @@ pub fn drop_sources(
     refresh_private(set, directives);
     let ids_after: BTreeSet<Id> = set.facts.iter().map(|f| f.id).collect();
     out.deleted = ids_before.difference(&ids_after).copied().collect();
+    out
+}
+
+/// 消えた・取り消した今の値 (単値の属性の、時制 `current` の `Live`) の代わりに、同じ (主語, 属性) の
+/// `Contested` のうち、出典の最も新しいターンが消えた値の出典の最も新しいターンより後のもの (2 つ以上あれば
+/// 最も後のもの、同じなら事実の ID の大きいもの) を今の値にする (04 §7.4)。`ended` は消えた値の
+/// (主語, 属性, 出典の最も新しいターン)。今の値にした事実の ID を ID の順に返す。
+fn promote_after(set: &mut FactSet, ended: Vec<(String, String, Option<Id>)>) -> Vec<Id> {
+    let mut promoted = Vec::new();
+    for (subject, attribute, latest) in ended {
+        let group = set.group(&subject, &attribute);
+        if set.live_current(&group).is_some() {
+            continue;
+        }
+        let next = group
+            .iter()
+            .copied()
+            .filter(|&i| matches!(set.facts[i].state, FactState::Contested { .. }))
+            .filter_map(|i| {
+                let t = set.facts[i].latest_turn()?;
+                (Some(t) > latest).then_some((t, set.facts[i].id, i))
+            })
+            .max();
+        if let Some((turn, id, i)) = next {
+            set.make_live(None, i, turn);
+            promoted.push(id);
+        }
+    }
+    promoted.sort_unstable();
+    promoted
+}
+
+/// 忘れるで取り消したもの ([`retract`])。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Retraction {
+    /// `Retracted` にした事実 (ID の順)。もう `Retracted` だった事実は含まない。
+    pub retracted: Vec<Id>,
+    /// 取り消した今の値に代わって、今の値にした矛盾の値 (ID の順、04 §7.4)。
+    pub promoted: Vec<Id>,
+}
+
+/// 事実 `ids` を忘れる (04 §7.1・§7.4): `Retracted` にし、値・値の鍵・span を消す (出典のターンと改訂の番号は
+/// 残す)。単値の属性の今の値 (時制 `current` の `Live`) を取り消したときは、セッションの削除と同じく
+/// `Contested` を繰り上げる ([`drop_sources`] と同じ規則)。置き換えの連鎖の `by`・`against` は、取り消した記録を
+/// 指したまま残す。private の写しは呼ぶ側が指示から計算し直す ([`refresh_private`])。
+pub fn retract(set: &mut FactSet, ids: &BTreeSet<Id>, attributes: &Attributes) -> Retraction {
+    let mut out = Retraction::default();
+    let mut ended: Vec<(String, String, Option<Id>)> = Vec::new();
+    for f in &mut set.facts {
+        if !ids.contains(&f.id) || f.state == FactState::Retracted {
+            continue;
+        }
+        let single = attributes
+            .get(&f.attribute)
+            .is_some_and(|a| a.cardinality == Cardinality::Single);
+        if single && f.state == FactState::Live && f.tense == Tense::Current {
+            ended.push((f.subject.clone(), f.attribute.clone(), f.latest_turn()));
+        }
+        f.state = FactState::Retracted;
+        f.value = None;
+        f.vk = None;
+        // 保存の形は `Retracted` の span を持たない (`FactBody`)。読み直した形と同じにする。
+        f.sources = f
+            .sources
+            .iter()
+            .map(|s| Source {
+                start: 0,
+                end: 0,
+                ..*s
+            })
+            .collect();
+        out.retracted.push(f.id);
+    }
+    out.retracted.sort_unstable();
+    out.promoted = promote_after(set, ended);
     out
 }
 

@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use evorag_memory::{KIND_TURN, Masker, Turn, TurnRole, TurnText, hidden_marker, turn_rev};
+use evorag_memory::{
+    KIND_TURN, Masker, Turn, TurnRole, TurnText, hidden_marker, redaction_marker, turn_rev,
+};
 use evorag_store::{Read, ReadTxn};
 use evorag_types::Id;
 
@@ -29,7 +31,7 @@ fn exchange_key(t: &Turn) -> Id {
 impl Hide {
     /// 記録から読む。読めなければ `None` (伏せる値を確かめられないので、呼ぶ側は本文を添えない・出さない)。
     pub(crate) fn load(r: &ReadTxn<'_>, lang: PromptLanguage) -> Option<Self> {
-        match Masker::load(r) {
+        match Masker::load(r, redaction_marker(lang.as_str())) {
             Ok(masker) => Some(Self {
                 masker,
                 marker: hidden_marker(lang.as_str()),

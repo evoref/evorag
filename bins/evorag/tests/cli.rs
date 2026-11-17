@@ -392,6 +392,7 @@ fn export_writes_records_and_the_config_without_api_keys() {
                     start: 0,
                     end: 1,
                     rules: 1,
+                    src_rev: None,
                 }],
             )
             .unwrap();

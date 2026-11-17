@@ -12,6 +12,7 @@ mod facts;
 mod fold;
 #[cfg(test)]
 mod fold_cases;
+mod forget;
 mod gates;
 mod kinds;
 mod lexical;
@@ -48,8 +49,13 @@ pub use facts::{
 };
 pub use fold::{
     Candidate, Choice, Cover, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet,
-    FactState, FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, drop_sources, fold,
-    refresh_private, table_order,
+    FactState, FoldEnv, Mood, Report, Retraction, Scope, Source, Tense, VerifiedCorrection,
+    drop_sources, fold, refresh_private, retract, table_order,
+};
+pub use forget::{
+    ForgetAbort, ForgetEnv, ForgetOptions, ForgetPlan, ForgetPreview, ForgetSample, ForgetScope,
+    PlanHash, Replay, TurnForgets, forget_backups_for_all, forget_backups_job, journal_cuts,
+    plan_forget, rebuild_directive_indexes, replay_forgets,
 };
 pub use gates::{
     Accepted, EvidenceMatch, GateEnv, GateReason, MAX_SUBJECT_CHARS, RawCandidate, RawMood, Safety,
@@ -71,7 +77,9 @@ pub use kinds::{
     UNIT_CHUNK, UNIT_KEY, carried_on_restore, kinds,
 };
 pub use lexical::{Signals, evidence_language, signals};
-pub use mask::{Masker, TurnText, apply_ranges, hidden_marker};
+pub use mask::{
+    Masker, REDACTION_MARKERS, TurnText, apply_ranges, hidden_marker, redaction_marker,
+};
 pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
     SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, note_is_current, note_matches,

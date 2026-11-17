@@ -5,7 +5,8 @@
 //! - private の事実: 出典 (改訂の番号が今のターンと合うもの) がその往復にあれば、往復のすべてのターンで、
 //!   値の鍵の正規化 (04 §5.6) の後に値と一致する範囲 (英数字は語の境界で)。出典の根拠の範囲の中に一致が
 //!   見つからないときは、根拠の範囲の全体を伏せる (安全の側に倒す)。
-//! - 伏せ字にしないで忘れた事実: 忘れるの指示の `hidden` の範囲 (改訂の番号が今のターンと合うもの)。
+//! - 伏せ字にしないで忘れた事実: 忘れるの指示の `hidden` の範囲。指示は書き換えないので、その指示より後の忘れるの
+//!   伏せ字で今の本文の位置に写す (04 §7.3 の「位置の写し直し」、[`TurnForgets`])。
 //!
 //! 本文は保存したまま変えない。置き換えは、添える・帯に出す・検証のプロンプトに入れる直前に当てる。
 
@@ -14,8 +15,9 @@ use std::ops::Range;
 use evorag_store::ReadTxn;
 use evorag_types::Id;
 
-use crate::facts::{HiddenBody, load_facts, load_hidden};
+use crate::facts::load_facts;
 use crate::fold::{FactSet, FactState, Source};
+use crate::forget::TurnForgets;
 use crate::read::MemoryError;
 use crate::value_key::{Edges, Mapped, normalize_v1};
 
@@ -28,6 +30,19 @@ pub fn hidden_marker(language: &str) -> &'static str {
         "[hidden]"
     }
 }
+
+/// 伏せ字の印 (プロンプトの言語で選ぶ、04 §7.3)。
+#[must_use]
+pub fn redaction_marker(language: &str) -> &'static str {
+    if language == "ja" {
+        REDACTION_MARKERS[0]
+    } else {
+        REDACTION_MARKERS[1]
+    }
+}
+
+/// 伏せ字の印のすべて (`ja`・`en`)。抽出の関門 6 は、プロンプトの言語に関わらず両方を当てる (04 §5.2)。
+pub const REDACTION_MARKERS: [&str; 2] = ["[伏せ字]", "[redacted]"];
 
 /// 往復の中のターン 1 つ (保存した本文と、その改訂の番号)。
 #[derive(Debug, Clone, Copy)]
@@ -48,13 +63,16 @@ struct PrivateValue {
 #[derive(Debug, Clone, Default)]
 pub struct Masker {
     private: Vec<PrivateValue>,
-    hidden: Vec<HiddenBody>,
+    forgets: TurnForgets,
+    /// 伏せ字の印 (`[非表示]` の範囲を、後の伏せ字で写すのに使う)。
+    redaction_marker: String,
 }
 
 impl Masker {
-    /// private の事実 (`Retracted` でなく値のあるもの) と、忘れるの指示の `hidden` の範囲から作る。
+    /// private の事実 (`Retracted` でなく値のあるもの) と、忘れるの指示 (`hidden` の範囲と、それを写す後の伏せ字)
+    /// から作る。`redaction_marker` はデータ根の伏せ字の印 ([`redaction_marker`])。
     #[must_use]
-    pub fn new(set: &FactSet, hidden: Vec<HiddenBody>) -> Self {
+    pub fn new(set: &FactSet, forgets: TurnForgets, redaction_marker: &str) -> Self {
         let private = set
             .facts
             .iter()
@@ -67,21 +85,46 @@ impl Masker {
                 })
             })
             .collect();
-        Self { private, hidden }
+        Self {
+            private,
+            forgets,
+            redaction_marker: redaction_marker.to_owned(),
+        }
     }
 
-    /// 記録から作る (事実と、忘れるの指示)。
+    /// 記録から作る (事実と、忘れるの指示)。`redaction_marker` はデータ根の伏せ字の印。
     ///
     /// # Errors
     /// 記録を読めないとき。
-    pub fn load(tx: &ReadTxn<'_>) -> Result<Self, MemoryError> {
-        Ok(Self::new(&load_facts(tx)?.set, load_hidden(tx)?))
+    pub fn load(tx: &ReadTxn<'_>, redaction_marker: &str) -> Result<Self, MemoryError> {
+        Ok(Self::new(
+            &load_facts(tx)?.set,
+            TurnForgets::load(tx)?,
+            redaction_marker,
+        ))
     }
 
     /// 伏せるものが無い。
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.private.is_empty() && self.hidden.is_empty()
+        self.private.is_empty() && self.forgets.is_empty()
+    }
+
+    /// ターン `t` の、伏せ字にしないで忘れた `[非表示]` の範囲 (今の本文の位置)。
+    #[must_use]
+    pub fn hidden_ranges(&self, t: &TurnText<'_>) -> Vec<Range<usize>> {
+        self.forgets
+            .hidden_ranges(t.id, t.text, t.rev, &self.redaction_marker)
+    }
+
+    /// 往復の各ターンの本文に、伏せ字にしないで忘れた範囲だけの置き換えを当てたもの (`exchange` の順)。ノートの
+    /// 鍵を作るときに使う (04 §7.1: `[非表示]` の範囲を持つ往復のノートは、伏せた本文から作り直す)。
+    #[must_use]
+    pub fn mask_hidden(&self, exchange: &[TurnText<'_>], marker: &str) -> Vec<String> {
+        exchange
+            .iter()
+            .map(|t| apply_ranges(t.text, &self.hidden_ranges(t), marker))
+            .collect()
     }
 
     /// 往復 `exchange` の `i` 番目のターンの、伏せる範囲 (本文のバイト位置。重なりうる)。
@@ -91,10 +134,9 @@ impl Masker {
             return Vec::new();
         };
         let mut out: Vec<Range<usize>> = self
-            .hidden
-            .iter()
-            .filter(|h| h.turn == t.id && h.rev == t.rev)
-            .map(|h| widen(t.text, h.start as usize..h.end as usize))
+            .hidden_ranges(t)
+            .into_iter()
+            .map(|r| widen(t.text, r))
             .collect();
         let current = |s: &Source| exchange.iter().any(|x| x.id == s.turn && x.rev == s.rev);
         let mut mapped: Option<Option<Mapped>> = None;
@@ -190,6 +232,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::facts::HiddenBody;
     use crate::fold::{Fact, Tense};
     use crate::value_key::{ForgetKey, value_key};
 
@@ -225,7 +268,7 @@ mod tests {
         let set = FactSet {
             facts: vec![private_fact("猫", id(1), 0, start..start + 3)],
         };
-        let m = Masker::new(&set, Vec::new());
+        let m = Masker::new(&set, TurnForgets::default(), "[伏せ字]");
         let exchange = [
             TurnText {
                 id: id(1),
@@ -258,7 +301,7 @@ mod tests {
         let set = FactSet {
             facts: vec![private_fact("ann", id(1), 2, 0..3)],
         };
-        let m = Masker::new(&set, Vec::new());
+        let m = Masker::new(&set, TurnForgets::default(), "[伏せ字]");
         let stale = [TurnText {
             id: id(1),
             rev: 1,
@@ -289,7 +332,7 @@ mod tests {
             start: 21,
             end: 30,
         }];
-        let m = Masker::new(&set, hidden);
+        let m = Masker::new(&set, TurnForgets::from_hidden(hidden), "[伏せ字]");
         let t = [TurnText {
             id: id(1),
             rev: 0,
@@ -306,7 +349,7 @@ mod tests {
         let set = FactSet {
             facts: vec![private_fact("株", id(1), 0, 0..3)],
         };
-        let m = Masker::new(&set, Vec::new());
+        let m = Masker::new(&set, TurnForgets::default(), "[伏せ字]");
         let t = [TurnText {
             id: id(1),
             rev: 0,

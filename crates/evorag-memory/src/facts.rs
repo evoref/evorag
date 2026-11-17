@@ -211,6 +211,9 @@ pub struct FactDirectiveBody {
     pub scope: Option<String>,
     #[serde(default)]
     pub marks: Vec<String>,
+    /// 忘れた値の鍵の 16 進の並び (忘れる、04 §7.5 の「忘れると訂正」)。ほかの指示では空。
+    #[serde(default)]
+    pub vks: Vec<String>,
     #[serde(default)]
     pub turns: Vec<Id>,
     #[serde(default)]
@@ -254,7 +257,7 @@ impl Origin {
     }
 }
 
-const OP_FORGET: &str = "forget";
+pub(crate) const OP_FORGET: &str = "forget";
 const OP_PRIVATE: &str = "private";
 const OP_PRIVATE_OFF: &str = "private_off";
 const OP_ACCEPT: &str = "accept";
@@ -324,6 +327,7 @@ impl FactDirectiveBody {
             target,
             scope: scope.map(Into::into),
             marks: marks.iter().map(BlockMark::to_hex).collect(),
+            vks: Vec::new(),
             turns: Vec::new(),
             redactions: Vec::new(),
             hidden: Vec::new(),
@@ -1043,7 +1047,7 @@ pub fn add_directive(
 }
 
 /// 読める指示の本体を、ID とともに順に渡す (`v` が新しい・形の違う・正規化の版の違う指示は飛ばす)。
-fn for_each_directive_body(
+pub(crate) fn for_each_directive_body(
     tx: &ReadTxn<'_>,
     mut f: impl FnMut(Id, FactDirectiveBody),
 ) -> Result<(), MemoryError> {

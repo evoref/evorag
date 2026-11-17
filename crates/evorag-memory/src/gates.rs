@@ -92,6 +92,9 @@ pub enum GateReason {
     Imperative,
     /// 関門 6: ほかの指示への言及。
     InstructionRef,
+    /// 関門 6: 値か根拠が伏せ字の印 (`[伏せ字]`・`[redacted]`) を含む (伏せ字にした本文の印やその周りを、値として
+    /// 覚え直さないため、04 §5.2)。
+    RedactionMarker,
     /// 関門 7: 値が属性の上限を超える。
     TooLong,
     /// 関門 8: 再び覚えない印に当たる。
@@ -100,7 +103,7 @@ pub enum GateReason {
 
 impl GateReason {
     /// すべての理由 (当てる順)。
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::UnknownAttribute,
         Self::EvidenceMissing,
         Self::ValueNotInEvidence,
@@ -115,6 +118,7 @@ impl GateReason {
         Self::MixedScript,
         Self::Imperative,
         Self::InstructionRef,
+        Self::RedactionMarker,
         Self::TooLong,
         Self::Forgotten,
     ];
@@ -136,6 +140,7 @@ impl GateReason {
             Self::MixedScript => "mixed_script",
             Self::Imperative => "imperative",
             Self::InstructionRef => "instruction_ref",
+            Self::RedactionMarker => "redaction_marker",
             Self::TooLong => "too_long",
             Self::Forgotten => "forgotten",
         }
@@ -300,8 +305,12 @@ fn check_one<'s>(
         return Err(GateReason::SubjectNotAllowed);
     }
 
-    // 関門 6・7。
-    check_value(env.safety, attribute, &raw.value)?;
+    // 関門 6・7。根拠の伏せ字の印は、値の関門 6 の後、関門 7 の前に当てる (関門 6 の最後の理由)。
+    check_text(env.safety, &raw.value)?;
+    if has_redaction_marker(&raw.evidence) {
+        return Err(GateReason::RedactionMarker);
+    }
+    check_length(attribute, &raw.value)?;
 
     // 関門 8: 再び覚えない印。
     let vk = value_key(env.key, &raw.value);
@@ -393,17 +402,32 @@ pub fn check_value(
     value: &str,
 ) -> Result<(), GateReason> {
     check_text(safety, value)?;
+    check_length(attribute, value)
+}
+
+/// 関門 7: 値の長さが属性の上限の内にある。
+fn check_length(attribute: &Attribute, value: &str) -> Result<(), GateReason> {
     if value.chars().count() > usize::from(attribute.max_chars) {
         return Err(GateReason::TooLong);
     }
     Ok(())
 }
 
+/// 伏せ字の印 (`[伏せ字]`・`[redacted]`。プロンプトの言語に関わらず両方) を含むか。NFKC の後で照合する (04 §5.2 の
+/// 関門 6)。
+fn has_redaction_marker(text: &str) -> bool {
+    let text: String = text.nfkc().collect();
+    crate::mask::REDACTION_MARKERS.iter().any(|m| {
+        let m: String = m.nfkc().collect();
+        text.contains(&m)
+    })
+}
+
 /// 関門 6 を文字列 (値と、`self` 以外の主語の呼び名) に当てる (04 §5.2)。事実の表も、置く行の主語と値に当て直す
 /// (04 §5.4 の多重の守り)。
 ///
 /// 関門 6 の中は、一般カテゴリ → 区切りの文字 → URL → 役割の詐称 → 文字体系の混在 → 命令形 → ほかの指示への
-/// 言及 の順に当てる。
+/// 言及 → 伏せ字の印 の順に当てる。
 ///
 /// - 文字の判定は、元の値と、NFKC と case folding の後の両方に当てる。一般カテゴリの規則に加えて、表示されない
 ///   文字 (Default_Ignorable_Code_Point) も捨てる。
@@ -483,6 +507,9 @@ pub fn check_text(safety: &Safety<'_>, value: &str) -> Result<(), GateReason> {
         .any(|r| contains_any(&r.safety.instruction_refs))
     {
         return Err(GateReason::InstructionRef);
+    }
+    if has_redaction_marker(value) {
+        return Err(GateReason::RedactionMarker);
     }
     Ok(())
 }

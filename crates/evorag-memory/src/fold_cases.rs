@@ -1,10 +1,16 @@
-//! 統合の回帰ケース (`tests/memory-cases/consolidation.toml`、09 §3.5) を、純粋な核 (`fold`) で走らせる。
+//! 統合と忘れるの回帰ケース (`tests/memory-cases/consolidation.toml`・`forget.toml`、09 §3.5) を、純粋な核
+//! (`fold`) と実際のストア (書き込みの入口・忘れるの計画と当て直し) の両方で走らせる。
 //!
-//! 書式は `tests/memory-cases/README.md`。まだ作っていない操作 (忘れる、M3.4) を
-//! 使う事例は `PENDING` に明示して載せ、黙って飛ばさない。`PENDING` の事例が通ったら、一覧から外すよう
-//! 試験を落とす。
+//! 書式は `tests/memory-cases/README.md`。どの事例も飛ばさない (M3.4 の忘れるで、保留にしていた C28・C29・C34・
+//! C35 も通る)。
 //!
-//! verifies: AC-FR-304-3 (候補の順を入れ替えても同じ)、AC-FR-305-1 (単値・多値の置き換え)
+//! 忘れるの事例は、さらに次を確かめる。
+//! - 忘れるを当てた直後に当て直し (`replay_forgets`) をしても何も変わらない (2 回当てても 1 回と同じ)。
+//! - 鏡のストアに、忘れるの指示と伏せ字にしたターンの行だけを取り込んで当て直すと、操作をしたストアと同じ
+//!   事実とターンになる (ジャーナルからの当て直しと、操作の結果が一致する、04 §7.2)。
+//!
+//! verifies: AC-FR-304-3 (候補の順を入れ替えても同じ)、AC-FR-305-1 (単値・多値の置き換え)、AC-FR-307-4
+//! (apply_forget の冪等)、AC-FR-307-5 (値の鍵が合わなければ中止)
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -17,24 +23,18 @@ use crate::fold::{
     Mood, Scope, Source, Tense, VerifiedCorrection, drop_sources, fold, refresh_private,
     table_order,
 };
+use crate::forget::{ForgetOptions, forget_in_core};
+use crate::kinds::{KIND_TURN, TurnRole};
 use crate::lexical::signals;
 use crate::rules::attributes;
-use crate::value_key::{ForgetKey, normalize_v1, value_key};
+use crate::value_key::{BlockMark, ForgetKey, block_mark, normalize_v1, value_key};
 
-/// M3.4 (忘れる) で通す事例。
-const PENDING: &[(&str, &str)] = &[
-    ("C28", "M3.4: forget"),
-    ("C29", "M3.4: forget"),
-    ("C34", "M3.4: forget"),
-    ("C35", "M3.4: forget"),
-];
-
-fn cases() -> Vec<Value> {
+fn cases(file: &str) -> Vec<Value> {
     let dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let path = dir.join("../../tests/memory-cases/consolidation.toml");
-    let text = std::fs::read_to_string(&path).expect("consolidation.toml");
+    let path = dir.join("../../tests/memory-cases").join(file);
+    let text = std::fs::read_to_string(&path).expect(file);
     let doc: Value = toml::from_str(&text).expect("parses");
     doc["case"].as_array().expect("cases").clone()
 }
@@ -58,11 +58,6 @@ fn parse_ms(at: &str) -> i64 {
     digits.parse::<i64>().expect("at")
 }
 
-enum Outcome {
-    Passed,
-    Pending(&'static str),
-}
-
 /// 実際のストアに同じ手順を当てる鏡 (書き込みの入口 `facts.rs` を通る)。
 mod db {
     use std::collections::{BTreeMap, BTreeSet};
@@ -73,13 +68,20 @@ mod db {
     use evorag_store::{Envelope, OpenOptions, Store, WriteOp, WriteRequest, Writer, WriterHandle};
     use evorag_types::{Id, IdGen, ManualClock, Timestamp, UuidV7Gen};
 
-    use crate::facts::{FactCtx, add_directive, consolidate, load_facts, rebuild};
-    use crate::fold::{DirectiveKind, Event, FactSet};
+    use evorag_store::{BodyPatch, Read};
+
+    use crate::facts::{FactCtx, add_directive, consolidate, load_directives, load_facts, rebuild};
+    use crate::fold::{DirectiveKind, Event, FactSet, FactState};
+    use crate::forget::{
+        ForgetAbort, ForgetEnv, ForgetOptions, ForgetPlan, Replay, plan_forget, replay_forgets,
+    };
     use crate::gates::Safety;
     use crate::kinds::{
-        KIND_SESSION, KIND_TURN, LOOKUP_UPDATED_AT, REL_IN_SESSION, SessionBody, SessionState,
-        TurnBody, TurnRole, TurnState,
+        KIND_SESSION, KIND_TURN, LOOKUP_UPDATED_AT, REL_IN_SESSION, REL_REPLY_TO, SessionBody,
+        SessionState, TurnBody, TurnRole, TurnState,
     };
+    use crate::mask::{Masker, TurnText};
+    use crate::value_key::BlockMark;
 
     use super::id_at;
 
@@ -153,9 +155,17 @@ mod db {
                 .expect("write facts");
         }
 
-        /// 発話のターンを書く (書き込みの入口が、出典の改訂の番号を今のターンと突き合わせるため)。
-        /// セッションが無ければ作る (セッションの削除が、関係からターンをたどるため)。
-        pub fn add_turn(&mut self, id: Id, session: Id, text: &str) {
+        /// ターンを書く (書き込みの入口が、出典の改訂の番号を今のターンと突き合わせるため)。応答は `reply_to`
+        /// (同じセッションの直前の発話) を持つ。セッションが無ければ作る (セッションの削除が、関係からターンを
+        /// たどるため)。
+        pub fn add_turn(
+            &mut self,
+            id: Id,
+            session: Id,
+            text: &str,
+            role: TurnRole,
+            reply_to: Option<Id>,
+        ) {
             let mut ops = Vec::new();
             if self.sessions.insert(session) {
                 let mut s = Envelope::new(session, KIND_SESSION, 1, NOW, "");
@@ -177,13 +187,13 @@ mod db {
             let mut e = Envelope::new(id, KIND_TURN, 1, NOW, "");
             e.set_body(&TurnBody {
                 session,
-                role: TurnRole::User,
+                role,
                 state: TurnState::Confirmed,
                 text: text.to_owned(),
                 model_key: None,
                 generation: None,
                 attached: Vec::new(),
-                reply_to: None,
+                reply_to,
                 error: None,
                 recall: None,
                 obs: None,
@@ -196,7 +206,178 @@ mod db {
                 to: session,
                 attrs: Vec::new(),
             });
+            if let Some(u) = reply_to {
+                ops.push(WriteOp::PutLink {
+                    from: id,
+                    rel: REL_REPLY_TO.into(),
+                    to: u,
+                    attrs: Vec::new(),
+                });
+            }
             self.submit(ops);
+        }
+
+        /// ターンの本文を、規則を通さずに書き換える (改訂の番号は変えない。中止の試験だけに使う)。
+        pub fn tamper(&self, id: Id, text: &str) {
+            self.submit(vec![WriteOp::Patch {
+                kind: KIND_TURN.into(),
+                id,
+                fields: BodyPatch::new().set("text", &text).expect("patch"),
+                updated_at: None,
+            }]);
+        }
+
+        fn forget_env<'k>(&'k self, key: &'k ForgetKey) -> ForgetEnv<'k> {
+            ForgetEnv {
+                key,
+                attributes: attributes(),
+                marker: "[伏せ字]",
+                hidden_marker: "[非表示]",
+                ids: &self.ids,
+                now: NOW,
+            }
+        }
+
+        /// 指した値の行 (今の値か `Contested` の値) の参照。
+        fn row(&self, target: (&str, &str, ValueKey)) -> evorag_types::api::FactKey {
+            let set = self.facts();
+            let fact = set
+                .facts
+                .iter()
+                .find(|f| {
+                    f.subject == target.0
+                        && f.attribute == target.1
+                        && f.vk == Some(target.2)
+                        && matches!(f.state, FactState::Live | FactState::Contested { .. })
+                })
+                .expect("the target row");
+            crate::view::row_key(fact).expect("a row")
+        }
+
+        /// 忘れる (計画を作って書く)。中止なら何も書かない。
+        pub fn forget(
+            &mut self,
+            key: &ForgetKey,
+            pure_id: Id,
+            target: (&str, &str, ValueKey),
+            options: ForgetOptions,
+        ) -> Result<ForgetPlan, ForgetAbort> {
+            let row = self.row(target);
+            let plan = {
+                let tx = self.store.read().expect("read");
+                plan_forget(&tx, &self.forget_env(key), &row, options).expect("plan")
+            }?;
+            // 見本と実行で、同じ読み取りからは同じ計画になる (ハッシュが同じ)。
+            let again = {
+                let tx = self.store.read().expect("read");
+                plan_forget(&tx, &self.forget_env(key), &row, options)
+                    .expect("plan")
+                    .expect("the same plan")
+            };
+            assert_eq!(again.hash, plan.hash, "the plan hash is stable");
+            self.submit(plan.ops.clone());
+            self.directives.insert(pure_id, plan.directive);
+            Ok(plan)
+        }
+
+        /// 忘れるの当て直しを当てる。
+        pub fn replay(&self, key: &ForgetKey) -> Replay {
+            let r = {
+                let tx = self.store.read().expect("read");
+                replay_forgets(&tx, &self.forget_env(key)).expect("replay")
+            };
+            if r.changed() {
+                self.submit(r.ops.clone());
+            }
+            r
+        }
+
+        /// `from` の記録 (忘れるの指示と伏せ字にしたターン) を、ジャーナルの取り込みのように丸ごと書く。
+        pub fn import(&mut self, from: &Db, records: &[(&str, Id)], pure_id: Id, directive: Id) {
+            let ops: Vec<WriteOp> = {
+                let tx = from.store.read().expect("read");
+                records
+                    .iter()
+                    .filter_map(|(kind, id)| match tx.get(kind, *id).expect("get") {
+                        Some(Read::Ok(e)) => Some(WriteOp::Put(e)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            // 取り込みは関係と副索引を本体から作り直す (`derive`)。
+            let mut all = Vec::new();
+            for op in ops {
+                if let WriteOp::Put(e) = &op
+                    && e.kind == crate::facts::KIND_FACT_DIRECTIVE
+                {
+                    all.extend(crate::facts::derive_directive(e));
+                }
+                all.push(op);
+            }
+            self.submit(all);
+            self.directives.insert(pure_id, directive);
+        }
+
+        /// ターンの本文と改訂の番号。
+        pub fn turn(&self, id: Id) -> (String, u32) {
+            self.turn_opt(id)
+                .unwrap_or_else(|| panic!("turn {id} is missing"))
+        }
+
+        /// ターンの本文と改訂の番号 (消えたターンは `None`)。
+        pub fn turn_opt(&self, id: Id) -> Option<(String, u32)> {
+            let tx = self.store.read().expect("read");
+            match tx.get(KIND_TURN, id).expect("get") {
+                Some(Read::Ok(e)) => Some((
+                    e.body_as::<TurnBody>().expect("turn").text,
+                    crate::extract::turn_rev(&e),
+                )),
+                None => None,
+                other => panic!("turn {id}: {other:?}"),
+            }
+        }
+
+        /// 想起で添えるときの本文 (往復 `exchange` の `turn` のもの)。
+        pub fn recall_text(&self, exchange: &[Id], turn: Id) -> String {
+            let texts: Vec<(Id, String, u32)> = exchange
+                .iter()
+                .map(|t| {
+                    let (text, rev) = self.turn(*t);
+                    (*t, text, rev)
+                })
+                .collect();
+            let tx = self.store.read().expect("read");
+            let m = Masker::load(&tx, "[伏せ字]").expect("masker");
+            let view: Vec<TurnText<'_>> = texts
+                .iter()
+                .map(|(id, text, rev)| TurnText {
+                    id: *id,
+                    rev: *rev,
+                    text,
+                })
+                .collect();
+            let masked = m.mask(&view, "[非表示]");
+            let i = exchange
+                .iter()
+                .position(|t| *t == turn)
+                .expect("in exchange");
+            masked[i].clone()
+        }
+
+        /// 効いている再び覚えない印 (印を解いた指示を除く)。
+        pub fn active_marks(&self) -> BTreeSet<BlockMark> {
+            let tx = self.store.read().expect("read");
+            let dirs = load_directives(&tx).expect("directives");
+            dirs.iter()
+                .filter(|d| !dirs.is_unblocked(d.id))
+                .filter_map(|d| match &d.kind {
+                    DirectiveKind::Forget { marks } | DirectiveKind::Unknown { marks } => {
+                        Some(marks.clone())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect()
         }
 
         /// セッションを消す (書き込みの入口を通して、事実の出典も外す、04 §7.1)。
@@ -251,6 +432,9 @@ mod db {
         ) {
             let kind = match kind {
                 DirectiveKind::PrivateOff { target } => DirectiveKind::PrivateOff {
+                    target: self.directives[&target],
+                },
+                DirectiveKind::Unblock { target } => DirectiveKind::Unblock {
                     target: self.directives[&target],
                 },
                 k => k,
@@ -333,6 +517,10 @@ struct Runner {
     seq: u64,
     last_ms: i64,
     turns: BTreeMap<String, (Id, String)>,
+    /// ターンの ID → 往復 (利用者の発話と、それへの応答)。
+    exchanges: BTreeMap<Id, Vec<Id>>,
+    /// セッションの名前 → 最後の利用者の発話 (応答の `reply_to`)。
+    last_user: BTreeMap<String, Id>,
     /// セッションの名前 → ID と、そのターン。
     sessions: BTreeMap<String, (Id, BTreeSet<Id>)>,
     set: FactSet,
@@ -341,21 +529,37 @@ struct Runner {
     history: Vec<Event>,
     batch: Vec<Event>,
     db: db::Db,
+    /// 忘れるの鏡: 忘れるの指示と伏せ字にしたターンの行だけを取り込み、当て直しで同じ結果になるかを確かめる。
+    mirror: Option<db::Db>,
+    /// 直前の操作が中止された。
+    aborted: bool,
 }
 
 impl Runner {
-    fn new() -> Self {
+    fn new(mirror: bool) -> Self {
         Self {
             key: ForgetKey::from_bytes([1; 32]),
             seq: 0,
             last_ms: 0,
             turns: BTreeMap::new(),
+            exchanges: BTreeMap::new(),
+            last_user: BTreeMap::new(),
             sessions: BTreeMap::new(),
             set: FactSet::default(),
             dirs: Directives::default(),
             history: Vec::new(),
             batch: Vec::new(),
             db: db::Db::new(),
+            mirror: mirror.then(db::Db::new),
+            aborted: false,
+        }
+    }
+
+    /// 本体と鏡の両方のストアに当てる。
+    fn both(&mut self, mut f: impl FnMut(&mut db::Db)) {
+        f(&mut self.db);
+        if let Some(m) = self.mirror.as_mut() {
+            f(m);
         }
     }
 
@@ -386,8 +590,11 @@ impl Runner {
         }
         let batch = std::mem::take(&mut self.batch);
         self.history.extend(batch.iter().cloned());
-        self.db.ids.at(self.last_ms);
-        self.db.consolidate(&self.key, batch.clone());
+        let (ms, key) = (self.last_ms, self.key.clone());
+        self.both(|d| {
+            d.ids.at(ms);
+            d.consolidate(&key, batch.clone());
+        });
         let mut set = std::mem::take(&mut self.set);
         self.fold_events(&mut set, batch);
         self.set = set;
@@ -399,8 +606,11 @@ impl Runner {
         if reverse {
             events.reverse();
         }
-        self.db.ids.at(self.last_ms);
-        self.db.rebuild(&self.key, events.clone());
+        let (ms, key) = (self.last_ms, self.key.clone());
+        self.both(|d| {
+            d.ids.at(ms);
+            d.rebuild(&key, events.clone());
+        });
         events.extend(self.dirs.choices());
         let mut set = FactSet::default();
         self.fold_events(&mut set, events);
@@ -427,30 +637,137 @@ impl Runner {
             .expect("a directive to cancel")
     }
 
-    fn step(&mut self, id: &str, step: &Value) -> Result<(), Outcome> {
+    /// 効いている再び覚えない印 (純粋な核の側)。
+    fn active_marks(&self) -> BTreeSet<BlockMark> {
+        self.dirs
+            .iter()
+            .filter(|d| !self.dirs.is_unblocked(d.id))
+            .filter_map(|d| match &d.kind {
+                DirectiveKind::Forget { marks } => Some(marks.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// 忘れる (04 §7.1)。ストアの側で中止されたら、純粋な核の側も変えない。
+    fn forget(&mut self, id: &str, did: Id, body: &Value) {
+        let (subject, attribute, vk) = self.target(body);
+        let vk = vk.expect("a value");
+        let flag = |k: &str, d: bool| body.get(k).and_then(Value::as_bool).unwrap_or(d);
+        let options = ForgetOptions {
+            redact: flag("redact", true),
+            history: flag("history", false),
+            echo: flag("echo", true),
+            others: flag("others", false),
+        };
+        self.db.ids.at(self.last_ms);
+        let plan = match self
+            .db
+            .forget(&self.key, did, (&subject, &attribute, vk), options)
+        {
+            Ok(p) => p,
+            Err(_) => {
+                self.aborted = true;
+                return;
+            }
+        };
+        // 2 回目の当て直しは何も変えない (apply_forget の冪等、AC-FR-307-4)。
+        let again = self.db.replay(&self.key);
+        assert!(
+            !again.changed(),
+            "{id}: replaying right after the forget must change nothing: {again:?}"
+        );
+        // 鏡: 指示と伏せ字にしたターンだけを取り込み、当て直す。
+        if let Some(m) = self.mirror.as_mut() {
+            let mut records: Vec<(&str, Id)> =
+                vec![(crate::facts::KIND_FACT_DIRECTIVE, plan.directive)];
+            records.extend(plan.redacted_turns.iter().map(|t| (KIND_TURN, *t)));
+            m.ids.at(self.last_ms);
+            m.import(&self.db, &records, did, plan.directive);
+            let first = m.replay(&self.key);
+            assert!(
+                first.mismatched.is_empty(),
+                "{id}: no mismatched turns: {first:?}"
+            );
+            let second = m.replay(&self.key);
+            assert!(!second.changed(), "{id}: the mirror replay is idempotent");
+        }
+        let fact = self
+            .set
+            .facts
+            .iter()
+            .find(|f| {
+                f.subject == subject
+                    && f.attribute == attribute
+                    && f.vk == Some(vk)
+                    && matches!(f.state, FactState::Live | FactState::Contested { .. })
+            })
+            .unwrap_or_else(|| panic!("{id}: the target in the pure core"))
+            .id;
+        forget_in_core(
+            &mut self.set,
+            &mut self.dirs,
+            &self.key,
+            attributes(),
+            fact,
+            options.history,
+            did,
+        );
+        // 伏せ字にしたターンの候補と訂正は、作り直しでは出典の改訂の番号が合わずに捨てられる (書き込みの入口)。
+        let redacted: BTreeSet<Id> = plan.redacted_turns.iter().copied().collect();
+        self.history.retain(|e| match e {
+            Event::Candidate(c) => !redacted.contains(&c.source.turn),
+            Event::Correction(c) => !redacted.contains(&c.source().turn),
+            Event::Choose { .. } => true,
+        });
+    }
+
+    fn step(&mut self, id: &str, step: &Value) {
         let (name, body) = step.as_table().expect("table").iter().next().expect("one");
+        if name != "expect" {
+            self.aborted = false;
+        }
         match name.as_str() {
             "turn" => {
                 self.flush();
                 let ms = parse_ms(s(body, "at").expect("at"));
                 self.last_ms = ms;
                 let tid = self.next_id(ms);
-                let text = s(body, "text").expect("text");
+                let text = s(body, "text").expect("text").to_owned();
                 let name = s(body, "session").unwrap_or("default").to_owned();
                 let sid = match self.sessions.get(&name) {
                     Some((sid, _)) => *sid,
                     None => self.next_id(ms),
                 };
                 self.sessions
-                    .entry(name)
+                    .entry(name.clone())
                     .or_insert_with(|| (sid, BTreeSet::new()))
                     .1
                     .insert(tid);
-                self.db.add_turn(tid, sid, text);
-                self.turns.insert(
-                    s(body, "id").expect("id").to_owned(),
-                    (tid, text.to_owned()),
-                );
+                let (role, reply_to) = match s(body, "role").unwrap_or("user") {
+                    "assistant" => (TurnRole::Assistant, self.last_user.get(&name).copied()),
+                    _ => {
+                        self.last_user.insert(name, tid);
+                        (TurnRole::User, None)
+                    }
+                };
+                match reply_to {
+                    Some(u) => {
+                        let ex = self.exchanges.entry(u).or_insert_with(|| vec![u]);
+                        ex.push(tid);
+                        let ex = ex.clone();
+                        for t in &ex {
+                            self.exchanges.insert(*t, ex.clone());
+                        }
+                    }
+                    None => {
+                        self.exchanges.insert(tid, vec![tid]);
+                    }
+                }
+                self.both(|d| d.add_turn(tid, sid, &text, role, reply_to));
+                self.turns
+                    .insert(s(body, "id").expect("id").to_owned(), (tid, text));
             }
             "candidate" => {
                 let (turn, text) = self.turns[s(body, "turn").expect("turn")].clone();
@@ -508,20 +825,28 @@ impl Runner {
                 );
                 self.batch.push(Event::Correction(c));
             }
+            "tamper" => {
+                self.flush();
+                let (turn, _) = self.turns[s(body, "id").expect("id")].clone();
+                let text = s(body, "text").expect("text").to_owned();
+                self.both(|d| d.tamper(turn, &text));
+            }
             "op" => {
                 self.flush();
                 let kind = s(body, "kind").expect("kind");
                 let did = self.next_id(self.last_ms);
                 match kind {
-                    "forget" => return Err(Outcome::Pending("M3.4: forget")),
+                    "forget" => self.forget(id, did, body),
                     "delete_session" => {
                         let name = s(body, "session").expect("session");
                         let (sid, gone) = self.sessions.remove(name).expect("a known session");
-                        self.db.ids.at(self.last_ms);
-                        self.db.delete_session(sid);
+                        let ms = self.last_ms;
+                        self.both(|d| {
+                            d.ids.at(ms);
+                            d.delete_session(sid);
+                        });
                         let is_gone = |t: Id| gone.contains(&t);
                         let mut seq = self.seq;
-                        let ms = self.last_ms;
                         let mut new_id = || {
                             seq += 1;
                             id_at(ms, seq)
@@ -556,13 +881,11 @@ impl Runner {
                             "accept" => DirectiveKind::Accept,
                             _ => DirectiveKind::Revert,
                         };
-                        self.db.ids.at(self.last_ms);
-                        self.db.add_directive(
-                            &self.key,
-                            did,
-                            dk.clone(),
-                            (&subject, &attribute, vk),
-                        );
+                        let (ms, key) = (self.last_ms, self.key.clone());
+                        self.both(|d| {
+                            d.ids.at(ms);
+                            d.add_directive(&key, did, dk.clone(), (&subject, &attribute, vk));
+                        });
                         self.dirs.push(Directive {
                             id: did,
                             kind: dk,
@@ -589,27 +912,35 @@ impl Runner {
                             self.set = set;
                         }
                     }
-                    "private_off" => {
-                        let target = self
-                            .find_directive(|k| matches!(k, DirectiveKind::Private { .. }), body);
+                    "private_off" | "unblock" => {
+                        let target = if kind == "unblock" {
+                            self.find_directive(|k| matches!(k, DirectiveKind::Forget { .. }), body)
+                        } else {
+                            self.find_directive(
+                                |k| matches!(k, DirectiveKind::Private { .. }),
+                                body,
+                            )
+                        };
+                        let dk = if kind == "unblock" {
+                            DirectiveKind::Unblock { target }
+                        } else {
+                            DirectiveKind::PrivateOff { target }
+                        };
                         let (subject, attribute, vk) = self.target(body);
-                        self.db.ids.at(self.last_ms);
-                        self.db.add_directive(
-                            &self.key,
-                            did,
-                            DirectiveKind::PrivateOff { target },
-                            (&subject, &attribute, vk),
-                        );
+                        let (ms, key) = (self.last_ms, self.key.clone());
+                        self.both(|d| {
+                            d.ids.at(ms);
+                            d.add_directive(&key, did, dk.clone(), (&subject, &attribute, vk));
+                        });
                         self.dirs.push(Directive {
                             id: did,
-                            kind: DirectiveKind::PrivateOff { target },
+                            kind: dk,
                             subject,
                             attribute,
                             vk,
                         });
                         refresh_private(&mut self.set, &self.dirs);
                     }
-                    "unblock" => return Err(Outcome::Pending("M3.4: forget")),
                     other => panic!("{id}: unknown op `{other}`"),
                 }
             }
@@ -617,10 +948,8 @@ impl Runner {
                 self.flush();
                 self.check(id, body);
             }
-            "tamper" => return Err(Outcome::Pending("M3.4: forget")),
             other => panic!("{id}: unknown step `{other}`"),
         }
-        Ok(())
     }
 
     fn turn_name(&self, tid: Id) -> String {
@@ -631,14 +960,13 @@ impl Runner {
             .expect("a known turn")
     }
 
-    /// 事実を、期待と同じ形の文字列の並び (整列済み) にする。重複も見えるように集合にしない。
-    fn describe(&self, set: &FactSet) -> Vec<String> {
-        let value_of = |fid: Id| {
-            set.facts
-                .iter()
-                .find(|f| f.id == fid)
-                .and_then(|f| f.value.clone())
-                .unwrap_or_else(|| "(deleted)".into())
+    /// 事実を、期待と同じ形の文字列の並び (整列済み) にする。重複も見えるように集合にしない。`spans` なら出典の
+    /// 範囲と改訂の番号も書く (鏡との比べ)。
+    fn describe_with(&self, set: &FactSet, spans: bool) -> Vec<String> {
+        let value_of = |fid: Id| match set.facts.iter().find(|f| f.id == fid) {
+            Some(f) if f.state == FactState::Retracted => "(retracted)".to_owned(),
+            Some(f) => f.value.clone().unwrap_or_default(),
+            None => "(deleted)".to_owned(),
         };
         let mut out: Vec<String> = set
             .facts
@@ -661,8 +989,18 @@ impl Runner {
                     Tense::Past => "past",
                     Tense::Planned => "planned",
                 };
-                let sources: BTreeSet<String> =
-                    f.sources.iter().map(|s| self.turn_name(s.turn)).collect();
+                let sources: BTreeSet<String> = f
+                    .sources
+                    .iter()
+                    .map(|s| {
+                        let name = self.turn_name(s.turn);
+                        if spans {
+                            format!("{name}@{}:{}-{}", s.rev, s.start, s.end)
+                        } else {
+                            name
+                        }
+                    })
+                    .collect();
                 format!(
                     "{}/{}/{} {state}{extra} tn={tense} private={} sources={sources:?}",
                     f.subject,
@@ -674,6 +1012,10 @@ impl Runner {
             .collect();
         out.sort();
         out
+    }
+
+    fn describe(&self, set: &FactSet) -> Vec<String> {
+        self.describe_with(set, false)
     }
 
     /// 束の分け方に依らないこと: それまでの出来事を位置の順に並べ、1 件ずつ別の束で当てても、
@@ -695,6 +1037,20 @@ impl Runner {
         );
     }
 
+    fn marks_of(&self, list: &[Value]) -> BTreeSet<BlockMark> {
+        list.iter()
+            .map(|m| {
+                let vk = value_key(&self.key, s(m, "v").expect("v"));
+                block_mark(
+                    &self.key,
+                    &normalize_v1(s(m, "s").expect("s")),
+                    s(m, "a").expect("a"),
+                    &vk,
+                )
+            })
+            .collect()
+    }
+
     fn check(&self, id: &str, body: &Value) {
         // 実際のストアを通した結果も、純粋な核と同じ (書き込みの入口の差と写しの検査)。
         self.db.check_indexes(id);
@@ -704,6 +1060,18 @@ impl Runner {
             self.describe(&self.set),
             "{id}: the store must hold what the pure core holds"
         );
+        // 鏡 (指示と伏せ字の行だけを取り込んで当て直したストア) も、事実 (出典の範囲と番号まで) とターンが同じ。
+        if let Some(m) = &self.mirror {
+            m.check_indexes(id);
+            assert_eq!(
+                self.describe_with(&m.facts(), true),
+                self.describe_with(&stored, true),
+                "{id}: replaying the directive must give the same facts"
+            );
+            for (tid, _) in self.turns.values() {
+                assert_eq!(m.turn_opt(*tid), self.db.turn_opt(*tid), "{id}: turn {tid}");
+            }
+        }
         let names = |set: &FactSet| -> Vec<String> {
             table_order(set, attributes())
                 .into_iter()
@@ -715,6 +1083,9 @@ impl Runner {
             names(&self.set),
             "{id}: table order in the store"
         );
+        if let Some(a) = body.get("aborted").and_then(Value::as_bool) {
+            assert_eq!(self.aborted, a, "{id}: aborted");
+        }
         if let Some(facts) = body.get("facts").and_then(Value::as_array) {
             // 実際の事実を、期待と同じ形の文字列にして、並び (重複を含む) として比べる。
             let actual = self.describe(&self.set);
@@ -768,43 +1139,61 @@ impl Runner {
                 .collect();
             assert_eq!(actual, expected, "{id}: table");
         }
+        if let Some(turns) = body.get("turns").and_then(Value::as_array) {
+            for t in turns {
+                let (tid, _) = &self.turns[s(t, "id").expect("id")];
+                assert_eq!(
+                    self.db.turn(*tid).0,
+                    s(t, "text").expect("text"),
+                    "{id}: the text of turn {}",
+                    s(t, "id").unwrap_or_default()
+                );
+            }
+        }
+        if let Some(recall) = body.get("recall").and_then(Value::as_array) {
+            for t in recall {
+                let (tid, _) = &self.turns[s(t, "turn").expect("turn")];
+                let exchange = &self.exchanges[tid];
+                assert_eq!(
+                    self.db.recall_text(exchange, *tid),
+                    s(t, "text").expect("text"),
+                    "{id}: the recalled text of turn {}",
+                    s(t, "turn").unwrap_or_default()
+                );
+            }
+        }
+        if let Some(blocked) = body.get("blocked").and_then(Value::as_array) {
+            let want = self.marks_of(blocked);
+            assert_eq!(self.active_marks(), want, "{id}: blocked (pure core)");
+            assert_eq!(self.db.active_marks(), want, "{id}: blocked (store)");
+        }
     }
+}
+
+/// 事例を走らせる。通った数を返す。
+fn run_cases(file: &str, mirror: bool) -> usize {
+    let mut passed = 0;
+    for case in cases(file) {
+        let id = s(&case, "id").expect("id").to_owned();
+        let mut r = Runner::new(mirror);
+        for step in case["step"].as_array().expect("steps") {
+            r.step(&id, step);
+        }
+        r.check_batch_independence(&id);
+        passed += 1;
+    }
+    passed
 }
 
 #[test]
 fn consolidation_cases_hold_on_the_pure_core() {
-    let mut pending = BTreeSet::new();
-    let mut passed = 0;
-    for case in cases() {
-        let id = s(&case, "id").expect("id").to_owned();
-        let mut r = Runner::new();
-        let mut outcome = Outcome::Passed;
-        for step in case["step"].as_array().expect("steps") {
-            if let Err(o) = r.step(&id, step) {
-                outcome = o;
-                break;
-            }
-        }
-        match outcome {
-            Outcome::Passed => {
-                assert!(
-                    !PENDING.iter().any(|(p, _)| *p == id),
-                    "{id} passes now: remove it from PENDING"
-                );
-                r.check_batch_independence(&id);
-                passed += 1;
-            }
-            Outcome::Pending(why) => {
-                let listed = PENDING.iter().find(|(p, _)| *p == id);
-                assert_eq!(listed.map(|l| l.1), Some(why), "{id}: pending for `{why}`");
-                pending.insert(id);
-            }
-        }
-    }
-    let listed: BTreeSet<String> = PENDING.iter().map(|(p, _)| (*p).to_owned()).collect();
-    assert_eq!(
-        pending, listed,
-        "PENDING must match the cases that need later steps"
-    );
-    assert!(passed >= 29, "passed {passed}");
+    let passed = run_cases("consolidation.toml", false);
+    assert!(passed >= 33, "passed {passed}");
+}
+
+/// verifies: 04 §7.1〜§7.3・§7.5 (忘れるの回帰ケース F01〜F15)、AC-FR-307-4、AC-FR-307-5
+#[test]
+fn forget_cases_hold_in_the_store_and_replay_the_same() {
+    let passed = run_cases("forget.toml", true);
+    assert_eq!(passed, 15, "passed {passed}");
 }

@@ -2316,7 +2316,7 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
             continue;
         };
         let new = if recall::indexable(&body) {
-            recall::chunk_bodies(id, &body)
+            recall::chunk_bodies(id, rev, &body)
         } else {
             Vec::new()
         };

@@ -728,7 +728,7 @@ async fn a_verified_correction_replaces_the_live_value() {
     );
     assert_eq!(c.pattern, "{old}じゃなくて{new}");
     assert_eq!(c.dir_old.as_deref(), Some("大阪"));
-    assert_eq!(c.dir_new, "東京");
+    assert_eq!(c.dir_new.as_deref(), Some("東京"));
     assert_eq!(
         (c.target.as_deref(), c.old.as_deref(), c.new.as_deref()),
         (Some("fact"), Some("大阪"), Some("東京"))

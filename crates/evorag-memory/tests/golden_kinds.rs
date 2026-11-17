@@ -232,6 +232,7 @@ fn chunk_v1() {
             start: 0,
             end: 398,
             rules: 1,
+            src_rev: Some(1),
         },
     );
 }
@@ -248,6 +249,7 @@ fn embedding_v1() {
             model_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
             dim: 1024,
             key: None,
+            src_rev: Some(1),
         },
     );
 }
@@ -285,6 +287,7 @@ fn job_v1() {
         JobBody {
             task: JOB_PURGE_BACKUPS.into(),
             ids: vec![id("019a6a2b-0000-7000-8000-000000000001")],
+            directive: None,
         },
     );
 }
@@ -334,6 +337,7 @@ fn fact_directive_v1() {
             target: None,
             scope: None,
             marks: vec!["cd".repeat(32)],
+            vks: vec!["ab".repeat(32)],
             turns: vec![id("019a6a2b-0000-7000-8000-000000000002")],
             redactions: vec![RedactionBody {
                 turn: id("019a6a2b-0000-7000-8000-000000000002"),
@@ -368,7 +372,7 @@ fn correction_v1() {
             previous: Some(id("019a6a2b-0000-7000-8000-000000000003")),
             pattern: "{old}じゃなくて{new}".into(),
             dir_old: Some("見本の村".into()),
-            dir_new: "見本の町".into(),
+            dir_new: Some("見本の町".into()),
             checked: true,
             rejected: None,
             target: Some("fact".into()),

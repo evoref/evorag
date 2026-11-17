@@ -59,8 +59,9 @@ pub(crate) fn indexable(b: &TurnBody) -> bool {
     !b.text.trim().is_empty() && b.state != TurnState::Failed && b.role != TurnRole::System
 }
 
-/// ターンの本文から、チャンクの本体を作る (05 §2.4)。
-pub(crate) fn chunk_bodies(turn: Id, b: &TurnBody) -> Vec<ChunkBody> {
+/// ターンの本文 (改訂の番号 `rev`) から、チャンクの本体を作る (05 §2.4)。作ったときの改訂の番号を `src_rev` に
+/// 持つ (03 §3.3)。
+pub(crate) fn chunk_bodies(turn: Id, rev: u32, b: &TurnBody) -> Vec<ChunkBody> {
     evorag_retrieval::chunk::split(&b.text)
         .into_iter()
         .map(|s| ChunkBody {
@@ -69,6 +70,7 @@ pub(crate) fn chunk_bodies(turn: Id, b: &TurnBody) -> Vec<ChunkBody> {
             start: s.start as u32,
             end: s.end as u32,
             rules: evorag_retrieval::chunk::CHUNK_RULES_VERSION,
+            src_rev: Some(rev),
         })
         .collect()
 }
@@ -195,11 +197,14 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
         return SyncPlan::default();
     };
     let mut turns: HashMap<Id, TurnBody> = HashMap::new();
+    let mut revs: HashMap<Id, u32> = HashMap::new();
     let _ = rtx.for_each(KIND_TURN, |r| {
         if let Read::Ok(e) = r
             && let Ok(b) = e.body_as::<TurnBody>()
             && indexable(&b)
+            && let Some(rev) = evorag_memory::turn_rev_checked(&e)
         {
+            revs.insert(e.id, rev);
             turns.insert(e.id, b);
         }
         true
@@ -240,7 +245,12 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
     let mut covered: HashSet<Id> = HashSet::new();
     for (id, c) in chunks {
         match turns.get(&c.turn) {
-            Some(t) if c.rules == evorag_retrieval::chunk::CHUNK_RULES_VERSION => {
+            // 伏せ字の前の本文から作ったチャンク (出典の改訂の番号が今と合わない) は使わずに作り直す
+            // (04 §7.7 の 1)。
+            Some(t)
+                if c.rules == evorag_retrieval::chunk::CHUNK_RULES_VERSION
+                    && revs.get(&c.turn) == Some(&c.src_rev()) =>
+            {
                 covered.insert(c.turn);
                 plan.keep.push(chunk_doc(id, &c, &t.text));
             }
@@ -249,7 +259,7 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
     }
     for (id, t) in &turns {
         if !covered.contains(id) {
-            plan.create.extend(chunk_bodies(*id, t));
+            plan.create.extend(chunk_bodies(*id, revs[id], t));
         }
     }
     plan.texts = turns.into_iter().map(|(id, t)| (id, t.text)).collect();
