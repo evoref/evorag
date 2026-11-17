@@ -243,7 +243,7 @@ fn prefilter_cases_pass() {
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 94);
+    assert_eq!(run_gates(&[]), 95);
 }
 
 #[test]

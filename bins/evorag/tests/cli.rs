@@ -379,6 +379,7 @@ fn export_writes_records_and_the_config_without_api_keys() {
                     model_key: "k".into(),
                     rules: 1,
                     src_revs: Vec::new(),
+                    forgets_seen: None,
                 },
             )
             .unwrap();

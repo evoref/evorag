@@ -110,11 +110,25 @@ impl Masker {
         self.private.is_empty() && self.forgets.is_empty()
     }
 
-    /// ターン `t` の、伏せ字にしないで忘れた `[非表示]` の範囲 (今の本文の位置)。
+    /// ターン `t` の、伏せ字にしないで忘れた `[非表示]` の範囲 (今の本文の位置)。忘れるの指示と合わないターン
+    /// (04 §7.2 の「合わないターン」) は `None`。
     #[must_use]
-    pub fn hidden_ranges(&self, t: &TurnText<'_>) -> Vec<Range<usize>> {
+    pub fn hidden_ranges(&self, t: &TurnText<'_>) -> Option<Vec<Range<usize>>> {
         self.forgets
             .hidden_ranges(t.id, t.text, t.rev, &self.redaction_marker)
+    }
+
+    /// 忘れるの指示と合わないターンか。呼び手は、そのターンを想起・候補の帯・裏の LLM の呼び出し・書き出しから除く
+    /// (04 §7.2)。[`Self::mask`] と [`Self::mask_hidden`] は、念のため本文の全体を伏せる。
+    #[must_use]
+    pub fn excluded(&self, t: &TurnText<'_>) -> bool {
+        self.hidden_ranges(t).is_none()
+    }
+
+    /// 合わないターンなら本文の全体、そうでなければ `[非表示]` の範囲。
+    fn hidden_or_whole(&self, t: &TurnText<'_>) -> Vec<Range<usize>> {
+        self.hidden_ranges(t)
+            .unwrap_or_else(|| std::iter::once(0..t.text.len()).collect())
     }
 
     /// 往復の各ターンの本文に、伏せ字にしないで忘れた範囲だけの置き換えを当てたもの (`exchange` の順)。ノートの
@@ -123,7 +137,7 @@ impl Masker {
     pub fn mask_hidden(&self, exchange: &[TurnText<'_>], marker: &str) -> Vec<String> {
         exchange
             .iter()
-            .map(|t| apply_ranges(t.text, &self.hidden_ranges(t), marker))
+            .map(|t| apply_ranges(t.text, &self.hidden_or_whole(t), marker))
             .collect()
     }
 
@@ -134,7 +148,7 @@ impl Masker {
             return Vec::new();
         };
         let mut out: Vec<Range<usize>> = self
-            .hidden_ranges(t)
+            .hidden_or_whole(t)
             .into_iter()
             .map(|r| widen(t.text, r))
             .collect();

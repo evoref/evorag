@@ -307,7 +307,13 @@ fn check_one<'s>(
 
     // 関門 6・7。根拠の伏せ字の印は、値の関門 6 の後、関門 7 の前に当てる (関門 6 の最後の理由)。
     check_text(env.safety, &raw.value)?;
-    if has_redaction_marker(&raw.evidence) {
+    // 根拠は、LLM の写しと、一致した保存した本文の範囲の両方で見る (正規化の後の照合で通った根拠の印を逃さない)。
+    if has_redaction_marker(&raw.evidence)
+        || utterance
+            .text
+            .get(found.stored.clone())
+            .is_some_and(has_redaction_marker)
+    {
         return Err(GateReason::RedactionMarker);
     }
     check_length(attribute, &raw.value)?;
@@ -413,14 +419,13 @@ fn check_length(attribute: &Attribute, value: &str) -> Result<(), GateReason> {
     Ok(())
 }
 
-/// 伏せ字の印 (`[伏せ字]`・`[redacted]`。プロンプトの言語に関わらず両方) を含むか。NFKC の後で照合する (04 §5.2 の
-/// 関門 6)。
+/// 伏せ字の印 (`[伏せ字]`・`[redacted]`。プロンプトの言語に関わらず両方) を含むか (04 §5.2 の関門 6)。値の鍵の
+/// 正規化 (NFKC と case folding、空白をまとめる) の後で照合する (`[REDACTED]`・全角の括弧も当てる)。
 fn has_redaction_marker(text: &str) -> bool {
-    let text: String = text.nfkc().collect();
-    crate::mask::REDACTION_MARKERS.iter().any(|m| {
-        let m: String = m.nfkc().collect();
-        text.contains(&m)
-    })
+    let text = normalize_v1(text);
+    crate::mask::REDACTION_MARKERS
+        .iter()
+        .any(|m| text.contains(&normalize_v1(m)))
 }
 
 /// 関門 6 を文字列 (値と、`self` 以外の主語の呼び名) に当てる (04 §5.2)。事実の表も、置く行の主語と値に当て直す

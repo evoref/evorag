@@ -40,6 +40,7 @@ use crate::kinds::{
     REL_NOTE_OF, REL_REPLY_TO,
 };
 use crate::mask::apply_ranges;
+use crate::note::note_matches;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
 use crate::value_key::{
@@ -83,7 +84,8 @@ pub struct ForgetEnv<'a> {
     pub marker: &'a str,
     /// `[非表示]` の印 (見本の、伏せ字にしないときの後の本文に使う。[`crate::hidden_marker`])。
     pub hidden_marker: &'a str,
-    /// 指示と job の ID。
+    /// 指示と job の ID。ストアと同じ、単調に増える ID の作り手を渡す (指示の ID はターン・ノートの ID と同じ列で
+    /// 比べる: 当て直しの「指示より前に作ったか」、ノートの `forgets_seen`、04 §5.3 の入力の順)。
     pub ids: &'a dyn IdGen,
     pub now: Timestamp,
 }
@@ -111,6 +113,9 @@ pub enum ForgetAbort {
     StaleSource(Id),
     /// 伏せ字にする範囲の本文の値の鍵が忘れる値と合わない (本文が記録と食い違う)。
     ValueMismatch(Id),
+    /// 伏せ字にするターンが、前の忘れるの指示と合わない (当て直しが済んでいない・指示が欠けている、04 §7.2 の
+    /// 「合わないターン」)。
+    MismatchedTurn(Id),
 }
 
 impl fmt::Display for ForgetAbort {
@@ -121,6 +126,9 @@ impl fmt::Display for ForgetAbort {
             Self::UnreadableTurn(t) => write!(f, "turn {t} cannot be read"),
             Self::StaleSource(t) => write!(f, "the source revision of turn {t} is stale"),
             Self::ValueMismatch(t) => write!(f, "the text of turn {t} does not hold the value"),
+            Self::MismatchedTurn(t) => {
+                write!(f, "turn {t} does not match its earlier forget directives")
+            }
         }
     }
 }
@@ -146,16 +154,28 @@ impl fmt::Debug for PlanHash {
     }
 }
 
-/// 見本の 1 行 (伏せ字か `[非表示]` にするターンの、前と後の本文)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 見本の 1 行 (伏せ字か `[非表示]` にするターンの、前と後の本文)。`Debug` は本文を出さない (ログに忘れる値を
+/// 残さないため)。
+#[derive(Clone, PartialEq, Eq)]
 pub struct ForgetSample {
     pub turn: Id,
     pub before: String,
     pub after: String,
 }
 
+impl fmt::Debug for ForgetSample {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ForgetSample")
+            .field("turn", &self.turn)
+            .field("before_len", &self.before.len())
+            .field("after_len", &self.after.len())
+            .finish()
+    }
+}
+
 /// 見本 (04 §7.1 の「見本と計画」)。値そのものは本文の中にだけある (画面に出す前に、利用者が自分で選んだ値)。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `Debug` は本文を出さない。
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ForgetPreview {
     /// 伏せ字 (か `[非表示]`) にするターンの前と後の本文 (ターンの ID の順)。
     pub samples: Vec<ForgetSample>,
@@ -169,12 +189,35 @@ pub struct ForgetPreview {
     pub affected: Vec<FactKey>,
     /// 根拠の範囲に値の一致が無いので伏せ字にしない出典のターン。
     pub unredacted_sources: Vec<Id>,
+    /// 出典の発話の、根拠の範囲の外で値の鍵が一致した範囲の数 (同じ往復の応答と同じ選択で伏せる)。
+    pub source_outside: usize,
+    /// 位置を戻せないので全体を `[非表示]` にするターンの数 (伏せ字にしないとき)。
+    pub whole_turns: usize,
+    /// 前の忘れるの指示と合わないので飛ばしたターン (伏せ字にしないとき。伏せ字にするときは中止する)。
+    pub mismatched_turns: Vec<Id>,
     /// 探さずに飛ばした読めないターン (読めない記録・`v` が新しい記録) の数。
     pub skipped_unreadable: usize,
 }
 
-/// 忘れるの計画 ([`plan_forget`])。`ops` を 1 つの依頼で書き手に渡す。
-#[derive(Debug, Clone)]
+impl fmt::Debug for ForgetPreview {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ForgetPreview")
+            .field("samples", &self.samples)
+            .field("other_turns", &self.other_turns)
+            .field("other_matches", &self.other_matches)
+            .field("history", &self.history)
+            .field("affected", &self.affected.len())
+            .field("unredacted_sources", &self.unredacted_sources)
+            .field("source_outside", &self.source_outside)
+            .field("whole_turns", &self.whole_turns)
+            .field("mismatched_turns", &self.mismatched_turns)
+            .field("skipped_unreadable", &self.skipped_unreadable)
+            .finish()
+    }
+}
+
+/// 忘れるの計画 ([`plan_forget`])。`ops` を 1 つの依頼で書き手に渡す。`Debug` は本文 (操作の封筒) を出さない。
+#[derive(Clone)]
 pub struct ForgetPlan {
     /// 足す忘れるの指示の ID。
     pub directive: Id,
@@ -197,13 +240,41 @@ pub struct ForgetPlan {
     pub journal: BTreeMap<Id, JournalCut>,
 }
 
-/// 読んだターンの要るところ。
-#[derive(Debug, Clone)]
+impl fmt::Debug for ForgetPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ForgetPlan")
+            .field("directive", &self.directive)
+            .field("ops", &self.ops.len())
+            .field("preview", &self.preview)
+            .field("hash", &self.hash)
+            .field("retracted", &self.retracted)
+            .field("promoted", &self.promoted)
+            .field("derived", &self.derived)
+            .field("redacted_turns", &self.redacted_turns)
+            .field("hidden_turns", &self.hidden_turns)
+            .field("journal", &self.journal)
+            .finish()
+    }
+}
+
+/// 読んだターンの要るところ。`Debug` は本文を出さない。
+#[derive(Clone)]
 struct TurnSnap {
     role: String,
     text: String,
     rev: u32,
     reply_to: Option<Id>,
+}
+
+impl fmt::Debug for TurnSnap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TurnSnap")
+            .field("role", &self.role)
+            .field("text_len", &self.text.len())
+            .field("rev", &self.rev)
+            .field("reply_to", &self.reply_to)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,20 +327,47 @@ fn value_matches(mapped: Option<&Mapped>, needle: &str) -> Vec<Range<usize>> {
     }
 }
 
-/// 本文の全体で、忘れる値のどれかに一致する範囲 (書記素の境界に広げた後)。値の鍵の検査に通らない一致があれば
-/// `None` (本文が記録と食い違う)。
-fn whole_matches(key: &ForgetKey, text: &str, needles: &[Needle]) -> Option<Vec<Range<usize>>> {
-    let mapped = Mapped::new(text);
+/// 本文の全体で、忘れる値を探した結果 ([`whole_matches`])。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Found {
+    /// 一致する範囲 (書記素の境界に広げた後。空なら一致なし)。
+    Ranges(Ranges),
+    /// 一致の値の鍵が合わない (本文が記録と食い違う)。
+    Mismatch,
+    /// 正規化した本文に値はあるが、位置の対応表を作れず範囲を戻せない。
+    Unplaceable,
+}
+
+impl Found {
+    /// 値があるか (位置を戻せたかに関わらず)。
+    fn hit(&self) -> bool {
+        !matches!(self, Found::Ranges(r) if r.is_empty())
+    }
+}
+
+/// 本文の全体で、忘れる値のどれかに一致する範囲 (04 §7.1 の「同じ往復の応答」「ほかのターン」)。
+fn whole_matches(key: &ForgetKey, text: &str, needles: &[Needle]) -> Found {
+    let Some(mapped) = Mapped::new(text) else {
+        let norm = normalize_v1(text);
+        return if needles
+            .iter()
+            .any(|n| !n.norm.is_empty() && norm.contains(&n.norm))
+        {
+            Found::Unplaceable
+        } else {
+            Found::Ranges(Vec::new())
+        };
+    };
     let mut out = Vec::new();
     for n in needles {
-        for h in value_matches(mapped.as_ref(), &n.norm) {
+        for h in value_matches(Some(&mapped), &n.norm) {
             if !checked(key, text, &h, &n.vk) {
-                return None;
+                return Found::Mismatch;
             }
             out.push(widen_to_graphemes(text, h));
         }
     }
-    Some(out)
+    Found::Ranges(out)
 }
 
 /// 本文に、正規化した値が (位置を戻せなくても) 含まれるか。
@@ -531,8 +629,14 @@ fn hash_line(h: &mut Sha256, line: &str) {
 /// - 伏せ字にするときは、出典のターンが読めない・`v` が新しい、出典の改訂の番号が今と合わない、範囲の値の鍵が
 ///   合わない、根拠の範囲に値が無い (本文が記録と食い違う) ときに中止する。見本では、中止の理由を示して伏せ字に
 ///   しない忘れるを勧める (`redact = false` で作り直す)。
-/// - 伏せ字にしないときは中止しない。範囲を求められないターン (読めない・`v` が新しい・番号の合わない出典) には
-///   `[非表示]` の範囲を足さない。
+/// - 伏せ字にしないときは中止しない。範囲を求められないターン (読めない・`v` が新しい・番号の合わない出典、前の
+///   忘れるの指示と合わないターン) には `[非表示]` の範囲を足さない。根拠の範囲に値の一致が無い出典は、根拠の
+///   範囲の全体を、位置を戻せないほかのターンは本文の全体を `[非表示]` にする (private と同じく伏せる側に倒す)。
+/// - 出典の発話の、根拠の範囲の外の一致は、同じ往復の応答と同じ選択 (`echo`) で伏せる。
+///
+/// 書き手の前提は、伏せるターンの改訂の番号だけを確かめる (本文のハッシュは確かめない)。応答の生成中のターンの
+/// 本文が改訂の番号を変えずに書き換わらないよう、呼ぶ側は、どれかのセッションで応答を生成している間は忘れるを
+/// 受け付けない (04 §7.1 の「受け付けないとき」)。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -628,6 +732,11 @@ pub fn plan_forget(
                 .filter(|h| span.start <= h.start && h.end <= span.end)
                 .collect();
             if hits.is_empty() {
+                if !options.redact {
+                    // 伏せ字にしないときは、根拠の範囲の全体を `[非表示]` にする (private と同じ、04 §7.5)。
+                    ranges.push(widen_to_graphemes(&snap.text, span));
+                    continue;
+                }
                 let within = &snap.text[span];
                 if holds_value(within, needle)
                     || crate::mask::REDACTION_MARKERS
@@ -655,7 +764,27 @@ pub fn plan_forget(
                 ranges.push(widen_to_graphemes(&snap.text, h));
             }
         }
-        if usable && !ranges.is_empty() {
+        if !usable {
+            continue;
+        }
+        // 根拠の範囲の外の一致 (同じ往復の応答と同じ選択で伏せる)。
+        match whole_matches(env.key, &snap.text, &needles) {
+            Found::Ranges(all) => {
+                let outside: Vec<Range<usize>> = all
+                    .into_iter()
+                    .filter(|r| !ranges.iter().any(|x| x.start < r.end && r.start < x.end))
+                    .collect();
+                preview.source_outside += outside.len();
+                if options.echo {
+                    ranges.extend(outside);
+                }
+            }
+            Found::Mismatch if options.echo && options.redact => {
+                return Ok(Err(ForgetAbort::ValueMismatch(turn)));
+            }
+            Found::Mismatch | Found::Unplaceable => {}
+        }
+        if !ranges.is_empty() {
             targets.insert(turn, Target { snap, ranges });
         }
     }
@@ -682,11 +811,15 @@ pub fn plan_forget(
         if !options.echo {
             continue;
         }
-        let Some(ranges) = whole_matches(env.key, &snap.text, &needles) else {
-            if options.redact {
+        let ranges = match whole_matches(env.key, &snap.text, &needles) {
+            Found::Ranges(r) => r,
+            Found::Mismatch | Found::Unplaceable if options.redact => {
                 return Ok(Err(ForgetAbort::ValueMismatch(answer)));
             }
-            continue;
+            Found::Mismatch | Found::Unplaceable => {
+                preview.whole_turns += 1;
+                std::iter::once(0..snap.text.len()).collect()
+            }
         };
         if !ranges.is_empty() {
             targets.insert(answer, Target { snap, ranges });
@@ -695,7 +828,7 @@ pub fn plan_forget(
 
     // 3. ほかのターン (すべてのセッションの利用者の発話と応答のうち、上の 2 つに入らないもの)。
     // 一致のあるターンだけを覚える (すべてのターンの本文を持たない)。
-    let mut others: Vec<(Id, TurnSnap, Option<Ranges>)> = Vec::new();
+    let mut others: Vec<(Id, TurnSnap, Found)> = Vec::new();
     tx.for_each(KIND_TURN, |r| {
         match r {
             Read::Ok(e) => {
@@ -705,7 +838,7 @@ pub fn plan_forget(
                 match snap(&e) {
                     Some(s) if s.role == "user" || s.role == "assistant" => {
                         let found = whole_matches(env.key, &s.text, &needles);
-                        if found.as_ref().is_none_or(|r| !r.is_empty()) {
+                        if found.hit() {
                             others.push((e.id, s, found));
                         }
                     }
@@ -718,18 +851,46 @@ pub fn plan_forget(
         true
     })?;
     for (turn, snap, found) in others {
-        let Some(ranges) = found else {
-            if options.redact && options.others {
+        // 位置を戻せない・値の鍵が合わないターンも、ほかのターンの一致として数える。
+        preview.other_turns += 1;
+        let ranges = match found {
+            Found::Ranges(r) => {
+                preview.other_matches += r.len();
+                r
+            }
+            Found::Mismatch | Found::Unplaceable if options.redact && options.others => {
                 return Ok(Err(ForgetAbort::ValueMismatch(turn)));
             }
-            continue;
+            Found::Mismatch | Found::Unplaceable => {
+                if options.others {
+                    preview.whole_turns += 1;
+                }
+                std::iter::once(0..snap.text.len()).collect()
+            }
         };
-        preview.other_turns += 1;
-        preview.other_matches += ranges.len();
         if options.others {
             targets.insert(turn, Target { snap, ranges });
         }
     }
+
+    // 前の忘れるの指示と合わないターン (04 §7.2 の「合わないターン」) は伏せない。伏せ字にするときは中止する。
+    let forgets = TurnForgets::load(tx)?;
+    let mut skipped = Vec::new();
+    for (&turn, t) in &targets {
+        if forgets
+            .marks(turn, &t.snap.text, t.snap.rev, env.marker)
+            .is_none()
+        {
+            if options.redact {
+                return Ok(Err(ForgetAbort::MismatchedTurn(turn)));
+            }
+            skipped.push(turn);
+        }
+    }
+    for turn in &skipped {
+        targets.remove(turn);
+    }
+    preview.mismatched_turns = skipped;
 
     // 4. ターンごとの伏せ字 (または `[非表示]` の範囲)。
     let directive = env.ids.next_id();
@@ -826,9 +987,6 @@ pub fn plan_forget(
                 purge.with_embeddings(tx, KIND_CHUNK, c)?;
             }
         }
-        for q in quarantined_of(tx, &redactions.keys().copied().collect())? {
-            purge.add(KIND_QUARANTINE, q);
-        }
     }
     for &turn in &note_turns {
         for key in note_keys(turn, targets.get(&turn).map(|t| &t.snap)) {
@@ -844,6 +1002,16 @@ pub fn plan_forget(
     }
     for c in corrections_with_values(tx, &vks)? {
         purge.add(KIND_CORRECTION, c);
+    }
+    // 隔離の記録: 伏せ字にするターン・消す派生の記録・取り消す事実のもの (隔離した原文に値が残るため、04 §7.2)。
+    let quarantine_of: BTreeSet<Id> = redactions
+        .keys()
+        .copied()
+        .chain(purge.ids())
+        .chain(forgotten.iter().copied())
+        .collect();
+    for q in quarantined_of(tx, &quarantine_of)? {
+        purge.add(KIND_QUARANTINE, q);
     }
     let derived = purge.ids();
 
@@ -1041,8 +1209,10 @@ struct Step {
 #[derive(Debug, Clone, Default)]
 pub struct TurnForgets {
     turns: BTreeMap<Id, Vec<Step>>,
-    /// 記録した伏せ字・範囲が形として正しくないターン (合わないターンとして扱う)。
-    invalid: BTreeSet<Id>,
+    /// 記録した伏せ字が形として正しくないターン (合わないターンとして扱う)。
+    invalid_redaction: BTreeSet<Id>,
+    /// 記録した `[非表示]` の範囲が形として正しくないターン。
+    invalid_hidden: BTreeSet<Id>,
 }
 
 impl TurnForgets {
@@ -1088,7 +1258,7 @@ impl TurnForgets {
                         ) {
                             Ok(r) if same => Some(r),
                             _ => {
-                                out.invalid.insert(turn);
+                                out.invalid_redaction.insert(turn);
                                 None
                             }
                         }
@@ -1099,7 +1269,7 @@ impl TurnForgets {
                     match HiddenRange::from_stored(h.rev, u64::from(h.start), u64::from(h.end)) {
                         Some(x) => hidden.push(x),
                         None => {
-                            out.invalid.insert(turn);
+                            out.invalid_hidden.insert(turn);
                         }
                     }
                 }
@@ -1126,7 +1296,7 @@ impl TurnForgets {
                     hidden: vec![x],
                 }),
                 None => {
-                    out.invalid.insert(h.turn);
+                    out.invalid_hidden.insert(h.turn);
                 }
             }
         }
@@ -1144,10 +1314,20 @@ impl TurnForgets {
         self.turns.keys().copied()
     }
 
+    /// ターン `turn` に伏せ字の指示があるか (形の正しくないものを含む)。
+    #[must_use]
+    pub fn has_redactions(&self, turn: Id) -> bool {
+        self.invalid_redaction.contains(&turn)
+            || self
+                .turns
+                .get(&turn)
+                .is_some_and(|steps| steps.iter().any(|s| s.redaction.is_some()))
+    }
+
     /// ターン `turn` の伏せ字 (指示の ID の順)。記録が形として正しくなければ `None`。
     #[must_use]
     pub fn redactions(&self, turn: Id) -> Option<Vec<Redaction>> {
-        if self.invalid.contains(&turn) {
+        if self.invalid_redaction.contains(&turn) {
             return None;
         }
         Some(
@@ -1163,7 +1343,7 @@ impl TurnForgets {
     /// ときは `None` (呼び手は、そのターンを「合わないターン」として扱う、04 §7.2)。
     #[must_use]
     pub fn marks(&self, turn: Id, text: &str, rev: u32, marker: &str) -> Option<Vec<Mark>> {
-        if self.invalid.contains(&turn) {
+        if self.invalid_redaction.contains(&turn) || self.invalid_hidden.contains(&turn) {
             return None;
         }
         let Some(steps) = self.turns.get(&turn) else {
@@ -1179,27 +1359,23 @@ impl TurnForgets {
         display_marks(text, rev, &dirs, marker)
     }
 
-    /// ターンの `[非表示]` の範囲 (今の本文の位置)。印の範囲を求められないときは、改訂の番号が今と合う範囲だけを
-    /// そのまま使う (後の伏せ字で写せないので、伏せる側に倒しつつ、本文の外を指さないように収める)。
+    /// ターンの `[非表示]` の範囲 (今の本文の位置)。印の範囲を求められない (合わないターン) ときは `None`: 呼び手は
+    /// そのターンを除く (想起・候補の帯・裏の LLM の呼び出し・書き出し、04 §7.2)。
     #[must_use]
-    pub fn hidden_ranges(&self, turn: Id, text: &str, rev: u32, marker: &str) -> Vec<Range<usize>> {
-        match self.marks(turn, text, rev, marker) {
-            Some(marks) => marks
+    pub fn hidden_ranges(
+        &self,
+        turn: Id,
+        text: &str,
+        rev: u32,
+        marker: &str,
+    ) -> Option<Vec<Range<usize>>> {
+        self.marks(turn, text, rev, marker).map(|marks| {
+            marks
                 .into_iter()
                 .filter(|m| m.kind == MarkKind::Hidden)
                 .map(|m| m.range)
-                .collect(),
-            None => self
-                .turns
-                .get(&turn)
-                .into_iter()
-                .flatten()
-                .flat_map(|s| &s.hidden)
-                .filter(|h| h.rev == rev)
-                .map(|h| h.range.start.min(text.len())..h.range.end.min(text.len()))
-                .filter(|r| !r.is_empty())
-                .collect(),
-        }
+                .collect()
+        })
     }
 
     /// ターン `turn` に掛かる指示の ID (指示の ID の順)。
@@ -1209,6 +1385,21 @@ impl TurnForgets {
             .map(|steps| steps.iter().map(|s| s.directive).collect())
             .unwrap_or_default()
     }
+}
+
+/// 最も新しい忘れるの指示の ID (読める指示のうち)。ノートの `forgets_seen` に、鍵を作る入力を読んだのと同じ
+/// 読み取りで書く。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn latest_forget(tx: &ReadTxn<'_>) -> Result<Option<Id>, MemoryError> {
+    let mut last = None;
+    for_each_directive_body(tx, |id, b| {
+        if b.op == OP_FORGET {
+            last = last.max(Some(id));
+        }
+    })?;
+    Ok(last)
 }
 
 /// 忘れたターンと値の鍵 (04 §6 の「候補を見つける時機」「検証の時機」、§7.5 の「忘れると訂正」)。印を解いた指示も
@@ -1313,18 +1504,29 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
     let mut now_rev: BTreeMap<Id, u32> = BTreeMap::new();
     let mut snaps: BTreeMap<Id, TurnSnap> = BTreeMap::new();
     for turn in forgets.turns() {
+        // 合わないターンにするのは、伏せ字の指示のあるターンだけ (`[非表示]` だけのターンは本文を変えない)。
+        let redacted = forgets.has_redactions(turn);
         let e = match tx.get(KIND_TURN, turn)? {
             None => continue,
             Some(Read::Ok(e)) => e,
             Some(_) => {
-                out.mismatched.push(turn);
+                if redacted {
+                    out.mismatched.push(turn);
+                }
                 continue;
             }
         };
         let Some(s) = snap(&e) else {
-            out.mismatched.push(turn);
+            if redacted {
+                out.mismatched.push(turn);
+            }
             continue;
         };
+        if !redacted {
+            now_rev.insert(turn, s.rev);
+            snaps.insert(turn, s);
+            continue;
+        }
         let Some(steps) = forgets.redactions(turn) else {
             out.mismatched.push(turn);
             now_rev.insert(turn, s.rev);
@@ -1391,7 +1593,21 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
     ops.extend(diff_ops(&before, &set, env.now)?);
     out.retracted = retraction.retracted;
 
-    // 4. 消す派生の記録。
+    // 4. 消す派生の記録。ターンの改訂の番号は当て直しの後のもので読む。
+    let rev_of = |t: Id| -> Option<u32> {
+        if let Some(r) = now_rev.get(&t) {
+            return Some(*r);
+        }
+        match tx.get(KIND_TURN, t) {
+            Ok(Some(Read::Ok(e))) => turn_rev_checked(&e),
+            _ => None,
+        }
+    };
+    let answers_of = |t: Id| -> Vec<Id> {
+        tx.links_to(t, REL_REPLY_TO)
+            .map(|l| l.into_iter().map(|(a, _)| a).collect())
+            .unwrap_or_default()
+    };
     let mut purge = Purge::default();
     let redacted_turns: BTreeSet<Id> = bodies
         .iter()
@@ -1424,19 +1640,14 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
                 }
             }
         }
+        // ノートは、読み出しと同じ判定 (`note_matches`) で、当て直しの後の改訂の番号と合わないものを消す。
         for key in note_keys(turn, snaps.get(&turn)) {
             for (n, _) in tx.links_to(key, REL_NOTE_OF)? {
                 if let Some(Read::Ok(e)) = tx.get(KIND_NOTE, n)?
                     && let Ok(b) = e.body_as::<NoteBody>()
+                    && !note_matches(&b, rev_of, answers_of)
                 {
-                    let made = b
-                        .src_revs
-                        .iter()
-                        .find(|s| s.turn == turn)
-                        .map_or(0, |s| s.rev);
-                    if made != rev {
-                        purge.with_embeddings(tx, KIND_NOTE, n)?;
-                    }
+                    purge.with_embeddings(tx, KIND_NOTE, n)?;
                 }
             }
         }
@@ -1448,12 +1659,10 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
                 purge.add(KIND_CORRECTION, c);
             }
         }
-        for q in quarantined_of(tx, &BTreeSet::from([turn]))? {
-            purge.add(KIND_QUARANTINE, q);
-        }
         attribute_to(&purge, n, &ds, &mut touched);
     }
-    // 伏せ字にしないときの `[非表示]` の範囲を持つ往復のノートと、対象のターンの訂正 (指示より前に作ったもの)。
+    // 伏せ字にしないときの `[非表示]` の範囲を持つ往復のノート (その指示を見ずに作ったもの: `forgets_seen` が無いか
+    // 指示より前) と、対象のターンの訂正 (訂正には読んだ指示の印が無いので、指示より前に作ったもの)。
     for (directive, b) in bodies.iter().filter(|(_, b)| !b.redact) {
         let turns: BTreeSet<Id> = b
             .turns
@@ -1472,7 +1681,14 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
             };
             for key in note_keys(turn, s.as_ref()) {
                 for (note, _) in tx.links_to(key, REL_NOTE_OF)? {
-                    if note < *directive {
+                    let seen = match tx.get(KIND_NOTE, note)? {
+                        Some(Read::Ok(e)) => {
+                            e.body_as::<NoteBody>().ok().and_then(|b| b.forgets_seen)
+                        }
+                        // 読めない (新しい `v` の) ノートは本体を解釈せずに残す。
+                        _ => continue,
+                    };
+                    if seen.is_none_or(|s| s < *directive) {
                         purge.with_embeddings(tx, KIND_NOTE, note)?;
                     }
                 }
@@ -1495,6 +1711,16 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
             purge.add(KIND_CORRECTION, c);
         }
         attribute_to(&purge, n, &[*directive], &mut touched);
+    }
+    // 隔離の記録: 伏せ字の指示のあるターン・消す派生の記録・取り消す事実のもの。
+    let quarantine_of: BTreeSet<Id> = redacted_turns
+        .iter()
+        .copied()
+        .chain(purge.ids())
+        .chain(out.retracted.iter().copied())
+        .collect();
+    for q in quarantined_of(tx, &quarantine_of)? {
+        purge.add(KIND_QUARANTINE, q);
     }
     out.deleted = purge.ids();
     ops.extend(purge.ops());
@@ -1748,6 +1974,16 @@ mod tests {
         }
 
         fn fact(&self, turn: Id, text: &str, attribute: &str, value: &str) {
+            self.fact_span(turn, 0..text.len(), attribute, value);
+        }
+
+        /// 根拠の範囲 `span` (保存した本文の位置) の候補を当てる。
+        fn fact_span(&self, turn: Id, span: Range<usize>, attribute: &str, value: &str) {
+            self.fact_at(turn, span, 0, attribute, value);
+        }
+
+        /// 改訂の番号 `rev` の本文の根拠の範囲 `span` の候補を当てる。
+        fn fact_at(&self, turn: Id, span: Range<usize>, rev: u32, attribute: &str, value: &str) {
             let safety = Safety::bundled();
             let ctx = FactCtx {
                 key: &self.key,
@@ -1759,9 +1995,9 @@ mod tests {
             let c = Candidate {
                 source: Source {
                     turn,
-                    start: 0,
-                    end: u32::try_from(text.len()).expect("short"),
-                    rev: 0,
+                    start: u32::try_from(span.start).expect("short"),
+                    end: u32::try_from(span.end).expect("short"),
+                    rev,
                 },
                 subject: "self".into(),
                 attribute: attribute.into(),
@@ -1959,6 +2195,7 @@ mod tests {
             model_key: "m".into(),
             rules: 1,
             src_revs: vec![SrcRev { turn: u1, rev: 0 }, SrcRev { turn: a1, rev: 0 }],
+            forgets_seen: None,
         };
         let (note_id, ops) = w.note(&[], &[], &note).expect("note");
         env.write(ops).expect("note");
@@ -2255,6 +2492,183 @@ mod tests {
         assert!(!env.replay().changed());
     }
 
+    fn redact_off() -> ForgetOptions {
+        ForgetOptions {
+            redact: false,
+            ..ForgetOptions::default()
+        }
+    }
+
+    /// 出典の発話の、根拠の範囲の外の一致も、同じ往復の応答と同じ選択 (既定で伏せる) で伏せ、見本に数える。
+    /// verifies: 04 §7.1 の確認の画面 (出典の発話の根拠の範囲の外)
+    #[test]
+    fn matches_outside_the_evidence_span_follow_the_echo_choice() {
+        let env = Env::new("forget-outside");
+        let text = "私は大阪に住んでいます。大阪はいい街です";
+        let t = env.turn("user", text, None, serde_json::Value::Null);
+        let first = text.find('。').expect("period");
+        env.fact_span(t, 0..first, "residence", "大阪");
+        let no_echo = env
+            .plan(
+                "residence",
+                ForgetOptions {
+                    echo: false,
+                    ..ForgetOptions::default()
+                },
+            )
+            .expect("plan");
+        assert_eq!(no_echo.preview.source_outside, 1);
+        assert_eq!(
+            no_echo.preview.samples[0].after,
+            "私は[伏せ字]に住んでいます。大阪はいい街です"
+        );
+        let plan = env
+            .plan("residence", ForgetOptions::default())
+            .expect("plan");
+        assert_eq!(plan.preview.source_outside, 1);
+        assert_ne!(plan.hash, no_echo.hash);
+        env.write(plan.ops).expect("forget");
+        assert_eq!(
+            env.text(t),
+            ("私は[伏せ字]に住んでいます。[伏せ字]はいい街です".into(), 1)
+        );
+        assert!(!env.replay().changed());
+    }
+
+    /// 伏せ字にしないとき、根拠の範囲に値の一致が無い出典は、根拠の範囲の全体を `[非表示]` にする。伏せ字にする
+    /// ときは中止する。
+    /// verifies: 04 §7.1 (伏せ字にしないときの `[非表示]`)、§7.3
+    #[test]
+    fn a_span_without_the_value_is_hidden_whole_when_not_redacting() {
+        let env = Env::new("forget-whole-span");
+        let text = "趣味は登山です。週末は山に行きます";
+        let t = env.turn("user", text, None, serde_json::Value::Null);
+        let span = text.find("週末").expect("span")..text.len();
+        env.fact_span(t, span.clone(), "hobby", "登山");
+        assert_eq!(
+            env.plan("hobby", ForgetOptions::default()).err(),
+            Some(ForgetAbort::ValueMismatch(t))
+        );
+        let plan = env
+            .plan(
+                "hobby",
+                ForgetOptions {
+                    echo: false,
+                    ..redact_off()
+                },
+            )
+            .expect("plan");
+        assert_eq!(plan.hidden_turns, [t]);
+        assert_eq!(plan.preview.samples[0].after, "趣味は登山です。[非表示]");
+    }
+
+    /// 伏せ字にするターンが前の忘れるの指示と合わない (合わないターン) なら、伏せ字にするときは中止し、伏せ字に
+    /// しないときは飛ばして数える。`[非表示]` だけのターンは、読めなくても合わないターンにしない。
+    /// verifies: 04 §7.2 の「合わないターン」
+    #[test]
+    fn mismatched_turns_abort_a_redaction_and_are_skipped_otherwise() {
+        let env = Env::new("forget-mismatched");
+        let text = "趣味は登山です。私は大阪に住んでいます";
+        let t = env.turn("user", text, None, serde_json::Value::Null);
+        let first = text.find('。').expect("period");
+        env.fact_span(t, first + "。".len()..text.len(), "residence", "大阪");
+        // 伏せ字にしないで忘れる (改訂の番号 0 の `[非表示]` の範囲)。
+        let plan = env.plan("residence", redact_off()).expect("plan");
+        env.write(plan.ops).expect("forget");
+        // 伏せ字の指示なしに改訂の番号だけが進んだターン (指示と合わない)。
+        env.write(vec![WriteOp::Patch {
+            kind: KIND_TURN.into(),
+            id: t,
+            fields: turn_patch(text, 1).expect("patch"),
+            updated_at: None,
+        }])
+        .expect("bump");
+        env.fact_at(t, 0..first, 1, "hobby", "登山");
+        assert_eq!(
+            env.plan("hobby", ForgetOptions::default()).err(),
+            Some(ForgetAbort::MismatchedTurn(t))
+        );
+        let off = env.plan("hobby", redact_off()).expect("plan");
+        assert_eq!(off.preview.mismatched_turns, [t]);
+        assert!(off.hidden_turns.is_empty());
+
+        // `[非表示]` だけのターンは、改訂の番号が読めなくなっても合わないターンにしない。
+        let env = Env::new("forget-hidden-only");
+        let text = "趣味は登山です";
+        let t = env.turn("user", text, None, serde_json::Value::Null);
+        env.fact(t, text, "hobby", "登山");
+        let plan = env.plan("hobby", redact_off()).expect("plan");
+        assert_eq!(plan.hidden_turns, [t]);
+        env.write(plan.ops).expect("forget");
+        env.write(vec![WriteOp::Patch {
+            kind: KIND_TURN.into(),
+            id: t,
+            fields: BodyPatch::new().set("rev", &"bad").expect("patch"),
+            updated_at: None,
+        }])
+        .expect("tamper");
+        let r = {
+            let tx = env.store.read().expect("read");
+            replay_forgets(&tx, &env.forget_env()).expect("replay")
+        };
+        assert!(r.mismatched.is_empty(), "{r:?}");
+    }
+
+    /// 2 つの応答のうち古い方だけを伏せ字にした往復で、新しい応答から作り直したノートは、当て直しで消さない
+    /// (読み出しと同じ判定)。伏せ字にしないときは、`forgets_seen` が無いか指示より前のノートだけを消す。
+    /// verifies: 04 §7.2 の当て直しの一覧の 4、§7.7 の 1
+    #[test]
+    fn replay_keeps_notes_that_match_and_drops_notes_made_without_the_directive() {
+        let env = Env::new("forget-notes");
+        let text = "私は大阪に住んでいます";
+        let u1 = env.turn("user", text, None, serde_json::Value::Null);
+        let _a1 = env.turn("assistant", "大阪ですね", Some(u1), 0.into());
+        let a2 = env.turn("assistant", "いいですね", Some(u1), 0.into());
+        env.fact(u1, text, "residence", "大阪");
+        let plan = env
+            .plan("residence", ForgetOptions::default())
+            .expect("plan");
+        env.write(plan.ops).expect("forget");
+        let w = env.writes();
+        let note = |seen: Option<Id>, src_revs: Vec<SrcRev>| NoteBody {
+            session: env.session,
+            exchanges: vec![u1],
+            keys: vec!["住まい".into()],
+            model_key: "m".into(),
+            rules: 1,
+            src_revs,
+            forgets_seen: seen,
+        };
+        let rebuilt = note(
+            Some(plan.directive),
+            vec![SrcRev { turn: u1, rev: 1 }, SrcRev { turn: a2, rev: 0 }],
+        );
+        let (kept, ops) = w.note(&[], &[], &rebuilt).expect("note");
+        env.write(ops).expect("note");
+        assert!(!env.replay().changed(), "the rebuilt note matches");
+        assert!(env.exists(KIND_NOTE, kept));
+
+        let env = Env::new("forget-hidden-notes");
+        let u1 = env.turn("user", text, None, serde_json::Value::Null);
+        env.fact(u1, text, "residence", "大阪");
+        let plan = env.plan("residence", redact_off()).expect("plan");
+        env.write(plan.ops).expect("forget");
+        let w = env.writes();
+        let unaware = note(None, vec![SrcRev { turn: u1, rev: 0 }]);
+        let aware = note(Some(plan.directive), vec![SrcRev { turn: u1, rev: 0 }]);
+        let (old_id, ops) = w.note(&[], &[], &unaware).expect("note");
+        env.write(ops).expect("note");
+        let (new_id, ops) = w.note(&[], &[], &aware).expect("note");
+        env.write(ops).expect("note");
+        let r = env.replay();
+        assert_eq!(r.deleted, [old_id]);
+        assert!(env.exists(KIND_NOTE, new_id));
+        assert!(!env.replay().changed());
+        // 最も新しい忘れるの指示。
+        let tx = env.store.read().expect("read");
+        assert_eq!(latest_forget(&tx).expect("read"), Some(plan.directive));
+    }
+
     /// 規則 12 の (1): 古い版が関係を作らずに取り込んだ指示の副索引 (`mark` など) を作り直す。
     /// verifies: 03 §4.2 の規則 12 の (1)
     #[test]
@@ -2373,7 +2787,14 @@ mod tests {
         );
         let marks = forgets.marks(turn, &t1, 1, M).expect("marks");
         assert_eq!(marks.len(), 2);
-        // 伏せ字がまだ当たっていない本文では印を求めない (合わないターン)。
+        // 伏せ字がまだ当たっていない本文では印を求めない (合わないターン)。呼び手は除き、伏せるときは全体を伏せる。
         assert_eq!(forgets.marks(turn, text, 0, M), None);
+        let stale = TurnText {
+            id: turn,
+            rev: 0,
+            text,
+        };
+        assert!(m.excluded(&stale));
+        assert_eq!(m.mask(&[stale], "[非表示]"), ["[非表示]"]);
     }
 }

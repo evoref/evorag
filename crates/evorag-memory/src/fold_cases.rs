@@ -529,8 +529,9 @@ struct Runner {
     history: Vec<Event>,
     batch: Vec<Event>,
     db: db::Db,
-    /// 忘れるの鏡: 忘れるの指示と伏せ字にしたターンの行だけを取り込み、当て直しで同じ結果になるかを確かめる。
-    mirror: Option<db::Db>,
+    /// 忘れるの鏡: 忘れるの指示 (と、`true` なら伏せ字にしたターンの行) だけを取り込み、当て直しで同じ結果に
+    /// なるかを確かめる。指示だけの鏡では、当て直しがターンを伏せ字にする (核の「当てた本文」の枝)。
+    mirrors: Vec<(db::Db, bool)>,
     /// 直前の操作が中止された。
     aborted: bool,
 }
@@ -550,7 +551,11 @@ impl Runner {
             history: Vec::new(),
             batch: Vec::new(),
             db: db::Db::new(),
-            mirror: mirror.then(db::Db::new),
+            mirrors: if mirror {
+                vec![(db::Db::new(), true), (db::Db::new(), false)]
+            } else {
+                Vec::new()
+            },
             aborted: false,
         }
     }
@@ -558,7 +563,7 @@ impl Runner {
     /// 本体と鏡の両方のストアに当てる。
     fn both(&mut self, mut f: impl FnMut(&mut db::Db)) {
         f(&mut self.db);
-        if let Some(m) = self.mirror.as_mut() {
+        for (m, _) in &mut self.mirrors {
             f(m);
         }
     }
@@ -678,11 +683,13 @@ impl Runner {
             !again.changed(),
             "{id}: replaying right after the forget must change nothing: {again:?}"
         );
-        // 鏡: 指示と伏せ字にしたターンだけを取り込み、当て直す。
-        if let Some(m) = self.mirror.as_mut() {
+        // 鏡: 指示 (と伏せ字にしたターン) だけを取り込み、当て直す。
+        for (m, with_turns) in &mut self.mirrors {
             let mut records: Vec<(&str, Id)> =
                 vec![(crate::facts::KIND_FACT_DIRECTIVE, plan.directive)];
-            records.extend(plan.redacted_turns.iter().map(|t| (KIND_TURN, *t)));
+            if *with_turns {
+                records.extend(plan.redacted_turns.iter().map(|t| (KIND_TURN, *t)));
+            }
             m.ids.at(self.last_ms);
             m.import(&self.db, &records, did, plan.directive);
             let first = m.replay(&self.key);
@@ -690,6 +697,14 @@ impl Runner {
                 first.mismatched.is_empty(),
                 "{id}: no mismatched turns: {first:?}"
             );
+            let mut patched = first.patched.clone();
+            patched.sort_unstable();
+            let want = if *with_turns {
+                Vec::new()
+            } else {
+                plan.redacted_turns.clone()
+            };
+            assert_eq!(patched, want, "{id}: turns redacted by the replay");
             let second = m.replay(&self.key);
             assert!(!second.changed(), "{id}: the mirror replay is idempotent");
         }
@@ -1061,7 +1076,7 @@ impl Runner {
             "{id}: the store must hold what the pure core holds"
         );
         // 鏡 (指示と伏せ字の行だけを取り込んで当て直したストア) も、事実 (出典の範囲と番号まで) とターンが同じ。
-        if let Some(m) = &self.mirror {
+        for (m, _) in &self.mirrors {
             m.check_indexes(id);
             assert_eq!(
                 self.describe_with(&m.facts(), true),

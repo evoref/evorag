@@ -817,3 +817,12 @@ spec = "04 §5.2 の関門 6 (伏せ字の印)"
 text = "趣味は[redacted]です"
 candidate = { s = "self", a = "hobby", v = "[redacted]", e = "趣味は[redacted]です" }
 expect = "redaction_marker"
+
+[[case]]
+id = "G95"
+title = "大文字や全角で書いた伏せ字の印も、値の鍵の正規化の後で照合して捨てる"
+spec = "04 §5.2 の関門 6 (伏せ字の印)"
+lang = "en"
+text = "My hobby is [REDACTED] hunting"
+candidate = { s = "self", a = "hobby", v = "[REDACTED] hunting", e = "My hobby is [REDACTED] hunting" }
+expect = "redaction_marker"
