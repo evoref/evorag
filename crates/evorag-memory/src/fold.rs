@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use evorag_types::Id;
+use evorag_types::{Id, Timestamp};
 
 use crate::lexical::Signals;
 use crate::rules::{Attributes, Cardinality};
@@ -44,10 +44,11 @@ pub enum FactState {
     Contested {
         against: Id,
     },
-    /// 置き換えられた (`by`)、または終わった (`by` 無し)。`at` は置き換えた出来事の ID (ターンか指示)。
+    /// 置き換えられた (`by`)、または終わった (`by` 無し)。`at` は置き換えた出来事 (ターンか指示) の
+    /// ID の時刻 (作り直しても同じ値になる、04 §5.1 の `state_at`)。
     Superseded {
         by: Option<Id>,
-        at: Id,
+        at: Timestamp,
     },
     /// 忘れた (M3.4)。
     Retracted,
@@ -450,7 +451,7 @@ impl FactSet {
         {
             self.facts[o].state = FactState::Superseded {
                 by: Some(new_id),
-                at,
+                at: at.timestamp(),
             };
         }
         self.facts[new].state = FactState::Live;
@@ -578,7 +579,10 @@ fn apply_candidate(
             });
             match hit {
                 Some(i) if c.signals.negation_change => {
-                    set.facts[i].state = FactState::Superseded { by: None, at: turn };
+                    set.facts[i].state = FactState::Superseded {
+                        by: None,
+                        at: turn.timestamp(),
+                    };
                     set.facts[i].sources.insert(c.source);
                     report.replaced += 1;
                 }
@@ -597,7 +601,10 @@ fn apply_candidate(
             });
             if let Some(i) = live {
                 // 過去形で今の値を終える (置き換えではない)。終えた発言を出典に足す。
-                set.facts[i].state = FactState::Superseded { by: None, at: turn };
+                set.facts[i].state = FactState::Superseded {
+                    by: None,
+                    at: turn.timestamp(),
+                };
                 set.facts[i].sources.insert(c.source);
                 report.replaced += 1;
             } else if let Some(i) = history {
@@ -608,7 +615,10 @@ fn apply_candidate(
                     env,
                     c,
                     Tense::Past,
-                    FactState::Superseded { by: None, at: turn },
+                    FactState::Superseded {
+                        by: None,
+                        at: turn.timestamp(),
+                    },
                 );
                 set.push(f);
                 report.added += 1;
@@ -634,7 +644,7 @@ fn apply_candidate(
                     let by = set.facts[n].id;
                     set.facts[o].state = FactState::Superseded {
                         by: Some(by),
-                        at: turn,
+                        at: turn.timestamp(),
                     };
                     report.replaced += 1;
                 }
@@ -765,7 +775,7 @@ fn apply_multi_current(
         let by = set.facts[n].id;
         set.facts[t].state = FactState::Superseded {
             by: Some(by),
-            at: c.source.turn,
+            at: c.source.turn.timestamp(),
         };
         report.replaced += 1;
     }
@@ -834,7 +844,7 @@ fn apply_correction(
             let t = set.index_of(t_id).expect("the corrected fact is present");
             set.facts[t].state = FactState::Superseded {
                 by: Some(by),
-                at: turn,
+                at: turn.timestamp(),
             };
         }
     }

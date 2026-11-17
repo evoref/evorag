@@ -179,6 +179,22 @@ pub fn kinds() -> Vec<KindSpec> {
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
+        // 事実は LLM で作る派生の記録 (04 §2)。ジャーナルに書かない。関係と副索引は本体から作り直せる。
+        KindSpec {
+            name: crate::facts::KIND_FACT,
+            current_v: 1,
+            create_when_newer_present: false,
+            journaled: false,
+            derive: Some(crate::facts::derive_fact),
+        },
+        // 事実への指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
+        KindSpec {
+            name: crate::facts::KIND_FACT_DIRECTIVE,
+            current_v: 1,
+            create_when_newer_present: true,
+            journaled: true,
+            derive: Some(crate::facts::derive_directive),
+        },
     ]
 }
 

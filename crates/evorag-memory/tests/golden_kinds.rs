@@ -276,3 +276,69 @@ fn job_v1() {
         },
     );
 }
+
+#[test]
+fn fact_v1() {
+    check(
+        KIND_FACT,
+        id("019a6a2b-0000-7000-8000-000000000020"),
+        FactBody {
+            subject: "self".into(),
+            attribute: "residence".into(),
+            value: Some("見本の町".into()),
+            vk: Some("ab".repeat(32)),
+            norm: 1,
+            tense: "current".into(),
+            valid_from: Some("2026-01".into()),
+            valid_to: None,
+            state: "superseded".into(),
+            against: None,
+            by: Some(id("019a6a2b-0000-7000-8000-000000000021")),
+            state_at: Some(1_762_650_000_000),
+            recorded_at: 1_762_640_000_000,
+            private: false,
+            sources: vec![SourceBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev: 0,
+                start: Some(0),
+                end: Some(12),
+            }],
+        },
+    );
+}
+
+#[test]
+fn fact_directive_v1() {
+    check(
+        KIND_FACT_DIRECTIVE,
+        id("019a6a2b-0000-7000-8000-000000000022"),
+        FactDirectiveBody {
+            op: "forget".into(),
+            subject: "self".into(),
+            attribute: "hobby".into(),
+            vk: None,
+            norm: Some(1),
+            fact: Some(id("019a6a2b-0000-7000-8000-000000000020")),
+            target: None,
+            scope: None,
+            marks: vec!["cd".repeat(32)],
+            turns: vec![id("019a6a2b-0000-7000-8000-000000000002")],
+            redactions: vec![RedactionBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev_before: 0,
+                rev_after: 1,
+                start: 3,
+                end: 9,
+                hash: "ef".repeat(32),
+            }],
+            hidden: vec![HiddenBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev: 1,
+                start: 0,
+                end: 3,
+            }],
+            history: false,
+            redact: true,
+        },
+    );
+}

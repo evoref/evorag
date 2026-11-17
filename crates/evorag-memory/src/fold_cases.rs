@@ -65,6 +65,146 @@ enum Outcome {
     Pending(&'static str),
 }
 
+/// 実際のストアに同じ手順を当てる鏡 (書き込みの入口 `facts.rs` を通る)。
+mod db {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use evorag_store::testutil::TempDir;
+    use evorag_store::{OpenOptions, Store, WriteOp, WriteRequest, Writer, WriterHandle};
+    use evorag_types::{Id, IdGen, ManualClock, Timestamp, UuidV7Gen};
+
+    use super::id_at;
+    use crate::facts::{FactCtx, add_directive, consolidate, load_facts, rebuild};
+    use crate::fold::{DirectiveKind, Event, FactSet};
+    use crate::rules::attributes;
+    use crate::value_key::{ForgetKey, ValueKey};
+
+    /// 回帰ケースの時刻に合わせて ID を作る (指示の時点とターンの順を保つため)。
+    pub struct CaseIds(Mutex<(i64, u64)>);
+
+    impl CaseIds {
+        pub fn at(&self, ms: i64) {
+            self.0.lock().expect("ids").0 = ms;
+        }
+    }
+
+    impl IdGen for CaseIds {
+        fn next_id(&self) -> Id {
+            let mut g = self.0.lock().expect("ids");
+            g.1 += 1;
+            // 純粋な核の側の ID と重ならないように、通し番号を大きく離す。
+            id_at(g.0, (1 << 40) + g.1)
+        }
+    }
+
+    pub struct Db {
+        _dir: TempDir,
+        store: Arc<Store>,
+        handle: WriterHandle,
+        thread: Option<std::thread::JoinHandle<()>>,
+        pub ids: CaseIds,
+        /// 純粋な核の側の指示の ID → ストアの側の指示の ID。
+        pub directives: BTreeMap<Id, Id>,
+    }
+
+    impl Db {
+        pub fn new() -> Self {
+            let dir = TempDir::new("fold-cases");
+            let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+            let (store, _) = Store::open(OpenOptions {
+                data_root: dir.path().to_path_buf(),
+                evorag_version: "0.3.0".into(),
+                kinds: crate::kinds(),
+                clock: clock.clone(),
+                ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+                config_file: None,
+            })
+            .expect("open");
+            let store = Arc::new(store);
+            let (writer, handle) = Writer::new(store.clone()).expect("writer");
+            let thread = std::thread::spawn(move || writer.run());
+            Self {
+                _dir: dir,
+                store,
+                handle,
+                thread: Some(thread),
+                ids: CaseIds(Mutex::new((0, 0))),
+                directives: BTreeMap::new(),
+            }
+        }
+
+        fn submit(&self, ops: Vec<WriteOp>) {
+            self.handle
+                .submit_wait(WriteRequest::conversation(ops))
+                .expect("write facts");
+        }
+
+        fn ctx<'a>(&'a self, key: &'a ForgetKey) -> FactCtx<'a> {
+            FactCtx {
+                key,
+                attributes: attributes(),
+                ids: &self.ids,
+                now: Timestamp::from_millis(1_762_650_000_000),
+            }
+        }
+
+        pub fn consolidate(&self, key: &ForgetKey, events: Vec<Event>) {
+            let ops = {
+                let tx = self.store.read().expect("read");
+                consolidate(&tx, &self.ctx(key), events)
+                    .expect("consolidate")
+                    .0
+            };
+            self.submit(ops);
+        }
+
+        pub fn rebuild(&self, key: &ForgetKey, events: Vec<Event>) {
+            let ops = {
+                let tx = self.store.read().expect("read");
+                rebuild(&tx, &self.ctx(key), events).expect("rebuild").0
+            };
+            self.submit(ops);
+        }
+
+        pub fn add_directive(
+            &mut self,
+            key: &ForgetKey,
+            pure_id: Id,
+            kind: DirectiveKind,
+            target: (&str, &str, Option<ValueKey>),
+        ) {
+            let kind = match kind {
+                DirectiveKind::PrivateOff { target } => DirectiveKind::PrivateOff {
+                    target: self.directives[&target],
+                },
+                k => k,
+            };
+            let (id, ops) = {
+                let tx = self.store.read().expect("read");
+                add_directive(&tx, &self.ctx(key), kind, target.0, target.1, target.2)
+                    .expect("add directive")
+            };
+            self.submit(ops);
+            self.directives.insert(pure_id, id);
+        }
+
+        pub fn facts(&self) -> FactSet {
+            let tx = self.store.read().expect("read");
+            load_facts(&tx).expect("load").set
+        }
+    }
+
+    impl Drop for Db {
+        fn drop(&mut self) {
+            self.handle.shutdown();
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+}
+
 struct Runner {
     key: ForgetKey,
     seq: u64,
@@ -75,6 +215,7 @@ struct Runner {
     /// それまでに当てた候補と訂正 (作り直しと順の入れ替えで当て直す)。
     history: Vec<Event>,
     batch: Vec<Event>,
+    db: db::Db,
 }
 
 impl Runner {
@@ -88,6 +229,7 @@ impl Runner {
             dirs: Directives::default(),
             history: Vec::new(),
             batch: Vec::new(),
+            db: db::Db::new(),
         }
     }
 
@@ -118,6 +260,8 @@ impl Runner {
         }
         let batch = std::mem::take(&mut self.batch);
         self.history.extend(batch.iter().cloned());
+        self.db.ids.at(self.last_ms);
+        self.db.consolidate(&self.key, batch.clone());
         let mut set = std::mem::take(&mut self.set);
         self.fold_events(&mut set, batch);
         self.set = set;
@@ -129,6 +273,8 @@ impl Runner {
         if reverse {
             events.reverse();
         }
+        self.db.ids.at(self.last_ms);
+        self.db.rebuild(&self.key, events.clone());
         events.extend(self.dirs.choices());
         let mut set = FactSet::default();
         self.fold_events(&mut set, events);
@@ -238,6 +384,13 @@ impl Runner {
                             "accept" => DirectiveKind::Accept,
                             _ => DirectiveKind::Revert,
                         };
+                        self.db.ids.at(self.last_ms);
+                        self.db.add_directive(
+                            &self.key,
+                            did,
+                            dk.clone(),
+                            (&subject, &attribute, vk),
+                        );
                         self.dirs.push(Directive {
                             id: did,
                             kind: dk,
@@ -268,6 +421,13 @@ impl Runner {
                         let target = self
                             .find_directive(|k| matches!(k, DirectiveKind::Private { .. }), body);
                         let (subject, attribute, vk) = self.target(body);
+                        self.db.ids.at(self.last_ms);
+                        self.db.add_directive(
+                            &self.key,
+                            did,
+                            DirectiveKind::PrivateOff { target },
+                            (&subject, &attribute, vk),
+                        );
                         self.dirs.push(Directive {
                             id: did,
                             kind: DirectiveKind::PrivateOff { target },
@@ -364,6 +524,24 @@ impl Runner {
     }
 
     fn check(&self, id: &str, body: &Value) {
+        // 実際のストアを通した結果も、純粋な核と同じ (書き込みの入口の差と写しの検査)。
+        let stored = self.db.facts();
+        assert_eq!(
+            self.describe(&stored),
+            self.describe(&self.set),
+            "{id}: the store must hold what the pure core holds"
+        );
+        let names = |set: &FactSet| -> Vec<String> {
+            table_order(set, attributes())
+                .into_iter()
+                .map(|f| format!("{}/{}", f.subject, f.value.clone().unwrap_or_default()))
+                .collect()
+        };
+        assert_eq!(
+            names(&stored),
+            names(&self.set),
+            "{id}: table order in the store"
+        );
         if let Some(facts) = body.get("facts").and_then(Value::as_array) {
             // 実際の事実を、期待と同じ形の文字列にして、並び (重複を含む) として比べる。
             let actual = self.describe(&self.set);
