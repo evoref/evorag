@@ -143,6 +143,10 @@ pub struct CommonRules {
     pub url_markers: Vec<String>,
     /// 値に含んだら捨てる、役割の詐称と区切りの模倣。
     pub role_markers: Vec<String>,
+    /// 役割の語。後ろに (空白を挟んでもよい) `role_colons` の文字が続いたら捨てる。
+    pub role_words: Vec<String>,
+    /// 役割の語の後のコロンとみなす文字 (1 文字ずつ。全角・小さいコロンは NFKC で `:` になる)。
+    pub role_colons: Vec<String>,
 }
 
 impl CommonRules {
@@ -158,19 +162,29 @@ impl CommonRules {
                 out.push(at(&format!(
                     "forbidden_categories `{c}` is not a general category"
                 )));
+            } else if !crate::chars::SUPPORTED_CATEGORIES.contains(&c.as_str()) {
+                out.push(at(&format!(
+                    "forbidden_categories `{c}` is not supported by the gate (only {:?})",
+                    crate::chars::SUPPORTED_CATEGORIES
+                )));
             }
         }
-        for c in &self.forbidden_chars {
-            if c.chars().count() != 1 {
-                out.push(at(&format!(
-                    "forbidden_chars `{c:?}` must be one character"
-                )));
+        for (name, list) in [
+            ("forbidden_chars", &self.forbidden_chars),
+            ("role_colons", &self.role_colons),
+        ] {
+            for c in list {
+                if c.chars().count() != 1 {
+                    out.push(at(&format!("{name} `{c:?}` must be one character")));
+                }
             }
         }
         for (name, list) in [
             ("forbidden_chars", &self.forbidden_chars),
             ("url_markers", &self.url_markers),
             ("role_markers", &self.role_markers),
+            ("role_words", &self.role_words),
+            ("role_colons", &self.role_colons),
         ] {
             check_entries(&mut out, &at, name, list);
         }
@@ -427,6 +441,11 @@ mod tests {
         assert!(c.forbidden_categories.iter().any(|s| s == "Cf"));
         assert!(c.forbidden_chars.iter().any(|s| s == "|"));
         assert!(c.url_markers.iter().any(|s| s == "://"));
+        for cat in ["Co", "Cn", "Cs"] {
+            assert!(c.forbidden_categories.iter().any(|s| s == cat), "{cat}");
+        }
+        assert!(c.role_words.iter().any(|s| s == "system"));
+        assert!(c.role_colons.iter().any(|s| s == ":"));
     }
 
     #[test]
@@ -483,10 +502,13 @@ mod tests {
             forbidden_chars: vec!["ab".into()],
             url_markers: vec!["HTTP:".into()],
             role_markers: vec!["ｓｙｓｔｅｍ:".into()],
+            role_words: vec!["system".into()],
+            role_colons: vec!["::".into()],
         };
         let p = common.problems();
         assert!(p.iter().any(|s| s.contains("not a general category")));
         assert!(p.iter().any(|s| s.contains("one character")));
+        assert!(p.iter().any(|s| s.contains("role_colons")));
         assert!(p.iter().filter(|s| s.contains("never match")).count() >= 2);
     }
 

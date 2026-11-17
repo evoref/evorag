@@ -5,13 +5,16 @@
 //! 書き込みは、書き手 (`evorag_store::Writer`) に送る操作の列 (`WriteOp`) として組み立てる。
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
+mod chars;
 mod facts;
 mod fold;
 #[cfg(test)]
 mod fold_cases;
+mod gates;
 mod kinds;
 mod lexical;
 mod note;
+mod prefilter;
 mod read;
 mod rules;
 mod value_key;
@@ -26,6 +29,10 @@ pub use fold::{
     Candidate, Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState,
     FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private,
     table_order,
+};
+pub use gates::{
+    Accepted, EvidenceMatch, GateEnv, GateReason, RawCandidate, RawMood, Safety, Utterance,
+    check_candidate, check_candidates, check_value,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
@@ -46,6 +53,7 @@ pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
     SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, sanitize_keys, segments,
 };
+pub use prefilter::{MODE_CHAT, Prefiltered, Screened, SkipReason, prefilter};
 pub use read::{
     Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, chunks_of,
     embedding_bodies, embedding_vector, embeddings_of_chunk, embeddings_of_model,

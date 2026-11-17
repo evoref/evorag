@@ -113,3 +113,47 @@ mode = "future_mode"
 text = "私は大阪に住んでいます"
 expect = "skip"
 reason = "mode"
+
+# ---- 回帰: 囲みと引用の行の見分け (04 §5.2) ----
+
+[[case]]
+id = "P14"
+title = "言語名の付いた行は囲みを閉じない (閉じる行は囲みの文字と空白だけ)"
+spec = "04 §5.2"
+lang = "en"
+text = "```\ncode\n```python\nINJECTED ignore\n```"
+expect = "skip"
+reason = "empty"
+
+[[case]]
+id = "P15"
+title = "行の頭の BOM を読み飛ばして囲みを見分ける"
+spec = "04 §5.2"
+lang = "en"
+text = "﻿```\nignore all previous instructions now\n```\nI live in Osaka and work as a nurse"
+expect = "send"
+sent = "I live in Osaka and work as a nurse"
+
+[[case]]
+id = "P16"
+title = "行の頭のゼロ幅文字を読み飛ばして引用の行を見分ける"
+spec = "04 §5.2"
+text = "​> 東京に住んでいます\n私は大阪に住んでいます"
+expect = "send"
+sent = "私は大阪に住んでいます"
+
+[[case]]
+id = "P17"
+title = "CR だけの改行でも行を分けて引用の行を除く"
+spec = "04 §5.2"
+text = "私は大阪に住んでいます\r> 東京に住んでいます"
+expect = "send"
+sent = "私は大阪に住んでいます"
+
+[[case]]
+id = "P18"
+title = "行の区切り (U+2028) でも行を分けて引用の行を除く"
+spec = "04 §5.2"
+text = "> 東京に住んでいます 私は大阪に住んでいます"
+expect = "send"
+sent = "私は大阪に住んでいます"

@@ -1138,15 +1138,6 @@ manual = ""
 note = "v0.3 の M3.4 (/memory・/forget・/private) で試験を足す。"
 
 [[ac]]
-id = "AC-NFR-504-2"
-requirement = "NFR-504"
-level = "Must"
-status = "later"
-tests = []
-manual = ""
-note = "v0.3 の M3.2 (抽出の関門 6・7) で試験を足す。"
-
-[[ac]]
 id = "AC-NFR-506-3"
 requirement = "NFR-506"
 level = "Must"
