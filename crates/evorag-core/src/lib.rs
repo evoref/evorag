@@ -16,9 +16,12 @@ mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
 mod context;
 mod correction;
+pub mod export_checks;
 mod extraction;
 mod fact_ops;
 mod fact_table;
+mod forgets;
+pub use forgets::ForgetStatus;
 pub mod localtime;
 pub mod logging;
 mod masking;
@@ -207,6 +210,8 @@ pub struct StartReport {
     pub facts_disabled: Option<forget_key::FactsKeyProblem>,
     /// この起動で `memory.forget_key` を作った。
     pub forget_key_created: bool,
+    /// 起動時の忘れるの当て直しの後の状態 (合わないターン、ジャーナルの書き直しの残り。状態の行に示す、04 §7.2)。
+    pub forget: ForgetStatus,
 }
 
 /// 生成の取り消しの理由。
@@ -326,6 +331,10 @@ struct Inner {
     fail_index_removal: std::sync::atomic::AtomicUsize,
     /// 命令の待ち行列を回す task と、その止め方。
     command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
+    /// 忘れるの状態 (合わないターン、ジャーナルの書き直しの残り、04 §7.2)。
+    forget: Mutex<forgets::State>,
+    /// 忘れるの退避の写し直しの回 (動いている間に足された job は、次の回にまとめる)。
+    forget_batch: Mutex<forgets::Batch>,
 }
 
 /// 途中まで済んだ較正の、問いごとの結果。
@@ -651,7 +660,12 @@ impl Core {
             cleanup_lock: Arc::new(tokio::sync::Mutex::new(())),
             fail_index_removal: std::sync::atomic::AtomicUsize::new(0),
             command_loop: Mutex::new(None),
+            forget: Mutex::new(forgets::State::default()),
+            forget_batch: Mutex::new(forgets::Batch::default()),
         });
+        // 忘れるの当て直し (04 §7.2 の「起動の順」): 書き手を作った後、照会と命令を受け付ける前。`Core` を返す
+        // のはこの後なので、照会と命令は当て直しを終えてから届く。
+        forgets::startup(&inner).await;
         let core = Self { inner, commands };
         let worker = core.inner.clone();
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
@@ -720,6 +734,7 @@ impl Core {
                 core.inner.facts_key,
                 forget_key::FactsKey::Ready { created: true, .. }
             ),
+            forget: forgets::status(&core.inner),
         };
         // 裏の処理 (04 §4)。利用者が操作していない間に、要る手順を動かす。
         let worker = core.inner.clone();
@@ -777,14 +792,19 @@ impl Core {
     }
 
     /// 照会: セッションのターン (元の順)。
+    /// 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
     pub fn turns(&self, session: Id) -> Vec<evorag_types::api::TurnView> {
         let Ok(rtx) = self.inner.store.read() else {
             return Vec::new();
         };
+        let hide = masking::Hide::load(&rtx, self.inner.language);
         evorag_memory::session_turns(&rtx, session)
             .unwrap_or_default()
-            .iter()
-            .map(views::turn)
+            .into_iter()
+            .map(|mut t| {
+                withhold(hide.as_ref(), &mut t);
+                views::turn(&t)
+            })
             .collect()
     }
 
@@ -799,7 +819,43 @@ impl Core {
     /// 済んでいない整理の job (索引と退避から消した ID を除く、04 §7.7 の 2・5) の数。`doctor` は `job` の
     /// 記録の数として報告する。
     pub fn pending_cleanup_jobs(&self) -> usize {
-        pending_cleanup(&self.inner).len()
+        let forget = self
+            .inner
+            .store
+            .read()
+            .map_or(0, |r| forgets::pending_backup_jobs(&r));
+        pending_cleanup(&self.inner).len() + forget
+    }
+
+    /// 忘れるの状態 (忘れるの指示と合わないターン、ジャーナルの書き直しの残り、04 §7.2)。状態の行に示す。
+    pub fn forget_status(&self) -> ForgetStatus {
+        forgets::status(&self.inner)
+    }
+
+    /// 試験のため: 忘れるを実行する (04 §7.1〜§7.3。見本を確かめずに、既定の計画で書く)。画面からの操作は
+    /// `/forget` の命令 (M3.4c の後半で足す) が同じ経路を通す。書いたら忘れるの指示の ID。
+    ///
+    /// # Errors
+    /// 応答を生成している、中止した (04 §7.1 の「中止」)、記録を読めない・書けないとき (理由の文)。
+    #[doc(hidden)]
+    pub async fn forget_now(
+        &self,
+        target: evorag_types::api::FactKey,
+        options: evorag_memory::ForgetOptions,
+    ) -> Result<Id, String> {
+        match forgets::execute(&self.inner, target, options, None).await {
+            forgets::Executed::Done { directive, .. } => Ok(directive),
+            forgets::Executed::Changed { hash, .. } => Err(format!("the plan changed ({hash})")),
+            forgets::Executed::Aborted(a) => Err(a.to_string()),
+            forgets::Executed::Busy => Err("a reply is being generated".into()),
+            forgets::Executed::Failed(e) => Err(e),
+        }
+    }
+
+    /// 試験のための注入: 次のジャーナルの書き直しを、決まった点で失敗させる (09 §3.5)。
+    #[doc(hidden)]
+    pub fn inject_journal_rewrite_fault(&self, fault: evorag_store::RewriteFault) {
+        self.inner.store.inject_journal_rewrite_fault(fault);
     }
 
     /// 試験のための注入: 次のジャーナルの書き込みを失敗させる (AC-FR-202-1)。
@@ -1633,6 +1689,14 @@ pub(crate) async fn write_derived(inner: &Inner, ops: Vec<WriteOp>) -> Result<()
 }
 
 async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
+    write_outcome(inner, req).await.map(|_| ())
+}
+
+/// 書き手に送り、結果 (ジャーナルの書き直しの成否を含む) を待つ。
+pub(crate) async fn write_outcome(
+    inner: &Inner,
+    req: WriteRequest,
+) -> Result<evorag_store::WriteOutcome, String> {
     let (tx, rx) = oneshot::channel();
     inner
         .writer
@@ -1645,10 +1709,10 @@ async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     match rx.await {
         Ok(Ok(out)) => {
-            if let Some(e) = out.quarantine_failed {
+            if let Some(e) = &out.quarantine_failed {
                 tracing::warn!(error = %e, "broken records could not be quarantined; the write went ahead");
             }
-            Ok(())
+            Ok(out)
         }
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("the writer stopped".into()),
@@ -1960,6 +2024,11 @@ pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
         for job in jobs {
             all &= run_cleanup_job(&worker, &job, false).await;
         }
+        // 忘れるの退避の写し直し (03 §7.3)。残っている job をまとめて 1 回の写しにする。
+        if !forgets::run_backup_jobs(&worker).await {
+            flag_cleanup(&worker);
+            all = false;
+        }
         all
     })
     .await
@@ -2001,6 +2070,13 @@ async fn adopt_pending_deletes(inner: &Arc<Inner>) {
             .cleanup_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// 整理の job を書いた・残した (sleep-time に試し直す)。
+pub(crate) fn flag_cleanup(inner: &Inner) {
+    inner
+        .cleanup_pending
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// sleep-time に試し直す整理の job があるか。
@@ -2059,7 +2135,7 @@ async fn run_cleanup_job(
 
 /// 退避と退避の整理の前に、空きが DB の大きさ以上あるかを確かめる (03 §7.1、§8)。足りなければ
 /// 裏の処理を止めて知らせる (会話の追記は続ける、FR-217)。
-fn enough_space(inner: &Inner) -> bool {
+pub(crate) fn enough_space(inner: &Inner) -> bool {
     let (free, need) = space(inner);
     match free {
         Some(free) if free < need => {
@@ -2159,7 +2235,12 @@ fn open_session(inner: &Inner, id: Id) {
         return;
     };
     // この版では読めないターンは読み飛ばし、件数を画面に知らせる (03 §4.2 の規則 11)。
-    let read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
+    let mut read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
+    // 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
+    let hide = masking::Hide::load(&rtx, inner.language);
+    for t in &mut read.turns {
+        withhold(hide.as_ref(), t);
+    }
     inner
         .state
         .lock()
@@ -2183,6 +2264,17 @@ fn open_session(inner: &Inner, id: Id) {
             unreadable: read.unreadable,
         },
     );
+}
+
+/// 画面に出すターンの本文: 忘れるの指示と合わないターンは、伏せ字の印だけにする (04 §7.2)。伏せる材料を読め
+/// なければ、忘れるの指示の有無を確かめられないので、本文を出さない。
+fn withhold(hide: Option<&masking::Hide>, t: &mut evorag_memory::Turn) {
+    match hide {
+        Some(h) => {
+            h.withhold(t);
+        }
+        None => t.body.text = String::new(),
+    }
 }
 
 async fn send(inner: &Arc<Inner>, text: String) {
@@ -3060,12 +3152,29 @@ fn stamped(lang: PromptLanguage, at_ms: i64, text: &str) -> String {
 }
 
 pub(crate) fn conversation(inner: &Inner, session: Id, user_turn: Id) -> Conversation {
-    let turns = inner
-        .store
-        .read()
-        .ok()
-        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
+    let rtx = inner.store.read().ok();
+    let mut turns = rtx
+        .as_ref()
+        .and_then(|r| evorag_memory::session_turns(r, session).ok())
         .unwrap_or_default();
+    // 忘れるの指示と合わないターンの本文は送らず、伏せ字の印だけにする (04 §7.2)。確かめられなければ、忘れるの
+    // 指示の掛かるターンを確かめられないので、本文を送らない側に倒す。
+    match rtx
+        .as_ref()
+        .and_then(|r| masking::Hide::load(r, inner.language))
+    {
+        Some(hide) => {
+            for t in &mut turns {
+                hide.withhold(t);
+            }
+        }
+        None => {
+            let marker = evorag_memory::redaction_marker(inner.language.as_str());
+            for t in &mut turns {
+                t.body.text = marker.to_owned();
+            }
+        }
+    }
     let mut c = Conversation {
         past: Vec::new(),
         current: None,

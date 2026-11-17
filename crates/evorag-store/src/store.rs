@@ -1237,6 +1237,12 @@ impl Store {
                     crate::compact::PENDING.as_bytes(),
                 )
                 .map_err(db)?;
+                // 規則 12 の (1): 起動時に、すべての忘れるの指示の退避の写し直しの job を作り直させる (03 §4.2)。
+                m.insert(
+                    meta::FORGET_RECHECK.as_bytes(),
+                    meta::FORGET_RECHECK_SET.as_bytes(),
+                )
+                .map_err(db)?;
             }
             let wk = format!("{}{}", meta::WRITER_PREFIX, self.version);
             if !existing.contains_key(&wk) {

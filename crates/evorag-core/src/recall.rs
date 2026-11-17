@@ -425,6 +425,10 @@ fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは添えない・帯に出さない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -449,7 +453,7 @@ fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
                 .remove(&sid)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| set.contains(&t.envelope.id))
+                .filter(|t| set.contains(&t.envelope.id) && !hide.excluded(&t.envelope))
                 .collect();
             hide.apply(&rtx, &mut turns);
             Source {
@@ -490,6 +494,10 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは、リランクにも送らない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -507,6 +515,7 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -
         let mut members: Vec<Turn> = turns
             .iter()
             .filter(|t| t.envelope.id == *id || Some(t.envelope.id) == other)
+            .filter(|t| !hide.excluded(&t.envelope))
             .cloned()
             .collect();
         hide.apply(&rtx, &mut members);
@@ -597,6 +606,11 @@ impl QueryCache {
             (std::time::Instant::now(), v),
         );
     }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
 
 /// リランクの結果のキャッシュ (入力が止まったときに先に済ませた結果を、同じ発話を送ったときに使う、
@@ -625,6 +639,11 @@ impl RerankCache {
             m.remove(0);
         }
         m.push((std::time::Instant::now(), key, scores));
+    }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -748,16 +767,19 @@ struct Selection {
 }
 
 /// セッションの `upto` までの発話の本文 (新しい順)。
-fn user_texts(store: &Store, session: Id, upto: Id) -> Vec<String> {
-    let turns = store
-        .read()
-        .ok()
-        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
-        .unwrap_or_default();
+fn user_texts(store: &Store, session: Id, upto: Id, lang: PromptLanguage) -> Vec<String> {
+    let Ok(r) = store.read() else {
+        return Vec::new();
+    };
+    let turns = evorag_memory::session_turns(&r, session).unwrap_or_default();
+    // 忘れるの指示と合わない発話は、問いの本文 (語彙・埋め込み・リランクの問い) に使わない (04 §7.2)。確かめ
+    // られなければ使わない。
+    let hide = crate::masking::Hide::load(&r, lang);
     turns
         .iter()
         .rev()
         .filter(|t| t.body.role == TurnRole::User && t.envelope.id <= upto)
+        .filter(|t| hide.as_ref().is_some_and(|h| !h.excluded(&t.envelope)))
         .map(|t| t.body.text.clone())
         .collect()
 }
@@ -772,7 +794,7 @@ async fn select(
     mode: &RerankMode,
     vectors: Option<&VectorQuery>,
 ) -> Selection {
-    let mut users = user_texts(store, session, user_turn).into_iter();
+    let mut users = user_texts(store, session, user_turn, lang).into_iter();
     let query = users.next().unwrap_or_default();
     let previous = users.next();
     select_for(
@@ -802,7 +824,7 @@ pub async fn precompute(
     vectors: Option<&VectorQuery>,
 ) {
     // 送ると、今の最後の発話が「直前の発話」になる。
-    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]))
+    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]), lang)
         .into_iter()
         .next();
     select_for(
@@ -1118,7 +1140,10 @@ pub fn source_turns(
             out.push(Turn { envelope: e, body });
         }
     }
-    crate::masking::Hide::load(&rtx, lang)?.apply(&rtx, &mut out);
+    let hide = crate::masking::Hide::load(&rtx, lang)?;
+    // 忘れるの指示と合わないターンは出さない (04 §7.2)。
+    out.retain(|t| !hide.excluded(&t.envelope));
+    hide.apply(&rtx, &mut out);
     (!out.is_empty()).then_some(out)
 }
 

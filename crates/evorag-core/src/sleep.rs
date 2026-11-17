@@ -102,6 +102,9 @@ pub(crate) enum Step {
     /// 済まなかった整理の job (消した ID を索引と退避から除く、03 §7.3、04 §7.7 の 2・5) を試し直す。
     /// sleep-time の手順。
     Cleanup,
+    /// 忘れるの当て直しの残り (DB の層と、入れ替えに失敗したジャーナルの書き直し) を確かめ直す (04 §7.2)。
+    /// sleep-time のほかの手順の前に置く。
+    Forget,
 }
 
 /// sleep-time の手順を動かせる状態か。
@@ -135,6 +138,9 @@ fn sleep_ready(inner: &Inner) -> Result<(), BackgroundState> {
 /// 要る sleep-time の手順 (状態から求める)。
 fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     let waiting = |s: Step| skip.get(&s).is_some_and(|t| t.elapsed() < BACKOFF);
+    if !waiting(Step::Forget) && crate::forgets::needed(inner) {
+        return Some(Step::Forget);
+    }
     if !waiting(Step::Embed) && crate::embedding::needed(inner) {
         return Some(Step::Embed);
     }
@@ -336,6 +342,10 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
             Step::Verify => crate::correction::run(inner).await,
             Step::FactTable => crate::fact_table::run(inner).await,
             Step::Cleanup => crate::run_cleanup_jobs(inner).await,
+            Step::Forget => {
+                crate::forgets::recheck(inner).await;
+                false
+            }
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

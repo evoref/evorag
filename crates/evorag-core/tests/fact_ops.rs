@@ -493,11 +493,11 @@ fn write_forget_mark(root: &Path, attribute: &str, value: &str) {
     t.join().unwrap();
 }
 
-/// `/memory accept` で矛盾の値を今の値にし、`/memory history`・`/memory revert` で履歴の値を戻す。忘れた値は
-/// 戻さず、`/memory forgotten`・`/memory unblock` で印を解いた後は戻せる (04 §7.4〜§7.6)。採る・戻すの後は、次の
-/// ターンの前に事実の表を作り直す。
+/// `/memory accept` で矛盾の値を今の値にし、`/memory history`・`/memory revert` で履歴の値を戻す。忘れた値は、
+/// 起動時の当て直しで履歴から取り消し (04 §7.2)、`/memory forgotten`・`/memory unblock` で印を解ける
+/// (04 §7.4〜§7.6)。採る・戻すの後は、次のターンの前に事実の表を作り直す。
 #[tokio::test(flavor = "multi_thread")]
-async fn accept_revert_and_a_blocked_revert_after_unblock() {
+async fn accept_revert_and_unblocking_a_forgotten_value() {
     let dir = TempDir::new("fact-ops-accept");
     prepare(dir.path());
     let llm = chat(&[
@@ -540,7 +540,8 @@ async fn accept_revert_and_a_blocked_revert_after_unblock() {
         system(&answers(&llm)[2])
     );
 
-    // 大阪を忘れた値にする (印だけ)。
+    // 大阪を忘れた値にする (印だけ)。起動時の当て直しが、印に当たる履歴の値を取り消す (04 §7.2 の当て直しの
+    // 一覧の 2)。
     write_forget_mark(dir.path(), "residence", "大阪");
     let again = chat(&[]);
     let (core, mut rx) = start(dir.path(), &again, 9).await;
@@ -559,22 +560,7 @@ async fn accept_revert_and_a_blocked_revert_after_unblock() {
     let Event::FactHistoryInfo { history } = ev else {
         panic!("{ev:?}")
     };
-    let [osaka] = &history.items[..] else {
-        panic!("{history:?}")
-    };
-    assert_eq!(osaka.value, "大阪");
-    let ev = fact_event(
-        &core,
-        &mut rx,
-        Command::RevertFact {
-            target: osaka.key.clone(),
-        },
-    )
-    .await;
-    assert!(
-        matches!(&ev, Event::FactOpRejected { error, .. } if error.key == MessageKey::FactsBlocked),
-        "{ev:?}"
-    );
+    assert!(history.items.is_empty(), "{history:?}");
     let ev = fact_event(&core, &mut rx, Command::ShowForgotten).await;
     let Event::ForgottenInfo { items } = ev else {
         panic!("{ev:?}")
@@ -608,32 +594,16 @@ async fn accept_revert_and_a_blocked_revert_after_unblock() {
         matches!(&ev, Event::ForgottenInfo { items } if items.is_empty()),
         "{ev:?}"
     );
-    let ev = fact_event(
-        &core,
-        &mut rx,
-        Command::RevertFact {
-            target: osaka.key.clone(),
-        },
-    )
-    .await;
-    let Event::FactsUpdated {
-        op: FactOp::Revert,
-        list,
-        ..
-    } = ev
-    else {
-        panic!("{ev:?}")
-    };
+    // 印を解いても、取り消した値は戻らない (忘れた値は記録に残さない)。今の値はそのまま。
+    let list = facts(&core, &mut rx).await;
     let rows = value_rows(&list);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].1, "大阪");
-    // 戻した後は、東京が履歴にある。
+    assert_eq!(rows[0].1, "東京");
     let ev = fact_event(&core, &mut rx, Command::ShowFactHistory { group }).await;
     let Event::FactHistoryInfo { history } = ev else {
         panic!("{ev:?}")
     };
-    let values: Vec<&str> = history.items.iter().map(|i| i.value.as_str()).collect();
-    assert_eq!(values, ["東京"]);
+    assert!(history.items.is_empty(), "{history:?}");
     core.shutdown().await;
 }
 

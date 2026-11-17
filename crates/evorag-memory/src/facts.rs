@@ -257,12 +257,14 @@ impl Origin {
     }
 }
 
-pub(crate) const OP_FORGET: &str = "forget";
+/// 指示の `op`: 忘れる (04 §7.5)。
+pub const OP_FORGET: &str = "forget";
 const OP_PRIVATE: &str = "private";
 const OP_PRIVATE_OFF: &str = "private_off";
 const OP_ACCEPT: &str = "accept";
 const OP_REVERT: &str = "revert";
-const OP_UNBLOCK: &str = "unblock";
+/// 指示の `op`: 印を解く (04 §7.5)。
+pub const OP_UNBLOCK: &str = "unblock";
 
 impl FactDirectiveBody {
     /// 核の指示の形にする。知らない `op` は印だけを当てる `Unknown` にする (04 §7.5)。

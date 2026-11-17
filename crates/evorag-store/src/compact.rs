@@ -226,6 +226,16 @@ impl WriteTxn<'_> {
         m.remove(meta::COMPACT_PENDING.as_bytes()).map_err(db)?;
         Ok(())
     }
+
+    /// 起動時の退避の写し直しの job の作り直しを済ませた (`meta` の `forget.recheck` を消す)。
+    ///
+    /// # Errors
+    /// `meta` に書けないとき。
+    pub fn clear_forget_recheck(&mut self) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        m.remove(meta::FORGET_RECHECK.as_bytes()).map_err(db)?;
+        Ok(())
+    }
 }
 
 /// 写さない行 (`meta` の `compact.pending`。写しを終えた時点で compact は済むため)。
