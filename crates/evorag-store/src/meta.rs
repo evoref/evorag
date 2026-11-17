@@ -16,3 +16,5 @@ pub const MIGRATION_STATE: &str = "migration.state";
 pub const MIGRATION_NONE: &str = "none";
 pub const JOURNAL_LAST_SEQ: &str = "journal.last_seq";
 pub const PROMPT_LANGUAGE: &str = "prompt.language";
+/// 値の鍵と再び覚えない印の HMAC の鍵 (03 §3.1.1、04 §5.6、v0.3)。一度だけ書く。
+pub const FORGET_KEY: &str = "memory.forget_key";

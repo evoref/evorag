@@ -49,6 +49,9 @@ pub struct Scan {
     pub newer: usize,
     /// 書きかけで切り詰めた末尾のバイト数 (すべてのファイルの合計)。
     pub truncated: usize,
+    /// すべての `meta` の行 (`last_seq` に関わらず、連番の順)。古い版が取り込まずに連番だけを
+    /// 進めた `meta` の行を、新しい版が探すため (03 §3.1.1 の `memory.forget_key`)。
+    pub metas: Vec<(String, String)>,
 }
 
 pub struct Journal {
@@ -210,6 +213,30 @@ pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
     Ok(s)
 }
 
+/// 書き換えずに、すべての `meta` の行を連番の順に集める (読むだけで開いたとき、03 §3.1.1)。
+pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
+    let dir = root.join(JOURNAL_DIR);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut metas: Vec<(u64, String, String)> = Vec::new();
+    for path in files(&dir)? {
+        let bytes = std::fs::read(&path)?;
+        for raw in bytes.split_inclusive(|&b| b == b'\n') {
+            if raw.last() != Some(&b'\n') {
+                continue; // 書きかけの末尾
+            }
+            if let Decoded::Line(line) = decode(trim_newline(raw))
+                && let LineOp::Meta { key, value } = line.op
+            {
+                metas.push((line.seq, key, value));
+            }
+        }
+    }
+    metas.sort_by_key(|m| m.0);
+    Ok(metas.into_iter().map(|(_, k, v)| (k, v)).collect())
+}
+
 impl Journal {
     /// 開いて読む。`last_seq` より大きい行を返す。書きかけの末尾を切り詰め、削除の後始末をする。
     pub fn open(root: &Path, last_seq: u64) -> io::Result<(Self, Scan)> {
@@ -225,6 +252,7 @@ impl Journal {
         let mut max_seq = last_seq;
         let mut deleted = BTreeSet::new();
         let mut put_ids = BTreeSet::new();
+        let mut metas: Vec<(u64, String, String)> = Vec::new();
         for path in files(&dir)? {
             let mut bytes = std::fs::read(&path)?;
             if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
@@ -250,7 +278,9 @@ impl Journal {
                             LineOp::Put(e) => {
                                 put_ids.insert(e.id);
                             }
-                            LineOp::Meta { .. } => {}
+                            LineOp::Meta { key, value } => {
+                                metas.push((line.seq, key.clone(), value.clone()));
+                            }
                         }
                         if line.seq > last_seq {
                             scan.lines.push(line);
@@ -267,6 +297,8 @@ impl Journal {
             }
         }
         scan.lines.sort_by_key(|l| l.seq);
+        metas.sort_by_key(|m| m.0);
+        scan.metas = metas.into_iter().map(|(_, k, v)| (k, v)).collect();
         let mut journal = Self {
             dir,
             next_seq: max_seq + 1,
