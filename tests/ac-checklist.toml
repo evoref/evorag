@@ -1163,3 +1163,12 @@ status = "later"
 tests = []
 manual = ""
 note = "v0.3 の M3.4 (忘れるの確認の文言) で確かめる。"
+
+[[ac]]
+id = "AC-FR-307-4"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/src/forget.rs::applying_twice_is_the_same_as_once", "crates/evorag-store/src/forget.rs::several_directives_apply_in_order_and_report_gaps", "crates/evorag-store/tests/forget_backups.rs::a_backup_is_rewritten_with_the_turn_redacted_and_targets_dropped"]
+manual = ""
+note = "純粋な核 (04 §7.2 の apply_forget) と、退避の写し直し (03 §7.3 の forget_backups) で判定する。生きている DB とジャーナルの層の当て直しは、それを足すときに試験を足す。"

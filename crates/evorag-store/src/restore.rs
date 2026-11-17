@@ -1,8 +1,8 @@
 //! 破損への対策と復元 (03 §7.3、§8、§10)。
 //!
 //! - 開けない DB のファイルは `broken/<日時>/` へ移す (消さない)。
-//! - `restore`: 今の DB を退避してから、退避の写しを据える。次に開いたときに、退避の後の
-//!   ジャーナルの行 (削除の行を含む) が取り込まれる。
+//! - `restore`: 今の DB を退避してから、退避の写しを据える。今の DB の残っている整理の job と
+//!   `compact.pending` を引き継ぐ。次に開いたときに、退避の後のジャーナルの行 (削除の行を含む) が取り込まれる。
 //! - `purge_backups`: 削除した記録を、保持している退避から除いて写し直す。
 
 use std::collections::BTreeSet;
@@ -13,6 +13,7 @@ use evorag_types::Id;
 use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::backup::{self, BACKUPS_DIR, DAILY_DIR, PRE_OP_DIR, WEEKLY_DIR};
+use crate::envelope::Envelope;
 use crate::fsutil;
 use crate::lock::DataRootLock;
 use crate::store::{DB_FILE, META, OpenError, StoreError};
@@ -184,14 +185,78 @@ pub fn sweep_leftovers(root: &Path, backups: Option<&Path>) -> Vec<String> {
     failed
 }
 
+/// 置き換える DB から、戻した DB へ引き継ぐもの (03 §10)。
+#[derive(Debug, Default)]
+struct Carried {
+    /// 記録の表の行 (キーと値をそのまま。チェックサムはキーと値だけで決まるので、そのまま写せる)。
+    records: Vec<(Vec<u8>, Vec<u8>)>,
+    compact_pending: Option<Vec<u8>>,
+}
+
+/// 置き換える DB から、`carry` が真を返す記録 (読めるもの) と `compact.pending` を読む。
+fn read_carried(db: &Database, carry: &dyn Fn(&Envelope) -> bool) -> Result<Carried, StoreError> {
+    let rtx = db.begin_read().map_err(crate::store::db)?;
+    let mut out = Carried::default();
+    let records = rtx
+        .open_table(crate::store::RECORDS)
+        .map_err(crate::store::db)?;
+    for item in records.iter().map_err(crate::store::db)? {
+        let (k, v) = item.map_err(crate::store::db)?;
+        if let Ok(env) = Envelope::decode(k.value(), v.value())
+            && carry(&env)
+        {
+            out.records.push((k.value().to_vec(), v.value().to_vec()));
+        }
+    }
+    let m = rtx.open_table(META).map_err(crate::store::db)?;
+    out.compact_pending = m
+        .get(crate::meta::COMPACT_PENDING.as_bytes())
+        .map_err(crate::store::db)?
+        .map(|v| v.value().to_vec());
+    Ok(out)
+}
+
+/// 戻す DB の写し `file` に、引き継ぐものを書き、退避だけに置く `meta` ([`crate::meta::BACKUP_MAX_ID`]) を消す。
+fn write_carried(file: &Path, carried: &Carried) -> Result<(), StoreError> {
+    let db = Database::open(file).map_err(crate::store::db)?;
+    let tx = db.begin_write().map_err(crate::store::db)?;
+    {
+        let mut records = tx
+            .open_table(crate::store::RECORDS)
+            .map_err(crate::store::db)?;
+        for (k, v) in &carried.records {
+            records
+                .insert(k.as_slice(), v.as_slice())
+                .map_err(crate::store::db)?;
+        }
+        let mut m = tx.open_table(META).map_err(crate::store::db)?;
+        m.remove(crate::meta::BACKUP_MAX_ID.as_bytes())
+            .map_err(crate::store::db)?;
+        if let Some(v) = &carried.compact_pending {
+            m.insert(crate::meta::COMPACT_PENDING.as_bytes(), v.as_slice())
+                .map_err(crate::store::db)?;
+        }
+    }
+    tx.commit().map_err(crate::store::db)
+}
+
 /// 退避 `backup` (フォルダか、`evorag.redb` のファイル) から戻す (03 §10)。
-/// 今の DB が開ければ、先に退避する (03 §7.2)。戻した後に `Store::open` すると、退避の後の
-/// ジャーナルの行が取り込まれる。データ根を使っているプロセスがあれば断る。
+///
+/// 今の DB が開ければ、先に退避する (03 §7.2)。置き換える DB の、`carry` が真を返す記録 (残っている整理の job:
+/// `purge_backups`・`purge_indexes`・`forget_backups`) と `meta` の `compact.pending` は、戻した DB に引き継ぐ
+/// (同じ ID の記録は置き換える DB の方を採る)。`carry` は関係も副索引も持たない種類の記録だけを選ぶこと (記録の行
+/// だけを写す)。戻した後に `Store::open` すると、退避の後のジャーナルの行が取り込まれる。データ根を使っている
+/// プロセスがあれば断る。
+///
+/// # Errors
+/// 退避が開けないとき、データ根を使っているプロセスがあるとき、今の DB を退避できない・引き継ぐものを読めない
+/// とき (引き継げないまま戻すと、退避の整理と compact が抜けるため)、ファイルを書けないとき。
 pub fn restore(
     root: &Path,
     backup: &Path,
     now_ms: i64,
     config_file: Option<&Path>,
+    carry: &dyn Fn(&Envelope) -> bool,
 ) -> Result<Option<PathBuf>, OpenError> {
     let src = if backup.is_dir() {
         backup.join(DB_FILE)
@@ -203,15 +268,18 @@ pub fn restore(
     let _lock = DataRootLock::acquire(root)?;
     let main = root.join(DB_FILE);
     let mut pre_op = None;
+    let mut carried = Carried::default();
     if main.exists() {
         match Database::open(&main) {
             Ok(db) => {
                 let extra: Vec<&Path> = config_file.into_iter().collect();
                 let fmt = String::from("current");
+                let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
                 pre_op = Some(
                     backup::pre_op(&db, root, now_ms, "restore", &fmt, &extra)
-                        .map_err(|e| OpenError::Unreadable(e.to_string()))?,
+                        .map_err(unreadable)?,
                 );
+                carried = read_carried(&db, carry).map_err(unreadable)?;
             }
             Err(_) => {
                 move_broken(root, now_ms)?;
@@ -221,13 +289,17 @@ pub fn restore(
     let tmp = root.join(format!("{DB_FILE}.restoring"));
     fsutil::prepare_private_file(&tmp)?;
     std::fs::copy(&src, &tmp)?;
+    if let Err(e) = write_carried(&tmp, &carried) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(OpenError::Unreadable(e.to_string()));
+    }
     fsutil::sync_file(&tmp)?;
     fsutil::rename_durable(&tmp, &main)?;
     Ok(pre_op)
 }
 
 /// キーが、消した記録の ID を含むか (ID の要素は `0x04` + 16 バイト、03 §3.3)。
-fn mentions(key: &[u8], ids: &BTreeSet<[u8; 16]>) -> bool {
+pub(crate) fn mentions(key: &[u8], ids: &BTreeSet<[u8; 16]>) -> bool {
     key.windows(17).any(|w| {
         w[0] == 0x04
             && w[1..]

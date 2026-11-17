@@ -128,7 +128,14 @@ fn a_broken_database_is_moved_aside_and_restored_from_the_backup_and_the_journal
     assert!(moved_to.is_file(), "the broken file is kept, not deleted");
 
     let latest = &list_backups(dir.path(), None)[0];
-    restore(dir.path(), &latest.dir, c.now().as_millis(), None).unwrap();
+    restore(
+        dir.path(),
+        &latest.dir,
+        c.now().as_millis(),
+        None,
+        &carried_on_restore,
+    )
+    .unwrap();
     let env = Env::open(dir.path(), c).unwrap();
     // 退避の状態に、ジャーナルの差分が足される (重複も抜けも無い)。
     assert_eq!(env.texts(sid), ["退避の前", "退避の後"]);
@@ -152,7 +159,14 @@ fn restore_backs_up_the_current_database_first() {
         env.store.daily_backup(None).unwrap();
     }
     let latest = list_backups(dir.path(), None)[0].dir.clone();
-    let pre = restore(dir.path(), &latest, c.now().as_millis(), None).unwrap();
+    let pre = restore(
+        dir.path(),
+        &latest,
+        c.now().as_millis(),
+        None,
+        &carried_on_restore,
+    )
+    .unwrap();
     let pre = pre.expect("a pre-op backup of the current database");
     assert!(pre.join(DB_FILE).is_file());
     assert!(

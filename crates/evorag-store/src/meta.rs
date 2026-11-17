@@ -13,7 +13,13 @@ pub const MAX_WRITER: &str = "max_writer";
 /// 開くときにジャーナルの削除の行から消し、まだ索引と退避の整理の job にしていない記録の ID (空白区切り、
 /// 03 §7.3)。`Store::pending_deletes` が読み、job を書く依頼が消す。
 pub const PENDING_DELETES: &str = "cleanup.pending_deletes";
-/// `writer.<semver>`: その版が最初に書き込みで開いた時刻 (UTC、ミリ秒)。
+/// 次の起動で compact が要ること (値は `1`、03 §3.1.1)。書き換えてよいキーで、ジャーナルには書かない。
+/// 無い・知らない値は「要らない」として読む。`Store::compact_pending` が読む。
+pub const COMPACT_PENDING: &str = "compact.pending";
+/// 退避の `meta` だけに置く: 写したときの記録の ID の最大 (03 §7.3 の「飛ばす退避」)。退避の論理的な写しが
+/// 書き、restore で据えた DB からは消す。
+pub const BACKUP_MAX_ID: &str = "backup.max_id";
+/// `writer.<semver>`:その版が最初に書き込みで開いた時刻 (UTC、ミリ秒)。
 pub const WRITER_PREFIX: &str = "writer.";
 pub const MIGRATION_STATE: &str = "migration.state";
 pub const MIGRATION_NONE: &str = "none";
