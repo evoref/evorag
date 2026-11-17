@@ -89,6 +89,19 @@ impl BodyPatch {
     }
 }
 
+/// 本体 (map) の整数の項目 `name`。項目が無いか null なら 0 (03 §4.2 の規則 1 の既定値)、整数でない・本体が
+/// map でないなら `None`。
+pub(crate) fn map_uint(body: &Value, name: &str) -> Option<u64> {
+    let Value::Map(map) = body else {
+        return None;
+    };
+    match map.iter().find(|(k, _)| k.as_text() == Some(name)) {
+        None | Some((_, Value::Null)) => Some(0),
+        Some((_, Value::Integer(i))) => u64::try_from(*i).ok(),
+        Some(_) => None,
+    }
+}
+
 fn checksum(key: &[u8], cbor: &[u8]) -> u64 {
     let mut h = xxhash_rust::xxh3::Xxh3::new();
     h.update(key);
@@ -158,14 +171,7 @@ impl Envelope {
 
     /// 本体の整数の項目 `name`。項目が無ければ 0 (03 §4.2 の規則 1 の既定値)、整数でなければ `None`。
     pub fn body_uint(&self, name: &str) -> Option<u64> {
-        let Value::Map(map) = &self.body else {
-            return None;
-        };
-        match map.iter().find(|(k, _)| k.as_text() == Some(name)) {
-            None | Some((_, Value::Null)) => Some(0),
-            Some((_, Value::Integer(i))) => u64::try_from(*i).ok(),
-            Some(_) => None,
-        }
+        map_uint(&self.body, name)
     }
 
     /// `records` の値のバイト列にする。`key` は表のキー (チェックサムが覆う)。

@@ -137,6 +137,27 @@ pub fn from_json(v: &Json) -> Result<Cbor, String> {
     })
 }
 
+/// JSON に写した本体 (`env.body`) の最上位の整数の項目 `name` を、封筒の全体を読まずに読む
+/// ([`Envelope::body_uint`] と同じ読み方。無いか null なら 0)。版の新しい行でも読めるように、ほかの項目は
+/// 見ない (03 §6 の「削除と忘れる」)。
+pub(crate) fn body_uint_json(body: &Json, name: &str) -> Option<u64> {
+    match body.as_object() {
+        // 本体の全体を CBOR のまま運んだもの (`{"$cbor": …}`)。
+        Some(m) if m.len() == 1 && m.contains_key(MARK) => {
+            crate::envelope::map_uint(&from_json(body).ok()?, name)
+        }
+        Some(m) => match m.get(name) {
+            None | Some(Json::Null) => Some(0),
+            Some(v) => match from_json(v).ok()? {
+                Cbor::Integer(i) => u64::try_from(i).ok(),
+                Cbor::Null => Some(0),
+                _ => None,
+            },
+        },
+        None => None,
+    }
+}
+
 /// 封筒を JSON にする (チェックサムは写さない)。
 pub fn envelope_to_json(e: &Envelope) -> Json {
     let mut m = Map::new();

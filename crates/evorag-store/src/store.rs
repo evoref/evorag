@@ -84,6 +84,10 @@ pub struct KindSpec {
     pub journaled: bool,
     /// ジャーナルから取り込むときに、関係と副索引を作る関数。
     pub derive: Option<DeriveFn>,
+    /// 単調に増える本体の整数の項目 (ターンの改訂の番号 `rev`、04 §7.3)。宣言した種類では、ジャーナルの取り込み
+    /// (と repair) は、DB の記録のこの値を小さくする `put` の行を当てない (03 §6 の「突き合わせ」)。ジャーナルを
+    /// 開くときに、この値を ID ごとに集める (04 §7.2 の「ジャーナルの層の見つけ方」)。
+    pub monotonic: Option<&'static str>,
 }
 
 impl KindSpec {
@@ -94,6 +98,21 @@ impl KindSpec {
             create_when_newer_present: false,
             journaled: false,
             derive: None,
+            monotonic: None,
+        }
+    }
+
+    /// `old` の上に `new` を書くと、宣言した単調に増える項目が小さくなるか (03 §6)。`new` の値が読めないときも、
+    /// `old` の値が 0 より大きければ小さくなるとみなす (伏せ字の前の本文を戻さない側に倒す)。`old` の値が
+    /// 読めないときは、比べられないので小さくならないとみなす。
+    pub fn lowers_monotonic(&self, old: &Envelope, new: &Envelope) -> bool {
+        let Some(field) = self.monotonic else {
+            return false;
+        };
+        match (old.body_uint(field), new.body_uint(field)) {
+            (Some(o), Some(n)) => n < o,
+            (Some(o), None) => o > 0,
+            (None, _) => false,
         }
     }
 }
@@ -153,6 +172,9 @@ pub struct OpenReport {
     /// 開くときにジャーナルの削除の行から消した記録の ID (取り込んだ削除の行と、削除の行があるのに DB に
     /// 残っていた記録)。索引と退避から除く ID として `meta` にも残す ([`Store::pending_deletes`])。
     pub journal_deletes: Vec<Id>,
+    /// 削除の行のある ID の `put` の行をジャーナルから除く書き直しが、開くときに済まなかった (次に開くときに
+    /// もう一度試す。`doctor` が報告する)。
+    pub journal_rewrite_failed: Option<crate::journal::RewriteError>,
 }
 
 /// 開くときにジャーナルの削除の行から消し、まだ整理の job にしていない記録 ([`Store::pending_deletes`])。
@@ -680,7 +702,12 @@ impl Store {
             .map_err(|e| OpenError::BadMeta(e.to_string()))?
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let (journal, scan) = Journal::open(&self.root, last)?;
+        let monotonic: crate::journal::Monotonic = self
+            .kinds
+            .values()
+            .filter_map(|k| Some((k.name, k.monotonic?)))
+            .collect();
+        let (journal, scan) = Journal::open(&self.root, last, monotonic)?;
         self.deleted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -688,6 +715,7 @@ impl Store {
         report.journal_bad_lines = scan.bad;
         report.journal_newer_lines = scan.newer;
         report.journal_truncated = scan.truncated;
+        report.journal_rewrite_failed = scan.rewrite_failed.clone();
         let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
         // 削除の行があるのに DB に残っている記録 (古い版が書き戻したもの) を、読み取りのトランザクションで探す
         // (毎回の起動で空の書き込みをしないため)。見つけた記録は、ほかの記録からつながっていても消す (消したと
@@ -852,6 +880,11 @@ impl Store {
                 match tx.get(&env.kind, env.id)? {
                     Some(Read::Ok(old)) => {
                         if spec.is_some_and(|s| old.v > s.current_v) {
+                            return Ok(());
+                        }
+                        // 単調に増える項目 (ターンの改訂の番号) を小さくする行は当てない (伏せ字の前の行で、
+                        // 伏せ字を戻さないため、03 §6)。
+                        if spec.is_some_and(|s| s.lowers_monotonic(&old, env)) {
                             return Ok(());
                         }
                         self.undo_derived(tx, &old)?;
@@ -1029,6 +1062,30 @@ impl Store {
     /// その種類をジャーナルにも書くか。
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
+    }
+
+    /// ジャーナルに集めた、その ID の `put` の行の単調に増える項目の値の範囲 (開くときに集め、このプロセスの
+    /// 追記と書き直しで更新する)。忘れるの書き直しが済んでいないこと (`min < 伏せ字の後の番号 <= max`) を
+    /// 見つけるのに使う (04 §7.2 の「ジャーナルの層の見つけ方」)。読むだけで開いたときは `None`。
+    pub fn journal_rev_span(&self, id: Id) -> Option<crate::journal::RevSpan> {
+        self.journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()?
+            .rev_span(id)
+    }
+
+    /// 試験のための注入: 次のジャーナルの書き直しを、決まった点で失敗させる (09 §3.5)。
+    #[doc(hidden)]
+    pub fn inject_journal_rewrite_fault(&self, fault: crate::journal::RewriteFault) {
+        if let Some(j) = self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            j.inject_rewrite_fault(fault);
+        }
     }
 
     /// 試験のための注入: 次のジャーナルの追記を失敗させる (AC-FR-202-1)。
