@@ -68,7 +68,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// `needle` が `hay` に現れる位置 (バイト)。`bounded` なら、前後が英数字でない位置だけ。
-fn find_all(hay: &str, needle: &str, bounded: bool) -> Vec<usize> {
+pub(crate) fn find_all(hay: &str, needle: &str, bounded: bool) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -90,7 +90,7 @@ fn any_match(hay: &str, words: &[String], bounded: bool) -> bool {
 }
 
 /// 除外の語に当たった箇所を伏せる (同じ長さの、どの語にも当たらない文字で埋める)。
-fn mask(hay: &str, excludes: &[String], bounded: bool) -> String {
+pub(crate) fn mask(hay: &str, excludes: &[String], bounded: bool) -> String {
     // 範囲は元の文字列で集め、その範囲の文字をまとめて置き換える (位置がずれないように)。
     let ranges: Vec<(usize, usize)> = excludes
         .iter()

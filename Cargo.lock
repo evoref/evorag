@@ -627,6 +627,8 @@ dependencies = [
  "toml",
  "unicase",
  "unicode-normalization",
+ "unicode-properties",
+ "unicode-segmentation",
 ]
 
 [[package]]

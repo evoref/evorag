@@ -7,6 +7,7 @@
 //! - HMAC に入れるバイト列は 04 §5.6 のとおりに凍結する (用途の印・長さを前に置く・値の鍵は生の 32 バイト)。
 
 use std::fmt;
+use std::ops::Range;
 
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -37,6 +38,117 @@ pub fn normalize_v1(s: &str) -> String {
         }
     }
     out
+}
+
+/// 正規化 v1 の結果と、元の本文の位置との対応表 (04 §5.6)。
+///
+/// 元の本文を書記素ごとに正規化してつなぎ、出力の文字ごとに、どの書記素から出たかを持つ。照合の一致は、
+/// 両端が書記素の展開の切れ目に来たものだけを採る (一致の端が 1 つの文字の展開の途中なら一致としない)。
+#[derive(Debug, Clone)]
+pub(crate) struct Mapped {
+    text: String,
+    /// 出力の文字ごとの (出力のバイト位置, 元の書記素の番号)。バイト位置の昇順。
+    owners: Vec<(usize, usize)>,
+    /// 元の本文の書記素の範囲。
+    clusters: Vec<Range<usize>>,
+}
+
+/// 照合の一致 1 つ。`out` は正規化の後の位置、`source` は元の本文の位置 (書記素の境界)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hit {
+    pub(crate) out: Range<usize>,
+    pub(crate) source: Range<usize>,
+}
+
+/// 一致の端の条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Edges {
+    /// 部分一致。
+    Any,
+    /// 英数字で始まる・終わる探す語は、前・後が英数字でない位置だけ (04 §5.2 の関門 2)。
+    Word,
+}
+
+impl Mapped {
+    /// 対応表を作る。書記素ごとに正規化した結果が、本文の全体を正規化した結果 (`normalize_v1`) と
+    /// 食い違うとき (書記素をまたぐ合成など) は `None` (位置を戻せないので、正規化の後の照合をしない)。
+    pub(crate) fn new(s: &str) -> Option<Self> {
+        let clusters = crate::chars::graphemes(s);
+        let mut text = String::with_capacity(s.len());
+        let mut owners = Vec::new();
+        let mut pending_space: Option<usize> = None;
+        for (ci, r) in clusters.iter().enumerate() {
+            let nfkc: String = s[r.clone()].nfkc().collect();
+            let folded = unicase::UniCase::unicode(nfkc.as_str()).to_folded_case();
+            for c in folded.nfkc() {
+                if c.is_whitespace() {
+                    if !text.is_empty() && pending_space.is_none() {
+                        pending_space = Some(ci);
+                    }
+                } else {
+                    if let Some(owner) = pending_space.take() {
+                        owners.push((text.len(), owner));
+                        text.push(' ');
+                    }
+                    owners.push((text.len(), ci));
+                    text.push(c);
+                }
+            }
+        }
+        (text == normalize_v1(s)).then_some(Self {
+            text,
+            owners,
+            clusters,
+        })
+    }
+
+    /// 正規化の後の本文 (`normalize_v1` と同じ)。
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// `needle` (正規化 v1 の後の文字列) の一致を、重なりを含めて前から順に返す。
+    pub(crate) fn find(&self, needle: &str, edges: Edges) -> Vec<Hit> {
+        let mut hits = Vec::new();
+        let Some(first) = needle.chars().next() else {
+            return hits;
+        };
+        let last = needle.chars().next_back().unwrap_or(first);
+        let mut from = 0;
+        while let Some(p) = self.text[from..].find(needle) {
+            let at = from + p;
+            let end = at + needle.len();
+            from = at + first.len_utf8();
+            if edges == Edges::Word {
+                let before = self.text[..at].chars().next_back();
+                let after = self.text[end..].chars().next();
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+                if (first.is_ascii_alphanumeric() && word(before))
+                    || (last.is_ascii_alphanumeric() && word(after))
+                {
+                    continue;
+                }
+            }
+            if let Some(source) = self.source_of(at, end) {
+                hits.push(Hit {
+                    out: at..end,
+                    source,
+                });
+            }
+        }
+        hits
+    }
+
+    /// 出力の範囲 `[start, end)` を元の本文の範囲に戻す。端が書記素の展開の途中なら `None`。
+    fn source_of(&self, start: usize, end: usize) -> Option<Range<usize>> {
+        let i = self.owners.binary_search_by_key(&start, |o| o.0).ok()?;
+        let j = self.owners.partition_point(|o| o.0 < end).checked_sub(1)?;
+        let (owner_i, owner_j) = (self.owners[i].1, self.owners[j].1);
+        let starts_clean = i == 0 || self.owners[i - 1].1 != owner_i;
+        let ends_clean = self.owners.get(j + 1).is_none_or(|o| o.1 != owner_j);
+        (starts_clean && ends_clean)
+            .then(|| self.clusters[owner_i].start..self.clusters[owner_j].end)
+    }
 }
 
 /// データ根ごとの HMAC の鍵 (`meta` の `memory.forget_key` を復号した 32 バイト、03 §3.1.1)。
@@ -302,5 +414,37 @@ mod tests {
         assert!(ForgetKey::from_hex(&"AB".repeat(32)).is_none()); // 大文字は受けない
         assert!(ForgetKey::from_hex(&"zz".repeat(32)).is_none());
         assert_eq!(format!("{k:?}"), "ForgetKey(..)");
+    }
+
+    fn sources<'t>(text: &'t str, needle: &str, edges: Edges) -> Vec<&'t str> {
+        let m = Mapped::new(text).expect("consistent");
+        assert_eq!(m.text(), normalize_v1(text));
+        m.find(needle, edges)
+            .into_iter()
+            .map(|h| &text[h.source])
+            .collect()
+    }
+
+    #[test]
+    fn mapped_positions_return_to_the_original_text() {
+        assert_eq!(
+            sources("ＲＴＸ４０７０を使う", "rtx4070", Edges::Any),
+            ["ＲＴＸ４０７０"]
+        );
+        assert_eq!(sources("ｶﾞｽと ガス", "ガス", Edges::Any), ["ｶﾞｽ", "ガス"]);
+        assert_eq!(
+            sources("東京 \u{3000} タワー", "東京 タワー", Edges::Any),
+            ["東京 \u{3000} タワー"]
+        );
+        // 一致の端が 1 つの文字の展開の途中なら一致としない (`㈱` → `(株)`)。
+        assert!(sources("㈱山田", "株", Edges::Any).is_empty());
+        assert_eq!(sources("㈱山田", "(株)", Edges::Any), ["㈱"]);
+        // 英数字は語の境界で。記号で終わる語は後ろを見ない。
+        assert!(sources("Annabelle", "ann", Edges::Word).is_empty());
+        assert_eq!(sources("Ann and Annabelle", "ann", Edges::Word), ["Ann"]);
+        assert_eq!(sources("C++er", "c++", Edges::Word), ["C++"]);
+        assert_eq!(sources("5歳の娘", "5歳の娘", Edges::Word), ["5歳の娘"]);
+        // 重なる一致も返す。
+        assert_eq!(sources("aaa", "aa", Edges::Any), ["aa", "aa"]);
     }
 }

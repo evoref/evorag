@@ -158,6 +158,11 @@ impl CommonRules {
                 out.push(at(&format!(
                     "forbidden_categories `{c}` is not a general category"
                 )));
+            } else if !crate::chars::SUPPORTED_CATEGORIES.contains(&c.as_str()) {
+                out.push(at(&format!(
+                    "forbidden_categories `{c}` is not supported by the gate (only {:?})",
+                    crate::chars::SUPPORTED_CATEGORIES
+                )));
             }
         }
         for c in &self.forbidden_chars {
