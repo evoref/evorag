@@ -22,6 +22,19 @@ pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `from` を `to` に入れ替える (既にあれば置き換え)。フォルダは書き切らない (呼び手が [`sync_dir`] を別に
+/// 呼び、入れ替えの成否と書き切りの成否を分けて扱うため)。Windows は `MOVEFILE_WRITE_THROUGH` を付け、
+/// 一時の共有違反を [`retry_transient`] と同じ間隔で試し直す。
+pub fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
+    imp::rename(from, to)
+}
+
+/// ほかのプログラムが一時的にファイルを掴んでいるための失敗 (Windows の共有・ロックの違反とアクセスの拒否) を、
+/// 少し待って試し直す (合わせて約 2 秒)。Unix では 1 回だけ呼ぶ。
+pub fn retry_transient<T>(f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    imp::retry_transient(f)
+}
+
 /// ファイルの中身をディスクへ書き切る (書き込みの権限で開く。Windows の `FlushFileBuffers` は
 /// 読み取り専用のハンドルを拒否する)。
 pub fn sync_file(path: &Path) -> io::Result<()> {
@@ -109,23 +122,15 @@ mod imp {
         Ok(s)
     }
 
-    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-        let (f, t) = (wide(from)?, wide(to)?);
+    pub fn retry_transient<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
         // 合わせて約 2 秒まで待つ。
         let mut wait = Duration::from_millis(20);
-        for attempt in 0.. {
-            // SAFETY: 両方とも NUL で終わる UTF-16 の列で、呼び出しの間は生きている。
-            let ok = unsafe {
-                MoveFileExW(
-                    f.as_ptr(),
-                    t.as_ptr(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
+        let mut attempt = 0;
+        loop {
+            let e = match f() {
+                Ok(v) => return Ok(v),
+                Err(e) => e,
             };
-            if ok != 0 {
-                return Ok(());
-            }
-            let e = io::Error::last_os_error();
             let transient = matches!(
                 e.raw_os_error(),
                 Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
@@ -135,8 +140,27 @@ mod imp {
             }
             std::thread::sleep(wait);
             wait *= 2;
+            attempt += 1;
         }
-        unreachable!()
+    }
+
+    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        let (f, t) = (wide(from)?, wide(to)?);
+        retry_transient(|| {
+            // SAFETY: 両方とも NUL で終わる UTF-16 の列で、呼び出しの間は生きている。
+            let ok = unsafe {
+                MoveFileExW(
+                    f.as_ptr(),
+                    t.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
     }
 
     pub fn sync_dir(_dir: &Path) -> io::Result<()> {
@@ -200,6 +224,10 @@ mod imp {
     fn unsupported(e: &io::Error) -> bool {
         matches!(e.raw_os_error(), Some(22 | 45 | 95 | 102))
             || e.kind() == io::ErrorKind::Unsupported
+    }
+
+    pub fn retry_transient<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+        f()
     }
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {

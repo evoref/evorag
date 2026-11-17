@@ -13,10 +13,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use evorag_types::{Id, Timestamp};
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::envelope::{BodyPatch, Envelope};
-use crate::journal::LineOp;
+use crate::journal::{JournalCut, LineOp, RewriteError, RewriteReport};
 use crate::key::{OwnedPart, Part};
 use crate::store::{Durability, Read, Store, StoreError, WriteToken, WriteTxn};
 
@@ -93,9 +93,19 @@ pub enum WriteOp {
     /// 開くときに残した「索引と退避から除く ID」([`Store::pending_deletes`]) を消す。整理の job を書くのと同じ
     /// 依頼に入れる。
     ClearPendingDeletes,
+    /// コミットの後に、ジャーナルから ID ごとの `put` の行を除く書き直し (03 §6 の「削除と忘れる」)。DB には何も
+    /// 書かない。忘れるでは、指示の `put` と伏せ字にしたターンの `Patch` と同じ依頼に入れる (伏せ字の後の行を
+    /// 追記してから書き直す)。sleep-time の試し直しと起動時の当て直しは、この操作だけの依頼で送る (そのときは
+    /// DB のトランザクションを開かない)。書き直しの成否は [`WriteOutcome::journal_rewrite`] に返し、失敗しても
+    /// 依頼は断らない (コミットは済んでいる)。`Delete` で消すジャーナルに書く種類の ID には、
+    /// [`JournalCut::All`] を自動で足す。
+    RewriteJournal(BTreeMap<Id, JournalCut>),
 }
 
 /// 書き込みの依頼。`ops` は 1 つのトランザクションで、すべて書くか、何も書かない。
+///
+/// ジャーナルに書く行は、`ops` の順に、1 回の追記で、続いた連番で書く。忘れるでは、指示 (`fact_directive`) の
+/// `Put` を、伏せ字にするターンの `Patch` より前に置く (指示の行を先に書く、03 §6 の「書く物」)。
 #[derive(Debug, Clone)]
 pub struct WriteRequest {
     pub ops: Vec<WriteOp>,
@@ -132,6 +142,9 @@ pub struct WriteOutcome {
     pub quarantined: usize,
     /// quarantine へ移せなかった理由 (依頼は続けて書いた)。呼び手が知らせる。
     pub quarantine_failed: Option<String>,
+    /// コミットの後のジャーナルの書き直し (削除と [`WriteOp::RewriteJournal`]) の結果。書き直しが無ければ
+    /// `None`。失敗は依頼の失敗にしない。呼び手が job に残すか試し直す ([`RewriteError::is_swap`]、03 §6)。
+    pub journal_rewrite: Option<Result<RewriteReport, RewriteError>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -276,8 +289,19 @@ impl Writer {
             // ジャーナルに書いた後でコミットに失敗した。取り込み直すまで書かない (03 §6)。
             return Err(StoreError::NeedsRestart.into());
         }
-        // 1. DB のトランザクションで操作を当てて、規則を確かめる (断られたらジャーナルにも書かない)。
         let mut out = WriteOutcome::default();
+        let mut cuts = requested_cuts(&req.ops);
+        if !req.ops.is_empty()
+            && req
+                .ops
+                .iter()
+                .all(|op| matches!(op, WriteOp::RewriteJournal(_)))
+        {
+            // 書き直しだけの依頼 (試し直し・起動時の当て直し)。DB には書かない。
+            out.journal_rewrite = Some(self.rewrite_journal(&cuts));
+            return Ok(out);
+        }
+        // 1. DB のトランザクションで操作を当てて、規則を確かめる (断られたらジャーナルにも書かない)。
         if self.store.suspect_count() > 0 {
             self.quarantine(req.durability, &mut out);
         }
@@ -310,6 +334,9 @@ impl Writer {
         }
         // 2. ジャーナルに書いて書き切る (03 §6)。書けなければ DB にも書かない。
         let (lines, deleted) = self.journal_lines(req, patched);
+        for id in deleted {
+            cuts.insert(id, JournalCut::All);
+        }
         let mut journaled = false;
         if !lines.is_empty() {
             let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
@@ -338,15 +365,57 @@ impl Writer {
             return Err(e.into());
         }
         self.store.remember_deleted(gone);
-        // 4. 削除した記録の本文の行をジャーナルから除く。失敗しても次の起動で除く。
-        if !deleted.is_empty() {
-            let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(journal) = guard.as_mut() {
-                let _ = journal.remove_ids(&deleted);
-            }
+        // 4. すぐにジャーナルを書き直す (削除した記録の `put` の行と、忘れるの伏せ字の前の行を除く、03 §6)。
+        // 失敗しても依頼は断らない (削除の行は次の起動で、忘れるは起動時と sleep-time の当て直しで除く)。
+        if !cuts.is_empty() {
+            out.journal_rewrite = Some(self.rewrite_journal(&cuts));
         }
         Ok(out)
     }
+
+    /// ジャーナルを書き直す。ジャーナルのロックを持ったまま行うので、書き直しの間に追記は入らない (03 §6 の
+    /// 「追記との直列」)。読むだけで開いていてジャーナルが無ければ、何もしない。
+    ///
+    /// [`JournalCut::All`] は、消した記録の ID ([`Store::was_deleted`]) にだけ当てる。生きている記録の行を
+    /// 消さないため。ほかの ID は当てずに [`RewriteReport::skipped`] に入れる。
+    fn rewrite_journal(
+        &self,
+        cuts: &BTreeMap<Id, JournalCut>,
+    ) -> Result<RewriteReport, RewriteError> {
+        let (allowed, refused): (BTreeMap<Id, JournalCut>, BTreeMap<Id, JournalCut>) = cuts
+            .iter()
+            .map(|(&id, &cut)| (id, cut))
+            .partition(|&(id, cut)| cut != JournalCut::All || self.store.was_deleted(id));
+        let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let mut report = match guard.as_mut() {
+            Some(journal) => journal.rewrite(&allowed)?,
+            None => RewriteReport::default(),
+        };
+        report.skipped.extend(refused.into_keys());
+        Ok(report)
+    }
+}
+
+/// 依頼の [`WriteOp::RewriteJournal`] をまとめる。同じ ID に [`JournalCut::All`] があればそれを、
+/// [`JournalCut::Below`] どうしなら大きいほうを採る。
+fn requested_cuts(ops: &[WriteOp]) -> BTreeMap<Id, JournalCut> {
+    let mut cuts: BTreeMap<Id, JournalCut> = BTreeMap::new();
+    for op in ops {
+        let WriteOp::RewriteJournal(more) = op else {
+            continue;
+        };
+        for (&id, &cut) in more {
+            let merged = match (cuts.get(&id), cut) {
+                (Some(JournalCut::All), _) | (_, JournalCut::All) => JournalCut::All,
+                (Some(JournalCut::Below(a)), JournalCut::Below(b)) => {
+                    JournalCut::Below((*a).max(b))
+                }
+                (None, c) => c,
+            };
+            cuts.insert(id, merged);
+        }
+    }
+    cuts
 }
 
 impl Writer {
@@ -381,13 +450,9 @@ impl Writer {
     /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) と、
     /// 削除する ID。
     /// `patched` は、依頼の `Patch` の順に、差し替えて書いた封筒。
-    fn journal_lines(
-        &self,
-        req: &WriteRequest,
-        patched: Vec<Envelope>,
-    ) -> (Vec<LineOp>, BTreeSet<Id>) {
+    fn journal_lines(&self, req: &WriteRequest, patched: Vec<Envelope>) -> (Vec<LineOp>, Vec<Id>) {
         let mut lines = Vec::new();
-        let mut deleted = BTreeSet::new();
+        let mut deleted = Vec::new();
         let mut patched = patched.into_iter();
         for op in &req.ops {
             match op {
@@ -404,7 +469,7 @@ impl Writer {
                     }
                 }
                 WriteOp::Delete { kind, id } if self.store.is_journaled(kind) => {
-                    deleted.insert(*id);
+                    deleted.push(*id);
                     lines.push(LineOp::Delete {
                         kind: kind.clone(),
                         id: *id,
@@ -525,6 +590,8 @@ pub(crate) fn apply_op(
         }
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
         WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
+        // コミットの後に書き手が行う (DB には書かない)。
+        WriteOp::RewriteJournal(_) => {}
     }
     Ok(None)
 }

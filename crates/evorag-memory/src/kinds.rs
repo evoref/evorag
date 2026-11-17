@@ -163,10 +163,15 @@ pub fn kinds() -> Vec<KindSpec> {
         create_when_newer_present: true,
         journaled: true,
         derive: Some(derive),
+        monotonic: None,
     };
     vec![
         append(KIND_SESSION, derive_session),
-        append(KIND_TURN, derive_turn),
+        // 改訂の番号は伏せ字のたびに上げる。取り込みと repair は、これを下げる行を当てない (03 §6、04 §7.3)。
+        KindSpec {
+            monotonic: Some(TURN_REV_FIELD),
+            ..append(KIND_TURN, derive_turn)
+        },
         append(KIND_SIGNAL, derive_signal),
         append(KIND_RECALL_FEEDBACK, derive_feedback),
         // 利用者の明示の操作なのでジャーナルに書く。関係も副索引も持たない (件数が少ないので全部読む)。
@@ -176,6 +181,7 @@ pub fn kinds() -> Vec<KindSpec> {
             create_when_newer_present: true,
             journaled: true,
             derive: None,
+            monotonic: None,
         },
         // 利用者が setup で確かめた (または最初の起動で記録した) 正本なので、ジャーナルに書く。
         KindSpec {
@@ -184,6 +190,7 @@ pub fn kinds() -> Vec<KindSpec> {
             create_when_newer_present: true,
             journaled: true,
             derive: None,
+            monotonic: None,
         },
         // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_MODEL_PROBE, 1),
@@ -204,6 +211,7 @@ pub fn kinds() -> Vec<KindSpec> {
             create_when_newer_present: false,
             journaled: false,
             derive: Some(crate::facts::derive_fact),
+            monotonic: None,
         },
         // 訂正の候補と検証済みの訂正は、字句の規則と LLM で作る派生の記録 (04 §6)。ジャーナルに書かない。関係は
         // 本体 (`turn`) から作り直せる。
@@ -213,6 +221,7 @@ pub fn kinds() -> Vec<KindSpec> {
             create_when_newer_present: false,
             journaled: false,
             derive: Some(crate::correction::derive_correction),
+            monotonic: None,
         },
         // 事実への指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
         KindSpec {
@@ -221,6 +230,7 @@ pub fn kinds() -> Vec<KindSpec> {
             create_when_newer_present: true,
             journaled: true,
             derive: Some(crate::facts::derive_directive),
+            monotonic: None,
         },
     ]
 }
