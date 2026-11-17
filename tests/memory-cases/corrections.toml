@@ -197,7 +197,7 @@ previous = "大阪にお住まいなんですね"
 text = "大阪じゃなくて東京です。妻は花子です"
 expect_candidate = true
 direction = { old = "大阪", new = "東京" }
-llm = { target = "fact", old = "大阪", new = "花子", e = "大阪じゃなくて東京です。妻は花子です" }
+llm = { target = "fact", old = "大阪", new = "東京です。妻は花子", e = "大阪じゃなくて東京です。妻は花子です" }
 expect = "direction"
 
 [[case]]
@@ -235,3 +235,64 @@ expect_candidate = true
 direction = { old = "https://example.com/a", new = "東京の話" }
 llm = { target = "fact", old = "https://example.com/a", new = "東京", e = "https://example.com/a じゃなくて東京の話です" }
 expect = "old_not_found"
+
+[[case]]
+id = "K22"
+title = "同じ値を括弧の内と外に書いても、置いた位置が括弧の内側なら捨てる"
+spec = "04 §6 の一致の端と括弧"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "その記事を読みました"
+text = "「大阪じゃなくて東京」と書いてあったけど、東京"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "「大阪じゃなくて東京」と書いてあったけど、東京" }
+expect = "quoted"
+
+[[case]]
+id = "K23"
+title = "根拠を語の途中で切っても、語の境界は本文の全体で確かめる"
+spec = "04 §6 の一致の端と括弧"
+lang = "en"
+live = [{ s = "self", a = "name", v = "Ann" }]
+previous = "Where did you move?"
+text = "We moved to Kyoto, not Annapolis."
+expect_candidate = true
+direction = { old = "Annapolis", new = "Kyoto" }
+llm = { target = "fact", old = "Ann", new = "Kyoto", e = "Kyoto, not Ann" }
+expect = "direction"
+
+[[case]]
+id = "K24"
+title = "古い値は穴の全体と一致させる (東大阪の大阪は通らない)"
+spec = "04 §6 の古い値は穴の全体"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "東大阪にお住まいなんですね"
+text = "東大阪じゃなくて京都です"
+expect_candidate = true
+direction = { old = "東大阪", new = "京都" }
+llm = { target = "fact", old = "大阪", new = "京都", e = "東大阪じゃなくて京都です" }
+expect = "direction"
+
+[[case]]
+id = "K25"
+title = "読点で切った古い値の穴は、その全体と一致すれば通る"
+spec = "04 §6 の古い値は穴の全体"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "いや、大阪じゃなくて京都です"
+expect_candidate = true
+direction = { old = "大阪", new = "京都" }
+llm = { target = "fact", old = "大阪", new = "京都", e = "いや、大阪じゃなくて京都です" }
+expect = "verified"
+
+[[case]]
+id = "K26"
+title = "文末でない「よ」は値の一部として残す"
+spec = "04 §6 の文末の「よ」「です」"
+live = [{ s = "self", a = "name", v = "かよ" }]
+previous = "かよさんですね"
+text = "かよじゃなくてさよです"
+expect_candidate = true
+direction = { old = "かよ", new = "さよ" }
+llm = { target = "fact", old = "かよ", new = "さよ", e = "かよじゃなくてさよです" }
+expect = "verified"
