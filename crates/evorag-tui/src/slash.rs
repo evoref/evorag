@@ -102,6 +102,7 @@ pub fn parse(input: &str) -> Option<Slash> {
             None if a == "forgotten" => Slash::MemoryForgotten,
             _ => Slash::Invalid("/memory".into()),
         },
+        ("private", Some("off")) => Slash::Invalid("/private".into()),
         ("private", Some(a)) => match a.split_once(char::is_whitespace) {
             Some(("off", n)) => numbered(n.trim(), 'F', Slash::PrivateOff),
             _ => numbered(a, 'F', Slash::Private),
@@ -205,6 +206,10 @@ mod tests {
         assert_eq!(parse("/private 3"), Some(Slash::Private(3)));
         assert_eq!(parse("/private off F3"), Some(Slash::PrivateOff(3)));
         assert_eq!(parse("/private off  3 "), Some(Slash::PrivateOff(3)));
+        assert_eq!(
+            parse("/private off"),
+            Some(Slash::Invalid("/private".into()))
+        );
         assert_eq!(parse("/private F0"), Some(Slash::BadNumber("F0".into())));
         assert_eq!(parse("/private x"), Some(Slash::BadNumber("x".into())));
         assert_eq!(

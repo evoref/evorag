@@ -28,6 +28,7 @@ style_unknown_value = "/style {item} に「{value}」は選べません。選べ
 band_not_latest = "帯の記録を添えて作り直せるのは、最新の応答の帯だけです。"
 band_unknown = "その記録は、この応答の帯にありません。"
 feedback_not_saved = "印を記録できませんでした。もう一度試してください。"
+mask_unavailable = "記録を読めず、伏せる値 (private・忘れた値) を確かめられないので、表示しませんでした。"
 
 [error.facts]
 list_outdated = "一覧が更新されました。指した行が、一覧を表示した後に変わったので、実行しませんでした。新しい一覧の番号で選び直してください。"
@@ -192,6 +193,7 @@ hint = "↑↓ で効く範囲を選び、Enter で実行、Esc でやめる"
 title = "private を解く"
 body = "{label}\n\nこの行に効いているすべての private の指示を解きます。"
 others = "次の行の private の印も外れます:"
+history = "履歴の値 {n} 件の private の印も外れます:"
 hint = "Enter で実行、Esc でやめる"
 
 [ui.band]

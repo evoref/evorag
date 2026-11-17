@@ -103,15 +103,7 @@ impl Masker {
                 continue;
             }
             let m = mapped.get_or_insert_with(|| Mapped::new(t.text));
-            let hits: Vec<Range<usize>> = m
-                .as_ref()
-                .map(|m| {
-                    m.find(&pv.norm, Edges::Word)
-                        .into_iter()
-                        .map(|h| h.source)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let hits = value_hits(m.as_ref(), t.text, &pv.norm);
             for s in pv
                 .sources
                 .iter()
@@ -136,6 +128,17 @@ impl Masker {
         (0..exchange.len())
             .map(|i| apply_ranges(exchange[i].text, &self.ranges(exchange, i), marker))
             .collect()
+    }
+}
+
+/// 本文 `text` の中で、正規化した値 `norm` に一致する範囲 (元の本文の位置)。文字の展開の途中に端が来る一致は、
+/// その書記素まで広げる。位置の対応表を作れない本文 (`mapped` が `None`) で、正規化した本文に値が含まれるときは、
+/// 位置を戻せないので本文の全体を返す (伏せる側に倒す)。
+fn value_hits(mapped: Option<&Mapped>, text: &str, norm: &str) -> Vec<Range<usize>> {
+    match mapped {
+        Some(m) => m.find_widened(norm, Edges::Word),
+        None if normalize_v1(text).contains(norm) => std::iter::once(0..text.len()).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -293,6 +296,29 @@ mod tests {
             text,
         }];
         assert_eq!(m.mask(&t, "[非表示]"), ["[非表示]ペットは[非表示]元気"]);
+    }
+
+    /// 一致の端が文字の展開の途中に来るとき (`㈱` の中の `株`) は、その書記素を伏せる。位置の対応表を作れない
+    /// 本文で値が含まれるときは、本文の全体を伏せる (伏せる側に倒す)。
+    #[test]
+    fn matches_inside_an_expansion_or_without_a_map_still_hide() {
+        let text = "㈱見本の社員です";
+        let set = FactSet {
+            facts: vec![private_fact("株", id(1), 0, 0..3)],
+        };
+        let m = Masker::new(&set, Vec::new());
+        let t = [TurnText {
+            id: id(1),
+            rev: 0,
+            text,
+        }];
+        assert_eq!(m.mask(&t, "[非表示]"), ["[非表示]見本の社員です"]);
+        // 位置の対応表が無いとき。
+        let whole = "見本の株";
+        let hits = value_hits(None, whole, "株");
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].start, hits[0].end), (0, whole.len()));
+        assert!(value_hits(None, "見本の会社", "株").is_empty());
     }
 
     #[test]

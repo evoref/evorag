@@ -148,6 +148,29 @@ enum Prepared {
     Stale,
 }
 
+/// 直前の応答 `previous` に `[非表示]` の置き換えを当てた本文 (検証のプロンプトに入れる形、04 §6・§7.5)。
+/// 直前の応答が無ければ `Some(None)`。記録を読めない・伏せる値を確かめられなければ `None` (送らない)。
+fn masked_previous(
+    store: &Store,
+    previous: Option<Id>,
+    lang: crate::prompt::PromptLanguage,
+) -> Option<Option<String>> {
+    let Some(id) = previous else {
+        return Some(None);
+    };
+    let r = store.read().ok()?;
+    let e = match r.get(KIND_TURN, id).ok()? {
+        Some(Read::Ok(e)) => e,
+        _ => return Some(None),
+    };
+    let Ok(body) = e.body_as::<TurnBody>() else {
+        return Some(None);
+    };
+    let hide = crate::masking::Hide::load(&r, lang)?;
+    let t = evorag_memory::Turn { envelope: e, body };
+    Some(Some(hide.text(&r, &t)))
+}
+
 /// 候補の材料を読む。記録を読めなければ `None`。
 fn prepare(
     store: &Store,
@@ -171,7 +194,8 @@ fn prepare(
     for t in session_turns(&r, body.session).ok()? {
         if Some(t.envelope.id) == c.previous {
             previous = Some(t.body.text.clone());
-            previous_prompt = Some(crate::masking::Hide::load(&r, lang).text(&r, &t));
+            // 伏せる値を確かめられなければ、この回は検証しない (伏せない本文を送らない)。
+            previous_prompt = Some(crate::masking::Hide::load(&r, lang)?.text(&r, &t));
         }
         // 同じセッションの、候補の発話より前の利用者の発話 (前のふるいの後の本文、04 §6 の「検証の時機」)。
         if t.envelope.id < c.turn && t.body.role == TurnRole::User {
@@ -443,16 +467,41 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                 let Ok(utterance) = excerpt else {
                     return progressed;
                 };
-                let input = fit_input(
-                    inner,
-                    &*llm,
-                    &server.model_key,
-                    limit,
-                    counting,
-                    m.previous_prompt.as_deref(),
-                    &utterance,
-                )
-                .await;
+                // 送る直前に、置き換えを当て直す (材料を読んでから送るまでの間に private にした値も
+                // 伏せる、04 §7.5)。当て直した本文が変われば、その本文で収め直す。2 回続けて変われば、この回は
+                // 送らない。
+                let mut previous = m.previous_prompt.clone();
+                let mut input = None;
+                for _ in 0..2 {
+                    let fitted = fit_input(
+                        inner,
+                        &*llm,
+                        &server.model_key,
+                        limit,
+                        counting,
+                        previous.as_deref(),
+                        &utterance,
+                    )
+                    .await;
+                    let store = inner.store.clone();
+                    let (id, lang) = (c.previous, inner.language);
+                    let again =
+                        tokio::task::spawn_blocking(move || masked_previous(&store, id, lang))
+                            .await
+                            .ok()
+                            .flatten();
+                    let Some(again) = again else {
+                        return progressed;
+                    };
+                    if again == previous {
+                        input = Some(fitted);
+                        break;
+                    }
+                    previous = again;
+                }
+                let Some(input) = input else {
+                    return progressed;
+                };
                 match input {
                     None => Verdict::Unverifiable(Unverifiable::TooLong),
                     Some(input) => {

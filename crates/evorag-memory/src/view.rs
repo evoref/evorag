@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use evorag_types::Id;
 use evorag_types::api::{
     AttrInfo, FactGroup, FactGroupKey, FactHistory, FactHistoryRow, FactKey, FactList, FactRow,
-    FactStatus, FactSubject, FactTense, PrivateCause, PrivateInfo, PrivateScope,
+    FactStatus, FactSubject, FactTense, PrivateCause, PrivateHistoryValue, PrivateInfo,
+    PrivateScope,
 };
 
 use crate::fold::{Cover, DirectiveKind, Directives, Fact, FactSet, FactState, Scope, Tense};
@@ -245,11 +246,24 @@ pub fn fact_list(
         if rows.is_empty() {
             continue;
         }
+        let mut hist: Vec<&Fact> = members.iter().copied().filter(|f| is_history(f)).collect();
+        hist.sort_by_key(|f| f.id);
+        let private_history = hist
+            .into_iter()
+            .filter_map(|f| {
+                let p = private_info(f, dirs, kept)?;
+                Some(PrivateHistoryValue {
+                    value: f.value.clone()?,
+                    directives: p.directives,
+                })
+            })
+            .collect();
         out.push(FactGroup {
             attr: attr_info(attributes, &attribute),
             group,
             rows,
             history,
+            private_history,
         });
     }
     FactList {
@@ -395,8 +409,39 @@ mod tests {
         );
         assert_eq!(values(&list.groups[1]), [("(rule)".into(), None)]);
         assert_eq!(values(&list.groups[2]), [("(vacant)".into(), None)]);
+        assert!(list.groups[2].private_history.is_empty());
         assert_eq!(list.groups[2].history, 1);
         assert!(list.groups[1].attr.multi, "dietary is multi-valued");
+    }
+
+    /// private の履歴の値は、効いている指示とともに一覧に載る (`/private off` の確認で示すため、04 §7.5)。
+    #[test]
+    fn private_history_values_carry_their_directives() {
+        let mut set = FactSet {
+            facts: vec![
+                fact(
+                    1,
+                    "residence",
+                    "京都",
+                    FactState::Superseded {
+                        by: Some(id(2)),
+                        at: id(11).timestamp(),
+                    },
+                    30,
+                ),
+                fact(2, "residence", "大阪", FactState::Live, 31),
+            ],
+        };
+        let dirs = Directives::new(vec![private(20, "residence", "大阪", Scope::Successors)]);
+        refresh_private(&mut set, &dirs);
+        let list = fact_list(&set, &dirs, attributes(), &BTreeSet::new());
+        assert_eq!(
+            list.groups[0].private_history,
+            [PrivateHistoryValue {
+                value: "京都".into(),
+                directives: vec![id(20)],
+            }]
+        );
     }
 
     /// private の理由を、選んだ値・後継・削除で足した指示で見分ける (04 §7.5)。

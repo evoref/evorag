@@ -139,6 +139,37 @@ impl Mapped {
         hits
     }
 
+    /// 伏せるための一致 (04 §7.5)。[`Mapped::find`] と同じ端の条件で探し、一致の端が 1 つの文字の展開の途中に
+    /// 来たとき (`㈱` の中の `株`、ZWJ の並びの中の 1 文字など) は、捨てずに、その展開を含む書記素まで広げて返す
+    /// (伏せる側に倒す。照合の規則は変えない)。元の本文の範囲を返す。
+    pub(crate) fn find_widened(&self, needle: &str, edges: Edges) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        let Some(first) = needle.chars().next() else {
+            return out;
+        };
+        let last = needle.chars().next_back().unwrap_or(first);
+        let mut from = 0;
+        while let Some(p) = self.text[from..].find(needle) {
+            let at = from + p;
+            let end = at + needle.len();
+            from = at + first.len_utf8();
+            if edges == Edges::Word {
+                let before = self.text[..at].chars().next_back();
+                let after = self.text[end..].chars().next();
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+                if (first.is_ascii_alphanumeric() && word(before))
+                    || (last.is_ascii_alphanumeric() && word(after))
+                {
+                    continue;
+                }
+            }
+            out.push(self.source_of(at, end).unwrap_or_else(|| {
+                self.cluster_of(at).start..self.cluster_of(end - last.len_utf8()).end
+            }));
+        }
+        out
+    }
+
     /// 正規化の後の本文のバイト位置 `out` の文字が出た、元の本文の書記素の範囲。
     pub(crate) fn cluster_of(&self, out: usize) -> Range<usize> {
         let i = self

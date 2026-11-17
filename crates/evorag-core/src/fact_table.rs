@@ -245,9 +245,19 @@ pub(crate) async fn for_turn(inner: &Inner, session: Id) -> Option<FactTable> {
         Some((false, table)) if !can_count(inner).await => return table,
         _ => {}
     }
-    // 読めなければ、前に作った表を使い続ける。
+    // 読めなければ前に作った表を使い続けるが、忘れる・private・削除の操作より前に作った表は置かない。
     let _ = rebuild(inner).await;
-    state(inner).built.as_ref().and_then(|b| b.table.clone())
+    let st = state(inner);
+    placeable(st.built.as_ref(), st.invalidations)
+}
+
+/// 覚えた表のうち、応答に置いてよいもの (04 §5.4)。忘れる・private・削除の操作 (`invalidations` 回目まで) の
+/// 後に作り始めた表だけを置く。作り直しに失敗して操作の前の表が残っていれば、表を置かない (private にした値や
+/// 消した値を、古い表で送らないため)。
+fn placeable(built: Option<&Built>, invalidations: u64) -> Option<FactTable> {
+    built
+        .filter(|b| b.invalidations >= invalidations)
+        .and_then(|b| b.table.clone())
 }
 
 /// `/tokenize` で数えられるか (表の前置きを数えてみる。数えた値はキャッシュに残る)。
@@ -406,4 +416,32 @@ pub(crate) async fn make_private(
     }
     invalidate(inner);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn built(invalidations: u64) -> Built {
+        Built {
+            budget: 600,
+            invalidations,
+            version: 1,
+            exact: true,
+            table: Some(FactTable {
+                text: "表".into(),
+                version: "v".into(),
+                facts: Vec::new(),
+                omitted: 0,
+            }),
+        }
+    }
+
+    /// 操作の後に作り直せなかったときは、操作の前の表を置かない (04 §5.4)。
+    #[test]
+    fn a_table_from_before_an_invalidation_is_never_placed() {
+        assert!(placeable(Some(&built(2)), 2).is_some());
+        assert!(placeable(Some(&built(1)), 2).is_none());
+        assert!(placeable(None, 0).is_none());
+    }
 }

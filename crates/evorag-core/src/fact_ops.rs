@@ -188,7 +188,7 @@ fn forgotten(inner: &Inner, r: &ReadTxn<'_>) -> Option<Vec<ForgottenFact>> {
             redacted: f.redact,
             sessions: titles,
             // 消えたターンからはセッションが分からないので、ターンの数で数える。
-            deleted_sessions: gone.len(),
+            deleted_turns: gone.len(),
         });
     }
     Some(out)
@@ -389,15 +389,28 @@ fn plan(
 }
 
 /// 事実への操作をする (04 §7.4〜§7.6)。結果は `FactsUpdated` か `FactOpRejected` で知らせる。
-pub(crate) async fn run(inner: &Arc<Inner>, req: Request) {
+///
+/// 操作は落とされない task で行い、命令の待ち行列を鍵の待ちで止めない。終了の処理は、この task を
+/// `background` で待つ (書いてから知らせるまでを途中で止めない)。
+pub(crate) fn run(inner: &Arc<Inner>, req: Request) {
     if inner.facts_key.key().is_none() {
         rejected(inner, MessageKey::FactsDisabled, None);
         return;
     }
+    let worker = inner.clone();
+    let task = tokio::spawn(async move { execute(&worker, req).await });
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(task);
+}
+
+async fn execute(inner: &Arc<Inner>, req: Request) {
     let op = req.op();
     // 鍵の順は index_lock → facts_lock (セッションの削除と同じ)。読んでから書き、索引から除くまで持つ。
-    let _index = inner.index_lock.lock().await;
-    let _facts = inner.facts_lock.lock().await;
+    let _index = inner.index_lock.clone().lock_owned().await;
+    let _facts = inner.facts_lock.clone().lock_owned().await;
     let note = note(inner);
     let worker = inner.clone();
     let planned = tokio::task::spawn_blocking(move || -> Result<Plan, String> {
@@ -457,7 +470,14 @@ pub(crate) async fn run(inner: &Arc<Inner>, req: Request) {
         );
         return;
     }
-    // コミットの直後に、知らせる前に、private になった事実の検索の鍵を索引から除く (04 §5.5)。除けなくても、
+    // 印を解くは事実を変えない (次の抽出から、その値を覚えられるだけ)。
+    let slow_next_turn = op != FactOp::Unblock;
+    if slow_next_turn {
+        // コミットの直後に、次のターンの前に事実の表を必ず作り直させる (04 §5.4。この間に始まる応答に古い表を
+        // 送らないため)。鍵の残りは次の sleep-time の手順で索引に合わせる。
+        crate::fact_table::invalidate(inner);
+    }
+    // 続けて、知らせる前に、private になった事実の検索の鍵を索引から除く (04 §5.5)。除けなくても、
     // 想起は当たりの事実を読み直して private の鍵を使わない (recall.rs の `hit_turns`)。鍵の残りは次の
     // sleep-time の手順で索引に合わせる。
     if !added.hidden.is_empty()
@@ -470,12 +490,6 @@ pub(crate) async fn run(inner: &Arc<Inner>, req: Request) {
                 "keys of facts made private could not be removed from the lexical index"
             );
         }
-    }
-    // 印を解くは事実を変えない (次の抽出から、その値を覚えられるだけ)。
-    let slow_next_turn = op != FactOp::Unblock;
-    if slow_next_turn {
-        // 次のターンの前に、事実の表を必ず作り直す (04 §5.4)。鍵は次の sleep-time の手順で索引に合わせる。
-        crate::fact_table::invalidate(inner);
     }
     match current_list(inner) {
         Some(list) => emit(

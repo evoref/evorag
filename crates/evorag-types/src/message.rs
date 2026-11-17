@@ -192,6 +192,8 @@ message_keys! {
     FactsBlocked => "error.facts.blocked",
     /// 引数: `detail`。
     FactsNotSaved => "error.facts.not_saved",
+    /// 伏せる値 (private・忘れた値) を確かめられないので、往復の本文を出さなかった (04 §7.5)。
+    MaskUnavailable => "error.mask_unavailable",
     /// 番号の一覧をまだ出していない。引数: `list` (先に打つコマンド)。
     FactsNoList => "error.facts.no_list",
     /// 引数: `n`。
@@ -254,6 +256,8 @@ message_keys! {
     /// 引数: `label` (主語・属性・値)。
     UiPrivateOffBody => "ui.private_off.body",
     UiPrivateOffOthers => "ui.private_off.others",
+    /// 引数: `n`。
+    UiPrivateOffHistory => "ui.private_off.history",
     UiPrivateOffHint => "ui.private_off.hint",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",

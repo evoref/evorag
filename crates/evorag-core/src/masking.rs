@@ -27,15 +27,17 @@ fn exchange_key(t: &Turn) -> Id {
 }
 
 impl Hide {
-    /// 記録から読む。読めなければ、何も伏せない材料にする (読めない事実は、表と想起でも使えない)。
-    pub(crate) fn load(r: &ReadTxn<'_>, lang: PromptLanguage) -> Self {
-        let masker = Masker::load(r).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "facts could not be read for hiding private values");
-            Masker::default()
-        });
-        Self {
-            masker,
-            marker: hidden_marker(lang.as_str()),
+    /// 記録から読む。読めなければ `None` (伏せる値を確かめられないので、呼ぶ側は本文を添えない・出さない)。
+    pub(crate) fn load(r: &ReadTxn<'_>, lang: PromptLanguage) -> Option<Self> {
+        match Masker::load(r) {
+            Ok(masker) => Some(Self {
+                masker,
+                marker: hidden_marker(lang.as_str()),
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "facts could not be read for hiding private values");
+                None
+            }
         }
     }
 

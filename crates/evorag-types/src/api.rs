@@ -227,6 +227,15 @@ pub struct FactGroup {
     pub rows: Vec<FactRow>,
     /// 履歴 (`Superseded`) の値の数。
     pub history: usize,
+    /// 履歴の値のうち private のもの (`/private off` の確認で、一緒に印が外れる履歴の値を示すため、04 §7.5)。
+    pub private_history: Vec<PrivateHistoryValue>,
+}
+
+/// private の履歴の値 1 つと、それに効いている private の指示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateHistoryValue {
+    pub value: String,
+    pub directives: Vec<Id>,
 }
 
 /// 事実を作っていない・止めている理由 (07 §3 の `/memory`)。
@@ -281,8 +290,8 @@ pub struct ForgottenFact {
     pub redacted: bool,
     /// 出典のセッションの題名 (残っているもの)。
     pub sessions: Vec<String>,
-    /// 消えた出典のセッションの数。
-    pub deleted_sessions: usize,
+    /// 消えた出典のターンの数 (消えたターンからはセッションが分からないので、ターンで数える)。
+    pub deleted_turns: usize,
 }
 
 /// 事実への操作 (結果の知らせを選ぶため)。

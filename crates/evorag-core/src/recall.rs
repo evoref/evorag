@@ -404,7 +404,10 @@ fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
     let Ok(rtx) = store.read() else {
         return Vec::new();
     };
-    let hide = crate::masking::Hide::load(&rtx, lang);
+    // 伏せる値を確かめられなければ、今回は添えない (帯・詳細にも出さない、04 §7.5)。
+    let Some(hide) = crate::masking::Hide::load(&rtx, lang) else {
+        return Vec::new();
+    };
     let mut order: Vec<Id> = Vec::new();
     let mut picked: HashMap<Id, HashSet<Id>> = HashMap::new();
     let mut session_turns: HashMap<Id, Vec<Turn>> = HashMap::new();
@@ -464,7 +467,10 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -
     let Ok(rtx) = store.read() else {
         return Vec::new();
     };
-    let hide = crate::masking::Hide::load(&rtx, lang);
+    // 伏せる値を確かめられなければ、リランクにも送らない (今回は添えない)。
+    let Some(hide) = crate::masking::Hide::load(&rtx, lang) else {
+        return Vec::new();
+    };
     let mut session_turns: HashMap<Id, Vec<Turn>> = HashMap::new();
     let mut out: Vec<Exchange> = Vec::new();
     for id in ranked {
@@ -1102,7 +1108,7 @@ pub fn source_turns(
             out.push(Turn { envelope: e, body });
         }
     }
-    crate::masking::Hide::load(&rtx, lang).apply(&rtx, &mut out);
+    crate::masking::Hide::load(&rtx, lang)?.apply(&rtx, &mut out);
     (!out.is_empty()).then_some(out)
 }
 

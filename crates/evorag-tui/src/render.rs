@@ -184,8 +184,8 @@ pub fn private_confirm_text(
     text
 }
 
-/// `/private off` の確認の画面の本文。ほかの行の印も外れるときは、その行を示す (04 §7.5)。
-pub fn private_off_text(app: &App, label: &str, others: &[String]) -> String {
+/// `/private off` の確認の画面の本文。ほかの行や履歴の値の印も外れるときは、その件数と行を示す (04 §7.5)。
+pub fn private_off_text(app: &App, label: &str, others: &[String], history: &[String]) -> String {
     let c = &app.catalog;
     let mut text = c.with(MessageKey::UiPrivateOffBody, &[("label", label)]);
     if !others.is_empty() {
@@ -193,6 +193,16 @@ pub fn private_off_text(app: &App, label: &str, others: &[String]) -> String {
         text.push_str(&c.key(MessageKey::UiPrivateOffOthers));
         for o in others {
             text.push_str(&format!("\n  {o}"));
+        }
+    }
+    if !history.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(&c.with(
+            MessageKey::UiPrivateOffHistory,
+            &[("n", &history.len().to_string())],
+        ));
+        for h in history {
+            text.push_str(&format!("\n  {h}"));
         }
     }
     text.push_str("\n\n");
@@ -356,11 +366,17 @@ pub fn draw(app: &App, f: &mut Frame) {
                 r,
             );
         }
-        Mode::ConfirmPrivateOff { label, others, .. } => {
-            let r = centered(area, 78, (others.len() as u16 + 8).min(20));
+        Mode::ConfirmPrivateOff {
+            label,
+            others,
+            history,
+            ..
+        } => {
+            let rows = u16::try_from(others.len() + history.len()).unwrap_or(u16::MAX);
+            let r = centered(area, 78, rows.saturating_add(10).min(24));
             f.render_widget(Clear, r);
             f.render_widget(
-                Paragraph::new(private_off_text(app, label, others))
+                Paragraph::new(private_off_text(app, label, others, history))
                     .wrap(Wrap { trim: false })
                     .block(
                         Block::new()

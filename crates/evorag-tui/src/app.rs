@@ -119,11 +119,13 @@ pub enum Mode {
         multi: bool,
         scope: PrivateScope,
     },
-    /// `/private off` の確認の画面。ほかの行の印も外れるときは、その行を示す (04 §7.5)。
+    /// `/private off` の確認の画面。ほかの行や履歴の値の印も外れるときは、それを示す (04 §7.5)。
     ConfirmPrivateOff {
         target: FactRowRef,
         label: String,
         others: Vec<String>,
+        /// 一緒に印が外れる履歴の値 (主語・属性・値)。
+        history: Vec<String>,
     },
 }
 
@@ -465,13 +467,13 @@ impl App {
                 MessageKey::UiFactsForgottenKept
             });
             let mut sessions = f.sessions.join("、");
-            if f.deleted_sessions > 0 {
+            if f.deleted_turns > 0 {
                 if !sessions.is_empty() {
                     sessions.push('、');
                 }
                 sessions.push_str(&c.with(
                     MessageKey::UiFactsForgottenDeleted,
-                    &[("n", &f.deleted_sessions.to_string())],
+                    &[("n", &f.deleted_turns.to_string())],
                 ));
             }
             let at = evorag_core::localtime::datetime(f.at.as_millis());
@@ -493,12 +495,15 @@ impl App {
         lines.join("\n")
     }
 
+    /// 窓を開く。確認の画面などほかの窓を開いているときは、それを閉じない (番号の対応だけが新しくなる)。
     fn open_panel(&mut self, title: String, body: String) {
-        self.mode = Mode::Panel {
-            title,
-            body,
-            scroll: 0,
-        };
+        if matches!(self.mode, Mode::Chat | Mode::Panel { .. }) {
+            self.mode = Mode::Panel {
+                title,
+                body,
+                scroll: 0,
+            };
+        }
     }
 
     /// 事実の一覧を窓に出し、`F` の番号をこの一覧に結び付ける。`head` は一覧の前に置く文。
@@ -655,11 +660,37 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default();
+                // 履歴 (`Superseded`) の値の印も外れる (04 §7.5)。
+                let history: Vec<String> = self
+                    .facts
+                    .list
+                    .as_ref()
+                    .map(|list| {
+                        list.groups
+                            .iter()
+                            .flat_map(|hg| {
+                                hg.private_history
+                                    .iter()
+                                    .filter(|h| h.directives.iter().any(|d| mine.contains(d)))
+                                    .map(move |h| (hg, h))
+                            })
+                            .map(|(hg, h)| {
+                                format!(
+                                    "{}・{}: {}",
+                                    self.subject_label(&hg.group.subject),
+                                    self.catalog.attribute(&hg.attr.name),
+                                    h.value
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let label = self.row_label(&g, &r);
                 self.mode = Mode::ConfirmPrivateOff {
                     target,
                     label,
                     others,
+                    history,
                 };
                 Vec::new()
             }
@@ -796,6 +827,12 @@ impl App {
                     // 「一覧が更新されました」と出し、同じ読み取りで作った新しい一覧を出す (04 §7.1)。
                     self.facts.history = None;
                     self.show_facts(list.clone(), Some(m));
+                } else if std::mem::take(&mut self.facts.awaiting) {
+                    // `/memory` の事実の一覧を出せなかった: 想起の答えだけを出す。
+                    if let Some(memory) = self.facts.memory.take() {
+                        let title = self.catalog.key(MessageKey::UiFactsTitle);
+                        self.open_panel(title, memory);
+                    }
                 }
             }
             _ => return false,
@@ -2330,6 +2367,7 @@ mod tests {
             },
             rows,
             history,
+            private_history: Vec::new(),
         }
     }
 
@@ -2346,7 +2384,7 @@ mod tests {
             causes: vec![PrivateCause::Successor],
             directives: vec![id(50)],
         };
-        FactList {
+        let mut list = FactList {
             groups: vec![
                 group(
                     "residence",
@@ -2389,7 +2427,13 @@ mod tests {
                 ),
             ],
             note: None,
-        }
+        };
+        // 同じ指示で private の履歴の値。
+        list.groups[1].private_history = vec![evorag_types::api::PrivateHistoryValue {
+            value: "たこ".into(),
+            directives: vec![id(50)],
+        }];
+        list
     }
 
     fn panel(a: &App) -> String {
@@ -2574,11 +2618,22 @@ mod tests {
             list: sample_list(),
         });
         assert!(run(&mut a, "/private off F3").is_empty());
-        let Mode::ConfirmPrivateOff { label, others, .. } = &a.mode else {
+        let Mode::ConfirmPrivateOff {
+            label,
+            others,
+            history,
+            ..
+        } = &a.mode
+        else {
             panic!("{:?}", a.mode)
         };
         assert_eq!(label, "あなた・食べないもの: えび");
         assert_eq!(others, &["F4 あなた・食べないもの: かに".to_owned()]);
+        // 同じ指示で private の履歴の値も、件数と行を示す。
+        assert_eq!(history, &["あなた・食べないもの: たこ".to_owned()]);
+        let text = crate::render::private_off_text(&a, label, others, history);
+        assert!(text.contains("履歴の値 1 件"), "{text}");
+        assert!(text.contains("たこ"), "{text}");
         assert_eq!(
             a.on_key(Key::Enter { newline: false }),
             vec![Action::Command(Command::UnsetFactPrivate {
@@ -2681,6 +2736,63 @@ mod tests {
         assert!(run(&mut a, "/memory accept F2").len() == 1);
     }
 
+    /// 一覧の知らせが確認の画面の間に届いても、確認の画面を閉じない (番号の対応だけが新しくなる)。
+    #[test]
+    fn fact_events_do_not_replace_a_confirmation() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        run(&mut a, "/private F1");
+        assert!(matches!(a.mode, Mode::ConfirmPrivate { .. }));
+        let mut fresh = sample_list();
+        fresh.groups.remove(0);
+        a.on_event(Event::FactsUpdated {
+            op: evorag_types::api::FactOp::PrivateOff,
+            list: fresh.clone(),
+            slow_next_turn: true,
+        });
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivate { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_eq!(a.facts.list.as_ref(), Some(&fresh), "the numbers follow");
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(matches!(a.mode, Mode::ConfirmPrivate { .. }));
+        // 開いていた窓は、新しい一覧に替える。
+        a.mode = Mode::Chat;
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(matches!(a.mode, Mode::Panel { .. }));
+    }
+
+    /// `/memory` で事実の一覧を出せなかったときも、想起の答えは出す。
+    #[test]
+    fn the_recall_part_of_memory_shows_when_the_facts_fail() {
+        let mut a = app();
+        a.session = Some(session());
+        run(&mut a, "/memory");
+        a.on_event(Event::MemoryInfo {
+            report: evorag_types::api::MemoryReport {
+                answer: None,
+                items: Vec::new(),
+                degraded: Vec::new(),
+                recall: RecallState::Simple,
+                sources: Vec::new(),
+            },
+        });
+        a.on_event(Event::FactOpRejected {
+            error: evorag_types::Message::new(MessageKey::FactsNotSaved).arg("detail", "x"),
+            list: None,
+        });
+        assert!(panel(&a).contains("まだ応答がありません"), "{}", panel(&a));
+        assert!(!a.facts.awaiting);
+    }
+
     /// 忘れた事実の一覧は値を出さず、`X` の番号で印を解ける (04 §7.6)。
     #[test]
     fn forgotten_facts_are_listed_without_values_and_unblocked_by_number() {
@@ -2704,7 +2816,7 @@ mod tests {
                 values: 2,
                 redacted: false,
                 sessions: vec!["旅行".into()],
-                deleted_sessions: 1,
+                deleted_turns: 1,
             }],
         });
         let body = panel(&a);

@@ -1739,20 +1739,14 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::ShowFactHistory { group } => fact_ops::show_history(inner, &group),
         Command::ShowForgotten => fact_ops::show_forgotten(inner),
         Command::SetFactPrivate { target, scope } => {
-            fact_ops::run(inner, fact_ops::Request::Private { target, scope }).await;
+            fact_ops::run(inner, fact_ops::Request::Private { target, scope });
         }
         Command::UnsetFactPrivate { target } => {
-            fact_ops::run(inner, fact_ops::Request::PrivateOff(target)).await;
+            fact_ops::run(inner, fact_ops::Request::PrivateOff(target));
         }
-        Command::AcceptFact { target } => {
-            fact_ops::run(inner, fact_ops::Request::Accept(target)).await;
-        }
-        Command::RevertFact { target } => {
-            fact_ops::run(inner, fact_ops::Request::Revert(target)).await;
-        }
-        Command::UnblockFact { target } => {
-            fact_ops::run(inner, fact_ops::Request::Unblock(target)).await;
-        }
+        Command::AcceptFact { target } => fact_ops::run(inner, fact_ops::Request::Accept(target)),
+        Command::RevertFact { target } => fact_ops::run(inner, fact_ops::Request::Revert(target)),
+        Command::UnblockFact { target } => fact_ops::run(inner, fact_ops::Request::Unblock(target)),
         _ => {}
     }
 }
@@ -2559,8 +2553,26 @@ async fn style(inner: &Arc<Inner>, set: Option<(evorag_types::api::StyleItem, St
     emit(inner, Event::StyleInfo { values, changed });
 }
 
+/// 伏せる値 (private・忘れた値) を確かめられるか。確かめられなければ、短い知らせを出して `false`
+/// (往復の本文を出さない、04 §7.5)。
+fn can_hide(inner: &Inner) -> bool {
+    let ok = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| masking::Hide::load(&r, inner.language))
+        .is_some();
+    if !ok {
+        reject(inner, MessageKey::MaskUnavailable);
+    }
+    ok
+}
+
 /// 応答の出典の詳細 (FR-110)。
 fn show_source(inner: &Inner, turn: Id, n: usize) {
+    if !can_hide(inner) {
+        return;
+    }
     let marks = irrelevant_marks(inner, turn);
     let found = read_env(inner, evorag_memory::KIND_TURN, turn)
         .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
@@ -2648,7 +2660,10 @@ fn decorate(
     let rtx = (!obs.band.is_empty())
         .then(|| inner.store.read().ok())
         .flatten();
-    let hide = rtx.as_ref().map(|r| masking::Hide::load(r, inner.language));
+    // 伏せる値を確かめられなければ、冒頭を出さない。
+    let hide = rtx
+        .as_ref()
+        .and_then(|r| masking::Hide::load(r, inner.language));
     view.band = obs
         .band
         .iter()
@@ -2661,9 +2676,10 @@ fn decorate(
                 envelope: e,
                 body: b,
             };
-            if let (Some(r), Some(h)) = (rtx.as_ref(), hide.as_ref()) {
-                t.body.text = h.text(r, &t);
-            }
+            t.body.text = match (rtx.as_ref(), hide.as_ref()) {
+                (Some(r), Some(h)) => h.text(r, &t),
+                _ => String::new(),
+            };
             let (e, b) = (t.envelope, t.body);
             let head: String = b
                 .text
@@ -2755,15 +2771,19 @@ fn show_memory(inner: &Inner) {
         let source_of = |id: Id| mine.iter().find(|s| s.2.contains(&id)).map(|s| s.0);
         // 帯と下の往復の冒頭にも `[非表示]` の置き換えを当てる (04 §7.5)。
         let rtx = inner.store.read().ok();
-        let hide = rtx.as_ref().map(|r| masking::Hide::load(r, inner.language));
+        let hide = rtx
+            .as_ref()
+            .and_then(|r| masking::Hide::load(r, inner.language));
         let head_of = |id: Id| {
             read_env(inner, evorag_memory::KIND_TURN, id)
                 .and_then(|e| {
                     let body = e.body_as::<evorag_memory::TurnBody>().ok()?;
                     let mut t = evorag_memory::Turn { envelope: e, body };
-                    if let (Some(r), Some(h)) = (rtx.as_ref(), hide.as_ref()) {
-                        t.body.text = h.text(r, &t);
-                    }
+                    // 伏せる値を確かめられなければ、冒頭を出さない。
+                    t.body.text = match (rtx.as_ref(), hide.as_ref()) {
+                        (Some(r), Some(h)) => h.text(r, &t),
+                        _ => String::new(),
+                    };
                     Some(t)
                 })
                 .map(|x| exchange_head(inner, &x))
@@ -2834,6 +2854,9 @@ fn show_memory(inner: &Inner) {
 
 /// 帯の往復の詳細 (05 §5.2)。
 fn show_band(inner: &Inner, answer: Id, target: Id) {
+    if !can_hide(inner) {
+        return;
+    }
     let Some(turns) = recall::exchange_turns(&inner.store, target, inner.language) else {
         reject(inner, MessageKey::BandUnknown);
         return;
