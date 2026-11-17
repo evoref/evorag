@@ -181,6 +181,84 @@ message_keys! {
     UiMemoryDegradedNoIndex => "ui.memory.degraded_no_index",
     /// 引数: `reason`。
     UiMemoryDegradedOther => "ui.memory.degraded_other",
+    // 事実の一覧と事実への操作 (04 §7.1・§7.4〜§7.6、07 §3)。
+    /// 指した行が、一覧を表示した後に変わった (実行しない)。
+    FactsOutdated => "error.facts.list_outdated",
+    /// 操作の前提が合わない (private でない行への `/private off` など)。
+    FactsNotAllowed => "error.facts.not_allowed",
+    /// `memory.forget_key` が使えないので、事実への操作ができない。
+    FactsDisabled => "error.facts.disabled",
+    /// 戻す値が忘れた値 (再び覚えない印に当たる)。
+    FactsBlocked => "error.facts.blocked",
+    /// 引数: `detail`。
+    FactsNotSaved => "error.facts.not_saved",
+    /// 伏せる値 (private・忘れた値) を確かめられないので、往復の本文を出さなかった (04 §7.5)。
+    MaskUnavailable => "error.mask_unavailable",
+    /// 番号の一覧をまだ出していない。引数: `list` (先に打つコマンド)。
+    FactsNoList => "error.facts.no_list",
+    /// 引数: `n`。
+    FactsBadNumber => "error.facts.bad_number",
+    UiFactsTitle => "ui.facts.title",
+    UiFactsHeader => "ui.facts.header",
+    UiFactsEmpty => "ui.facts.empty",
+    UiFactsSelf => "ui.facts.self",
+    /// 引数: `n`・`subject`・`attr`・`value`・`marks`。
+    UiFactsRow => "ui.facts.row",
+    /// 引数: `n`・`subject`・`attr`・`history`。
+    UiFactsVacant => "ui.facts.vacant",
+    /// 引数: `n`・`subject`・`attr`。
+    UiFactsRuleOnly => "ui.facts.rule_only",
+    UiFactsMarkContested => "ui.facts.mark_contested",
+    UiFactsMarkPlanned => "ui.facts.mark_planned",
+    UiFactsMarkChanged => "ui.facts.mark_changed",
+    UiFactsMarkPrivateSuccessors => "ui.facts.mark_private_successors",
+    UiFactsMarkPrivateValueOnly => "ui.facts.mark_private_value_only",
+    UiFactsMarkPrivateSuccessor => "ui.facts.mark_private_successor",
+    UiFactsMarkPrivateKept => "ui.facts.mark_private_kept",
+    /// 引数: `n`。
+    UiFactsMarkHistory => "ui.facts.mark_history",
+    UiFactsNoteSleepOff => "ui.facts.note_sleep_off",
+    UiFactsNoteProbe => "ui.facts.note_probe",
+    UiFactsNoteKey => "ui.facts.note_key",
+    UiFactsHint => "ui.facts.hint",
+    /// 引数: `subject`・`attr`。
+    UiFactsHistoryTitle => "ui.facts.history_title",
+    /// 引数: `n`・`value`・`at`・`marks`。
+    UiFactsHistoryRow => "ui.facts.history_row",
+    UiFactsHistoryEmpty => "ui.facts.history_empty",
+    UiFactsHistoryHint => "ui.facts.history_hint",
+    UiFactsMarkPrivate => "ui.facts.mark_private",
+    UiFactsForgottenTitle => "ui.facts.forgotten_title",
+    /// 引数: `n`・`subject`・`attr`・`at`・`values`・`how`・`sessions`。
+    UiFactsForgottenRow => "ui.facts.forgotten_row",
+    UiFactsForgottenRedacted => "ui.facts.forgotten_redacted",
+    UiFactsForgottenKept => "ui.facts.forgotten_kept",
+    /// 引数: `n`。
+    UiFactsForgottenDeleted => "ui.facts.forgotten_deleted",
+    UiFactsForgottenEmpty => "ui.facts.forgotten_empty",
+    UiFactsForgottenHint => "ui.facts.forgotten_hint",
+    UiFactsDonePrivate => "ui.facts.done_private",
+    UiFactsDonePrivateOff => "ui.facts.done_private_off",
+    UiFactsDoneAccept => "ui.facts.done_accept",
+    UiFactsDoneRevert => "ui.facts.done_revert",
+    UiFactsDoneUnblock => "ui.facts.done_unblock",
+    UiFactsSlowNext => "ui.facts.slow_next",
+    UiPanelHint => "ui.panel.hint",
+    UiPrivateTitle => "ui.private.title",
+    /// 引数: `label` (主語・属性・値)。
+    UiPrivateBody => "ui.private.body",
+    UiPrivateScopeSuccessors => "ui.private.scope_successors",
+    UiPrivateScopeValueOnly => "ui.private.scope_value_only",
+    UiPrivateMulti => "ui.private.multi",
+    UiPrivateRemote => "ui.private.remote",
+    UiPrivateHint => "ui.private.hint",
+    UiPrivateOffTitle => "ui.private_off.title",
+    /// 引数: `label` (主語・属性・値)。
+    UiPrivateOffBody => "ui.private_off.body",
+    UiPrivateOffOthers => "ui.private_off.others",
+    /// 引数: `n`。
+    UiPrivateOffHistory => "ui.private_off.history",
+    UiPrivateOffHint => "ui.private_off.hint",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。

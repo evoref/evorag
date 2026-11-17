@@ -9,6 +9,9 @@ use evorag_types::{Message, MessageKey};
 
 const JA: &str = include_str!("../../../locales/ja.toml");
 
+/// 属性の表示名の表の名前 (文言キーではない。`cargo xtask i18n` が属性の一覧と突き合わせる)。
+pub const ATTR_TABLE: &str = "attr";
+
 pub struct Catalog {
     entries: HashMap<String, String>,
 }
@@ -58,6 +61,15 @@ impl Catalog {
         s
     }
 
+    /// 属性の表示名 (カタログの `[attr]` の表、07 §3)。知らない属性は名前のまま出す。表と属性の一覧
+    /// (`evorag-memory/attributes.toml`) の差は `cargo xtask i18n` が検査する。
+    pub fn attribute(&self, name: &str) -> String {
+        self.entries
+            .get(&format!("{ATTR_TABLE}.{name}"))
+            .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+
     /// 引数つきのキー (画面の側で作る文言)。
     pub fn with(&self, key: MessageKey, args: &[(&str, &str)]) -> String {
         let mut m = Message::new(key);
@@ -86,5 +98,12 @@ mod tests {
             s.contains("503") && s.contains("busy") && !s.contains('{'),
             "{s}"
         );
+    }
+
+    #[test]
+    fn attribute_labels_fall_back_to_the_name() {
+        let c = Catalog::load("ja");
+        assert_eq!(c.attribute("residence"), "住んでいる所");
+        assert_eq!(c.attribute("someday_attr"), "someday_attr");
     }
 }

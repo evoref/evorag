@@ -351,6 +351,7 @@ fn fact_directive_v1() {
             }],
             history: false,
             redact: true,
+            origin: "user".into(),
         },
     );
 }

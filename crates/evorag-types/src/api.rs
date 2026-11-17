@@ -47,6 +47,261 @@ pub enum Command {
     /// `/memory` (FR-310、07 §3): 直前の応答に添えたメモリ、候補の帯、リランクの値、縮退の理由と、
     /// このセッションの出典の番号と往復の対応を照会する。
     Memory,
+    /// 事実の一覧を照会する (04 §7.1、07 §3 の `/memory`)。データ根の全体のものなので、セッションを開いて
+    /// いなくてよい。答えは [`Event::FactsInfo`]。
+    ShowFacts,
+    /// (主語, 属性) の置き換えの履歴を照会する (`/memory history`、04 §7.4)。答えは [`Event::FactHistoryInfo`]。
+    ShowFactHistory { group: FactGroupKey },
+    /// 忘れた事実の一覧を照会する (`/memory forgotten`、04 §7.6)。答えは [`Event::ForgottenInfo`]。
+    ShowForgotten,
+    /// 値の行を private にする (`/private`、04 §7.5)。画面が確認した後に送る。
+    SetFactPrivate {
+        target: FactKey,
+        scope: PrivateScope,
+    },
+    /// 行に効いているすべての private の指示を解く (`/private off`、04 §7.5)。画面が確認した後に送る。
+    UnsetFactPrivate { target: FactRowRef },
+    /// `Contested` の値を今の値にする (`/memory accept`、04 §7.4)。
+    AcceptFact { target: FactKey },
+    /// 履歴の値を今の値に戻す (`/memory revert`、04 §7.4)。
+    RevertFact { target: FactKey },
+    /// 再び覚えない印を解く (`/memory unblock`、04 §7.6)。
+    UnblockFact { target: ForgottenRef },
+}
+
+/// 事実の主語 (04 §5.1)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FactSubject {
+    /// 利用者本人 (`self`)。
+    User,
+    /// 発話にある呼び名 (正規化 v1 の後)。
+    Named(String),
+}
+
+/// 事実の時制 (04 §5.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactTense {
+    Current,
+    Past,
+    Planned,
+}
+
+/// 一覧に示した行の状態の種類 (04 §7.1 の行の参照)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactStatus {
+    Live,
+    Contested,
+    Superseded,
+}
+
+/// 値の行の参照 (04 §7.1): 事実への指示と同じ鍵 (主語, 属性, 値の鍵) と、表示したときの状態の種類と時制。
+///
+/// 等しさとハッシュは `fact` を見ない (事実の ID は作り直すと変わるので照合に使わない。参考として持つ)。
+#[derive(Debug, Clone)]
+pub struct FactKey {
+    pub subject: FactSubject,
+    pub attribute: String,
+    /// 値の鍵 (64 桁の小文字の 16 進)。
+    pub vk: String,
+    pub status: FactStatus,
+    pub tense: FactTense,
+    /// 表示したときの事実の ID (参考)。
+    pub fact: Option<Id>,
+}
+
+impl FactKey {
+    fn parts(&self) -> (&FactSubject, &str, &str, FactStatus, FactTense) {
+        (
+            &self.subject,
+            &self.attribute,
+            &self.vk,
+            self.status,
+            self.tense,
+        )
+    }
+
+    /// 行が属する (主語, 属性)。
+    pub fn group(&self) -> FactGroupKey {
+        FactGroupKey {
+            subject: self.subject.clone(),
+            attribute: self.attribute.clone(),
+        }
+    }
+}
+
+impl PartialEq for FactKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for FactKey {}
+
+impl std::hash::Hash for FactKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+/// (主語, 属性) の参照 (今の値が消えた属性・後継まで効く private の指示だけが残る属性の行、履歴の照会)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FactGroupKey {
+    pub subject: FactSubject,
+    pub attribute: String,
+}
+
+/// `/private off` の対象の行。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FactRowRef {
+    /// 値の行。
+    Value(FactKey),
+    /// 値が 1 つも無く、後継まで効く private の指示だけが残る属性の行。
+    RuleOnly(FactGroupKey),
+}
+
+/// 忘れた事実の一覧の行の参照 (忘れるの指示の ID)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForgottenRef {
+    pub directive: Id,
+}
+
+/// 属性の名前と、多値か (表示名は画面がカタログの表で引く。知らない属性は名前のまま出す)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrInfo {
+    pub name: String,
+    pub multi: bool,
+}
+
+/// private の効く範囲 (04 §7.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrivateScope {
+    /// 指定した値と、同じ (主語, 属性) にあとで入る値 (既定)。
+    Successors,
+    /// この値だけ。
+    ValueOnly,
+}
+
+/// 値が private である理由 (04 §7.5 の「private の理由の表示」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateCause {
+    /// 利用者がこの値を選んだ。
+    Chosen { scope: PrivateScope },
+    /// 後継まで効く指示の後に言われた値。
+    Successor,
+    /// セッションの削除で後継でなくなったので、削除のときに足した指示。
+    KeptAfterDelete,
+}
+
+/// 値の行の private の印。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateInfo {
+    /// 理由 (重ならない。表示の順)。
+    pub causes: Vec<PrivateCause>,
+    /// 効いている private の指示 (`/private off` で解くもの。ほかの行と共有していれば、確認の画面で示す)。
+    pub directives: Vec<Id>,
+}
+
+/// 事実の一覧の 1 行 (04 §7.1 の「番号を振る行」)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactRow {
+    /// 今の値・予定の値・`Contested` の値。
+    Value {
+        key: FactKey,
+        value: String,
+        private: Option<PrivateInfo>,
+    },
+    /// 今の値が消えた属性 (04 §7.4)。履歴に届く。
+    Vacant { group: FactGroupKey },
+    /// 値が 1 つも無く、後継まで効く private の指示だけが残る属性。
+    RuleOnly {
+        group: FactGroupKey,
+        directives: Vec<Id>,
+    },
+}
+
+/// (主語, 属性) ごとの行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactGroup {
+    pub group: FactGroupKey,
+    pub attr: AttrInfo,
+    pub rows: Vec<FactRow>,
+    /// 履歴 (`Superseded`) の値の数。
+    pub history: usize,
+    /// 履歴の値のうち private のもの (`/private off` の確認で、一緒に印が外れる履歴の値を示すため、04 §7.5)。
+    pub private_history: Vec<PrivateHistoryValue>,
+}
+
+/// private の履歴の値 1 つと、それに効いている private の指示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateHistoryValue {
+    pub value: String,
+    pub directives: Vec<Id>,
+}
+
+/// 事実を作っていない・止めている理由 (07 §3 の `/memory`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactsUnavailable {
+    /// `memory.sleep_time = false`。
+    SleepTimeOff,
+    /// 点検で型縛りの補助の呼び出しを止めた (06 §3.3)。
+    StoppedByProbe,
+    /// `memory.forget_key` が使えない (03 §3.1.1)。事実への操作もできない。
+    KeyUnavailable,
+}
+
+/// 事実の一覧 (`/memory`、04 §7.1)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactList {
+    /// 属性の一覧の順 → 主語 (`self` が先) の順。
+    pub groups: Vec<FactGroup>,
+    pub note: Option<FactsUnavailable>,
+}
+
+/// 置き換えの履歴の 1 件 (`/memory history`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactHistoryRow {
+    /// 状態は `Superseded`。
+    pub key: FactKey,
+    pub value: String,
+    /// 置き換えた・終えた出来事の時刻。
+    pub superseded_at: Timestamp,
+    pub private: bool,
+}
+
+/// (主語, 属性) の置き換えの履歴 (新しい順)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactHistory {
+    pub group: FactGroupKey,
+    pub attr: AttrInfo,
+    pub items: Vec<FactHistoryRow>,
+}
+
+/// 忘れた事実の一覧の 1 件 (`/memory forgotten`、値は持たない、04 §7.6)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgottenFact {
+    pub target: ForgottenRef,
+    pub subject: FactSubject,
+    pub attr: AttrInfo,
+    /// 忘れた日時。
+    pub at: Timestamp,
+    /// 忘れた値の数 (再び覚えない印の数)。
+    pub values: usize,
+    /// 出典の発話を伏せ字にしたか。
+    pub redacted: bool,
+    /// 出典のセッションの題名 (残っているもの)。
+    pub sessions: Vec<String>,
+    /// 消えた出典のターンの数 (消えたターンからはセッションが分からないので、ターンで数える)。
+    pub deleted_turns: usize,
+}
+
+/// 事実への操作 (結果の知らせを選ぶため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactOp {
+    Private,
+    PrivateOff,
+    Accept,
+    Revert,
+    Unblock,
 }
 
 /// 答え方の既定の項目 (07 §3)。
@@ -349,5 +604,24 @@ pub enum Event {
         info: ModelRoleInfo,
         /// この変化でモデルを初めて記録した。
         recorded_now: bool,
+    },
+    /// 事実の一覧 (`ShowFacts` の答え)。
+    FactsInfo { list: FactList },
+    /// 置き換えの履歴 (`ShowFactHistory` の答え)。
+    FactHistoryInfo { history: FactHistory },
+    /// 忘れた事実の一覧 (`ShowForgotten` の答え)。
+    ForgottenInfo { items: Vec<ForgottenFact> },
+    /// 事実への操作をした。`list` は操作の後の一覧 (前の番号は使えなくなる)。`slow_next_turn` は、次の応答の前に
+    /// 事実の表を作り直すので、始まるまで少し長くかかるか (04 §5.4)。
+    FactsUpdated {
+        op: FactOp,
+        list: FactList,
+        slow_next_turn: bool,
+    },
+    /// 事実への操作をしなかった。指した行が変わっていたときは、同じ読み取りで作った新しい一覧を持つ
+    /// (04 §7.1。「一覧が更新されました」)。
+    FactOpRejected {
+        error: Message,
+        list: Option<FactList>,
     },
 }

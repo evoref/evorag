@@ -618,6 +618,7 @@ fn main() -> ExitCode {
                 .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
             recall: Some(report.recall),
             background: None,
+            remote_llm: cfg.llm.allow_remote,
         },
     );
     for w in &report.location_warnings {

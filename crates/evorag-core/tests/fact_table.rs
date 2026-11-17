@@ -564,6 +564,18 @@ async fn a_successor_stays_private_after_its_restating_session_is_deleted() {
     assert_eq!(value_only[0].vk, osaka.vk);
     assert_eq!(value_only[0].subject, "self");
     assert_eq!(value_only[0].attribute, "residence");
+    // 削除で足した指示は `origin = "delete"` で書き、`/memory` で利用者が選んだ値と見分ける (04 §7.5)。
+    let kept = evorag_memory::kept_after_delete(&r).unwrap();
+    assert_eq!(kept.into_iter().collect::<Vec<_>>(), [value_only[0].id]);
+    assert_eq!(
+        evorag_memory::private_info(
+            osaka,
+            &directives,
+            &evorag_memory::kept_after_delete(&r).unwrap()
+        )
+        .map(|p| p.causes),
+        Some(vec![evorag_types::api::PrivateCause::KeptAfterDelete])
+    );
     let journaled = std::fs::read_dir(dir.path().join("journal"))
         .unwrap()
         .any(|e| file_contains(&e.unwrap().path(), "value_only"));

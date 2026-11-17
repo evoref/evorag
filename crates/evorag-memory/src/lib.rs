@@ -15,12 +15,14 @@ mod fold_cases;
 mod gates;
 mod kinds;
 mod lexical;
+mod mask;
 mod note;
 mod prefilter;
 mod read;
 mod rules;
 mod table;
 mod value_key;
+mod view;
 mod write;
 
 pub use correction::{
@@ -38,12 +40,14 @@ pub use extract::{
     pack, parse_extraction, turn_rev, turn_rev_checked, user_utterances_after, utterance_budget,
 };
 pub use facts::{
-    FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
+    DirectivesAdded, FactBody, FactCtx, FactDirectiveBody, ForgetRecord, HiddenBody, KIND_FACT,
+    KIND_FACT_DIRECTIVE, LoadedFacts, NewDirective, ORIGIN_DELETE, ORIGIN_USER, Origin,
     REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, SourcesDropped, add_directive,
-    consolidate, diff_ops, drop_turns, load_directives, load_fact, load_facts, rebuild,
+    add_directives, consolidate, diff_ops, drop_turns, kept_after_delete, load_directives,
+    load_fact, load_facts, load_forgets, load_hidden, rebuild,
 };
 pub use fold::{
-    Candidate, Choice, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet,
+    Candidate, Choice, Cover, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet,
     FactState, FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, drop_sources, fold,
     refresh_private, table_order,
 };
@@ -67,6 +71,7 @@ pub use kinds::{
     kinds,
 };
 pub use lexical::{Signals, evidence_language, signals};
+pub use mask::{Masker, TurnText, apply_ranges, hidden_marker};
 pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
     SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, note_is_current, note_matches,
@@ -90,6 +95,9 @@ pub use table::{
     table_head, table_rows, table_version,
 };
 pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
+pub use view::{
+    fact_history, fact_list, find_row, private_info, row_key, rule_only, subject_name, subject_of,
+};
 pub use write::{
     AssistantTurn, CleanupJob, Writes, delete_session, deleted_ids, expect_record, expect_turn,
     index_job, pending_cleanup_jobs, pending_purge_jobs, purge_job,
