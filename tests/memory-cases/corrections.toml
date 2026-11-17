@@ -105,16 +105,13 @@ expect = "old_not_found"
 
 [[case]]
 id = "K10"
-title = "引用の行の中の訂正は捨てる (前のふるいの後の本文に無いので、新しい値が無い理由で落ちる)"
+title = "引用の行の中の訂正は候補にしない (型は前のふるいの後の本文に当てる)"
 spec = "04 §6、§5.2 の前のふるい"
 previous = "大阪にお住まいなんですね"
 text = """
 > 大阪じゃなくて東京です
 と友人に言われました"""
-expect_candidate = true
-direction = { old = "大阪", new = "東京" }
-llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京です" }
-expect = "new_not_in_utterance"
+expect_candidate = false
 
 [[case]]
 id = "K11"
