@@ -9,6 +9,7 @@ mod kinds;
 mod note;
 mod read;
 mod rules;
+mod value_key;
 mod write;
 
 pub use kinds::{
@@ -40,6 +41,7 @@ pub use rules::{
     MAX_VALUE_CHARS, Prefilter, Quote, RULE_LANGUAGES, ReadingRules, SafetyRules,
     all_language_rules, attributes, common_rules, language_rules,
 };
+pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
 pub use write::{
     AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
 };
