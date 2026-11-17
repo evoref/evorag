@@ -286,11 +286,15 @@ impl CorrectionRules {
     }
 }
 
+/// 型の固定の部分の長さ。読点と空白は照合で区別しないので数えない (04 §6。数えると「{new}、{old}ではなく」が
+/// 「{old}ではなく{new}」より先に当たり、「いや、大阪ではなく京都です」の新しい値の穴が「いや」になる)。
+/// 同じ長さの型は TOML の順に試す (並べ替えは安定)。
 fn fixed_len(pattern: &str) -> usize {
     pattern
         .replace("{new}", "")
         .replace("{old}", "")
         .chars()
+        .filter(|&c| !c.is_whitespace() && !matches!(c, '、' | '，' | ',' | '､'))
         .count()
 }
 

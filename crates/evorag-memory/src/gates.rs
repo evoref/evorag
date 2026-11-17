@@ -615,6 +615,14 @@ impl<'s> QuoteRegions<'s> {
                 && pos.end <= inner.end
         })
     }
+
+    /// `pos` が、`attribute` を許していない括弧の内側と 1 文字でも重なるか (訂正の検証で、値や型の固定の部分が
+    /// 引用に掛かるものを落とす、04 §6 の関門 3)。
+    pub(crate) fn overlaps(&self, attribute: &str, pos: &Range<usize>) -> bool {
+        self.regions.iter().any(|(inner, allow)| {
+            !allow.iter().any(|a| a == attribute) && inner.start < pos.end && pos.start < inner.end
+        })
+    }
 }
 
 /// 括弧の内側の範囲 (括弧を含まない)。閉じていない括弧は本文の終わりまでとみなす (安全の側に倒す)。

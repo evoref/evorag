@@ -631,6 +631,8 @@ struct Matched {
     holes: Vec<HoleAt>,
     /// 一致の全体 (穴を含む `View::chars` の範囲)。
     span: Range<usize>,
+    /// 固定の部分 (錨) の一致 (`View::chars` の範囲)。
+    anchors: Vec<Range<usize>>,
 }
 
 impl Matched {
@@ -643,7 +645,6 @@ impl Matched {
 struct Matcher<'a> {
     c: &'a Compiled,
     v: &'a View,
-    region: Range<usize>,
     occ: Vec<Vec<(usize, usize)>>,
 }
 
@@ -696,7 +697,9 @@ impl Matcher<'_> {
 
     /// 最初の錨の前の穴が置けるか (置けなければ、その錨の位置からは当たらない)。
     fn lead(&self, a0: usize, out: &mut Vec<HoleAt>) -> Option<usize> {
-        let s = self.v.sentence_start(a0).max(self.region.start);
+        // 穴の端は文で決める (根拠の範囲で切らない。LLM が根拠を値の途中から始めて、古い値の穴を値と同じ
+        // 長さに縮め、「古い値は穴の全体」の検査を抜けないため)。根拠の範囲は錨を探す範囲にだけ使う。
+        let s = self.v.sentence_start(a0);
         self.place(&self.c.lead, (s, a0), true, false, false, out)?;
         Some(s)
     }
@@ -714,9 +717,8 @@ impl Matcher<'_> {
             match placed.get(k + 1) {
                 Some(&(next, _)) => self.place(sides, (b, next), true, false, false, &mut holes)?,
                 None => {
-                    let sentence_end = self.v.sentence_end(b);
-                    let e = sentence_end.min(self.region.end).max(b);
-                    self.place(sides, (b, e), false, true, e == sentence_end, &mut holes)?;
+                    let e = self.v.sentence_end(b).max(b);
+                    self.place(sides, (b, e), false, true, true, &mut holes)?;
                     if !sides.is_empty() {
                         end = e;
                     }
@@ -731,6 +733,7 @@ impl Matcher<'_> {
         Some(Matched {
             holes,
             span: start..end,
+            anchors: placed.iter().map(|&(a, len)| a..a + len).collect(),
         })
     }
 
@@ -776,15 +779,15 @@ impl Matcher<'_> {
     }
 }
 
-/// 型の、`region` (`View::chars` の範囲) の中の最初の一致 (同じ型なら本文の前から)。先頭の穴は文の頭 (か範囲の
-/// 始まり) から、末尾の穴は文の終わり (か範囲の終わり) まで取る。
+/// 型の、錨が `region` (`View::chars` の範囲) の中にある最初の一致 (同じ型なら本文の前から)。穴は範囲で切らず、
+/// 先頭の穴は文の頭から、末尾の穴は文の終わりまで取る (04 §6 の穴の範囲)。
 fn first_match(c: &Compiled, v: &View, region: Range<usize>) -> Option<Matched> {
     let occ = c
         .anchors
         .iter()
         .map(|(variants, _)| v.occurrences(variants, &region))
         .collect();
-    let m = Matcher { c, v, region, occ };
+    let m = Matcher { c, v, occ };
     m.search(0, &mut Vec::new())
 }
 
@@ -1008,7 +1011,13 @@ pub fn verify(
     let new_hole = m.hole(Side::New).ok_or(Rejection::Direction)?;
     let new_hits = view.mapped.find(&new_n, Edges::Word);
     let new_hit = placed_new(&view, new_hole, &new_hits).ok_or(Rejection::Direction)?;
-    if regions.is_quoted("", &new_hit.source) {
+    // 置いた新しい値が括弧の内側に掛かるか、型の固定の部分が括弧の内側にあれば、引用の中の訂正とみなす
+    // (新しい値を閉じ括弧の外まで伸ばして、引用の中の他人の訂正を当てないため)。
+    let anchor_quoted = m
+        .anchors
+        .iter()
+        .any(|a| view.source(a).is_none_or(|src| regions.overlaps("", &src)));
+    if anchor_quoted || regions.overlaps("", &new_hit.source) {
         return Err(Rejection::Quoted);
     }
     let (old_vk, new_vk) = (value_key(ctx.key, &out.old), value_key(ctx.key, &out.new));
@@ -1953,6 +1962,90 @@ mod tests {
         );
         let text = "いや、大阪じゃなくて京都です";
         assert!(run(text, prev, &output("大阪", "京都", text)).is_ok());
+    }
+
+    /// 根拠を値の途中から始めても (終えても)、穴は文で決まるので、古い値の穴を値と同じ長さに縮められない。
+    #[test]
+    fn a_truncated_evidence_does_not_shrink_the_old_hole() {
+        let cases = [
+            (
+                "東大阪じゃなくて京都です",
+                "大阪",
+                "京都",
+                "大阪じゃなくて京都です",
+            ),
+            (
+                "いや大阪じゃなくて京都です",
+                "大阪",
+                "京都",
+                "大阪じゃなくて京都です",
+            ),
+            (
+                "妻の実家の大阪じゃなくて京都です",
+                "大阪",
+                "京都",
+                "大阪じゃなくて京都",
+            ),
+            (
+                "東東京は大阪の間違いでした",
+                "東京",
+                "大阪",
+                "東京は大阪の間違い",
+            ),
+            ("1.2ではなくて1.3です", "2", "1.3", "2ではなくて1.3"),
+            (
+                "I work at Google, not Apple Music.",
+                "Apple",
+                "Google",
+                "Google, not Apple",
+            ),
+        ];
+        for (text, old, new, e) in cases {
+            assert_eq!(
+                run(text, Some(text), &output(old, new, e)),
+                Err(Rejection::Direction),
+                "{text}"
+            );
+        }
+    }
+
+    /// 新しい値を閉じ括弧の外まで伸ばしても、引用に掛かる訂正は `quoted` で落とす。
+    #[test]
+    fn a_value_reaching_out_of_a_quote_is_still_quoted() {
+        let text = "「いや、大阪じゃなくて東京」と彼は言った";
+        assert_eq!(
+            run(
+                text,
+                Some("大阪ですね"),
+                &output("大阪", "東京」と彼", text)
+            ),
+            Err(Rejection::Quoted)
+        );
+        let text = "\"It isn't Osaka, it's Kyoto\" is what he said.";
+        assert_eq!(
+            run(
+                text,
+                Some("Osaka"),
+                &output("Osaka", "Kyoto\" is what he said", text)
+            ),
+            Err(Rejection::Quoted)
+        );
+    }
+
+    /// 読点を型の長さに数えないので、「いや、大阪ではなく京都です」は「{old}ではなく{new}」に当たる。
+    #[test]
+    fn a_leading_interjection_does_not_pick_the_comma_pattern() {
+        for text in ["いや、大阪ではなく京都です", "そう、大阪ではなく京都です"]
+        {
+            let (_, old, new) = dir(text).expect("a match");
+            assert_eq!(
+                (old.as_deref(), new.as_str()),
+                (Some("大阪"), "京都"),
+                "{text}"
+            );
+        }
+        let (_, old, new) = dir("東京、大阪ではなく").expect("a match");
+        assert_eq!((old.as_deref(), new.as_str()), (Some("大阪"), "東京"));
     }
 
     /// 値の一致の語の境界は、根拠ではなく前のふるいの後の本文の全体で見る。文の区切りは元の文字で決める。
