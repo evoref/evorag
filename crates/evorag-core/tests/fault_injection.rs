@@ -139,6 +139,22 @@ enum KillFrom {
     Spawn,
     /// READY を知らせてから (保存の最中に殺す回)。起動の速さ (CI の機械の速さ) に左右されない。
     Ready,
+    /// 最初の SAVED を知らせてから (応答の生成と保存の最中に殺す回)。保存の速さに左右されずに、保存の後を突く。
+    Saved,
+    /// 最初の ANSWERED を知らせてから (次の発話の保存と、裏の処理の最中に殺す回)。
+    Answered,
+}
+
+impl KillFrom {
+    /// この時点の合図になる行の頭 (`Spawn` は合図を待たない)。
+    fn signal(self) -> Option<&'static str> {
+        match self {
+            Self::Spawn => None,
+            Self::Ready => Some("READY"),
+            Self::Saved => Some("SAVED "),
+            Self::Answered => Some("ANSWERED "),
+        }
+    }
 }
 
 /// 子を起動し、`from` から `kill_after` で強制終了する。子が知らせた行を返す。
@@ -161,14 +177,15 @@ fn run_and_kill(root: &Path, from: KillFrom, kill_after: Duration) -> Vec<String
     );
     let stdout = child.0.stdout.take().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
     let reader = {
         let lines = lines.clone();
+        let signal = from.signal();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let line = line.trim().to_owned();
-                if line == "READY" {
-                    let _ = ready_tx.send(());
+                if signal.is_some_and(|s| line.starts_with(s)) {
+                    let _ = signal_tx.send(());
                 }
                 if !line.is_empty() {
                     lines.lock().unwrap().push(line);
@@ -176,14 +193,11 @@ fn run_and_kill(root: &Path, from: KillFrom, kill_after: Duration) -> Vec<String
             }
         })
     };
-    match from {
-        KillFrom::Spawn => std::thread::sleep(kill_after),
-        KillFrom::Ready => {
-            // READY が来ないまま止まった子も、待ちすぎずに殺す。
-            let _ = ready_rx.recv_timeout(Duration::from_secs(30));
-            std::thread::sleep(kill_after);
-        }
+    if from.signal().is_some() {
+        // 合図が来ないまま止まった子も、待ちすぎずに殺す。
+        let _ = signal_rx.recv_timeout(Duration::from_secs(30));
     }
+    std::thread::sleep(kill_after);
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     reader.join().unwrap();
@@ -232,11 +246,13 @@ fn committed_turns_survive_kills_at_random_points() {
     let (mut saved_total, mut answered_total) = (0usize, 0usize);
     for run in 0..runs {
         let kill_after = Duration::from_millis(next(&mut seed) % 400);
-        // 4 回に 1 回は起動の最中 (退避・ジャーナルの取り込み・索引の突き合わせ) に殺す。
-        let from = if run % 4 == 0 {
-            KillFrom::Spawn
-        } else {
-            KillFrom::Ready
+        // 起動の最中 (退避・ジャーナルの取り込み・索引の突き合わせ)、保存の最中、最初の保存の後、最初の応答の
+        // 後を順に突く。後の 2 つは合図から測るので、CI の機械が遅くても、保存の後に殺す回が必ずある。
+        let from = match run % 4 {
+            0 => KillFrom::Spawn,
+            1 => KillFrom::Ready,
+            2 => KillFrom::Saved,
+            _ => KillFrom::Answered,
         };
         let lines = run_and_kill(dir.path(), from, kill_after);
         let saved: BTreeSet<String> = lines
