@@ -67,7 +67,7 @@ enum Outcome {
 
 /// 実際のストアに同じ手順を当てる鏡 (書き込みの入口 `facts.rs` を通る)。
 mod db {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
 
     use evorag_store::testutil::TempDir;
@@ -192,6 +192,54 @@ mod db {
         pub fn facts(&self) -> FactSet {
             let tx = self.store.read().expect("read");
             load_facts(&tx).expect("load").set
+        }
+
+        /// すべての事実の記録について、本体から作る関係と副索引の集合と、ストアに実際にある集合が
+        /// 一致する (書き込みの差と、repair・ジャーナルの取り込みでの作り直しが同じ結果になる)。
+        pub fn check_indexes(&self, id: &str) {
+            use crate::facts::{IndexEntry, KIND_FACT, REL_FACT_SRC, fact_entries};
+            use evorag_store::key::OwnedPart;
+            use evorag_store::{LookupRange, Read};
+            let tx = self.store.read().expect("read");
+            let mut want: BTreeSet<(Id, IndexEntry)> = BTreeSet::new();
+            let mut ids = Vec::new();
+            tx.for_each(KIND_FACT, |r| {
+                if let Read::Ok(e) = r {
+                    ids.push(e.id);
+                    want.extend(fact_entries(&e).into_iter().map(|x| (e.id, x)));
+                }
+                true
+            })
+            .expect("facts");
+            let mut got: BTreeSet<(Id, IndexEntry)> = BTreeSet::new();
+            for field in ["sa", "vk"] {
+                let all = LookupRange::Between {
+                    from: None,
+                    to: None,
+                };
+                for entry in tx
+                    .lookup(KIND_FACT, field, &all, false, None)
+                    .expect("lookup")
+                {
+                    let OwnedPart::Str(value) = entry.value else {
+                        panic!("{id}: a non-string lookup value");
+                    };
+                    let field = if field == "sa" { "sa" } else { "vk" };
+                    got.insert((entry.id, IndexEntry::Lookup { field, value }));
+                }
+            }
+            for fid in ids {
+                for (to, _) in tx.links_from(fid, REL_FACT_SRC).expect("links") {
+                    got.insert((
+                        fid,
+                        IndexEntry::Link {
+                            rel: REL_FACT_SRC,
+                            to,
+                        },
+                    ));
+                }
+            }
+            assert_eq!(got, want, "{id}: the indexes must match the fact bodies");
         }
     }
 
@@ -525,6 +573,7 @@ impl Runner {
 
     fn check(&self, id: &str, body: &Value) {
         // 実際のストアを通した結果も、純粋な核と同じ (書き込みの入口の差と写しの検査)。
+        self.db.check_indexes(id);
         let stored = self.db.facts();
         assert_eq!(
             self.describe(&stored),

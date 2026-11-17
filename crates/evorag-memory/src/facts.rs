@@ -14,8 +14,8 @@ use evorag_types::{Id, IdGen, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::fold::{
-    Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report, Scope,
-    Source, Tense, fold, refresh_private,
+    Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report,
+    Scope, Source, Tense, fold,
 };
 use crate::read::MemoryError;
 use crate::rules::Attributes;
@@ -284,7 +284,8 @@ impl FactDirectiveBody {
             subject: d.subject.clone(),
             attribute: d.attribute.clone(),
             vk: d.vk.map(|v| v.to_hex()),
-            norm: d.vk.map(|_| NORM_V1),
+            // 正規化の版は、値の鍵や印を持たない指示にも書く (04 §5.6)。
+            norm: Some(NORM_V1),
             fact: None,
             target,
             scope: scope.map(Into::into),
@@ -298,13 +299,23 @@ impl FactDirectiveBody {
     }
 }
 
-/// `fact` の本体のうち、関係と副索引を作るのに要る項目だけ (03 §4.2 の規則 11)。
+// 関係と副索引を作るのに要る項目は、1 つずつ別の型で読む (03 §4.2 の規則 11)。新しい版でほかの項目の
+// 型が変わっても、読める項目の関係と副索引 (特に再び覚えない印の `mark`) を失わないようにする。
+
 #[derive(Deserialize)]
-struct FactLinks {
+struct SubjectAttribute {
     subject: String,
     attribute: String,
+}
+
+#[derive(Deserialize)]
+struct VkField {
     #[serde(default)]
     vk: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SourcesField {
     #[serde(default)]
     sources: Vec<SourceTurn>,
 }
@@ -314,97 +325,149 @@ struct SourceTurn {
     turn: Id,
 }
 
-/// `fact_directive` の本体のうち、関係と副索引を作るのに要る項目だけ。
 #[derive(Deserialize)]
-struct DirectiveLinks {
-    subject: String,
-    attribute: String,
-    #[serde(default)]
-    vk: Option<String>,
+struct TargetField {
     #[serde(default)]
     target: Option<Id>,
+}
+
+#[derive(Deserialize)]
+struct MarksField {
     #[serde(default)]
     marks: Vec<String>,
 }
 
-fn lookup(kind: &str, field: &str, value: String, id: Id) -> WriteOp {
-    WriteOp::PutLookup {
-        kind: kind.into(),
-        field: field.into(),
-        value: OwnedPart::Str(value),
-        id,
+/// 記録から作る関係と副索引の 1 項目。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum IndexEntry {
+    Lookup { field: &'static str, value: String },
+    Link { rel: &'static str, to: Id },
+}
+
+impl IndexEntry {
+    fn put(&self, kind: &str, id: Id) -> WriteOp {
+        match self {
+            IndexEntry::Lookup { field, value } => WriteOp::PutLookup {
+                kind: kind.into(),
+                field: (*field).into(),
+                value: OwnedPart::Str(value.clone()),
+                id,
+            },
+            IndexEntry::Link { rel, to } => WriteOp::PutLink {
+                from: id,
+                rel: (*rel).into(),
+                to: *to,
+                attrs: Vec::new(),
+            },
+        }
+    }
+
+    fn delete(&self, kind: &str, id: Id) -> WriteOp {
+        match self {
+            IndexEntry::Lookup { field, value } => WriteOp::DeleteLookup {
+                kind: kind.into(),
+                field: (*field).into(),
+                value: OwnedPart::Str(value.clone()),
+                id,
+            },
+            IndexEntry::Link { rel, to } => WriteOp::DeleteLink {
+                from: id,
+                rel: (*rel).into(),
+                to: *to,
+            },
+        }
     }
 }
 
-fn unlookup(kind: &str, field: &str, value: String, id: Id) -> WriteOp {
-    WriteOp::DeleteLookup {
-        kind: kind.into(),
-        field: field.into(),
-        value: OwnedPart::Str(value),
-        id,
+/// `fact` の関係と副索引の集合 (本体から決まる)。
+pub(crate) fn fact_entries(e: &Envelope) -> BTreeSet<IndexEntry> {
+    let mut out = BTreeSet::new();
+    if let Ok(b) = e.body_as::<SubjectAttribute>() {
+        out.insert(IndexEntry::Lookup {
+            field: LOOKUP_SA,
+            value: sa_key(&b.subject, &b.attribute),
+        });
     }
+    if let Ok(VkField { vk: Some(vk) }) = e.body_as::<VkField>() {
+        out.insert(IndexEntry::Lookup {
+            field: LOOKUP_VK,
+            value: vk,
+        });
+    }
+    if let Ok(b) = e.body_as::<SourcesField>() {
+        out.extend(b.sources.into_iter().map(|s| IndexEntry::Link {
+            rel: REL_FACT_SRC,
+            to: s.turn,
+        }));
+    }
+    out
 }
 
-fn link(from: Id, rel: &str, to: Id) -> WriteOp {
-    WriteOp::PutLink {
-        from,
-        rel: rel.into(),
-        to,
-        attrs: Vec::new(),
+/// `fact_directive` の関係と副索引の集合。
+fn directive_entries(e: &Envelope) -> BTreeSet<IndexEntry> {
+    let mut out = BTreeSet::new();
+    if let Ok(b) = e.body_as::<SubjectAttribute>() {
+        out.insert(IndexEntry::Lookup {
+            field: LOOKUP_SA,
+            value: sa_key(&b.subject, &b.attribute),
+        });
     }
+    if let Ok(VkField { vk: Some(vk) }) = e.body_as::<VkField>() {
+        out.insert(IndexEntry::Lookup {
+            field: LOOKUP_VK,
+            value: vk,
+        });
+    }
+    if let Ok(b) = e.body_as::<MarksField>() {
+        out.extend(b.marks.into_iter().map(|m| IndexEntry::Lookup {
+            field: LOOKUP_MARK,
+            value: m,
+        }));
+    }
+    if let Ok(TargetField { target: Some(t) }) = e.body_as::<TargetField>() {
+        out.insert(IndexEntry::Link {
+            rel: REL_CANCELS,
+            to: t,
+        });
+    }
+    out
 }
 
 /// `fact` の関係と副索引 (ジャーナルの取り込みや repair で、本体から作り直すときにも使う)。
 pub(crate) fn derive_fact(e: &Envelope) -> Vec<WriteOp> {
-    let Ok(b) = e.body_as::<FactLinks>() else {
-        return Vec::new();
-    };
-    let mut ops = vec![lookup(
-        KIND_FACT,
-        LOOKUP_SA,
-        sa_key(&b.subject, &b.attribute),
-        e.id,
-    )];
-    if let Some(vk) = b.vk {
-        ops.push(lookup(KIND_FACT, LOOKUP_VK, vk, e.id));
-    }
-    let turns: BTreeSet<Id> = b.sources.iter().map(|s| s.turn).collect();
-    ops.extend(turns.into_iter().map(|t| link(e.id, REL_FACT_SRC, t)));
-    ops
+    fact_entries(e)
+        .iter()
+        .map(|x| x.put(KIND_FACT, e.id))
+        .collect()
 }
 
 /// `fact_directive` の関係と副索引。
 pub(crate) fn derive_directive(e: &Envelope) -> Vec<WriteOp> {
-    let Ok(b) = e.body_as::<DirectiveLinks>() else {
-        return Vec::new();
-    };
-    let mut ops = vec![lookup(
-        KIND_FACT_DIRECTIVE,
-        LOOKUP_SA,
-        sa_key(&b.subject, &b.attribute),
-        e.id,
-    )];
-    if let Some(vk) = b.vk {
-        ops.push(lookup(KIND_FACT_DIRECTIVE, LOOKUP_VK, vk, e.id));
-    }
-    ops.extend(
-        b.marks
-            .into_iter()
-            .map(|m| lookup(KIND_FACT_DIRECTIVE, LOOKUP_MARK, m, e.id)),
-    );
-    if let Some(t) = b.target {
-        ops.push(link(e.id, REL_CANCELS, t));
-    }
-    ops
+    directive_entries(e)
+        .iter()
+        .map(|x| x.put(KIND_FACT_DIRECTIVE, e.id))
+        .collect()
 }
+/// `fact` の本体の版 (03 §3.3)。これより新しい `v` の記録は読むだけにし、書き換えない (03 §4.2 の規則 6)。
+pub(crate) const FACT_V: u32 = 1;
+/// `fact_directive` の本体の版。
+pub(crate) const FACT_DIRECTIVE_V: u32 = 1;
 
 /// 読んだ事実。`envelopes` は畳みの前の封筒 (差を作るのに使う)。
 #[derive(Debug, Clone, Default)]
 pub struct LoadedFacts {
     pub set: FactSet,
     envelopes: BTreeMap<Id, Envelope>,
-    /// 知らない状態・形の事実の数 (畳みに入れず、書き換えない。`doctor` が報告する)。
+    /// 新しい `v`・知らない状態・形の事実の数 (畳みに入れず、書き換えも削除もしない。`doctor` が報告する)。
     pub unknown: usize,
+}
+
+/// 封筒を核の事実にする。新しい `v`・知らない状態・正規化の版・形の事実は `None`。
+fn fact_of(e: &Envelope) -> Option<Fact> {
+    if e.v != FACT_V {
+        return None;
+    }
+    e.body_as::<FactBody>().ok()?.to_fact(e.id)
 }
 
 /// すべての事実を読む (数百件の見込みなので全件を読む、04 §5.4)。
@@ -412,7 +475,7 @@ pub fn load_facts(tx: &ReadTxn<'_>) -> Result<LoadedFacts, MemoryError> {
     let mut out = LoadedFacts::default();
     tx.for_each(KIND_FACT, |r| {
         match r {
-            Read::Ok(e) => match e.body_as::<FactBody>().ok().and_then(|b| b.to_fact(e.id)) {
+            Read::Ok(e) => match fact_of(&e) {
                 Some(f) => {
                     out.set.facts.push(f);
                     out.envelopes.insert(e.id, e);
@@ -426,79 +489,96 @@ pub fn load_facts(tx: &ReadTxn<'_>) -> Result<LoadedFacts, MemoryError> {
     Ok(out)
 }
 
-/// すべての事実への指示を読む。
+/// 封筒を核の指示にする。読めない指示・新しい `v`・知らない正規化の版の指示は、印だけを当てる
+/// `Unknown` にする (忘れた値を蘇らせないため、04 §7.5 の「知らない op の読み方」)。
+fn directive_of(e: &Envelope) -> Directive {
+    let readable = (e.v == FACT_DIRECTIVE_V)
+        .then(|| e.body_as::<FactDirectiveBody>().ok())
+        .flatten()
+        .filter(|b| b.norm.is_none_or(|n| n == NORM_V1));
+    if let Some(b) = readable {
+        return b.to_directive(e.id);
+    }
+    let marks = e
+        .body_as::<MarksField>()
+        .map(|m| {
+            m.marks
+                .iter()
+                .filter_map(|h| BlockMark::from_hex(h))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (subject, attribute) = e
+        .body_as::<SubjectAttribute>()
+        .map(|b| (b.subject, b.attribute))
+        .unwrap_or_default();
+    Directive {
+        id: e.id,
+        kind: DirectiveKind::Unknown { marks },
+        subject,
+        attribute,
+        vk: None,
+    }
+}
+
+/// すべての事実への指示を読む。読めない指示も、印だけは当てる (`Directives::unknown_count` で数える)。
 pub fn load_directives(tx: &ReadTxn<'_>) -> Result<Directives, MemoryError> {
     let mut list = Vec::new();
     tx.for_each(KIND_FACT_DIRECTIVE, |r| {
-        if let Read::Ok(e) = r
-            && let Ok(b) = e.body_as::<FactDirectiveBody>()
-        {
-            list.push(b.to_directive(e.id));
+        // 封筒そのものが読めない指示は、印も読めない。`doctor` が quarantine として報告する。
+        if let Read::Ok(e) = r {
+            list.push(directive_of(&e));
         }
         true
     })?;
     Ok(Directives::new(list))
 }
 
-/// 畳みの前後の差を、書き込みの操作にする。
+/// 畳みの前後の差を、書き込みの操作にする。関係と副索引は、前後の封筒から作る集合の差で付け替える
+/// (repair でジャーナルや本体から作り直したものと、常に同じになるように)。
 pub fn diff_ops(
     before: &LoadedFacts,
     after: &FactSet,
     now: Timestamp,
 ) -> Result<Vec<WriteOp>, BodyError> {
+    let old_facts: BTreeMap<Id, &Fact> = before.set.facts.iter().map(|f| (f.id, f)).collect();
     let mut ops = Vec::new();
     let mut kept = BTreeSet::new();
     for f in &after.facts {
         kept.insert(f.id);
-        let old = before.envelopes.get(&f.id);
-        let old_fact = before.set.facts.iter().find(|o| o.id == f.id);
-        if old_fact == Some(f) {
+        if old_facts.get(&f.id) == Some(&f) {
             continue;
         }
-        let recorded_at = old.map_or(now, |e| e.created_at);
-        let body = FactBody::from_fact(f, recorded_at);
+        let old = before.envelopes.get(&f.id);
+        // 核が決めない既知の項目 (現実の期間・記録した時刻) は、古い本体のものを残す。
+        let old_body = old.and_then(|e| e.body_as::<FactBody>().ok());
+        let mut body = FactBody::from_fact(f, now);
+        if let Some(ob) = old_body {
+            body.valid_from = ob.valid_from;
+            body.valid_to = ob.valid_to;
+            body.recorded_at = ob.recorded_at;
+        }
         let mut env = match old {
             Some(e) => {
                 let mut e = e.clone();
                 e.updated_at = now;
                 e
             }
-            None => Envelope::new(f.id, KIND_FACT, 1, now, ""),
+            None => Envelope::new(f.id, KIND_FACT, FACT_V, now, ""),
         };
         env.set_body(&body)?;
-        // 副索引: 値の鍵が変わった (忘れるで消えた) ときだけ付け替える。主語と属性は変わらない。
-        let old_vk = old_fact.and_then(|o| o.vk);
-        if old_fact.is_none() {
-            ops.push(lookup(
-                KIND_FACT,
-                LOOKUP_SA,
-                sa_key(&f.subject, &f.attribute),
-                f.id,
-            ));
-        }
-        if old_vk != f.vk {
-            if let Some(v) = old_vk {
-                ops.push(unlookup(KIND_FACT, LOOKUP_VK, v.to_hex(), f.id));
-            }
-            if let Some(v) = f.vk.filter(|_| f.state != FactState::Retracted) {
-                ops.push(lookup(KIND_FACT, LOOKUP_VK, v.to_hex(), f.id));
-            }
-        }
-        // 関係: 出典のターンの増減。
-        let old_turns: BTreeSet<Id> = old_fact
-            .map(|o| o.sources.iter().map(|s| s.turn).collect())
-            .unwrap_or_default();
-        let new_turns: BTreeSet<Id> = f.sources.iter().map(|s| s.turn).collect();
-        for t in new_turns.difference(&old_turns) {
-            ops.push(link(f.id, REL_FACT_SRC, *t));
-        }
-        for t in old_turns.difference(&new_turns) {
-            ops.push(WriteOp::DeleteLink {
-                from: f.id,
-                rel: REL_FACT_SRC.into(),
-                to: *t,
-            });
-        }
+        let before_entries = old.map(fact_entries).unwrap_or_default();
+        let after_entries = fact_entries(&env);
+        ops.extend(
+            before_entries
+                .difference(&after_entries)
+                .map(|x| x.delete(KIND_FACT, f.id)),
+        );
+        ops.extend(
+            after_entries
+                .difference(&before_entries)
+                .map(|x| x.put(KIND_FACT, f.id)),
+        );
         ops.push(WriteOp::Put(env));
     }
     for f in &before.set.facts {
@@ -506,14 +586,8 @@ pub fn diff_ops(
             continue;
         }
         // 畳みで消えた事実 (同じ値の矛盾を今の値に合わせた) は、関係と副索引ごと消す。
-        ops.push(unlookup(
-            KIND_FACT,
-            LOOKUP_SA,
-            sa_key(&f.subject, &f.attribute),
-            f.id,
-        ));
-        if let Some(v) = f.vk {
-            ops.push(unlookup(KIND_FACT, LOOKUP_VK, v.to_hex(), f.id));
+        if let Some(e) = before.envelopes.get(&f.id) {
+            ops.extend(fact_entries(e).iter().map(|x| x.delete(KIND_FACT, f.id)));
         }
         ops.push(WriteOp::DeleteLinksOf(f.id));
         ops.push(WriteOp::Delete {
@@ -547,6 +621,9 @@ impl FactCtx<'_> {
 
 /// 書き込みの入口: 候補と検証済みの訂正を畳み、書き込みの操作を返す (04 §5.3)。
 ///
+/// 読んでから書くまでの間に別の書き込み (利用者の指示など) が入ると、古い状態からの差を書いてしまう。
+/// 呼ぶ側は、事実を書く経路を直列にする (M3.2 で入口の呼び出し元を作るときに塞ぐ)。
+///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
 pub fn consolidate(
@@ -562,6 +639,7 @@ pub fn consolidate(
 }
 
 /// 事実を作り直す (`rebuild --facts`、03 §10): 事実を捨て、候補と訂正と、採る・戻すを当て直す。
+/// 読めない事実は畳みに入らないので、消さずに残る。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -582,7 +660,8 @@ pub fn rebuild(
 /// 採る・戻すは指示の時点で 1 回当て、private とその解除は事実の写しを計算し直す。
 ///
 /// # Errors
-/// 記録を読めない・本体を書けないとき。
+/// 記録を読めない・本体を書けないとき。今は足せない指示 (忘れる・印を解く・知らない指示、値の鍵の無い
+/// 採る・戻す) は `UnsupportedDirective`。
 pub fn add_directive(
     tx: &ReadTxn<'_>,
     ctx: &FactCtx<'_>,
@@ -591,6 +670,26 @@ pub fn add_directive(
     attribute: &str,
     vk: Option<ValueKey>,
 ) -> Result<(Id, Vec<WriteOp>), MemoryError> {
+    let choice = match kind {
+        DirectiveKind::Private { .. } | DirectiveKind::PrivateOff { .. } => None,
+        DirectiveKind::Accept => Some(Choice::Accept),
+        DirectiveKind::Revert => Some(Choice::Revert),
+        DirectiveKind::Forget { .. } | DirectiveKind::Unblock { .. } => {
+            return Err(MemoryError::UnsupportedDirective(
+                "forget and unblock come with redaction (M3.4)",
+            ));
+        }
+        DirectiveKind::Unknown { .. } => {
+            return Err(MemoryError::UnsupportedDirective(
+                "unknown directives are read, never written",
+            ));
+        }
+    };
+    if choice.is_some() && vk.is_none() {
+        return Err(MemoryError::UnsupportedDirective(
+            "accept and revert need a value key",
+        ));
+    }
     let id = ctx.ids.next_id();
     let d = Directive {
         id,
@@ -599,7 +698,7 @@ pub fn add_directive(
         attribute: attribute.to_owned(),
         vk,
     };
-    let mut env = Envelope::new(id, KIND_FACT_DIRECTIVE, 1, ctx.now, "");
+    let mut env = Envelope::new(id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, ctx.now, "");
     env.set_body(&FactDirectiveBody::from_directive(&d))?;
     let mut ops = derive_directive(&env);
     ops.insert(0, WriteOp::Put(env));
@@ -608,17 +707,114 @@ pub fn add_directive(
     let mut dirs = load_directives(tx)?;
     dirs.push(d);
     let mut set = before.set.clone();
-    let events: Vec<Event> = dirs
-        .choices()
-        .into_iter()
-        .filter(|e| is_choice_of(e, id))
-        .collect();
+    let events: Vec<Event> = match (choice, vk) {
+        (Some(choice), Some(vk)) => vec![Event::Choose {
+            directive: id,
+            subject: subject.to_owned(),
+            attribute: attribute.to_owned(),
+            vk,
+            choice,
+        }],
+        _ => Vec::new(),
+    };
+    // fold は最後に private を計算し直す (出来事が無くても)。
     ctx.fold(&mut set, &dirs, events);
-    refresh_private(&mut set, &dirs);
     ops.extend(diff_ops(&before, &set, ctx.now)?);
     Ok((id, ops))
 }
 
-fn is_choice_of(e: &Event, id: Id) -> bool {
-    matches!(e, Event::Choose { directive, .. } if *directive == id)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evorag_types::Timestamp;
+
+    fn envelope(kind: &str, v: u32, body: &impl Serialize) -> Envelope {
+        let mut e = Envelope::new(
+            Id::from_bytes([1; 16]),
+            kind,
+            v,
+            Timestamp::from_millis(1_762_650_000_000),
+            "",
+        );
+        e.set_body(body).expect("body");
+        e
+    }
+
+    fn fact_body(state: &str) -> FactBody {
+        FactBody {
+            subject: "self".into(),
+            attribute: "residence".into(),
+            value: Some("町".into()),
+            vk: Some("ab".repeat(32)),
+            norm: NORM_V1,
+            tense: "current".into(),
+            valid_from: None,
+            valid_to: None,
+            state: state.into(),
+            against: None,
+            by: None,
+            state_at: None,
+            recorded_at: 0,
+            private: false,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn newer_unknown_or_other_norm_facts_stay_out_of_the_fold() {
+        assert!(fact_of(&envelope(KIND_FACT, FACT_V, &fact_body("live"))).is_some());
+        assert!(fact_of(&envelope(KIND_FACT, FACT_V + 1, &fact_body("live"))).is_none());
+        assert!(fact_of(&envelope(KIND_FACT, FACT_V, &fact_body("someday"))).is_none());
+        let mut b = fact_body("live");
+        b.norm = 2;
+        assert!(fact_of(&envelope(KIND_FACT, FACT_V, &b)).is_none());
+    }
+
+    #[test]
+    fn unreadable_or_newer_directives_still_block_with_their_marks() {
+        let mark = "cd".repeat(32);
+        // 新しい版で、ほかの項目の型が変わった忘れるの指示 (redactions が文字列になった)。
+        let odd = serde_json::json!({
+            "op": "forget", "subject": "self", "attribute": "hobby",
+            "marks": [mark], "redactions": "changed shape",
+        });
+        let e = envelope(KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, &odd);
+        let d = directive_of(&e);
+        assert!(matches!(&d.kind, DirectiveKind::Unknown { marks } if marks.len() == 1));
+        // 新しい v の指示も、印だけを当てる。
+        let newer = envelope(KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V + 1, &odd);
+        assert!(matches!(
+            directive_of(&newer).kind,
+            DirectiveKind::Unknown { .. }
+        ));
+        // 関係と副索引も、読める項目からは作る (印の副索引を失わない)。
+        let entries = directive_entries(&e);
+        assert!(entries.contains(&IndexEntry::Lookup {
+            field: LOOKUP_MARK,
+            value: "cd".repeat(32),
+        }));
+        // 別の正規化の版の private は、v1 の鍵で照合しない。
+        let p = serde_json::json!({
+            "op": "private", "subject": "self", "attribute": "dietary",
+            "vk": "ab".repeat(32), "norm": 2, "scope": "successors",
+        });
+        let e = envelope(KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, &p);
+        assert!(matches!(
+            directive_of(&e).kind,
+            DirectiveKind::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn a_retracted_fact_has_no_value_key_index() {
+        let mut b = fact_body("retracted");
+        b.value = None;
+        b.vk = None;
+        let entries = fact_entries(&envelope(KIND_FACT, FACT_V, &b));
+        assert!(
+            entries
+                .iter()
+                .all(|x| !matches!(x, IndexEntry::Lookup { field, .. } if *field == LOOKUP_VK))
+        );
+    }
 }
