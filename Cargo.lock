@@ -580,6 +580,7 @@ dependencies = [
  "evorag-retrieval",
  "evorag-store",
  "evorag-types",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
