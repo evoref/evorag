@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | 設定 | `config.toml` | `%LOCALAPPDATA%\evorag\config\` | `~/.config/evorag/` | `~/Library/Application Support/evorag/config/` |
 | データ根 | `evorag.redb`、`journal/`、`index/`、`cartridges/`、`backups/`、`broken/`、`lock` | `%LOCALAPPDATA%\evorag\data\` | `~/.local/share/evorag/` | `~/Library/Application Support/evorag/data/` |
-| 状態 | `logs/`、`update/` (取得した更新の一時置き場) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` | `~/Library/Logs/evorag/` (logs)、`~/Library/Caches/evorag/` (update) |
+| 状態 | `logs/`、`update/` (更新のロックと状態のファイル、12 §7.2・§7.3。取得したものは主記憶で扱い、ここには置かない) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` | `~/Library/Logs/evorag/` (logs)、`~/Library/Caches/evorag/` (update) |
 
 - Windows で Roaming (`%APPDATA%`) を使わない。移動プロファイルで同期され、§2.2 の「危ない置き場所」に自分から当たるため。
 - macOS では設定とデータ根を別の下位フォルダにする。`evorag reset` (データ根を消し、設定は残す) が設定まで消さないようにするため。
@@ -295,9 +295,9 @@
 
 | コマンド | TUI が動いているとき |
 |---|---|
-| `evorag --version`、`evorag setup` (設定だけを書く) | 動く |
+| `evorag --version`、`evorag setup` (設定だけを書く)、`evorag update check` | 動く |
 | `evorag setup` (モデルの記録を書き換える・点検の結果やしきい値を書く、06 §3.2) | 設定だけを書き、DB に書く部分は TUI を閉じてから実行するよう案内する |
-| `evorag doctor`、`export`、`restore`、`repair`、`rebuild`、`backups`、`reset`、`import`、`update apply` | 理由を示して断る (TUI を閉じてから実行する) |
+| `evorag doctor`、`export`、`restore`、`repair`、`rebuild`、`backups`、`reset`、`import`、`update apply`、`update rollback` | 理由を示して断る (TUI を閉じてから実行する)。`update apply`・`rollback` はデータ根のロックを操作の終わりまで持つ (12 §7.2) |
 
 ## 10. 点検と復元のコマンド
 
