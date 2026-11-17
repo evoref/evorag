@@ -467,6 +467,9 @@ pub struct TurnObs {
     /// 縮退の理由 (`no_embed`・`no_rerank` など、05 §3.5)。値は足すだけで、知らない値はそのまま読む。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degraded: Vec<String>,
+    /// 置いた事実の表の版 (表の本文の SHA-256 の 16 進、04 §5.4、v0.3)。表を置かなかったら無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact_table: Option<String>,
 }
 
 /// リランクした 1 つの往復。`id` は往復を代表するターン (利用者の発話。発話の無い往復は、そのターン)。

@@ -482,9 +482,13 @@ async fn save(inner: &Arc<Inner>, events: Vec<FactEvent>, through: Id, model_key
             negation_dropped = report.negation_dropped,
             stale_source = report.stale_source,
             value_rejected = report.value_rejected,
+            subject_rejected = report.subject_rejected,
             "facts consolidated"
         );
         state(&worker).unreported.add(&report);
+        // 事実の検索の鍵と事実の表は、続く sleep-time の手順で作り直す (04 §4 の手順 6・7)。表の事実が表から
+        // 外れたら、次のターンの前に作り直す (04 §5.4)。
+        crate::fact_table::facts_changed(&worker, &report.withdrawn);
         true
     });
     task.await.unwrap_or(false)

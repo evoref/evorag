@@ -55,7 +55,7 @@
 | `old_not_in_evidence` | 2 | `old` が根拠に含まれない |
 | `mood` | 3 | 叙法が `question` か `hypothetical` |
 | `quoted` | 4 | 値が根拠の中で引用の括弧の内側にある (属性の例外を除く) |
-| `subject_not_allowed` | 5 | 主語が `self` 以外で、属性がそれを許さない |
+| `subject_not_allowed` | 5 | 主語が `self` 以外で、属性がそれを許さない。または、呼び名が 32 文字を超える・根拠に含まれない・表で本人を表す語 (「利用者」・user) と同じ。呼び名が関門 6 に外れたときは、関門 6 の理由で捨てる |
 | `forbidden_category` | 6 | 一般カテゴリ Cc・Cf・Co・Cn・Cs の文字と、Default_Ignorable の文字 (04 §5.2 の関門 6) |
 | `forbidden_char` | 6 | 行・段落の区切り、表の区切り |
 | `url` | 6 | URL・スキームの印 |

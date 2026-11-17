@@ -18,6 +18,7 @@ mod note;
 mod prefilter;
 mod read;
 mod rules;
+mod table;
 mod value_key;
 mod write;
 
@@ -30,7 +31,7 @@ pub use extract::{
 pub use facts::{
     FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
     REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, add_directive, consolidate, diff_ops,
-    load_directives, load_facts, rebuild,
+    load_directives, load_fact, load_facts, rebuild,
 };
 pub use fold::{
     Candidate, Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState,
@@ -38,8 +39,8 @@ pub use fold::{
     table_order,
 };
 pub use gates::{
-    Accepted, EvidenceMatch, GateEnv, GateReason, RawCandidate, RawMood, Safety, Utterance,
-    check_candidate, check_candidates, check_value,
+    Accepted, EvidenceMatch, GateEnv, GateReason, MAX_SUBJECT_CHARS, RawCandidate, RawMood, Safety,
+    Utterance, check_candidate, check_candidates, check_subject, check_text, check_value,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
@@ -71,6 +72,10 @@ pub use rules::{
     Attribute, Attributes, Cardinality, CommonRules, CorrectionRules, LanguageRules,
     MAX_VALUE_CHARS, Prefilter, Quote, RULE_LANGUAGES, ReadingRules, SafetyRules,
     all_language_rules, attributes, common_rules, language_rules,
+};
+pub use table::{
+    FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
+    table_head, table_rows, table_version,
 };
 pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
 pub use write::{

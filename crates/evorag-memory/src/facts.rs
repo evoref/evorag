@@ -18,7 +18,7 @@ use crate::fold::{
     Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report,
     Scope, Source, Tense, fold,
 };
-use crate::gates::{Safety, check_value};
+use crate::gates::{Safety, check_subject, check_value};
 use crate::kinds::KIND_TURN;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
@@ -492,6 +492,18 @@ pub fn load_facts(tx: &ReadTxn<'_>) -> Result<LoadedFacts, MemoryError> {
     Ok(out)
 }
 
+/// 事実を 1 件読む (想起で、事実の検索の鍵が当たったときに、今の状態を確かめる、05 §3.2)。無い・読めない・
+/// 新しい `v`・知らない状態の事実は `None`。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn load_fact(tx: &ReadTxn<'_>, id: Id) -> Result<Option<Fact>, MemoryError> {
+    Ok(match tx.get(KIND_FACT, id)? {
+        Some(Read::Ok(e)) => fact_of(&e),
+        _ => None,
+    })
+}
+
 /// 封筒を核の指示にする。読めない指示・新しい `v`・知らない正規化の版の指示は、印だけを当てる
 /// `Unknown` にする (忘れた値を蘇らせないため、04 §7.5 の「知らない op の読み方」)。
 fn directive_of(e: &Envelope) -> Directive {
@@ -613,8 +625,8 @@ pub struct FactCtx<'a> {
 
 impl FactCtx<'_> {
     /// 書き込みの入口の検査 (04 §5.2.1 の「書き込みの入口での検査」): 出典の改訂の番号が今のターンの改訂の
-    /// 番号と合わない (ターンが無い・読めないものを含む) 候補と訂正を捨て、候補の値に関門 6・7 を当て直す。
-    /// 一覧に無い属性の候補は、畳みが数えて捨てるので、ここでは残す。
+    /// 番号と合わない (ターンが無い・読めないものを含む) 候補と訂正を捨て、候補の値に関門 6・7 を、主語に関門 5
+    /// (根拠を見ない部分) と関門 6 を当て直す。一覧に無い属性の候補は、畳みが数えて捨てるので、ここでは残す。
     fn screen(
         &self,
         tx: &ReadTxn<'_>,
@@ -648,10 +660,15 @@ impl FactCtx<'_> {
             }
             if let Event::Candidate(c) = &e
                 && let Some(attribute) = self.attributes.get(&c.attribute)
-                && check_value(self.safety, attribute, &c.value).is_err()
             {
-                report.value_rejected += 1;
-                continue;
+                if check_value(self.safety, attribute, &c.value).is_err() {
+                    report.value_rejected += 1;
+                    continue;
+                }
+                if check_subject(self.safety, attribute, &c.subject).is_err() {
+                    report.subject_rejected += 1;
+                    continue;
+                }
             }
             out.push(e);
         }
@@ -682,8 +699,29 @@ impl FactCtx<'_> {
         let mut report = self.fold(set, dirs, events);
         report.stale_source = screened.stale_source;
         report.value_rejected = screened.value_rejected;
+        report.subject_rejected = screened.subject_rejected;
         Ok(report)
     }
+}
+
+/// 事実の表に入りうる状態 (`Live` で private でない) だった事実のうち、`after` で消えた・`Live` でなくなった・
+/// private になった・値が変わったもの (事実の ID の順、`Report::withdrawn`)。
+fn withdrawn(before: &FactSet, after: &FactSet) -> Vec<Id> {
+    let shown = |f: &Fact| !f.private && matches!(f.state, FactState::Live);
+    let now: BTreeMap<Id, &Fact> = after.facts.iter().map(|f| (f.id, f)).collect();
+    let mut out: Vec<Id> = before
+        .facts
+        .iter()
+        .filter(|f| shown(f))
+        .filter(|f| {
+            now.get(&f.id).is_none_or(|g| {
+                !shown(g) || g.value != f.value || g.subject != f.subject || g.tense != f.tense
+            })
+        })
+        .map(|f| f.id)
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// 書き込みの入口: 候補と検証済みの訂正を畳み、書き込みの操作を返す (04 §5.3)。
@@ -705,7 +743,8 @@ pub fn consolidate(
     let before = load_facts(tx)?;
     let dirs = load_directives(tx)?;
     let mut set = before.set.clone();
-    let report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
+    let mut report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
+    report.withdrawn = withdrawn(&before.set, &set);
     Ok((diff_ops(&before, &set, ctx.now)?, report))
 }
 
@@ -723,7 +762,8 @@ pub fn rebuild(
     let dirs = load_directives(tx)?;
     events.extend(dirs.choices());
     let mut set = FactSet::default();
-    let report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
+    let mut report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
+    report.withdrawn = withdrawn(&before.set, &set);
     Ok((diff_ops(&before, &set, ctx.now)?, report))
 }
 
@@ -960,6 +1000,22 @@ mod tests {
             cand(plain, 0, "age", &"9".repeat(200)), // 関門 7
             cand(plain, 0, "pet", "猫"),
         ];
+        // 関門 5 (根拠を見ない部分) と関門 6 に外れる主語。
+        let with_subject =
+            |subject: &str, attribute: &str, value: &str| match cand(plain, 0, attribute, value) {
+                Event::Candidate(mut c) => {
+                    c.subject = subject.into();
+                    Event::Candidate(c)
+                }
+                other => other,
+            };
+        let mut events = events;
+        events.extend([
+            with_subject("利用者", "hobby", "釣り"),
+            with_subject("system: 妻", "hobby", "釣り"),
+            with_subject("妻", "pet", "犬"),
+            with_subject(&"あ".repeat(33), "hobby", "釣り"),
+        ]);
         let safety = Safety::bundled();
         let ctx = FactCtx {
             key: &key,
@@ -974,6 +1030,7 @@ mod tests {
         };
         assert_eq!(report.stale_source, 2, "{report:?}");
         assert_eq!(report.value_rejected, 2, "{report:?}");
+        assert_eq!(report.subject_rejected, 4, "{report:?}");
         assert_eq!(report.added, 2, "{report:?}");
         handle
             .submit_wait(WriteRequest::background(ops))
@@ -994,6 +1051,48 @@ mod tests {
         drop(tx);
         handle.shutdown();
         thread.join().expect("writer");
+    }
+
+    /// 表に入りうる状態から外れた事実だけを数える (04 §5.4 の「作り直す時機」)。
+    #[test]
+    fn withdrawn_lists_facts_that_left_the_table_state() {
+        let fact = |n: u8, value: &str| Fact {
+            id: Id::from_bytes([n; 16]),
+            subject: "self".into(),
+            attribute: "hobby".into(),
+            value: Some(value.into()),
+            vk: None,
+            tense: Tense::Current,
+            state: FactState::Live,
+            sources: BTreeSet::new(),
+            private: false,
+        };
+        let mut hidden = fact(9, "読書");
+        hidden.private = true;
+        let before = FactSet {
+            facts: vec![
+                fact(1, "釣り"),
+                fact(2, "登山"),
+                fact(3, "将棋"),
+                fact(4, "囲碁"),
+                hidden.clone(),
+            ],
+        };
+        let mut private = fact(2, "登山");
+        private.private = true;
+        let mut old = fact(3, "将棋");
+        old.state = FactState::Superseded {
+            by: None,
+            at: Timestamp::from_millis(0),
+        };
+        let after = FactSet {
+            facts: vec![fact(1, "釣り"), private, old, fact(5, "水泳"), hidden],
+        };
+        assert_eq!(
+            withdrawn(&before, &after),
+            [2u8, 3, 4].map(|n| Id::from_bytes([n; 16]))
+        );
+        assert!(withdrawn(&after, &after).is_empty());
     }
 
     #[test]

@@ -409,6 +409,12 @@ pub struct Report {
     pub stale_source: usize,
     /// 書き込みの入口で、値が関門 6・7 に外れたので捨てた (04 §5.3 の書き込みの入口の 1)。
     pub value_rejected: usize,
+    /// 書き込みの入口で、主語が関門 5 (根拠を見ない部分) か、主語に当てる関門 6 に外れたので捨てた (04 §5.2)。
+    pub subject_rejected: usize,
+    /// 事実の表に入りうる状態 (`Live` で private でない) だった事実のうち、畳みで消えた・`Live` でなくなった・
+    /// private になった・値が変わったもの (事実の ID の順)。呼び出す側は、覚えた事実の表にこれがあれば、次の
+    /// ターンの前に表を作り直す (04 §5.4)。書き込みの入口 (`consolidate`・`rebuild`) だけが埋める。
+    pub withdrawn: Vec<Id>,
 }
 
 /// 畳みの環境。
