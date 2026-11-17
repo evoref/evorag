@@ -254,9 +254,9 @@ impl Directives {
         self.list
             .iter()
             .filter_map(|d| {
-                let revert = match d.kind {
-                    DirectiveKind::Accept => false,
-                    DirectiveKind::Revert => true,
+                let choice = match d.kind {
+                    DirectiveKind::Accept => Choice::Accept,
+                    DirectiveKind::Revert => Choice::Revert,
                     _ => return None,
                 };
                 Some(Event::Choose {
@@ -264,11 +264,20 @@ impl Directives {
                     subject: d.subject.clone(),
                     attribute: d.attribute.clone(),
                     vk: d.vk?,
-                    revert,
+                    choice,
                 })
             })
             .collect()
     }
+}
+
+/// 採るか戻すか (04 §7.4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// `Contested` の値を今の値にする。
+    Accept,
+    /// 履歴 (`Superseded`) の値を今の値に戻す。
+    Revert,
 }
 
 /// 畳みに当てる出来事。
@@ -276,13 +285,13 @@ impl Directives {
 pub enum Event {
     Candidate(Candidate),
     Correction(VerifiedCorrection),
-    /// 採る (`revert = false`)・戻す (`revert = true`)。指示の ID の位置で当てる。
+    /// 採る・戻す。指示の ID の位置で当てる。
     Choose {
         directive: Id,
         subject: String,
         attribute: String,
         vk: ValueKey,
-        revert: bool,
+        choice: Choice,
     },
 }
 
@@ -445,8 +454,8 @@ pub fn fold(
                 subject,
                 attribute,
                 vk,
-                revert,
-            } => apply_choice(set, directive, &subject, &attribute, &vk, revert, env),
+                choice,
+            } => apply_choice(set, directive, &subject, &attribute, &vk, choice, env),
         }
     }
     refresh_private(set, directives);
@@ -754,17 +763,16 @@ fn apply_choice(
     subject: &str,
     attribute: &str,
     vk: &ValueKey,
-    revert: bool,
+    choice: Choice,
     env: &FoldEnv<'_>,
 ) {
     let group = set.group(subject, attribute);
     let target = group.iter().copied().find(|&i| {
         let f = &set.facts[i];
         f.vk.as_ref() == Some(vk)
-            && if revert {
-                matches!(f.state, FactState::Superseded { .. })
-            } else {
-                matches!(f.state, FactState::Contested { .. })
+            && match choice {
+                Choice::Revert => matches!(f.state, FactState::Superseded { .. }),
+                Choice::Accept => matches!(f.state, FactState::Contested { .. }),
             }
     });
     let Some(t) = target else {

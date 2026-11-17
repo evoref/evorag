@@ -13,8 +13,8 @@ use evorag_types::Id;
 use toml::Value;
 
 use crate::fold::{
-    Candidate, Directive, DirectiveKind, Directives, Event, FactSet, FactState, FoldEnv, Mood,
-    Scope, Source, Tense, VerifiedCorrection, fold, refresh_private, table_order,
+    Candidate, Choice, Directive, DirectiveKind, Directives, Event, FactSet, FactState, FoldEnv,
+    Mood, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private, table_order,
 };
 use crate::lexical::signals;
 use crate::rules::attributes;
@@ -253,7 +253,11 @@ impl Runner {
                                 subject,
                                 attribute,
                                 vk: vk.expect("a value"),
-                                revert: kind == "revert",
+                                choice: if kind == "revert" {
+                                    Choice::Revert
+                                } else {
+                                    Choice::Accept
+                                },
                             };
                             let mut set = std::mem::take(&mut self.set);
                             self.fold_events(&mut set, vec![ev]);

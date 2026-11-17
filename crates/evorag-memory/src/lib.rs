@@ -17,8 +17,9 @@ mod value_key;
 mod write;
 
 pub use fold::{
-    Candidate, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv,
-    Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private, table_order,
+    Candidate, Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState,
+    FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private,
+    table_order,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
