@@ -10,6 +10,7 @@
 
 pub mod calibration;
 pub(crate) mod embedding;
+pub mod forget_key;
 pub mod power;
 mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
@@ -197,6 +198,10 @@ pub struct StartReport {
     pub recorded_roles: Vec<String>,
     /// 想起の状態 (07 §2.1)。
     pub recall: evorag_types::api::RecallState,
+    /// 事実の機能を止めた理由 (`memory.forget_key` が使えない、03 §3.1.1)。`None` なら使える。
+    pub facts_disabled: Option<forget_key::FactsKeyProblem>,
+    /// この起動で `memory.forget_key` を作った。
+    pub forget_key_created: bool,
 }
 
 /// 生成の取り消しの理由。
@@ -275,6 +280,8 @@ struct Inner {
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
+    /// 値の鍵と再び覚えない印の鍵 (03 §3.1.1)。使えなければ事実の機能を止める。
+    facts_key: forget_key::FactsKey,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     events: mpsc::UnboundedSender<Event>,
@@ -462,6 +469,15 @@ impl Core {
             }
         };
 
+        // 値の鍵と再び覚えない印の鍵 (03 §3.1.1)。ジャーナルの取り込みの後、裏の処理の前に確かめる。
+        let facts_key = forget_key::ensure(&store, Some(&handle)).map_err(StartError::Storage)?;
+        if let Some(problem) = facts_key.problem() {
+            tracing::warn!(
+                ?problem,
+                "facts are disabled: memory.forget_key is not usable"
+            );
+        }
+
         // 記録が無ければ (新しいデータ根、v0.1 のデータ根)、繋がっているモデルを記録する (06 §3.1)。
         let mut chat_model_recorded = None;
         if recorded_chat.is_none() {
@@ -565,6 +581,7 @@ impl Core {
 
             index,
             memory_enabled: cfg.memory_enabled,
+            facts_key,
             clock: cfg.clock,
             ids: cfg.ids,
             events,
@@ -654,6 +671,11 @@ impl Core {
             roles: role_infos,
             recorded_roles,
             recall: core.inner.recall_state(),
+            facts_disabled: core.inner.facts_key.problem(),
+            forget_key_created: matches!(
+                core.inner.facts_key,
+                forget_key::FactsKey::Ready { created: true, .. }
+            ),
         };
         // 裏の処理 (04 §4)。利用者が操作していない間に、要る手順を動かす。
         let worker = core.inner.clone();
@@ -751,6 +773,12 @@ impl Core {
     /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
     pub fn tokenize_calls(&self) -> usize {
         self.inner.tokens.calls()
+    }
+
+    /// 事実の機能 (抽出・統合・事実の表) が使えるか。`memory.forget_key` が使えないときは止める
+    /// (03 §3.1.1 のフェイルクローズ)。
+    pub fn facts_enabled(&self) -> bool {
+        self.inner.facts_key.key().is_some()
     }
 
     /// embed・rerank の役割が使える (記録と同じモデルに繋がっている) か (06 §3)。
