@@ -142,16 +142,28 @@ fn mentions(key: &[u8], ids: &BTreeSet<[u8; 16]>) -> bool {
 }
 
 /// 削除した記録を、保持している退避から除いて写し直す (03 §7.3)。写し直した退避の数を返す。
+///
+/// 開けない退避があっても、ほかの退避は写し直してから失敗を返す (呼び手は job を残して再試行する、
+/// 04 §7.7 の 5)。データ根を開いているプロセスからは [`crate::Store::purge_backups`] を使う (退避を作る処理と
+/// 同じ順序で通すため)。
+///
+/// # Errors
+/// 開けない・写せない退避があるとき。
 pub fn purge_backups(root: &Path, backups: Option<&Path>, ids: &[Id]) -> Result<usize, StoreError> {
     if ids.is_empty() {
         return Ok(0);
     }
     let set: BTreeSet<[u8; 16]> = ids.iter().map(|i| *i.as_bytes()).collect();
     let mut n = 0;
+    let mut unopened = Vec::new();
     for b in list_backups(root, backups) {
         let file = b.dir.join(DB_FILE);
-        let Ok(db) = Database::open(&file) else {
-            continue;
+        let db = match Database::open(&file) {
+            Ok(db) => db,
+            Err(e) => {
+                unopened.push(format!("{}: {e}", file.display()));
+                continue;
+            }
         };
         // 対象を含むかを、記録の表のキーで調べる。
         let hit = {
@@ -177,6 +189,12 @@ pub fn purge_backups(root: &Path, backups: Option<&Path>, ids: &[Id]) -> Result<
         drop(db);
         fsutil::rename_durable(&tmp, &file).map_err(io)?;
         n += 1;
+    }
+    if !unopened.is_empty() {
+        return Err(StoreError::Io(format!(
+            "backups could not be opened: {}",
+            unopened.join("; ")
+        )));
     }
     Ok(n)
 }

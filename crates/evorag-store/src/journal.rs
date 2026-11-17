@@ -52,6 +52,8 @@ pub struct Scan {
     /// すべての `meta` の行 (`last_seq` に関わらず、連番の順)。古い版が取り込まずに連番だけを
     /// 進めた `meta` の行を、新しい版が探すため (03 §3.1.1 の `memory.forget_key`)。
     pub metas: Vec<(String, String)>,
+    /// すべての削除の行の ID (`last_seq` に関わらない)。書き手は、これらを `put` で作り直さない (04 §7.7 の 3)。
+    pub deleted: BTreeSet<Id>,
 }
 
 pub struct Journal {
@@ -307,6 +309,7 @@ impl Journal {
         // 削除の行があるのに本文の行が残っていれば、除く (除く前に止まった、03 §6)。
         let leftover: BTreeSet<Id> = deleted.intersection(&put_ids).copied().collect();
         journal.remove_ids(&leftover)?;
+        scan.deleted = deleted;
         Ok((journal, scan))
     }
 

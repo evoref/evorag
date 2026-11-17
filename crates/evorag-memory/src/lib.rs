@@ -62,13 +62,15 @@ pub use kinds::{
     REL_FEEDBACK_TARGET, REL_IN_SESSION, REL_NOTE_OF, REL_REPLY_TO, REL_TARGET, ROLE_CHAT,
     ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallFeedbackBody, RecallRecord, Reranked,
     SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG,
-    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION,
-    ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, kinds,
+    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, SrcRev, TARGET_CONVERSATION,
+    TURN_REV_FIELD, ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY,
+    kinds,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
-    SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, sanitize_keys, segments,
+    SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, note_matches, sanitize_keys,
+    segments,
 };
 pub use prefilter::{MODE_CHAT, Prefiltered, Screened, SkipReason, prefilter};
 pub use read::{
@@ -88,5 +90,6 @@ pub use table::{
 };
 pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
 pub use write::{
-    AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
+    AssistantTurn, Writes, delete_session, deleted_ids, expect_record, expect_turn,
+    pending_purge_jobs, purge_job,
 };

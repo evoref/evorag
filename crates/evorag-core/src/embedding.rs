@@ -240,6 +240,10 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
             stale.push(id);
         }
     }
+    if let Some(p) = previous {
+        let want: HashSet<Id> = prev.keys().map(|(t, _)| *t).collect();
+        sync_previous(&vec_dir(&root, p), &want);
+    }
     let dir = vec_dir(&root, key);
     let Some(dim) = mine.values().next().map(|(_, b)| b.dim as usize) else {
         // 今のモデルの記録が無い: 索引のフォルダがあっても、中身は信用できないので消す (作り直す)。
@@ -289,18 +293,28 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
     })
 }
 
-/// 消した会話のチャンクの行を、今と前の世代のベクトルの索引から除く (04 §7、AC-FR-309-1)。
-/// 呼び手は `index_lock` を持つ。
-pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
+/// 消した記録の行を、今と前の世代のすべてのベクトルの索引から除く (04 §7.7 の 2、AC-FR-309-1)。呼び手は
+/// `index_lock` を持つ。すべて除けたら `true` (除けなかった分は、呼び手が job に残して試し直す)。開けない前の
+/// 世代の索引は、使えないので消す (使うときに DB から作り直す、05 §2.2)。
+pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) -> bool {
     if gone.is_empty() {
-        return;
+        return true;
     }
+    let mut ok = true;
     let current = current(inner);
-    if let Some((_, ix)) = &current {
-        let _ = ix.remove(gone);
+    if let Some((_, ix)) = &current
+        && let Err(e) = ix.remove(gone)
+    {
+        tracing::warn!(error = %e, "deleted rows could not be removed from the vector index");
+        ok = false;
     }
-    let Ok(entries) = std::fs::read_dir(memory_dir(inner.store.data_root())) else {
-        return;
+    let entries = match std::fs::read_dir(memory_dir(inner.store.data_root())) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ok,
+        Err(e) => {
+            tracing::warn!(error = %e, "the vector indexes could not be listed");
+            return false;
+        }
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -310,9 +324,48 @@ pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
         if current.as_ref().is_some_and(|(k, _)| k == key) {
             continue;
         }
-        if let Some(ix) = VecIndex::open_existing(&e.path()) {
-            let _ = ix.remove(gone);
-        }
+        ok &= remove_from_generation(&e.path(), gone);
+    }
+    ok
+}
+
+/// 前の世代 (今開いていない) のベクトルの索引から行を除く。開けなければフォルダごと消す。
+fn remove_from_generation(dir: &std::path::Path, gone: &HashSet<Id>) -> bool {
+    match VecIndex::open_existing(dir) {
+        Some(ix) => match ix.remove(gone) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "deleted rows could not be removed from a previous vector index");
+                false
+            }
+        },
+        None => match std::fs::remove_dir_all(dir) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "an unreadable vector index could not be removed");
+                false
+            }
+        },
+    }
+}
+
+/// 前の世代の索引を、DB の記録と突き合わせる (起動時の突き合わせをすべての世代に当てる、04 §7.7 の 2)。
+/// `want` は、DB に記録のある前のモデルの埋め込みの対象。それ以外の行を除く。
+fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) {
+    if !dir.is_dir() {
+        return;
+    }
+    let Some(ix) = VecIndex::open_existing(dir) else {
+        // 読めない索引は使えないので消す (戻したときに DB から作り直す)。
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    };
+    let extra: HashSet<Id> = ix.snapshot().ids().difference(want).copied().collect();
+    if !extra.is_empty()
+        && let Err(e) = ix.remove(&extra)
+    {
+        tracing::warn!(error = %e, "the previous vector index could not be synced");
     }
 }
 
@@ -491,6 +544,10 @@ async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<
             };
             if !matches!(r.get(kind, id), Ok(Some(Read::Ok(_)))) {
                 continue;
+            }
+            // 書き手のトランザクションの中でも、対象が残っていることを確かめる (04 §7.7 の 4)。
+            if !cleared.contains(&id) {
+                ops.push(evorag_memory::expect_record(kind, id));
             }
             if cleared.insert(id) {
                 for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {

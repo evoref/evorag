@@ -24,7 +24,7 @@ pub mod version;
 mod winacl;
 pub mod writer;
 
-pub use envelope::{BodyError, DecodeError, Envelope};
+pub use envelope::{BodyError, BodyPatch, DecodeError, Envelope};
 pub use journal::JOURNAL_DIR;
 pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};

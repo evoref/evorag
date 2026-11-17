@@ -1,7 +1,7 @@
 //! 応答の経路での書き込み (04 §3)。操作の列を組み立てるだけで、書くのは書き手。
 
 use evorag_store::key::OwnedPart;
-use evorag_store::{BodyError, Envelope, WriteOp};
+use evorag_store::{BodyError, BodyPatch, Envelope, WriteOp};
 use evorag_types::{Clock, Id, IdGen, Timestamp};
 
 use crate::kinds::*;
@@ -42,23 +42,48 @@ fn envelope<T: serde::Serialize>(
     Ok(e)
 }
 
-fn touch_session(session: &Envelope, now: Timestamp, ops: &mut Vec<WriteOp>) {
-    // 一覧の並びの副索引を、新しい更新時刻に付け替える。
+/// セッションの更新時刻を `now` にし、`fields` を差し替える。セッションは書き手のトランザクションの中で読み直す
+/// (外で読んだ封筒を書き戻すと、その間の題名の変更や削除を上書きするため、04 §7.7 の 3)。
+fn touch_session(session: &Envelope, now: Timestamp, fields: BodyPatch, ops: &mut Vec<WriteOp>) {
+    // 一覧の並びの副索引を、新しい更新時刻に付け替える (読んだ後に変わっていれば、古い項目が残る。読む側は
+    // それを読み飛ばす)。
     ops.push(WriteOp::DeleteLookup {
         kind: KIND_SESSION.into(),
         field: LOOKUP_UPDATED_AT.into(),
         value: OwnedPart::Int(session.updated_at.as_millis()),
         id: session.id,
     });
-    let mut s = session.clone();
-    s.updated_at = now;
     ops.push(WriteOp::PutLookup {
         kind: KIND_SESSION.into(),
         field: LOOKUP_UPDATED_AT.into(),
         value: OwnedPart::Int(now.as_millis()),
-        id: s.id,
+        id: session.id,
     });
-    ops.push(WriteOp::Put(s));
+    ops.push(WriteOp::Patch {
+        kind: KIND_SESSION.into(),
+        id: session.id,
+        fields,
+        updated_at: Some(now),
+    });
+}
+
+/// 派生の記録を書く前提: 出典のターン `turn` が残っていて、改訂の番号が `rev` (読んだときの番号) のまま
+/// (04 §7.7 の 4)。合わなければ書き手が依頼の全体を断る。
+pub fn expect_turn(turn: Id, rev: u32) -> WriteOp {
+    WriteOp::Expect {
+        kind: KIND_TURN.into(),
+        id: turn,
+        field: Some((TURN_REV_FIELD.into(), u64::from(rev))),
+    }
+}
+
+/// 派生の記録を書く前提: 記録 `kind`/`id` が残っている (04 §7.7 の 4)。
+pub fn expect_record(kind: &str, id: Id) -> WriteOp {
+    WriteOp::Expect {
+        kind: kind.into(),
+        id,
+        field: None,
+    }
 }
 
 impl Writes<'_> {
@@ -97,12 +122,15 @@ impl Writes<'_> {
         session: &Envelope,
         title: &str,
     ) -> Result<Vec<WriteOp>, BodyError> {
-        let mut body: SessionBody = session.body_as()?;
-        body.title = title.to_owned();
-        let mut e = session.clone();
-        e.set_body(&body)?;
+        // 本体を読めないセッションは書き換えない (03 §4.2 の規則 11)。
+        let _: SessionBody = session.body_as()?;
         let mut ops = Vec::new();
-        touch_session(&e, self.clock.now(), &mut ops);
+        touch_session(
+            session,
+            self.clock.now(),
+            BodyPatch::new().set("title", &title)?,
+            &mut ops,
+        );
         Ok(ops)
     }
 
@@ -112,12 +140,14 @@ impl Writes<'_> {
         session: &Envelope,
         memory: bool,
     ) -> Result<Vec<WriteOp>, BodyError> {
-        let mut body: SessionBody = session.body_as()?;
-        body.memory = Some(memory);
-        let mut e = session.clone();
-        e.set_body(&body)?;
+        let _: SessionBody = session.body_as()?;
         let mut ops = Vec::new();
-        touch_session(&e, self.clock.now(), &mut ops);
+        touch_session(
+            session,
+            self.clock.now(),
+            BodyPatch::new().set("memory", &Some(memory))?,
+            &mut ops,
+        );
         Ok(ops)
     }
 
@@ -269,7 +299,7 @@ impl Writes<'_> {
                 attrs: Vec::new(),
             },
         ];
-        touch_session(session, now, &mut ops);
+        touch_session(session, now, BodyPatch::new(), &mut ops);
         Ok((id, ops))
     }
 
@@ -315,15 +345,18 @@ impl Writes<'_> {
                 attrs: Vec::new(),
             },
         ];
-        let mut user: TurnBody = user_turn.body_as()?;
+        // 発話は状態だけを書き手のトランザクションの中で差し替える (本文と改訂の番号は読み直したものを残す。応答を
+        // 作っている間の伏せ字を上書きしないため、04 §7.3・§7.7 の 3)。
+        let user: TurnBody = user_turn.body_as()?;
         if user.state == TurnState::Pending {
-            user.state = TurnState::Confirmed;
-            let mut u = user_turn.clone();
-            u.set_body(&user)?;
-            u.updated_at = now;
-            ops.push(WriteOp::Put(u));
+            ops.push(WriteOp::Patch {
+                kind: KIND_TURN.into(),
+                id: user_turn.id,
+                fields: BodyPatch::new().set("state", &TurnState::Confirmed)?,
+                updated_at: Some(now),
+            });
         }
-        touch_session(session, now, &mut ops);
+        touch_session(session, now, BodyPatch::new(), &mut ops);
         Ok((id, ops))
     }
 
@@ -382,6 +415,8 @@ impl Writes<'_> {
     }
 
     /// ノートを書く (04 §2)。同じ区切りの前のノート `old` (とその埋め込み `old_embeddings`) は消す。
+    /// 本体の `src_revs` (鍵を作るときに読んだ出典のターンと改訂の番号、03 §3.3) ごとに、書き手が、出典が
+    /// 残っていて番号が合うことを確かめてから書く (合わなければ依頼の全体を断る、04 §7.7 の 4)。
     pub fn note(
         &self,
         old: &[Id],
@@ -399,6 +434,7 @@ impl Writes<'_> {
             });
             ops.push(WriteOp::DeleteLinksOf(*id));
         }
+        ops.extend(body.src_revs.iter().map(|s| expect_turn(s.turn, s.rev)));
         let id = self.ids.next_id();
         ops.push(WriteOp::Put(envelope(
             id,

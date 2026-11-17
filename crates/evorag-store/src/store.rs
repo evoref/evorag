@@ -3,7 +3,7 @@
 //! この段階では、書き込みはトランザクションの単位で直接行う。書き手スレッドと `WriteToken`
 //! (02 §5) は、この上に載せる。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -224,6 +224,13 @@ pub enum StoreError {
     /// 書き込みの操作で書いてよい `meta` のキーではない。
     #[error("meta `{0}` cannot be written by a request")]
     MetaNotWritable(String),
+    /// 消した記録を `put` で作り直さない (古い封筒を書き戻す経路で、消したものが蘇らないため、04 §7.7 の 3)。
+    #[error("record {kind}/{id} was deleted and is not written again")]
+    Deleted { kind: String, id: Id },
+    /// 依頼の前提 ([`crate::WriteOp::Expect`]・[`crate::WriteOp::Patch`]) が合わない (記録が無い・変わった)。
+    /// 依頼の全体を書かない (04 §7.7 の 4)。
+    #[error("record {kind}/{id} is gone or has changed")]
+    Stale { kind: String, id: Id },
 }
 
 pub(crate) fn db<E: Into<redb::Error>>(e: E) -> StoreError {
@@ -289,6 +296,11 @@ pub struct Store {
     /// `memory.forget_key` が食い違っている (03 §3.1.1)。立っている間は、鍵を書かせない
     /// (呼び出し側が旗を見落としても、3 つ目の鍵を作れないようにする)。
     forget_key_conflict: AtomicBool,
+    /// ジャーナルの削除の行 (開くときに集める) と、このプロセスで書き手が消した記録の ID。書き手は、これらを
+    /// `put` で作り直さない (04 §7.7 の 3)。
+    deleted: Mutex<HashSet<Id>>,
+    /// 退避を作る処理と退避の整理を、同じ順序で通す (03 §7.3、04 §7.7 の 5)。
+    backups: Mutex<()>,
     // ロックは DB の後に外す (フィールドは宣言の順に落ちる)。
     _lock: DataRootLock,
 }
@@ -544,6 +556,8 @@ impl Store {
             token_issued: AtomicBool::new(false),
             journal: Mutex::new(None),
             forget_key_conflict: AtomicBool::new(false),
+            deleted: Mutex::default(),
+            backups: Mutex::new(()),
             _lock: lock,
         };
 
@@ -636,6 +650,10 @@ impl Store {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let (journal, scan) = Journal::open(&self.root, last)?;
+        self.deleted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(scan.deleted.iter().copied());
         report.journal_bad_lines = scan.bad;
         report.journal_newer_lines = scan.newer;
         report.journal_truncated = scan.truncated;
@@ -820,14 +838,48 @@ impl Store {
     }
 
     /// 1 日 1 回までの自動の退避 (03 §7.1)。`backups` を省くとデータ根の `backups/`。
-    /// 読み取りのトランザクションで写すので、書き手と並んで動かしてよい。
+    /// 読み取りのトランザクションで写すので、書き手と並んで動かしてよい。退避の整理
+    /// ([`Self::purge_backups`]) とは同じ順序で通す (03 §7.3)。
     pub fn daily_backup(&self, backups: Option<&Path>) -> Result<Option<PathBuf>, StoreError> {
+        let _order = self.backup_order();
         let default = self.root.join(crate::backup::BACKUPS_DIR);
         crate::backup::daily(
             &self.db,
             backups.unwrap_or(&default),
             self.clock.now().as_millis(),
         )
+    }
+
+    /// 消した記録 `ids` を、保持している退避から除いて写し直す (03 §7.3)。写し直した退避の数を返す。
+    ///
+    /// 退避を作る処理と同じ順序で通す: 作りかけの退避があれば、それを作り終えるのを待ってから一覧を作る
+    /// (削除より前に写し始め、整理の job を書いた後に作り終えた退避も、整理の対象にするため、04 §7.7 の 5)。
+    ///
+    /// # Errors
+    /// 開けない・写せない退避があるとき (呼び手は job を残して再試行する)。
+    pub fn purge_backups(&self, backups: Option<&Path>, ids: &[Id]) -> Result<usize, StoreError> {
+        let _order = self.backup_order();
+        crate::restore::purge_backups(&self.root, backups, ids)
+    }
+
+    fn backup_order(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.backups.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 消した記録の ID か (ジャーナルの削除の行と、このプロセスで書き手が消したもの、04 §7.7 の 3)。
+    pub fn was_deleted(&self, id: Id) -> bool {
+        self.deleted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+    }
+
+    /// 書き手が消した記録の ID を覚える (コミットの後に)。
+    pub(crate) fn remember_deleted(&self, ids: impl IntoIterator<Item = Id>) {
+        self.deleted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(ids);
     }
 
     /// 作り直しなどの操作の前の退避 (03 §7.2)。DB の写しと `extra_files` (`config.toml` など) を、
@@ -837,6 +889,7 @@ impl Store {
         operation: &str,
         extra_files: &[&Path],
     ) -> Result<PathBuf, StoreError> {
+        let _order = self.backup_order();
         crate::backup::pre_op(
             &self.db,
             &self.root,
@@ -1280,5 +1333,77 @@ impl WriteTxn<'_> {
 
     pub fn now(&self) -> Timestamp {
         self.store.clock.now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempDir;
+    use evorag_types::{ManualClock, UuidV7Gen};
+
+    #[derive(serde::Serialize)]
+    struct Body {
+        text: String,
+    }
+
+    /// 退避の整理は、作りかけの退避を作り終えるまで待ってから一覧を作る。削除より前に写し始め、整理の job を
+    /// 書いた後に作り終えた退避も、消した記録を含んだまま残らない。
+    /// verifies: 03 §7.3、04 §7.7 の 5 (退避と整理を直列にする)
+    #[test]
+    fn a_backup_finished_while_a_purge_waits_is_purged_too() {
+        let dir = TempDir::new("store-backup-order");
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
+        let (store, _) = Store::open(OpenOptions {
+            data_root: dir.path().to_path_buf(),
+            evorag_version: "0.0.5".into(),
+            kinds: vec![KindSpec::new("sample", 1)],
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock.clone(), 2)),
+            config_file: None,
+        })
+        .unwrap();
+        let tok = store.take_write_token().unwrap();
+        let mut e = Envelope::new(store.ids().next_id(), "sample", 1, store.clock().now(), "");
+        e.set_body(&Body {
+            text: "架空の消す本文".into(),
+        })
+        .unwrap();
+        let gone = e.id;
+        let mut tx = store.write(&tok, Durability::Immediate).unwrap();
+        tx.put(&mut e).unwrap();
+        tx.commit().unwrap();
+
+        let base = dir.path().join(crate::backup::BACKUPS_DIR);
+        // 退避を作り始めた (写しは削除の前の時点)。
+        let making = store.backup_order();
+        std::thread::scope(|s| {
+            let purge = s.spawn(|| store.purge_backups(None, &[gone]));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!purge.is_finished(), "the purge waits for the backup");
+            // 整理の一覧を作った後に、退避を作り終える。
+            crate::backup::daily(&store.db, &base, clock.now().as_millis())
+                .unwrap()
+                .unwrap();
+            drop(making);
+            assert!(
+                purge.join().unwrap().unwrap() >= 1,
+                "the new backup is rewritten"
+            );
+        });
+        let backups = crate::restore::list_backups(dir.path(), None);
+        assert!(!backups.is_empty());
+        for b in backups {
+            let db = Database::open(b.dir.join(DB_FILE)).unwrap();
+            let rtx = db.begin_read().unwrap();
+            let t = rtx.open_table(RECORDS).unwrap();
+            assert!(
+                t.get(record_key("sample", gone).as_slice())
+                    .unwrap()
+                    .is_none(),
+                "{}",
+                b.dir.display()
+            );
+        }
     }
 }

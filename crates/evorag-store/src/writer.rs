@@ -11,14 +11,14 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
-use evorag_types::Id;
+use evorag_types::{Id, Timestamp};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
-use crate::envelope::Envelope;
+use crate::envelope::{BodyPatch, Envelope};
 use crate::journal::LineOp;
 use crate::key::{OwnedPart, Part};
-use crate::store::{Durability, Store, StoreError, WriteToken, WriteTxn};
+use crate::store::{Durability, Read, Store, StoreError, WriteToken, WriteTxn};
 
 /// 依頼の優先度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,23 @@ pub enum WriteOp {
     SetMetaOnce {
         key: String,
         value: String,
+    },
+    /// 記録をこのトランザクションの中で読み直し、本体の項目を差し替えて書く (外で読んだ封筒を丸ごと書き戻さない、
+    /// 04 §7.3・§7.7 の 3)。`updated_at` があれば更新時刻も変える。記録が無い・読めなければ、依頼の全体を断る
+    /// ([`StoreError::Stale`])。ジャーナルに書く種類なら、差し替えた封筒の `put` の行を書く。
+    Patch {
+        kind: String,
+        id: Id,
+        fields: BodyPatch,
+        updated_at: Option<Timestamp>,
+    },
+    /// 依頼の前提: 記録が読める形であり、`field` があれば本体のその整数の項目 (無ければ 0) が値と等しい。
+    /// 合わなければ依頼の全体を断る ([`StoreError::Stale`])。派生の記録を書く前に、出典が残っていて改訂の
+    /// 番号が読んだときと合うことを、書き手のトランザクションの中で確かめるのに使う (04 §7.7 の 4)。
+    Expect {
+        kind: String,
+        id: Id,
+        field: Option<(String, u64)>,
     },
 }
 
@@ -259,11 +276,34 @@ impl Writer {
         if self.store.suspect_count() > 0 {
             out.quarantined = tx.quarantine_suspects()?;
         }
+        // 消した記録を作り直さない (04 §7.7 の 3)。同じ依頼の中で消してから作るものは除く。
+        let mut gone: HashSet<Id> = HashSet::new();
+        let mut patched = Vec::new();
         for op in &req.ops {
-            apply_op(&mut tx, op, &mut out)?;
+            match op {
+                WriteOp::Put(Envelope { kind, id, .. }) | WriteOp::Patch { kind, id, .. }
+                    if !gone.contains(id) && self.store.was_deleted(*id) =>
+                {
+                    return Err(StoreError::Deleted {
+                        kind: kind.clone(),
+                        id: *id,
+                    }
+                    .into());
+                }
+                WriteOp::Put(e) => {
+                    gone.remove(&e.id);
+                }
+                WriteOp::Delete { id, .. } => {
+                    gone.insert(*id);
+                }
+                _ => {}
+            }
+            if let Some(e) = apply_op(&mut tx, op, &mut out)? {
+                patched.push(e);
+            }
         }
         // 2. ジャーナルに書いて書き切る (03 §6)。書けなければ DB にも書かない。
-        let (lines, deleted) = self.journal_lines(req);
+        let (lines, deleted) = self.journal_lines(req, patched);
         let mut journaled = false;
         if !lines.is_empty() {
             let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
@@ -291,6 +331,7 @@ impl Writer {
             }
             return Err(e.into());
         }
+        self.store.remember_deleted(gone);
         // 4. 削除した記録の本文の行をジャーナルから除く。失敗しても次の起動で除く。
         if !deleted.is_empty() {
             let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
@@ -305,15 +346,28 @@ impl Writer {
 impl Writer {
     /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) と、
     /// 削除する ID。
-    fn journal_lines(&self, req: &WriteRequest) -> (Vec<LineOp>, BTreeSet<Id>) {
+    /// `patched` は、依頼の `Patch` の順に、差し替えて書いた封筒。
+    fn journal_lines(
+        &self,
+        req: &WriteRequest,
+        patched: Vec<Envelope>,
+    ) -> (Vec<LineOp>, BTreeSet<Id>) {
         let mut lines = Vec::new();
         let mut deleted = BTreeSet::new();
+        let mut patched = patched.into_iter();
         for op in &req.ops {
             match op {
                 WriteOp::Put(e) if self.store.is_journaled(&e.kind) => {
                     let mut e = e.clone();
                     e.writer = self.store.evorag_version().to_owned();
                     lines.push(LineOp::Put(e));
+                }
+                WriteOp::Patch { .. } => {
+                    if let Some(e) = patched.next()
+                        && self.store.is_journaled(&e.kind)
+                    {
+                        lines.push(LineOp::Put(e));
+                    }
                 }
                 WriteOp::Delete { kind, id } if self.store.is_journaled(kind) => {
                     deleted.insert(*id);
@@ -342,12 +396,48 @@ fn part(p: &OwnedPart) -> Part<'_> {
     }
 }
 
+/// 操作を当てる。`Patch` なら、差し替えて書いた封筒を返す (ジャーナルの行にするため)。
 pub(crate) fn apply_op(
     tx: &mut WriteTxn<'_>,
     op: &WriteOp,
     out: &mut WriteOutcome,
-) -> Result<(), StoreError> {
+) -> Result<Option<Envelope>, StoreError> {
     match op {
+        WriteOp::Patch {
+            kind,
+            id,
+            fields,
+            updated_at,
+        } => {
+            let stale = || StoreError::Stale {
+                kind: kind.clone(),
+                id: *id,
+            };
+            let Some(Read::Ok(mut env)) = tx.get(kind, *id)? else {
+                return Err(stale());
+            };
+            env.apply_patch(fields).map_err(|_| stale())?;
+            if let Some(t) = updated_at {
+                env.updated_at = *t;
+            }
+            tx.put(&mut env)?;
+            out.put.push(env.id);
+            return Ok(Some(env));
+        }
+        WriteOp::Expect { kind, id, field } => {
+            let ok = match tx.get(kind, *id)? {
+                Some(Read::Ok(env)) => field
+                    .as_ref()
+                    .is_none_or(|(name, want)| env.body_uint(name) == Some(*want)),
+                _ => false,
+            };
+            if !ok {
+                return Err(StoreError::Stale {
+                    kind: kind.clone(),
+                    id: *id,
+                });
+            }
+        }
         WriteOp::Put(env) => {
             let mut env = env.clone();
             tx.put(&mut env)?;
@@ -390,7 +480,7 @@ pub(crate) fn apply_op(
         }
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
     }
-    Ok(())
+    Ok(None)
 }
 
 impl WriterHandle {

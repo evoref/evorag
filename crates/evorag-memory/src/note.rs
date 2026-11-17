@@ -2,7 +2,7 @@
 
 use evorag_types::Id;
 
-use crate::{Turn, TurnRole, TurnState};
+use crate::{NoteBody, SrcRev, Turn, TurnRole, TurnState};
 
 /// 区切りと鍵の作り方の版 (04 §2 の「ノートの版」)。変えたら上げる (ノートを作り直す)。
 pub const NOTE_RULES: u32 = 1;
@@ -24,6 +24,11 @@ pub const NOTE_KEY_CHARS: usize = 40;
 pub struct NoteExchange {
     /// 利用者の発話のターン。
     pub user: Id,
+    /// 区切りに使った応答のターン (最新の完了した応答)。
+    pub answer: Id,
+    /// 読んだときの発話と応答の改訂の番号 (04 §7.3。ノートの `src_revs` に書く、04 §7.7 の 4)。
+    pub user_rev: u32,
+    pub answer_rev: u32,
     pub user_text: String,
     pub answer_text: String,
 }
@@ -49,6 +54,38 @@ impl Segment {
     pub fn ids(&self) -> Vec<Id> {
         self.exchanges.iter().map(|x| x.user).collect()
     }
+
+    /// 区切りの出典のターン (発話と応答) と、読んだときの改訂の番号 (ノートの `src_revs`、04 §7.7 の 4)。
+    pub fn src_revs(&self) -> Vec<SrcRev> {
+        self.exchanges
+            .iter()
+            .flat_map(|x| {
+                [
+                    SrcRev {
+                        turn: x.user,
+                        rev: x.user_rev,
+                    },
+                    SrcRev {
+                        turn: x.answer,
+                        rev: x.answer_rev,
+                    },
+                ]
+            })
+            .collect()
+    }
+}
+
+/// ノートが今の出典と合うか (04 §7.7 の 1・4): 往復の発話のターンがすべてあり、記録した出典 (`src_revs`) の
+/// ターンがすべてあって改訂の番号が今と同じで、記録の無い発話のターンの番号が 0 (`src_revs` の無い古い
+/// ノート、03 §3.3)。`rev_of` はターンの今の改訂の番号 (ターンが無ければ `None`)。合わないノートは、伏せ字・
+/// 削除の前の本文から作ったものとして、読み出しで除き、作り直す。
+pub fn note_matches(body: &NoteBody, rev_of: impl Fn(Id) -> Option<u32>) -> bool {
+    let revs = &body.src_revs;
+    revs.iter().all(|s| rev_of(s.turn) == Some(s.rev))
+        && body.exchanges.iter().all(|t| {
+            let recorded = revs.iter().find(|s| s.turn == *t).map_or(0, |s| s.rev);
+            rev_of(*t) == Some(recorded)
+        })
 }
 
 fn cut(text: &str, n: usize) -> String {
@@ -74,6 +111,9 @@ pub fn segments(turns: &[Turn], now_ms: i64) -> Vec<Segment> {
         if let Some(a) = answer {
             exchanges.push(NoteExchange {
                 user: t.envelope.id,
+                answer: a.envelope.id,
+                user_rev: crate::turn_rev(&t.envelope),
+                answer_rev: crate::turn_rev(&a.envelope),
                 user_text: cut(&t.body.text, NOTE_USER_CHARS),
                 answer_text: cut(&a.body.text, NOTE_ANSWER_CHARS),
             });
@@ -302,5 +342,83 @@ mod tests {
             !keys.iter().any(|k| k == "日当たり"),
             "the ninth key is dropped"
         );
+    }
+
+    /// ノートは、出典の往復の発話と応答の改訂の番号を持ち、番号が今と合わない・出典が無いノートは今の出典と
+    /// 合わないとみなす。`src_revs` の無い古いノートは、発話の番号を 0 として比べる。
+    /// verifies: 03 §3.3 (`src_revs`)、04 §7.7 の 1・4
+    #[test]
+    fn a_note_matches_only_the_revisions_it_was_made_from() {
+        let mut turns = exchanges(2, "架空の話題", 0);
+        // 応答 (ID 2) は伏せ字の後 (改訂の番号 1)。
+        turns[1]
+            .envelope
+            .set_body(&serde_json::json!({ "rev": 1 }))
+            .unwrap();
+        let seg = &segments(&turns, SEGMENT_QUIET_MS)[0];
+        assert_eq!(
+            seg.src_revs(),
+            [
+                SrcRev {
+                    turn: id(1),
+                    rev: 0
+                },
+                SrcRev {
+                    turn: id(2),
+                    rev: 1
+                },
+                SrcRev {
+                    turn: id(3),
+                    rev: 0
+                },
+                SrcRev {
+                    turn: id(4),
+                    rev: 0
+                },
+            ]
+        );
+        let old = NoteBody {
+            session: id(0),
+            exchanges: seg.ids(),
+            keys: vec!["架空の鍵".into()],
+            model_key: "k".into(),
+            rules: NOTE_RULES,
+            src_revs: Vec::new(),
+        };
+        let body = NoteBody {
+            src_revs: seg.src_revs(),
+            ..old.clone()
+        };
+        let now = |changed: Option<(u8, u32)>, gone: Option<u8>| {
+            move |t: Id| {
+                if gone.is_some_and(|g| id(g) == t) {
+                    return None;
+                }
+                Some(match changed {
+                    Some((c, rev)) if id(c) == t => rev,
+                    _ if t == id(2) => 1,
+                    _ => 0,
+                })
+            }
+        };
+        assert!(note_matches(&body, now(None, None)));
+        assert!(
+            !note_matches(&body, now(Some((3, 1)), None)),
+            "redacted later"
+        );
+        assert!(!note_matches(&body, now(None, Some(4))), "a source is gone");
+        // `src_revs` の無い古いノート: 項目が無くても読め、発話の番号が 0 のままなら合う。
+        let mut e = Envelope::new(id(9), "note", 1, Timestamp::from_millis(0), "test");
+        e.set_body(&serde_json::json!({
+            "session": id(0),
+            "exchanges": seg.ids(),
+            "keys": ["架空の鍵"],
+            "model_key": "k",
+            "rules": NOTE_RULES,
+        }))
+        .unwrap();
+        assert_eq!(e.body_as::<NoteBody>().unwrap(), old);
+        assert!(note_matches(&old, now(None, None)));
+        assert!(!note_matches(&old, now(Some((1, 1)), None)));
     }
 }

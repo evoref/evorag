@@ -128,3 +128,31 @@ fn a_backup_taken_while_writing_is_consistent_and_opens_on_its_own() {
         .unwrap();
     assert_eq!(seen, c.ok);
 }
+
+/// 開けない退避があれば、整理は失敗を返す (呼び手が job を残して再試行する)。開ける退避は写し直す。
+/// verifies: 03 §7.3、04 §7.7 の 5 (開けない退避があれば job を残す)
+#[test]
+fn a_purge_reports_a_backup_it_cannot_open() {
+    let dir = TempDir::new("daily-purge-unopenable");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
+    let store = open(dir.path(), clock.clone());
+    let tok = store.take_write_token().unwrap();
+    let mut e = Envelope::new(store.ids().next_id(), "sample", 1, store.clock().now(), "");
+    e.set_body(&Body { n: 7 }).unwrap();
+    let gone = e.id;
+    let mut tx = store.write(&tok, Durability::Immediate).unwrap();
+    tx.put(&mut e).unwrap();
+    tx.commit().unwrap();
+    let good = store.daily_backup(None).unwrap().unwrap();
+    // 壊れた退避 (前の日の分)。
+    let bad = dir.path().join("backups").join(DAILY_DIR).join("20260101");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join(DB_FILE), b"not a database").unwrap();
+
+    let r = store.purge_backups(None, &[gone]);
+    assert!(r.is_err(), "{r:?}");
+    let copy = TempDir::new("daily-purge-unopenable-copy");
+    std::fs::copy(good.join(DB_FILE), copy.path().join(DB_FILE)).unwrap();
+    let back = open(copy.path(), clock);
+    assert_eq!(back.read().unwrap().get("sample", gone).unwrap(), None);
+}

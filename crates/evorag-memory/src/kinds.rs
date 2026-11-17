@@ -80,6 +80,21 @@ pub struct NoteBody {
     pub model_key: String,
     /// 区切りと鍵の作り方の版 (04 §2)。変われば作り直す。
     pub rules: u32,
+    /// 鍵を作ったときに読んだ出典のターン (往復の発話と応答) ごとの改訂の番号 (v0.3 の任意の項目、03 §3.3、
+    /// 04 §7.7 の 4)。項目の無い (古い) ノートは空で読み、出典の番号を 0 とみなす。合わなければノートを
+    /// 作り直す。
+    #[serde(default)]
+    pub src_revs: Vec<SrcRev>,
+}
+
+/// ターンの本体の、改訂の番号の項目の名前 (04 §7.3、03 §3.3 の任意の項目。無ければ 0)。
+pub const TURN_REV_FIELD: &str = "rev";
+
+/// 派生の記録の出典のターンと、作ったときのその改訂の番号 (03 §3.3 の `src_revs`、04 §7.7 の 4)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrcRev {
+    pub turn: Id,
+    pub rev: u32,
 }
 
 /// 関係: チャンク → 元のターン (05 §2.4)。

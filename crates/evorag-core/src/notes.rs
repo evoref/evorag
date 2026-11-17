@@ -111,13 +111,19 @@ fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
         let turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        let revs: HashMap<Id, u32> = turns
+            .iter()
+            .map(|t| (t.envelope.id, evorag_memory::turn_rev(&t.envelope)))
+            .collect();
         let have = notes.get(&sid).map(Vec::as_slice).unwrap_or_default();
         for seg in evorag_memory::segments(&turns, now_ms) {
             let ids = seg.ids();
-            if have
-                .iter()
-                .any(|(_, n)| n.exchanges == ids && n.rules == NOTE_RULES)
-            {
+            // 出典の改訂の番号が今と合わないノート (伏せ字の前の本文から作ったもの) は作り直す (04 §7.7 の 4)。
+            if have.iter().any(|(_, n)| {
+                n.exchanges == ids
+                    && n.rules == NOTE_RULES
+                    && evorag_memory::note_matches(n, |t| revs.get(&t).copied())
+            }) {
                 continue;
             }
             if !seg.closed {
@@ -226,7 +232,8 @@ async fn make_keys(
     Err(KeysError::Invalid)
 }
 
-/// ノートを書き (消し)、語彙の索引に鍵を足し、消したノートの項目を語彙とベクトルの索引から除く。
+/// ノートを書き (消し)、語彙の索引に鍵を足し、消したノートの項目を語彙とベクトルの索引から除く。書けなければ
+/// (出典が消えた・変わったときを含む) 何も変えずに `false`。
 /// チャンクと索引を変える処理の鍵の下の、落とされない task で行う (embedding.rs の冒頭)。鍵の埋め込みは、
 /// 埋め込みの手順が語彙の索引との差から作る。
 async fn save(
@@ -317,7 +324,10 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             keys,
             model_key: server.model_key.clone(),
             rules: NOTE_RULES,
+            src_revs: w.segment.src_revs(),
         };
+        // 書き手が、読んだ出典 (発話と応答) が残っていて改訂の番号が合うことを確かめてから書く。呼び出しの間に
+        // セッションが消えた・伏せ字になったら書かない (04 §7.7 の 4)。
         let Ok((id, ops)) = crate::writes(inner).note(&w.old, &w.old_embeddings, &body) else {
             return progressed;
         };
