@@ -15,6 +15,7 @@ pub mod power;
 mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
 mod context;
+mod extraction;
 pub mod localtime;
 pub mod logging;
 mod notes;
@@ -265,6 +266,11 @@ struct Inner {
     precompute: bool,
     /// ノートの手順の状態 (04 §2)。
     notes: Mutex<notes::State>,
+    /// 事実の抽出の手順の状態 (04 §5.2.1)。
+    extraction: Mutex<extraction::State>,
+    /// 事実を書く経路のロック (04 §5.2.1 の「書き込みの直列化」)。記録を読む前に取り、書き手が書き終えるまで
+    /// 放さない。統合のほか、事実への指示・出典の無い事実の掃除・忘れる・`rebuild --facts` も取る。
+    facts_lock: tokio::sync::Mutex<()>,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -572,6 +578,8 @@ impl Core {
             rerank_cache: Arc::new(recall::RerankCache::default()),
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
+            extraction: Mutex::new(extraction::State::default()),
+            facts_lock: tokio::sync::Mutex::new(()),
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
@@ -940,6 +948,8 @@ impl Core {
         }
         // 落とされない保存 (埋め込み) が終わるのを待つ (書き手を止める前に、ストアを手放させるため)。
         drop(self.inner.index_lock.lock().await);
+        // 落とされない事実の書き込み (抽出・統合) も同じく待つ。
+        drop(self.inner.facts_lock.lock().await);
         let running = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.running.take()
@@ -1715,6 +1725,7 @@ async fn delete(inner: &Arc<Inner>) {
         .unwrap_or_else(|e| e.into_inner())
         .session = None;
     notes::touch(inner);
+    extraction::touch(inner);
     emit(inner, Event::SessionDeleted { id: sid });
     let worker = inner.clone();
     let task = tokio::task::spawn_blocking(move || purge(&worker, job, &ids));
@@ -1944,8 +1955,9 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
 
 /// 書いたターンを裏でチャンクに分け、チャンクを記録して語彙の索引に足す (05 §2.3・§2.4)。
 fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
-    // 話題の区切りが変わったかもしれない (04 §2)。
+    // 話題の区切りが変わったかもしれない (04 §2)。事実を抽出する発話が増えたかもしれない (04 §5.2.1)。
     notes::touch(inner);
+    extraction::touch(inner);
     if inner.index.is_none() {
         return;
     }

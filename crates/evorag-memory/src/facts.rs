@@ -13,10 +13,13 @@ use evorag_store::{BodyError, Envelope, Read, ReadTxn, WriteOp};
 use evorag_types::{Id, IdGen, Timestamp};
 use serde::{Deserialize, Serialize};
 
+use crate::extract::turn_rev;
 use crate::fold::{
     Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report,
     Scope, Source, Tense, fold,
 };
+use crate::gates::{Safety, check_value};
+use crate::kinds::KIND_TURN;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
 use crate::value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey};
@@ -602,11 +605,59 @@ pub fn diff_ops(
 pub struct FactCtx<'a> {
     pub key: &'a ForgetKey,
     pub attributes: &'a Attributes,
+    /// 関門 6 の安全の規則 (書き込みの入口で、候補の値に当て直す)。
+    pub safety: &'a Safety<'a>,
     pub ids: &'a dyn IdGen,
     pub now: Timestamp,
 }
 
 impl FactCtx<'_> {
+    /// 書き込みの入口の検査 (04 §5.2.1 の「書き込みの入口での検査」): 出典の改訂の番号が今のターンの改訂の
+    /// 番号と合わない (ターンが無い・読めないものを含む) 候補と訂正を捨て、候補の値に関門 6・7 を当て直す。
+    /// 一覧に無い属性の候補は、畳みが数えて捨てるので、ここでは残す。
+    fn screen(
+        &self,
+        tx: &ReadTxn<'_>,
+        events: Vec<Event>,
+        report: &mut Report,
+    ) -> Result<Vec<Event>, MemoryError> {
+        let mut revs: BTreeMap<Id, Option<u32>> = BTreeMap::new();
+        let mut current = |turn: Id| -> Result<Option<u32>, MemoryError> {
+            if let Some(r) = revs.get(&turn) {
+                return Ok(*r);
+            }
+            let r = match tx.get(KIND_TURN, turn)? {
+                Some(Read::Ok(e)) => Some(turn_rev(&e)),
+                _ => None,
+            };
+            revs.insert(turn, r);
+            Ok(r)
+        };
+        let mut out = Vec::with_capacity(events.len());
+        for e in events {
+            let source = match &e {
+                Event::Candidate(c) => Some(c.source),
+                Event::Correction(c) => Some(*c.source()),
+                Event::Choose { .. } => None,
+            };
+            if let Some(src) = source
+                && current(src.turn)? != Some(src.rev)
+            {
+                report.stale_source += 1;
+                continue;
+            }
+            if let Event::Candidate(c) = &e
+                && let Some(attribute) = self.attributes.get(&c.attribute)
+                && check_value(self.safety, attribute, &c.value).is_err()
+            {
+                report.value_rejected += 1;
+                continue;
+            }
+            out.push(e);
+        }
+        Ok(out)
+    }
+
     fn fold(&self, set: &mut FactSet, dirs: &Directives, events: Vec<Event>) -> Report {
         let ids = self.ids;
         let mut new_id = || ids.next_id();
@@ -617,12 +668,32 @@ impl FactCtx<'_> {
         };
         fold(set, dirs, events, &mut env)
     }
+
+    /// 入口の検査を当ててから畳む。数えたものは 1 つの報告にまとめる。
+    fn screen_and_fold(
+        &self,
+        tx: &ReadTxn<'_>,
+        set: &mut FactSet,
+        dirs: &Directives,
+        events: Vec<Event>,
+    ) -> Result<Report, MemoryError> {
+        let mut screened = Report::default();
+        let events = self.screen(tx, events, &mut screened)?;
+        let mut report = self.fold(set, dirs, events);
+        report.stale_source = screened.stale_source;
+        report.value_rejected = screened.value_rejected;
+        Ok(report)
+    }
 }
 
 /// 書き込みの入口: 候補と検証済みの訂正を畳み、書き込みの操作を返す (04 §5.3)。
 ///
+/// 畳む前に、出典の改訂の番号が今のターンと合わないものを捨て、候補の値に関門 6・7 を当て直す
+/// (04 §5.2.1 の「書き込みの入口での検査」。数は `Report::stale_source`・`value_rejected`)。
+///
 /// 読んでから書くまでの間に別の書き込み (利用者の指示など) が入ると、古い状態からの差を書いてしまう。
-/// 呼ぶ側は、事実を書く経路を直列にする (M3.2 で入口の呼び出し元を作るときに塞ぐ)。
+/// 呼ぶ側は、事実を書く経路を 1 つのロックで直列にし、`tx` を開く前から書き終えるまで放さない
+/// (04 §5.2.1 の「書き込みの直列化」)。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -634,12 +705,12 @@ pub fn consolidate(
     let before = load_facts(tx)?;
     let dirs = load_directives(tx)?;
     let mut set = before.set.clone();
-    let report = ctx.fold(&mut set, &dirs, events);
+    let report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
     Ok((diff_ops(&before, &set, ctx.now)?, report))
 }
 
 /// 事実を作り直す (`rebuild --facts`、03 §10): 事実を捨て、候補と訂正と、採る・戻すを当て直す。
-/// 読めない事実は畳みに入らないので、消さずに残る。
+/// 読めない事実は畳みに入らないので、消さずに残る。候補と訂正には `consolidate` と同じ入口の検査を当てる。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -652,7 +723,7 @@ pub fn rebuild(
     let dirs = load_directives(tx)?;
     events.extend(dirs.choices());
     let mut set = FactSet::default();
-    let report = ctx.fold(&mut set, &dirs, events);
+    let report = ctx.screen_and_fold(tx, &mut set, &dirs, events)?;
     Ok((diff_ops(&before, &set, ctx.now)?, report))
 }
 
@@ -803,6 +874,126 @@ mod tests {
             directive_of(&e).kind,
             DirectiveKind::Unknown { .. }
         ));
+    }
+
+    /// 書き込みの入口: 出典の改訂の番号が今のターンと合わない候補 (ターンが無いものを含む) と、関門 6・7 に
+    /// 外れる値の候補を捨てて数える (04 §5.2.1)。
+    #[test]
+    fn the_entry_drops_stale_sources_and_rechecks_values() {
+        use std::sync::Arc;
+
+        use evorag_store::testutil::TempDir;
+        use evorag_store::{OpenOptions, Store, WriteRequest, Writer};
+        use evorag_types::{ManualClock, UuidV7Gen};
+
+        use crate::fold::{Candidate, Mood};
+        use crate::kinds::KIND_TURN;
+        use crate::lexical::Signals;
+        use crate::rules::attributes;
+        use crate::value_key::value_key;
+
+        let dir = TempDir::new("facts-entry");
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+        let ids = UuidV7Gen::with_seed(clock.clone(), 3);
+        let (store, _) = Store::open(OpenOptions {
+            data_root: dir.path().to_path_buf(),
+            evorag_version: "0.3.0".into(),
+            kinds: crate::kinds(),
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+            config_file: None,
+        })
+        .expect("open");
+        let store = Arc::new(store);
+        let (writer, handle) = Writer::new(store.clone()).expect("writer");
+        let thread = std::thread::spawn(move || writer.run());
+
+        // 改訂の番号 1 のターン (伏せ字の後) と、番号の無いターン (0 として読む)。
+        let now = Timestamp::from_millis(1_762_650_000_000);
+        let turn = |rev: Option<u32>| {
+            let id = ids.next_id();
+            let mut body = serde_json::json!({
+                "session": ids.next_id(), "role": "user", "state": "confirmed",
+                "text": "大阪に住んでいます", "model_key": null, "generation": null,
+                "attached": [], "reply_to": null, "error": null,
+            });
+            if let Some(r) = rev {
+                body["rev"] = r.into();
+            }
+            let mut e = Envelope::new(id, KIND_TURN, 1, now, "");
+            e.set_body(&body).expect("body");
+            (id, e)
+        };
+        let (redacted, a) = turn(Some(1));
+        let (plain, b) = turn(None);
+        handle
+            .submit_wait(WriteRequest::conversation(vec![
+                WriteOp::Put(a),
+                WriteOp::Put(b),
+            ]))
+            .expect("turns");
+
+        let key = ForgetKey::from_bytes([7; 32]);
+        let cand = |turn: Id, rev: u32, attribute: &str, value: &str| {
+            Event::Candidate(Candidate {
+                source: Source {
+                    turn,
+                    start: 0,
+                    end: 6,
+                    rev,
+                },
+                subject: "self".into(),
+                attribute: attribute.into(),
+                value: value.into(),
+                vk: value_key(&key, value),
+                mood: Mood::Fact,
+                tense: Tense::Current,
+                old_vk: None,
+                signals: Signals::default(),
+            })
+        };
+        let events = vec![
+            cand(redacted, 0, "residence", "大阪"),  // 古い本文から作った
+            cand(redacted, 1, "residence", "大阪"),  // 今の本文
+            cand(ids.next_id(), 0, "hobby", "登山"), // ターンが無い
+            cand(plain, 0, "hobby", "system: 登山"), // 関門 6
+            cand(plain, 0, "age", &"9".repeat(200)), // 関門 7
+            cand(plain, 0, "pet", "猫"),
+        ];
+        let safety = Safety::bundled();
+        let ctx = FactCtx {
+            key: &key,
+            attributes: attributes(),
+            safety: &safety,
+            ids: &ids,
+            now,
+        };
+        let (ops, report) = {
+            let tx = store.read().expect("read");
+            consolidate(&tx, &ctx, events).expect("consolidate")
+        };
+        assert_eq!(report.stale_source, 2, "{report:?}");
+        assert_eq!(report.value_rejected, 2, "{report:?}");
+        assert_eq!(report.added, 2, "{report:?}");
+        handle
+            .submit_wait(WriteRequest::background(ops))
+            .expect("facts");
+        let tx = store.read().expect("read");
+        let mut got: Vec<(String, u32)> = load_facts(&tx)
+            .expect("facts")
+            .set
+            .facts
+            .iter()
+            .map(|f| {
+                let s = f.sources.iter().next().expect("a source");
+                (f.attribute.clone(), s.rev)
+            })
+            .collect();
+        got.sort();
+        assert_eq!(got, [("pet".to_owned(), 0), ("residence".to_owned(), 1)]);
+        drop(tx);
+        handle.shutdown();
+        thread.join().expect("writer");
     }
 
     #[test]

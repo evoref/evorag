@@ -38,7 +38,7 @@ pub(crate) fn touch(inner: &Inner) {
 
 /// 今の応答のモデルで、型縛りの補助の呼び出しを使えるか (06 §3.3 の点検で通ったか)。
 /// 点検がまだなら使わない (点検を待つ)。
-fn usable(inner: &Inner) -> bool {
+pub(crate) fn usable(inner: &Inner) -> bool {
     let (_, server, _) = inner.conn();
     inner
         .store
@@ -163,7 +163,7 @@ enum KeysError {
 }
 
 /// 応答のスロット (0) が処理中か (06 §4)。`/slots` が使えなければ見ない。
-async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
+pub(crate) async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
     llm.slots()
         .await
         .is_ok_and(|s| s.iter().any(|x| x.id == 0 && x.is_processing))

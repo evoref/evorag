@@ -148,6 +148,11 @@ impl VerifiedCorrection {
             new_vk,
         }
     }
+
+    /// 訂正の出典 (書き込みの入口で、改訂の番号を今のターンと突き合わせる)。
+    pub(crate) fn source(&self) -> &Source {
+        &self.source
+    }
 }
 
 /// private の効く範囲 (04 §7.5)。
@@ -399,6 +404,11 @@ pub struct Report {
     pub negation_dropped: usize,
     /// 検証済みの訂正で、事実を変えなかった (学習にだけ使う)。
     pub correction_no_effect: usize,
+    /// 書き込みの入口で、出典の改訂の番号が今のターンと合わない (ターンが無いものを含む) ので捨てた
+    /// (04 §4・§5.2.1)。
+    pub stale_source: usize,
+    /// 書き込みの入口で、値が関門 6・7 に外れたので捨てた (04 §5.3 の書き込みの入口の 1)。
+    pub value_rejected: usize,
 }
 
 /// 畳みの環境。

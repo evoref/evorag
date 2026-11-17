@@ -110,6 +110,14 @@ message_keys! {
     UiProbeIssues => "ui.notice.probe_issues",
     UiProbeThinkingNotOff => "probe.thinking_not_off",
     UiProbeStructuredBroken => "probe.structured_broken",
+    /// 裏の処理で事実が変わった (04 §5.3 の「知らせ」)。引数: `parts` (下の 3 つを並べたもの)。
+    UiFactsChanged => "ui.notice.facts.changed",
+    /// 引数: `n`。
+    UiFactsAdded => "ui.notice.facts.added",
+    /// 引数: `n`。
+    UiFactsReplaced => "ui.notice.facts.replaced",
+    /// 引数: `n`。
+    UiFactsContested => "ui.notice.facts.contested",
     /// 引数: `current`、`model`、`n_ctx`、`choices`。
     /// 出典が見つからない。引数: `n`。
     SourceNotFound => "error.source_not_found",

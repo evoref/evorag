@@ -71,12 +71,14 @@ mod db {
     use std::sync::{Arc, Mutex};
 
     use evorag_store::testutil::TempDir;
-    use evorag_store::{OpenOptions, Store, WriteOp, WriteRequest, Writer, WriterHandle};
+    use evorag_store::{Envelope, OpenOptions, Store, WriteOp, WriteRequest, Writer, WriterHandle};
     use evorag_types::{Id, IdGen, ManualClock, Timestamp, UuidV7Gen};
 
     use super::id_at;
     use crate::facts::{FactCtx, add_directive, consolidate, load_facts, rebuild};
     use crate::fold::{DirectiveKind, Event, FactSet};
+    use crate::gates::Safety;
+    use crate::kinds::{KIND_TURN, TurnBody, TurnRole, TurnState};
     use crate::rules::attributes;
     use crate::value_key::{ForgetKey, ValueKey};
 
@@ -104,6 +106,7 @@ mod db {
         handle: WriterHandle,
         thread: Option<std::thread::JoinHandle<()>>,
         pub ids: CaseIds,
+        safety: Safety<'static>,
         /// 純粋な核の側の指示の ID → ストアの側の指示の ID。
         pub directives: BTreeMap<Id, Id>,
     }
@@ -130,6 +133,7 @@ mod db {
                 handle,
                 thread: Some(thread),
                 ids: CaseIds(Mutex::new((0, 0))),
+                safety: Safety::bundled(),
                 directives: BTreeMap::new(),
             }
         }
@@ -140,10 +144,37 @@ mod db {
                 .expect("write facts");
         }
 
+        /// 発話のターンを書く (書き込みの入口が、出典の改訂の番号を今のターンと突き合わせるため)。
+        pub fn add_turn(&self, id: Id, text: &str) {
+            let mut e = Envelope::new(
+                id,
+                KIND_TURN,
+                1,
+                Timestamp::from_millis(1_762_650_000_000),
+                "",
+            );
+            e.set_body(&TurnBody {
+                session: id_at(0, 0),
+                role: TurnRole::User,
+                state: TurnState::Confirmed,
+                text: text.to_owned(),
+                model_key: None,
+                generation: None,
+                attached: Vec::new(),
+                reply_to: None,
+                error: None,
+                recall: None,
+                obs: None,
+            })
+            .expect("turn body");
+            self.submit(vec![WriteOp::Put(e)]);
+        }
+
         fn ctx<'a>(&'a self, key: &'a ForgetKey) -> FactCtx<'a> {
             FactCtx {
                 key,
                 attributes: attributes(),
+                safety: &self.safety,
                 ids: &self.ids,
                 now: Timestamp::from_millis(1_762_650_000_000),
             }
@@ -357,9 +388,11 @@ impl Runner {
                 let ms = parse_ms(s(body, "at").expect("at"));
                 self.last_ms = ms;
                 let tid = self.next_id(ms);
+                let text = s(body, "text").expect("text");
+                self.db.add_turn(tid, text);
                 self.turns.insert(
                     s(body, "id").expect("id").to_owned(),
-                    (tid, s(body, "text").expect("text").to_owned()),
+                    (tid, text.to_owned()),
                 );
             }
             "candidate" => {
