@@ -226,3 +226,99 @@ expect = { aborted = true, facts = [
 ], turns = [
   { id = "a1", text = "私は京都に住んでいます" },
 ], blocked = [] }
+
+# ---- M3.4c の仕様の細目 (2026-11-17) ----
+
+[[case]]
+id = "F12"
+title = "伏せ字の範囲に値が掛かるほかの事実は、自動では取り消さずに残す (span は写し直す)"
+spec = "04 §7.1 の影響するほかの事実、§7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪のたこ焼きが好きで、大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪のたこ焼きが好きで、大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "大阪のたこ焼き", e = "大阪のたこ焼きが好き" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "likes", v = "大阪のたこ焼き", state = "Live", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "[伏せ字]のたこ焼きが好きで、[伏せ字]に住んでいます" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }], table = ["self/likes/大阪のたこ焼き"] }
+
+[[case]]
+id = "F13"
+title = "忘れた今の値より前の矛盾の値は、作り直すと今の値になる (作り直しの差を受け入れる)"
+spec = "04 §7.5 の作り直しで変わりうること、§7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-01T09:00:00Z", text = "大阪に住んでるから近いよ" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでる" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, redact = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1", "c1"] },
+  { s = "self", a = "residence", v = "東京", state = "Contested", against = "(retracted)", sources = ["b1"] },
+], table = [] }
+[[case.step]]
+op = { kind = "rebuild_facts" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+], table = ["self/residence/東京"], blocked = [{ s = "self", a = "residence", v = "大阪" }] }
+
+[[case]]
+id = "F14"
+title = "履歴もまとめて忘れても、矛盾の値は含めない (今の値を忘れた後に繰り上がる)"
+spec = "04 §7.1 の確認の画面、§7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, history = true, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "[伏せ字]に住んでます" },
+  { id = "b1", text = "東京に住んでるよ" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }], table = ["self/residence/東京"] }
+
+[[case]]
+id = "F15"
+title = "伏せ字にしないで忘れるときも、ほかのターンの一致を選べば、想起で添えるときに [非表示] にする"
+spec = "04 §7.1 の確認の画面"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "大阪のおすすめの店を教えて" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, redact = false, echo = false, others = true }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は大阪に住んでいます" },
+  { id = "b1", text = "大阪のおすすめの店を教えて" },
+], recall = [
+  { turn = "a1", text = "私は[非表示]に住んでいます" },
+  { turn = "b1", text = "[非表示]のおすすめの店を教えて" },
+] }
