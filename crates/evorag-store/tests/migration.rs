@@ -262,6 +262,37 @@ fn migrations_are_applied_in_order_across_several_versions() {
     no_leftovers(dir.path());
 }
 
+/// 2 段目で失敗して途中の形式で止まっても、下限 (`format.min_*`) を上げない。項目を足すだけの移行の
+/// 列で、古い版が開けなくならないように (03 §12.1)。
+#[test]
+fn a_chain_that_stops_halfway_keeps_the_lower_minimum() {
+    let dir = TempDir::new("migrate-halfway");
+    seed(dir.path());
+    let failing_03 = Migration {
+        from: "0.2",
+        to: "0.3",
+        run: fail,
+        counts_change: &[],
+    };
+    let mut p = plan("0.3", vec![TO_02, failing_03]);
+    p.min_read = "0.1".into();
+    p.min_write = "0.1".into();
+    let (store, report) = Store::open_with(opts(dir.path()), p).unwrap();
+    assert!(report.read_only.is_some());
+    assert_eq!(
+        store.meta(meta::FORMAT_VERSION).unwrap().as_deref(),
+        Some("0.2")
+    );
+    assert_eq!(
+        store.meta(meta::FORMAT_MIN_READ).unwrap().as_deref(),
+        Some("0.1")
+    );
+    assert_eq!(
+        store.meta(meta::FORMAT_MIN_WRITE).unwrap().as_deref(),
+        Some("0.1")
+    );
+}
+
 #[test]
 fn leftovers_of_an_interrupted_migration_are_cleaned_up() {
     // 入れ替えの前に止まった: 移行先の書きかけが残っている。

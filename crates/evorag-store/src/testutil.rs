@@ -56,6 +56,17 @@ pub fn raw_set_meta(data_root: &Path, key: &str, value: &str) {
     tx.commit().expect("commit");
 }
 
+/// 閉じた DB の `meta` の値を直接消す (試験で「古い版が取り込まなかった `meta` の行」を作るため)。
+pub fn raw_remove_meta(data_root: &Path, key: &str) {
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::META).expect("meta");
+        t.remove(key.as_bytes()).expect("remove");
+    }
+    tx.commit().expect("commit");
+}
+
 /// 閉じた DB の記録 1 件の本体のバイトを書き換える (試験で「壊れた記録」を作るため)。
 pub fn raw_corrupt_record(data_root: &Path, kind: &str, id: evorag_types::Id) {
     use redb::ReadableTable;

@@ -30,11 +30,11 @@ pub const RESERVE_FILE: &str = "reserve.space";
 const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
-pub const FORMAT_VERSION: &str = "0.2";
+pub const FORMAT_VERSION: &str = "0.3";
 
 /// この形式の DB を読み書きするのに要る、evorag が知る形式の版の下限 (`format.min_read`・
-/// `format.min_write`、03 §3.1.1)。0.2 は 0.1 に種類と任意の項目を足しただけなので、0.1 のまま
-/// にし、v0.1.2 に戻しても読み書きできるようにする (03 §12.1)。
+/// `format.min_write`、03 §3.1.1)。0.2 と 0.3 は種類と任意の項目を足しただけなので、0.1 のまま
+/// にし、v0.1.2・v0.2.x に戻しても読み書きできるようにする (03 §12.1)。
 pub const FORMAT_MIN: &str = "0.1";
 
 pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
@@ -142,6 +142,18 @@ pub struct OpenReport {
     pub journal_truncated: usize,
     /// ジャーナルの新しい版の行 (チェックサムは合うが読めない) の数。
     pub journal_newer_lines: usize,
+    /// DB に無かった `memory.forget_key` を、ジャーナルの行から入れた (03 §3.1.1)。
+    pub forget_key_recovered: bool,
+    /// ジャーナルの `memory.forget_key` が 2 つ以上あるか、DB の値と違う。書き換えていない。
+    /// 事実の抽出・統合・事実の表を止める (フェイルクローズ、03 §3.1.1)。
+    pub forget_key_conflict: bool,
+    /// 読むだけで開いたので、ジャーナルにだけある `memory.forget_key` を入れていない。
+    pub forget_key_pending: bool,
+}
+
+/// `memory.forget_key` の形 (ちょうど 64 桁の小文字の 16 進、03 §3.1.1)。
+fn is_forget_key(v: &str) -> bool {
+    v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -273,6 +285,9 @@ pub struct Store {
     token_issued: AtomicBool,
     /// ジャーナル (書き込みで開いたときだけ)。書き手だけが使う。
     pub(crate) journal: Mutex<Option<Journal>>,
+    /// `memory.forget_key` が食い違っている (03 §3.1.1)。立っている間は、鍵を書かせない
+    /// (呼び出し側が旗を見落としても、3 つ目の鍵を作れないようにする)。
+    forget_key_conflict: AtomicBool,
     // ロックは DB の後に外す (フィールドは宣言の順に落ちる)。
     _lock: DataRootLock,
 }
@@ -527,6 +542,7 @@ impl Store {
             suspects: Mutex::default(),
             token_issued: AtomicBool::new(false),
             journal: Mutex::new(None),
+            forget_key_conflict: AtomicBool::new(false),
             _lock: lock,
         };
 
@@ -566,8 +582,18 @@ impl Store {
                 .record_writer(&existing, &our_writer)
                 .map_err(|e| OpenError::Unreadable(e.to_string()))?;
             store.open_journal(&mut report)?;
+        } else {
+            // 読むだけのときは書かずに、鍵の食い違いと「ジャーナルにだけある」状態を調べる。
+            let metas = crate::journal::scan_metas(&store.root)?;
+            store.check_forget_key(&metas, false, &mut report)?;
         }
         Ok((store, report))
+    }
+
+    /// `memory.forget_key` が食い違っているか (03 §3.1.1)。立っていれば、事実の抽出・統合・
+    /// 事実の表を止める。
+    pub fn forget_key_conflict(&self) -> bool {
+        self.forget_key_conflict.load(Ordering::SeqCst)
     }
 
     /// 会話の追記のための予備のファイル (03 §8)。無ければ作る (0 で埋めて、実際に場所を取る)。
@@ -625,7 +651,64 @@ impl Store {
             tx.commit().map_err(unreadable)?;
             report.journal_replayed = scan.lines.len();
         }
+        self.check_forget_key(&scan.metas, true, report)?;
         *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = Some(journal);
+        Ok(())
+    }
+
+    /// ジャーナルの `memory.forget_key` の行を、連番に関わらず探す (03 §3.1.1)。
+    ///
+    /// v0.2.x は、この `meta` の行を取り込まずに連番だけを進めるので、v0.2.x で開いた後は、連番での
+    /// 取り込みでは二度と入らない。そのため、通常の取り込み (`replay_line`) ではこの行を当てず、ここだけで
+    /// 扱う (取り込みの経路で結果が変わらないようにするため)。
+    /// - DB に無く、ジャーナルに正しい形の値が 1 つだけあれば、それを入れる (`writable` のときだけ。読む
+    ///   だけのときは入れずに `forget_key_pending` を立てる)。
+    /// - ジャーナルの値が 2 つ以上ある・形が違う・DB の値と違うときは、書き換えずに食い違いの旗を立てる
+    ///   (別の鍵で作ると private と再び覚えない印が黙って効かなくなるので、使う側が止める)。
+    fn check_forget_key(
+        &self,
+        metas: &[(String, String)],
+        writable: bool,
+        report: &mut OpenReport,
+    ) -> Result<(), OpenError> {
+        let mut found: Vec<&str> = metas
+            .iter()
+            .filter(|(k, _)| k == meta::FORGET_KEY)
+            .map(|(_, v)| v.as_str())
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        let in_db = self
+            .meta(meta::FORGET_KEY)
+            .map_err(|e| OpenError::BadMeta(e.to_string()))?;
+        let bad_shape = in_db.as_deref().is_some_and(|v| !is_forget_key(v))
+            || found.iter().any(|v| !is_forget_key(v));
+        let conflict = bad_shape
+            || match (in_db.as_deref(), found.as_slice()) {
+                (_, []) => false,
+                (Some(db), [one]) => db != *one,
+                (None, [_]) => false,
+                _ => true,
+            };
+        if conflict {
+            report.forget_key_conflict = true;
+            self.forget_key_conflict.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if let (None, [one]) = (in_db.as_deref(), found.as_slice()) {
+            if !writable {
+                report.forget_key_pending = true;
+                return Ok(());
+            }
+            let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
+            let mut tx = self
+                .write_internal(Durability::Immediate)
+                .map_err(unreadable)?;
+            tx.set_meta_once(meta::FORGET_KEY, one)
+                .map_err(unreadable)?;
+            tx.commit().map_err(unreadable)?;
+            report.forget_key_recovered = true;
+        }
         Ok(())
     }
 
@@ -662,6 +745,8 @@ impl Store {
                 tx.delete_links_of(*id)?;
                 tx.delete_blobs(*id)?;
             }
+            // `memory.forget_key` は `check_forget_key` だけで扱う (03 §3.1.1)。
+            LineOp::Meta { key, .. } if key == meta::FORGET_KEY => {}
             LineOp::Meta { key, value } => match tx.set_meta_once(key, value) {
                 Ok(()) | Err(StoreError::MetaConflict { .. } | StoreError::MetaNotWritable(_)) => {}
                 Err(e) => return Err(e),
@@ -1116,9 +1201,14 @@ impl WriteTxn<'_> {
     }
 
     /// `meta` の値を一度だけ書く。同じ値ならそのまま、違う値なら `MetaConflict`。
-    /// 書いてよいのは、一度書いたら変えないキー (`prompt.language`、07 §6.1) だけ。
+    /// 書いてよいのは、一度書いたら変えないキー (`prompt.language`、07 §6.1。v0.3 から
+    /// `memory.forget_key`、03 §3.1.1) だけ。
     pub fn set_meta_once(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
-        if key != meta::PROMPT_LANGUAGE {
+        if key != meta::PROMPT_LANGUAGE && key != meta::FORGET_KEY {
+            return Err(StoreError::MetaNotWritable(key.to_owned()));
+        }
+        // 鍵は形を確かめ、食い違いがある間は書かせない (03 §3.1.1)。
+        if key == meta::FORGET_KEY && (!is_forget_key(value) || self.store.forget_key_conflict()) {
             return Err(StoreError::MetaNotWritable(key.to_owned()));
         }
         let mut m = self.tx.open_table(META).map_err(db)?;

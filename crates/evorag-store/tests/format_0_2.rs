@@ -75,7 +75,7 @@ fn a_v0_1_database_is_backed_up_and_moved_to_0_2_and_v0_1_can_still_write_to_it(
         assert!(backup.join(evorag_store::DB_FILE).exists());
         assert_eq!(
             store.meta(meta::FORMAT_VERSION).unwrap().as_deref(),
-            Some("0.2")
+            Some(evorag_store::FORMAT_VERSION)
         );
         assert_eq!(
             store.meta(meta::FORMAT_MIN_READ).unwrap().as_deref(),
