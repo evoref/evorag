@@ -139,6 +139,25 @@ pub fn run(
             if report.compact_pending() {
                 say(c, MessageKey::DoctorCompactPending, &[]);
             }
+            // 忘れるの指示と合わないターンと、当て直しの残り (04 §7.2)。
+            let lang = report
+                .meta
+                .get(evorag_store::meta::PROMPT_LANGUAGE)
+                .cloned();
+            if let Ok(Some(Some(f))) = evorag_store::inspect::with_view(data_root, |v| {
+                evorag_core::export_checks::forget_check(v, lang.as_deref())
+            }) {
+                if f.mismatched > 0 {
+                    say(
+                        c,
+                        MessageKey::DoctorForgetMismatched,
+                        &[("count", &f.mismatched.to_string())],
+                    );
+                }
+                if f.pending {
+                    say(c, MessageKey::DoctorForgetPending, &[]);
+                }
+            }
         }
     }
     let j = &report.journal;

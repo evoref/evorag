@@ -363,18 +363,28 @@ fn export_writes_records_and_the_config_without_api_keys() {
         let mut session = None;
         for title in ["一つ目", "二つ目"] {
             let (id, ops) = writes.create_session(title).unwrap();
+            let env = ops
+                .iter()
+                .find_map(|op| match op {
+                    evorag_store::WriteOp::Put(e) if e.id == id => Some(e.clone()),
+                    _ => None,
+                })
+                .unwrap();
             h.submit_wait(WriteRequest::conversation(ops)).unwrap();
-            session = Some(id);
+            session = Some((id, env));
         }
-        // 派生の記録: ノートは書き出し、チャンクと job は書き出さない (03 §11)。
-        let session = session.unwrap();
+        let (session, env) = session.unwrap();
+        let (turn, ops) = writes.user_turn(&env, "こんにちは").unwrap();
+        h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+        // 派生の記録: ノートは書き出し、チャンクと job は書き出さない (03 §11)。出典の往復が DB にあるノート
+        // だけを書き出す (出典の無い派生の記録は書き出さない、03 §4.2 の規則 12)。
         let (_, ops) = writes
             .note(
                 &[],
                 &[],
                 &evorag_memory::NoteBody {
                     session,
-                    exchanges: vec![session],
+                    exchanges: vec![turn],
                     keys: vec!["鍵".into()],
                     model_key: "k".into(),
                     rules: 1,
@@ -413,7 +423,7 @@ fn export_writes_records_and_the_config_without_api_keys() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
-    assert!(stdout.contains("3 件の記録"), "{stdout}");
+    assert!(stdout.contains("4 件の記録"), "{stdout}");
     assert!(out.join("note.jsonl").is_file());
     assert!(!out.join("chunk.jsonl").exists());
     assert!(!out.join("job.jsonl").exists());

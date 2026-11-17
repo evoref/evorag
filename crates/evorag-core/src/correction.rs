@@ -167,6 +167,10 @@ fn masked_previous(
         return Some(None);
     };
     let hide = crate::masking::Hide::load(&r, lang)?;
+    // 忘れるの指示と合わない応答は、検証のプロンプトに入れない (04 §7.2)。
+    if hide.excluded(&e) {
+        return Some(None);
+    }
     let t = evorag_memory::Turn { envelope: e, body };
     Some(Some(hide.text(&r, &t)))
 }
@@ -188,14 +192,21 @@ fn prepare(
     if turn_rev(&turn) != c.rev {
         return Some(Prepared::Stale);
     }
+    // 忘れるの指示と合わない発話・直前の応答は、検証に送らない (04 §7.2)。
+    let hide = crate::masking::Hide::load(&r, lang)?;
+    let excluded_previous = c
+        .previous
+        .is_some_and(|p| matches!(r.get(KIND_TURN, p), Ok(Some(Read::Ok(e))) if hide.excluded(&e)));
+    if hide.excluded(&turn) || excluded_previous {
+        return Some(Prepared::Stale);
+    }
     let mut previous = None;
     let mut previous_prompt = None;
     let mut earlier = Vec::new();
     for t in session_turns(&r, body.session).ok()? {
         if Some(t.envelope.id) == c.previous {
             previous = Some(t.body.text.clone());
-            // 伏せる値を確かめられなければ、この回は検証しない (伏せない本文を送らない)。
-            previous_prompt = Some(crate::masking::Hide::load(&r, lang)?.text(&r, &t));
+            previous_prompt = Some(hide.text(&r, &t));
         }
         // 同じセッションの、候補の発話より前の利用者の発話 (前のふるいの後の本文、04 §6 の「検証の時機」)。
         if t.envelope.id < c.turn && t.body.role == TurnRole::User {

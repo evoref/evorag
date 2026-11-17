@@ -65,6 +65,30 @@ pub fn inspect(
     inspect_collect(root, kinds, backups, &[])
 }
 
+/// データ根の DB を、何も書かずに読み取りのトランザクションで開き、`f` に渡す (`doctor` が、ストアの層では
+/// 決められない数 (忘れるの指示と合わないターンなど) をメモリの層の判定で数えるため)。DB が無い・読むだけでは
+/// 開けなければ `None`。使っているプロセスがあれば断る (03 §9)。
+///
+/// # Errors
+/// データ根のロックを取れないとき。
+pub fn with_view<T>(
+    root: &Path,
+    f: impl FnOnce(&crate::export::ExportView<'_>) -> T,
+) -> Result<Option<T>, OpenError> {
+    let _lock = DataRootLock::acquire_quiet(root)?;
+    let file = root.join(DB_FILE);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let Ok(db) = ReadOnlyDatabase::open(&file) else {
+        return Ok(None);
+    };
+    let Ok(rtx) = redb::ReadableDatabase::begin_read(&db) else {
+        return Ok(None);
+    };
+    Ok(Some(f(&crate::export::ExportView::new(&rtx))))
+}
+
 /// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。
 pub fn inspect_collect(
     root: &Path,

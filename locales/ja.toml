@@ -282,6 +282,8 @@ export_refused_journal = "ジャーナルに、まだデータベースに入っ
 export_refused_forget = "忘れるの当て直しが済んでいないので、書き出しませんでした。evorag を一度起動して終了してから、もう一度書き出してください。"
 compact_low_space = "空きが足りないので、消した記録の跡をデータベースのファイルから除く処理 (compact) を見送りました (空き {free} MiB、必要 {need} MiB)。空きを作ると、次の起動で行います。"
 compact_failed = "消した記録の跡をデータベースのファイルから除く処理 (compact) ができませんでした ({detail})。次の起動でやり直します。"
+forget_mismatched = "忘れた内容と本文が合わない発言が {count} 件あります。想起・裏の処理・書き出しには使いません (evorag doctor で件数を確かめられます)。"
+forget_journal_pending = "忘れた発言の伏せ字にする前の行が、会話のジャーナルに残っています (ほかのプログラムがファイルを開いているため、書き直せませんでした)。手が空いたときに書き直しを試します。"
 setup_guide = """
 llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
 次の手順で llama-server を用意してから、もう一度 evorag setup を実行してください。
@@ -373,6 +375,8 @@ probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
 probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
 compact_pending = "データベースのファイルの空きの領域に、消した記録の跡が残っています。次の起動で除きます (compact。空きが足りなければ見送ります)"
+forget_mismatched = "忘れた内容と本文が合わない発言: {count} 件 (想起・裏の処理・書き出しには使いません)"
+forget_pending = "忘れるの当て直しが済んでいません。evorag を一度起動すると当て直します"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
 index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"

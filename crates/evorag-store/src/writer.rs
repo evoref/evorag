@@ -98,6 +98,9 @@ pub enum WriteOp {
     /// `Patch` で単調に増える項目 (ターンの改訂の番号) を上げた依頼 (伏せ字) には、書き手が自動で足す。印は
     /// compact ([`Store::compact_if_pending`]) が消す。
     SetCompactPending,
+    /// 起動時の退避の写し直しの job の作り直しを済ませた (`meta` の `forget.recheck` を消す)。job を書くのと
+    /// 同じ依頼に入れる。
+    ClearForgetRecheck,
     /// コミットの後に、ジャーナルから ID ごとの `put` の行を除く書き直し (03 §6 の「削除と忘れる」)。DB には何も
     /// 書かない。忘れるでは、指示の `put` と伏せ字にしたターンの `Patch` と同じ依頼に入れる (伏せ字の後の行を
     /// 追記してから書き直す)。sleep-time の試し直しと起動時の当て直しは、この操作だけの依頼で送る (そのときは
@@ -614,6 +617,7 @@ pub(crate) fn apply_op(
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
         WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
         WriteOp::SetCompactPending => tx.set_compact_pending()?,
+        WriteOp::ClearForgetRecheck => tx.clear_forget_recheck()?,
         // コミットの後に書き手が行う (DB には書かない)。
         WriteOp::RewriteJournal(_) => {}
     }

@@ -1230,6 +1230,18 @@ impl TurnForgets {
         Ok(Self::from_bodies(bodies))
     }
 
+    /// 事実への指示の本体 (ID と本体) から作る。忘れるでない指示は無視する。DB の読み取りの口
+    /// ([`ReadTxn`]) を持たない呼び手 (書き出しの確かめと `doctor`) のため。
+    #[must_use]
+    pub fn from_directives(bodies: Vec<(Id, FactDirectiveBody)>) -> Self {
+        Self::from_bodies(
+            bodies
+                .into_iter()
+                .filter(|(_, b)| b.op == OP_FORGET)
+                .collect(),
+        )
+    }
+
     fn from_bodies(mut bodies: Vec<(Id, FactDirectiveBody)>) -> Self {
         bodies.sort_by_key(|(id, _)| *id);
         let mut out = Self::default();

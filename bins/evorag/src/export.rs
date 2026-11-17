@@ -4,7 +4,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use evorag_store::export::{ExportError, ExportOptions, NoChecks, export};
+use evorag_core::export_checks::ExportFilter;
+use evorag_store::export::{ExportError, ExportOptions, export};
 use evorag_tui::catalog::Catalog;
 use evorag_types::MessageKey;
 
@@ -49,8 +50,9 @@ fn copy_config(config_file: &Path, out: &Path) -> std::io::Result<bool> {
 pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms: i64) -> ExitCode {
     // 書き出すのは 03 §11 の「含めるもの」だけ。作り直せる派生の記録 (チャンク・埋め込み・点検の結果) と
     // 手順の記録 (job) は書き出さない。ノートは含める (OQ-37 の 9)。
-    // 当て直しの済んでいない忘れると、出典の改訂の番号が合わない派生の記録の確かめは、メモリの層の判定を
-    // `checks` に渡す (03 §11)。ここではストアの層で決められること (取り込んでいないジャーナルの行) だけで断る。
+    // 当て直しの済んでいない忘れると、出典の無い・出典の改訂の番号が合わない派生の記録、忘れるの指示と合わない
+    // ターンの確かめは、コアのメモリの層の判定を `checks` に渡す (03 §11、04 §7.2)。
+    let checks = ExportFilter::new();
     let opts = ExportOptions {
         evorag_version: env!("CARGO_PKG_VERSION"),
         now_ms,
@@ -60,7 +62,7 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
             evorag_memory::KIND_EMBEDDING,
             evorag_memory::KIND_JOB,
         ],
-        checks: &NoChecks,
+        checks: &checks,
     };
     let report = match export(data_root, out, &opts) {
         Ok(r) => r,

@@ -406,6 +406,10 @@ message_keys! {
     CliCompactLowSpace => "cli.compact_low_space",
     /// 起動時の compact に失敗した (元のファイルのまま)。引数: `detail`。
     CliCompactFailed => "cli.compact_failed",
+    /// 忘れるの指示と合わないターンがある (想起・裏の処理・書き出しから除く、04 §7.2)。引数: `count`。
+    CliForgetMismatched => "cli.forget_mismatched",
+    /// ジャーナルに伏せ字の前の行が残っている (書き直しの入れ替えに失敗した。sleep-time に試し直す、04 §7.8)。
+    CliForgetJournalPending => "cli.forget_journal_pending",
     // `evorag doctor` と `evorag backups list` (03 §10)。
     /// 引数: `path`。
     DoctorConfig => "doctor.config",
@@ -449,6 +453,10 @@ message_keys! {
     DoctorBroken => "doctor.broken",
     /// 次の起動で compact する (`compact.pending`、03 §8)。
     DoctorCompactPending => "doctor.compact_pending",
+    /// 忘れるの指示と合わないターンの数 (04 §7.2)。引数: `count`。
+    DoctorForgetMismatched => "doctor.forget_mismatched",
+    /// 当て直しの済んでいない忘れるがある (次の起動で当て直す、04 §7.2)。
+    DoctorForgetPending => "doctor.forget_pending",
     /// 引数: `docs`, `segments`。
     DoctorIndexOk => "doctor.index_ok",
     DoctorIndexMissing => "doctor.index_missing",

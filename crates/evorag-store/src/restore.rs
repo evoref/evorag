@@ -234,6 +234,12 @@ fn write_carried(file: &Path, carried: &Carried) -> Result<(), StoreError> {
             m.insert(crate::meta::COMPACT_PENDING.as_bytes(), v.as_slice())
                 .map_err(crate::store::db)?;
         }
+        // 戻した後の起動で、すべての忘れるの指示の退避の写し直しの job を作り直させる (03 §10)。
+        m.insert(
+            crate::meta::FORGET_RECHECK.as_bytes(),
+            crate::meta::FORGET_RECHECK_SET.as_bytes(),
+        )
+        .map_err(crate::store::db)?;
     }
     tx.commit().map_err(crate::store::db)
 }

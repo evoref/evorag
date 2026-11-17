@@ -60,6 +60,7 @@ pub enum TurnInCopy {
 #[derive(Debug)]
 pub struct RecopyView<'a> {
     turns: &'a BTreeMap<Id, TurnInCopy>,
+    dropped: &'a BTreeSet<Id>,
 }
 
 impl RecopyView<'_> {
@@ -68,7 +69,17 @@ impl RecopyView<'_> {
     pub fn turn(&self, id: Id) -> Option<TurnInCopy> {
         self.turns.get(&id).copied()
     }
+
+    /// 記録 `id` を、この写しから除くと決めたか (除く ID と、前の回の判定で除いた記録)。判定は、除く記録が
+    /// 増えなくなるまで繰り返すので、派生の記録の派生の記録 (チャンクの埋め込みなど) も、元の記録に続けて除ける。
+    #[must_use]
+    pub fn is_dropped(&self, id: Id) -> bool {
+        self.dropped.contains(&id)
+    }
 }
+
+/// 呼び手の判定を繰り返す上限 (派生の記録の段の数より多ければよい)。
+const DROP_ROUNDS: usize = 4;
 
 /// 退避の写し直しの対象 (1 つ以上の `forget_backups` の job をまとめたもの)。
 pub struct ForgetRecopy<'a> {
@@ -378,26 +389,37 @@ impl Changes {
                 quarantined.push((id, orig));
             }
         }
-        // 2 回目: 呼び手の判定 (写しのターンの結果を見て)。
-        let view = RecopyView { turns: &turns };
-        for item in records.iter().map_err(db)? {
-            let (k, v) = item.map_err(db)?;
-            let (k, v) = (k.value(), v.value());
-            let Some((kind, id)) = crate::store::split_record_key(k) else {
-                continue;
+        // 2 回目から: 呼び手の判定 (写しのターンの結果と、前の回までに除いた記録を見て)。除く記録が増えなく
+        // なるまで繰り返す。
+        for _ in 0..DROP_ROUNDS {
+            let mut more = Vec::new();
+            let view = RecopyView {
+                turns: &turns,
+                dropped: &out.drop,
             };
-            if kind == KIND_QUARANTINE
-                || out.drop.contains(&id)
-                || out.drop_record.contains(&id)
-                || turns.contains_key(&id)
-            {
-                continue;
+            for item in records.iter().map_err(db)? {
+                let (k, v) = item.map_err(db)?;
+                let (k, v) = (k.value(), v.value());
+                let Some((kind, id)) = crate::store::split_record_key(k) else {
+                    continue;
+                };
+                if kind == KIND_QUARANTINE
+                    || out.drop.contains(&id)
+                    || out.drop_record.contains(&id)
+                    || turns.contains_key(&id)
+                {
+                    continue;
+                }
+                if let Ok(env) = Envelope::decode(k, v)
+                    && (plan.drop)(&env, &view)
+                {
+                    more.push(id);
+                }
             }
-            if let Ok(env) = Envelope::decode(k, v)
-                && (plan.drop)(&env, &view)
-            {
-                out.drop.insert(id);
+            if more.is_empty() {
+                break;
             }
+            out.drop.extend(more);
         }
         // 除く記録・除く ID・伏せ字にするターンの隔離の記録 (隔離した原文に伏せる前の本文が残るため、04 §7.2)。
         // 写しに元の記録が無くても、計画の ID なら除く。

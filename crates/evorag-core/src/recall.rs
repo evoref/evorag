@@ -425,6 +425,10 @@ fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは添えない・帯に出さない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -449,7 +453,7 @@ fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
                 .remove(&sid)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| set.contains(&t.envelope.id))
+                .filter(|t| set.contains(&t.envelope.id) && !hide.excluded(&t.envelope))
                 .collect();
             hide.apply(&rtx, &mut turns);
             Source {
@@ -490,6 +494,10 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは、リランクにも送らない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -507,6 +515,7 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -
         let mut members: Vec<Turn> = turns
             .iter()
             .filter(|t| t.envelope.id == *id || Some(t.envelope.id) == other)
+            .filter(|t| !hide.excluded(&t.envelope))
             .cloned()
             .collect();
         hide.apply(&rtx, &mut members);
@@ -597,6 +606,11 @@ impl QueryCache {
             (std::time::Instant::now(), v),
         );
     }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
 
 /// リランクの結果のキャッシュ (入力が止まったときに先に済ませた結果を、同じ発話を送ったときに使う、
@@ -625,6 +639,11 @@ impl RerankCache {
             m.remove(0);
         }
         m.push((std::time::Instant::now(), key, scores));
+    }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 

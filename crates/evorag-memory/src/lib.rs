@@ -42,10 +42,10 @@ pub use extract::{
 };
 pub use facts::{
     DirectivesAdded, FactBody, FactCtx, FactDirectiveBody, ForgetRecord, HiddenBody, KIND_FACT,
-    KIND_FACT_DIRECTIVE, LoadedFacts, NewDirective, ORIGIN_DELETE, ORIGIN_USER, Origin,
-    REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, SourcesDropped, add_directive,
-    add_directives, consolidate, diff_ops, drop_turns, kept_after_delete, load_directives,
-    load_fact, load_facts, load_forgets, load_hidden, rebuild,
+    KIND_FACT_DIRECTIVE, LoadedFacts, NewDirective, OP_FORGET, OP_UNBLOCK, ORIGIN_DELETE,
+    ORIGIN_USER, Origin, REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, SourcesDropped,
+    add_directive, add_directives, consolidate, diff_ops, drop_turns, kept_after_delete,
+    load_directives, load_fact, load_facts, load_forgets, load_hidden, rebuild,
 };
 pub use fold::{
     Candidate, Choice, Cover, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet,

@@ -152,11 +152,18 @@ impl Item {
 }
 
 /// 進み具合より後の利用者の発話を読み、前のふるいを当てる。訂正の候補も探し、直前の応答を引いておく。
-fn plan(store: &Store) -> Option<Vec<Item>> {
+/// 忘れるの指示と合わない発話 (04 §7.2) は、抽出にも訂正の候補にも使わない。
+fn plan(store: &Store, lang: crate::prompt::PromptLanguage) -> Option<Vec<Item>> {
     let r = store.read().ok()?;
     let through = load_extract_progress(&r).ok()?.through;
+    let hide = crate::masking::Hide::load(&r, lang)?;
     let mut items = Vec::new();
     for u in evorag_memory::user_utterances_after(&r, through).ok()? {
+        if let Ok(Some(evorag_store::Read::Ok(e))) = r.get(evorag_memory::KIND_TURN, u.turn)
+            && hide.excluded(&e)
+        {
+            continue;
+        }
         let correction = match find_correction(&u.mode, &u.text) {
             Some(m) => {
                 let previous = previous_answer(&r, u.session, u.turn).ok()?;
@@ -577,7 +584,8 @@ pub(crate) async fn count_tokens(
 pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     let version = state(inner).version;
     let store = inner.store.clone();
-    let Ok(Some(items)) = tokio::task::spawn_blocking(move || plan(&store)).await else {
+    let lang = inner.language;
+    let Ok(Some(items)) = tokio::task::spawn_blocking(move || plan(&store, lang)).await else {
         return false;
     };
     let mut tally = Tally::default();

@@ -868,6 +868,18 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
+    // 忘れるの指示と合わないターンと、ジャーナルの書き直しの残り (04 §7.2・§7.8)。
+    if !report.forget.mismatched.is_empty() {
+        let m = app.catalog.with(
+            MessageKey::CliForgetMismatched,
+            &[("count", &report.forget.mismatched.len().to_string())],
+        );
+        app.notices.push(m);
+    }
+    if report.forget.journal_pending {
+        let m = app.catalog.key(MessageKey::CliForgetJournalPending);
+        app.notices.push(m);
+    }
     if report.prompt_language_mismatch {
         let m = app.catalog.with(
             MessageKey::CliPromptLanguageFixed,

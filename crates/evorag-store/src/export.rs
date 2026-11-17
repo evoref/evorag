@@ -87,7 +87,11 @@ pub struct ExportView<'a> {
     tx: &'a redb::ReadTransaction,
 }
 
-impl ExportView<'_> {
+impl<'a> ExportView<'a> {
+    pub(crate) fn new(tx: &'a redb::ReadTransaction) -> Self {
+        Self { tx }
+    }
+
     /// 1 件を読む。
     ///
     /// # Errors

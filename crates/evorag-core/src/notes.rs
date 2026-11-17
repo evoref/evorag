@@ -117,6 +117,8 @@ fn plan(store: &Store, now_ms: i64, lang: crate::prompt::PromptLanguage) -> Opti
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
         let mut turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        // 忘れるの指示と合わないターンは、鍵を作る呼び出しに渡さない (04 §7.2)。
+        turns.retain(|t| !hide.excluded(&t.envelope));
         hide.apply(&r, &mut turns);
         let have = notes.get(&sid).map(Vec::as_slice).unwrap_or_default();
         for seg in evorag_memory::segments(&turns, now_ms) {
