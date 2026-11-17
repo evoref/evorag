@@ -62,12 +62,12 @@ flowchart TB
 | `evorag-llm` | llama-server のクライアント (chat・embed・rerank・tokenize・props・slots) | reqwest (TLS なし)、serde_json | v0.1 |
 | `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック | redb、ciborium、xxhash-rust | v0.1 |
 | `evorag-index` | 語彙の索引とベクトルの索引、セグメントの形式と入れ替え | memmap2、rayon、arc-swap | v0.1 (語彙) / v0.2 (ベクトル) |
-| `evorag-memory` | メモリの書き込み・統合・読み出し、事実の入口、訂正の検証 | — | v0.1 (ターンとセッション) / v0.2〜v0.3 |
+| `evorag-memory` | メモリの書き込み・統合・読み出し、事実の入口、訂正の検証 | toml、unicode-normalization、unicase (値の鍵の case folding、04 §5.6)、sha2 (値の鍵の HMAC。HMAC は sha2 の上に組む) | v0.1 (ターンとセッション) / v0.2〜v0.3 |
 | `evorag-retrieval` | 問いの準備、候補の収集と順位付け、文脈の組み立て | unicode-normalization | v0.1 |
 | `evorag-learn` | 回帰台帳、precept、提案、リプレイ、ゲート | — | v0.4 |
 | `evorag-cartridge` | カートリッジの形式・検証・導入・作成 | zip (圧縮なしの読み書きだけ、既定の機能を切る)、minisign-verify、encoding_rs | v0.5 |
 | `evorag-update` | 本体の更新の確認・取得・検証・適用 | ureq (`rustls-no-provider`・`platform-verifier`) + rustls + rustls-graviola (純 Rust の暗号の実装、OQ-05、S-06)、minisign-verify | v0.3 |
-| `evorag-core` | 上を組み立てるコア。コアの API の実装、sleep-time の進行 | tokio、tracing | v0.1 |
+| `evorag-core` | 上を組み立てるコア。コアの API の実装、sleep-time の進行 | tokio、tracing、getrandom (`memory.forget_key` を作る OS の乱数、v0.3) | v0.1 |
 | `evorag-tui` | TUI | ratatui、crossterm、unicode-width、unicode-segmentation | v0.1 |
 | `evorag` (bin) | サブコマンドの入口 | clap | v0.1 |
 | `xtask` (bin、`publish = false`) | 開発用の作業コマンド (check、check-deps、i18n、trace、live-llm) | — | v0.1 |
