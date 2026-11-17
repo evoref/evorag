@@ -3,8 +3,10 @@
 //! 仕様: 03, 02 §4.1。redb を直接使ってよいのはこの crate だけ (02 §4.3 の R2)。
 
 pub mod backup;
+mod compact;
 pub mod envelope;
 pub mod export;
+pub mod forget;
 pub mod fsutil;
 pub mod inspect;
 mod journal;
@@ -14,6 +16,7 @@ pub mod location;
 pub mod lock;
 pub mod meta;
 pub mod migrate;
+pub mod recopy;
 pub mod relations;
 pub mod restore;
 mod store;

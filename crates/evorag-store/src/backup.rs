@@ -28,6 +28,38 @@ pub struct CopyStats {
 /// 1 回のコミットで写す行の数。最後に `Immediate` で書き切る。
 const BATCH: usize = 10_000;
 
+/// 写す行の扱い ([`logical_copy_rows`])。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Row {
+    /// そのまま写す。
+    Keep,
+    /// 写さない。
+    Drop,
+    /// 値をこのバイト列にして写す (記録を書き換えて写すとき。封筒のチェックサムは呼び手が計算し直す)。
+    Replace(Vec<u8>),
+}
+
+/// 写す行の表 ([`TABLES`] と同じ順)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Table {
+    Meta,
+    Records,
+    Links,
+    Lookup,
+    Blobs,
+}
+
+/// 行ごとの扱いを決める関数 ([`logical_copy_rows`])。引数は表、キー、値。
+pub(crate) type RowFn<'a> = dyn FnMut(Table, &[u8], &[u8]) -> Result<Row, StoreError> + 'a;
+
+const TABLE_KINDS: [Table; TABLES.len()] = [
+    Table::Meta,
+    Table::Records,
+    Table::Links,
+    Table::Lookup,
+    Table::Blobs,
+];
+
 /// `src` の一貫した写しを `dst` に作る (`dst` は無いこと)。一時名に書いて書き切ってから入れ替える。
 pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError> {
     logical_copy_excluding(src, dst, &|_| false)
@@ -39,10 +71,21 @@ pub fn logical_copy_excluding(
     dst: &Path,
     exclude: &dyn Fn(&[u8]) -> bool,
 ) -> Result<CopyStats, StoreError> {
+    logical_copy_rows(src, dst, &mut |_, k, _| {
+        Ok(if exclude(k) { Row::Drop } else { Row::Keep })
+    })
+}
+
+/// 行ごとに `row` で扱いを決めて写す (忘れるの写し直し、03 §7.3)。
+pub(crate) fn logical_copy_rows(
+    src: &Database,
+    dst: &Path,
+    row: &mut RowFn<'_>,
+) -> Result<CopyStats, StoreError> {
     let tmp = dst.with_extension("partial");
     let _ = std::fs::remove_file(&tmp);
     fsutil::prepare_private_file(&tmp).map_err(|e| StoreError::Io(e.to_string()))?;
-    let stats = match copy_into(src, &tmp, exclude) {
+    let stats = match copy_into(src, &tmp, row) {
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -53,11 +96,7 @@ pub fn logical_copy_excluding(
     Ok(stats)
 }
 
-fn copy_into(
-    src: &Database,
-    path: &Path,
-    exclude: &dyn Fn(&[u8]) -> bool,
-) -> Result<CopyStats, StoreError> {
+fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopyStats, StoreError> {
     let out = Database::create(path).map_err(db)?;
     let rtx = src.begin_read().map_err(db)?;
     let mut stats = CopyStats::default();
@@ -68,15 +107,19 @@ fn copy_into(
     }
     let mut in_batch = 0;
     for (i, t) in TABLES.iter().enumerate() {
+        let kind = TABLE_KINDS[i];
         let table = rtx.open_table(*t).map_err(db)?;
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
-            if exclude(k.value()) {
-                continue;
-            }
+            let (k, v) = (k.value(), v.value());
+            let replaced = match row(kind, k, v)? {
+                Row::Drop => continue,
+                Row::Keep => None,
+                Row::Replace(bytes) => Some(bytes),
+            };
             tx.open_table(*t)
                 .map_err(db)?
-                .insert(k.value(), v.value())
+                .insert(k, replaced.as_deref().unwrap_or(v))
                 .map_err(db)?;
             stats.rows[i] += 1;
             in_batch += 1;

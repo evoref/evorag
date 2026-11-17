@@ -1015,7 +1015,7 @@ impl Store {
         Ok(purged)
     }
 
-    fn backup_order(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(crate) fn backup_order(&self) -> std::sync::MutexGuard<'_, ()> {
         self.backups.lock().unwrap_or_else(|e| e.into_inner())
     }
 

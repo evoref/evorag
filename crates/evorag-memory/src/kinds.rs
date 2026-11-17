@@ -29,6 +29,23 @@ pub const JOB_PURGE_BACKUPS: &str = "purge_backups";
 /// job の手順: 索引の項目だけを除く (起動時の突き合わせで除けなかった、DB に記録の無い前の世代の索引の行。
 /// 退避には触れない、04 §7.7 の 2)。古い版は知らない手順の job を使わずに残す。
 pub const JOB_PURGE_INDEXES: &str = "purge_indexes";
+/// job の手順: 忘れるの退避の写し直し (03 §7.3)。忘れるの指示の ID を任意の項目 `directive` に持ち、`ids` は
+/// 退避から除く ID だけを持つ。
+pub const JOB_FORGET_BACKUPS: &str = "forget_backups";
+
+/// restore で、置き換える DB から戻した DB へ引き継ぐ記録か (残っている整理の job、03 §10)。
+/// `evorag_store::restore::restore` の `carry` に渡す。
+#[must_use]
+pub fn carried_on_restore(env: &Envelope) -> bool {
+    #[derive(Deserialize)]
+    struct Task {
+        task: String,
+    }
+    env.kind == KIND_JOB
+        && env.body_as::<Task>().is_ok_and(|b| {
+            [JOB_PURGE_BACKUPS, JOB_PURGE_INDEXES, JOB_FORGET_BACKUPS].contains(&b.task.as_str())
+        })
+}
 
 /// ターン → セッション。
 pub const REL_IN_SESSION: &str = "in_session";

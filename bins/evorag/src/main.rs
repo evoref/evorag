@@ -359,6 +359,7 @@ fn main() -> ExitCode {
             backup,
             clock.now().as_millis(),
             Some(&config_file),
+            &evorag_memory::carried_on_restore,
         ) {
             Ok(_) => {
                 eprintln!(
@@ -482,6 +483,7 @@ fn main() -> ExitCode {
                 &b.dir,
                 clock.now().as_millis(),
                 Some(&config_file),
+                &evorag_memory::carried_on_restore,
             ) {
                 return fail(
                     &catalog,
