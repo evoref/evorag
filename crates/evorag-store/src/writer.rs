@@ -93,6 +93,11 @@ pub enum WriteOp {
     /// 開くときに残した「索引と退避から除く ID」([`Store::pending_deletes`]) を消す。整理の job を書くのと同じ
     /// 依頼に入れる。
     ClearPendingDeletes,
+    /// 次の起動で compact が要ることを書く (`meta` の `compact.pending`、03 §3.1.1)。記録を消した・書き換えた
+    /// 依頼 (規則 12 の突き合わせなど) に入れる。ジャーナルに書く種類の記録を `Delete` で消した依頼と、`Put`・
+    /// `Patch` で単調に増える項目 (ターンの改訂の番号) を上げた依頼 (伏せ字) には、書き手が自動で足す。印は
+    /// compact ([`Store::compact_if_pending`]) が消す。
+    SetCompactPending,
     /// コミットの後に、ジャーナルから ID ごとの `put` の行を除く書き直し (03 §6 の「削除と忘れる」)。DB には何も
     /// 書かない。忘れるでは、指示の `put` と伏せ字にしたターンの `Patch` と同じ依頼に入れる (伏せ字の後の行を
     /// 追記してから書き直す)。sleep-time の試し直しと起動時の当て直しは、この操作だけの依頼で送る (そのときは
@@ -531,6 +536,10 @@ pub(crate) fn apply_op(
             store.undo_derived(tx, &old)?;
             tx.put(&mut env)?;
             store.redo_derived(tx, &env)?;
+            // 伏せ字で改訂の番号を上げた (忘れる): 前の本文の跡を次の起動で compact して除く (03 §3.1.1)。
+            if store.raises_monotonic(&old, &env) {
+                tx.set_compact_pending()?;
+            }
             out.put.push(env.id);
             return Ok(Some(env));
         }
@@ -550,11 +559,25 @@ pub(crate) fn apply_op(
         }
         WriteOp::Put(env) => {
             let mut env = env.clone();
+            // 改訂の番号を上げる書き換え (伏せ字) は、前の本文の跡を次の起動で compact して除く (03 §3.1.1)。
+            let raised = tx.store.has_monotonic(&env.kind)
+                && matches!(
+                    tx.get(&env.kind, env.id)?,
+                    Some(Read::Ok(old)) if tx.store.raises_monotonic(&old, &env)
+                );
             tx.put(&mut env)?;
+            if raised {
+                tx.set_compact_pending()?;
+            }
             out.put.push(env.id);
         }
         WriteOp::Delete { kind, id } => {
-            tx.delete(kind, *id)?;
+            // 利用者の削除 (ジャーナルに書く種類) で消した記録の跡は、次の起動で compact して除く (03 §8)。
+            // 作り直せる派生の記録と job の削除では立てない (起動のたびの compact を避けるため。消すべき本文を
+            // 持つ派生の記録の削除は、呼び手が `SetCompactPending` を足す)。
+            if tx.delete(kind, *id)? && tx.store.is_journaled(kind) {
+                tx.set_compact_pending()?;
+            }
         }
         WriteOp::PutLink {
             from,
@@ -590,6 +613,7 @@ pub(crate) fn apply_op(
         }
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
         WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
+        WriteOp::SetCompactPending => tx.set_compact_pending()?,
         // コミットの後に書き手が行う (DB には書かない)。
         WriteOp::RewriteJournal(_) => {}
     }

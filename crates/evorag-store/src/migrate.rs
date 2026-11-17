@@ -198,11 +198,15 @@ fn is_complete_db(path: &Path) -> bool {
             .is_some_and(|s| s == meta::MIGRATION_NONE)
 }
 
-/// 移行の跡のファイルで、残っているもの (無ければ `None`)。
+/// 移行と compact の跡のファイルで、残っているもの (無ければ `None`)。
 pub(crate) fn leftover(root: &Path) -> Option<&'static str> {
-    [MIGRATING_FILE, PRE_MIGRATION_FILE]
-        .into_iter()
-        .find(|f| root.join(f).exists())
+    [
+        MIGRATING_FILE,
+        PRE_MIGRATION_FILE,
+        crate::compact::COMPACTING_FILE,
+    ]
+    .into_iter()
+    .find(|f| root.join(f).exists())
 }
 
 /// 前の移行が途中で止まった跡を片付ける。データ根を開く前 (ロックを取った後) に呼ぶ。

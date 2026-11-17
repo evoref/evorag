@@ -147,6 +147,11 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         // 想起への操作はジャーナルにも書く種類なので、消したこともジャーナルに残る。
         ops.extend(w.delete_feedback(*f));
     }
+    // ジャーナルに書く種類を消したら、次の起動で compact して跡を除く (03 §3.1.1。派生の記録だけの削除では
+    // 立てない)。
+    if !p.feedback.is_empty() {
+        ops.push(WriteOp::SetCompactPending);
+    }
     // 消した事実 (同じ値に合わせて消した矛盾の値も含む) は、操作の列から求める。
     let gone_facts = evorag_memory::deleted_ids(&facts.ops);
     ops.extend(facts.ops);

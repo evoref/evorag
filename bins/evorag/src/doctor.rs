@@ -135,6 +135,10 @@ pub fn run(
                 MessageKey::DoctorQuarantine,
                 &[("count", &report.quarantined().to_string())],
             );
+            // 空きが足りずに見送った compact も、次の起動でやり直すまで知らせる (03 §8、04 §7.8)。
+            if report.compact_pending() {
+                say(c, MessageKey::DoctorCompactPending, &[]);
+            }
         }
     }
     let j = &report.journal;

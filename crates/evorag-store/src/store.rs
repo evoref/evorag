@@ -28,7 +28,7 @@ pub const DB_FILE: &str = "evorag.redb";
 
 /// 会話の追記のための予備のファイル (03 §8、既定 16 MiB)。
 pub const RESERVE_FILE: &str = "reserve.space";
-const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// この evorag が書く DB の形式の版 (03 §4.1。v0.1〜v0.4 は `0.<n>`)。
 pub const FORMAT_VERSION: &str = "0.3";
@@ -175,6 +175,8 @@ pub struct OpenReport {
     /// 削除の行のある ID の `put` の行をジャーナルから除く書き直しが、開くときに済まなかった (次に開くときに
     /// もう一度試す。`doctor` が報告する)。
     pub journal_rewrite_failed: Option<crate::journal::RewriteError>,
+    /// 起動時の compact の結果 (03 §8)。[`Store::compact_if_pending`] が書く。
+    pub compaction: crate::compact::Compaction,
 }
 
 /// 開くときにジャーナルの削除の行から消し、まだ整理の job にしていない記録 ([`Store::pending_deletes`])。
@@ -330,7 +332,7 @@ pub struct Census {
 
 /// 開いたストア。落とすと DB を閉じ、データ根のロックを外す。
 pub struct Store {
-    db: Database,
+    pub(crate) db: Database,
     root: PathBuf,
     version: String,
     plan: FormatPlan,
@@ -398,7 +400,7 @@ pub(crate) fn classify(kind: &str, id: Id, k: &[u8], v: &[u8]) -> Read {
     }
 }
 
-fn map_db_error(e: redb::DatabaseError) -> OpenError {
+pub(crate) fn map_db_error(e: redb::DatabaseError) -> OpenError {
     match e {
         redb::DatabaseError::DatabaseAlreadyOpen => OpenError::DatabaseInUse,
         // redb のファイルの形式が新しい (壊れてはいない)。broken/ へ移さない (03 §4.2 の規則 6、§12.2)。
@@ -427,7 +429,13 @@ fn open_db(root: &Path) -> Result<Database, OpenError> {
             Database::open(&main).map_err(map_db_error)
         }
         Ok(_) => {
-            // 作った直後 (中身を書く前) に止まった空のファイル。
+            // 作った直後 (中身を書く前) に止まった空のファイル。移行や compact の跡が残っていれば、空の DB を
+            // 作らずに止める (原子的でない rename の途中で空になった本体かもしれず、跡が元の記録を持つため)。
+            if let Some(left) = migrate::leftover(root) {
+                return Err(OpenError::Unreadable(format!(
+                    "{DB_FILE} is empty but {left} remains; not creating a new database"
+                )));
+            }
             fsutil::prepare_private_file(&main)?;
             Database::create(&main).map_err(map_db_error)
         }
@@ -520,6 +528,23 @@ pub(crate) fn census_of(
     Ok(c)
 }
 
+/// 消した記録の跡を compact で除くようになった版 (v0.3、03 §3.1.1 の `compact.pending`)。
+const COMPACTING_SINCE: &str = "0.3.0";
+
+/// `last_writer` が [`COMPACTING_SINCE`] より古いデータ根を、それ以降の版が書き込みで開いたか (古い版が開いた間に
+/// 消した記録の跡が、ファイルの空きに残りうるので、次の compact を立てる、03 §3.1.1)。`last_writer` が無い・
+/// 読めないときは立てない。
+fn needs_compact_after_old_writer(existing: &BTreeMap<String, String>, ours: &Version) -> bool {
+    let Ok(since) = COMPACTING_SINCE.parse::<Version>() else {
+        return false;
+    };
+    *ours >= since
+        && existing
+            .get(meta::LAST_WRITER)
+            .and_then(|w| w.parse::<Version>().ok())
+            .is_some_and(|w| w < since)
+}
+
 /// ストアが自分で持つ種類と、渡された種類。
 pub(crate) fn kind_map(kinds: Vec<KindSpec>) -> BTreeMap<&'static str, KindSpec> {
     let mut m: BTreeMap<&'static str, KindSpec> =
@@ -539,9 +564,14 @@ impl Store {
         fsutil::create_private_dir(&opts.data_root)?;
         let lock = DataRootLock::acquire(&opts.data_root)?;
         migrate::recover(&opts.data_root)?;
+        crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;
         let mut database = match open_db(&opts.data_root) {
-            // 開けない DB のファイルは broken/ へ移し (消さない)、戻すかを尋ねる (03 §8、FR-205)。
-            Err(OpenError::Unreadable(reason)) if opts.data_root.join(DB_FILE).is_file() => {
+            // 開けない DB のファイルは broken/ へ移し (消さない)、戻すかを尋ねる (03 §8、FR-205)。移行や compact の
+            // 跡が残っているときは移さない (跡の側に元の記録がありうるので、退避から戻させない)。
+            Err(OpenError::Unreadable(reason))
+                if opts.data_root.join(DB_FILE).is_file()
+                    && migrate::leftover(&opts.data_root).is_none() =>
+            {
                 let moved_to =
                     crate::restore::move_broken(&opts.data_root, opts.clock.now().as_millis())?;
                 return Err(OpenError::Broken { moved_to, reason });
@@ -734,6 +764,8 @@ impl Store {
             let mut tx = self
                 .write_internal(Durability::Immediate)
                 .map_err(unreadable)?;
+            // 記録を消した・伏せ字で書き換えた (次の起動で compact が要る、03 §3.1.1)。
+            let mut freed = false;
             for line in &scan.lines {
                 match &line.op {
                     // 削除の行のある ID の `put` の行は当てない (古い版が消した後に書き戻した行で、消したものを
@@ -742,15 +774,19 @@ impl Store {
                     LineOp::Delete { id, .. } => report.journal_deletes.push(*id),
                     _ => {}
                 }
-                self.replay_line(&mut tx, &line.op).map_err(unreadable)?;
+                freed |= self.replay_line(&mut tx, &line.op).map_err(unreadable)?;
             }
             for (id, kind) in stale_alive {
                 if report.journal_deletes.contains(&id) {
                     continue;
                 }
-                self.replay_line(&mut tx, &LineOp::Delete { kind, id })
+                freed |= self
+                    .replay_line(&mut tx, &LineOp::Delete { kind, id })
                     .map_err(unreadable)?;
                 report.journal_deletes.push(id);
+            }
+            if freed {
+                tx.set_compact_pending().map_err(unreadable)?;
             }
             // 開くときに消した ID は、同じトランザクションで「索引と退避から除く ID」として残す (呼び手が整理の
             // job にしてから消す。job を書く前に落ちても失わないため)。
@@ -870,8 +906,10 @@ impl Store {
         Ok(())
     }
 
-    /// ジャーナルの 1 行を、何度当てても同じになるように当てる。
-    fn replay_line(&self, tx: &mut WriteTxn<'_>, op: &LineOp) -> Result<(), StoreError> {
+    /// ジャーナルの 1 行を、何度当てても同じになるように当てる。記録を消したか、単調に増える項目 (ターンの改訂の
+    /// 番号) を上げて書き換えた (伏せ字の前の本文がファイルの空きに残りうる) ときに `true` を返す。
+    fn replay_line(&self, tx: &mut WriteTxn<'_>, op: &LineOp) -> Result<bool, StoreError> {
+        let mut freed = false;
         match op {
             LineOp::Put(env) => {
                 // 通常の書き込みと同じ規則で当てる (03 §6): 新しい `v` の記録と読めない記録は上書き
@@ -880,16 +918,17 @@ impl Store {
                 match tx.get(&env.kind, env.id)? {
                     Some(Read::Ok(old)) => {
                         if spec.is_some_and(|s| old.v > s.current_v) {
-                            return Ok(());
+                            return Ok(false);
                         }
                         // 単調に増える項目 (ターンの改訂の番号) を小さくする行は当てない (伏せ字の前の行で、
                         // 伏せ字を戻さないため、03 §6)。
                         if spec.is_some_and(|s| s.lowers_monotonic(&old, env)) {
-                            return Ok(());
+                            return Ok(false);
                         }
+                        freed = self.raises_monotonic(&old, env);
                         self.undo_derived(tx, &old)?;
                     }
-                    Some(Read::Newer { .. } | Read::Corrupt { .. }) => return Ok(()),
+                    Some(Read::Newer { .. } | Read::Corrupt { .. }) => return Ok(false),
                     None => {}
                 }
                 tx.put_raw(env)?;
@@ -904,7 +943,7 @@ impl Store {
                 if let Some(Read::Ok(old)) = tx.get(kind, *id)? {
                     self.undo_derived(tx, &old)?;
                 }
-                tx.delete(kind, *id)?;
+                freed = tx.delete(kind, *id)?;
                 tx.delete_links_of(*id)?;
                 tx.delete_blobs(*id)?;
             }
@@ -915,7 +954,7 @@ impl Store {
                 Err(e) => return Err(e),
             },
         }
-        Ok(())
+        Ok(freed)
     }
 
     /// 記録から関係と副索引を作る (書き手の差し替え `Patch` で、読み直した封筒から作り直すため)。
@@ -1064,6 +1103,19 @@ impl Store {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
     }
 
+    /// その種類が単調に増える項目 (ターンの改訂の番号) を宣言しているか。
+    pub(crate) fn has_monotonic(&self, kind: &str) -> bool {
+        self.kinds.get(kind).is_some_and(|k| k.monotonic.is_some())
+    }
+
+    /// `old` を `new` で書き換えると、宣言した単調に増える項目が上がるか (伏せ字で書き換えた。前の本文がファイルの
+    /// 空きに残りうるので、次の起動で compact する、03 §3.1.1)。
+    pub(crate) fn raises_monotonic(&self, old: &Envelope, new: &Envelope) -> bool {
+        self.kinds
+            .get(new.kind.as_str())
+            .is_some_and(|s| s.lowers_monotonic(new, old))
+    }
+
     /// ジャーナルに集めた、その ID の `put` の行の単調に増える項目の値の範囲 (開くときに集め、このプロセスの
     /// 追記と書き直しで更新する)。忘れるの書き直しが済んでいないこと (`min < 伏せ字の後の番号 <= max`) を
     /// 見つけるのに使う (04 §7.2 の「ジャーナルの層の見つけ方」)。読むだけで開いたときは `None`。
@@ -1178,6 +1230,13 @@ impl Store {
             if max_is_older {
                 m.insert(meta::MAX_WRITER.as_bytes(), self.version.as_bytes())
                     .map_err(db)?;
+            }
+            if needs_compact_after_old_writer(existing, ours) {
+                m.insert(
+                    meta::COMPACT_PENDING.as_bytes(),
+                    crate::compact::PENDING.as_bytes(),
+                )
+                .map_err(db)?;
             }
             let wk = format!("{}{}", meta::WRITER_PREFIX, self.version);
             if !existing.contains_key(&wk) {

@@ -335,7 +335,8 @@ fn backups_list_shows_the_backups() {
     assert!(text.contains("daily"), "{text}");
 }
 
-/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)
+/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)、
+/// 03 §11 (取り込んでいないジャーナルの行があれば断る)
 #[test]
 fn export_writes_records_and_the_config_without_api_keys() {
     use evorag_store::{WriteRequest, Writer};
@@ -429,6 +430,21 @@ fn export_writes_records_and_the_config_without_api_keys() {
         "",
     );
     assert_eq!(again.status.code(), Some(1));
+
+    // 取り込んでいないジャーナルの行があれば断り、何も作らない (03 §11)。
+    evorag_store::testutil::raw_set_meta(&root, evorag_store::meta::JOURNAL_LAST_SEQ, "0");
+    let refused_out = dir.path().join("out-refused");
+    let refused = evorag_with_stdin(
+        dir.path(),
+        "version = 1
+",
+        &["export", refused_out.to_str().unwrap()],
+        "",
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("書き出しませんでした"), "{stderr}");
+    assert!(!refused_out.exists());
 }
 
 fn evorag_raw(dir: &Path, args: &[&str], stdin: &str) -> Output {

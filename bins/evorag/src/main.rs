@@ -664,6 +664,27 @@ fn main() -> ExitCode {
             .with(MessageKey::CliConfigObsolete, &[("key", key)]);
         app.notices.push(m);
     }
+    // 起動時の compact を見送った・できなかった (03 §8)。次の起動でやり直すまで `doctor` も知らせる。
+    match &report.store.compaction {
+        evorag_store::Compaction::LowSpace { free, need } => {
+            let mib = |b: u64| b.div_ceil(1024 * 1024).to_string();
+            let m = app.catalog.with(
+                MessageKey::CliCompactLowSpace,
+                &[
+                    ("free", &(free / (1024 * 1024)).to_string()),
+                    ("need", &mib(*need)),
+                ],
+            );
+            app.notices.push(m);
+        }
+        evorag_store::Compaction::Failed { reason } => {
+            let m = app
+                .catalog
+                .with(MessageKey::CliCompactFailed, &[("detail", reason)]);
+            app.notices.push(m);
+        }
+        _ => {}
+    }
     if report.prompt_language_mismatch {
         let m = app.catalog.with(
             MessageKey::CliPromptLanguageFixed,
