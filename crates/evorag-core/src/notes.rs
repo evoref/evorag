@@ -82,6 +82,8 @@ struct Work {
 struct Plan {
     work: Vec<Work>,
     due_at: Option<i64>,
+    /// 往復を読んだときに見えていた、最も新しい忘れるの指示 (ノートの `forgets_seen`、04 §7.2)。
+    forgets_seen: Option<Id>,
 }
 
 fn embeddings_of(r: &evorag_store::ReadTxn<'_>, note: Id) -> Vec<Id> {
@@ -90,9 +92,12 @@ fn embeddings_of(r: &evorag_store::ReadTxn<'_>, note: Id) -> Vec<Id> {
         .unwrap_or_default()
 }
 
-/// 区切りと記録したノートを突き合わせる。
-fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
+/// 区切りと記録したノートを突き合わせる。往復の本文は、private の値と伏せ字にしないで忘れた範囲を `[非表示]` に
+/// してから区切る (鍵を作る呼び出しに忘れた値を渡さない、04 §7.1・§7.5)。伏せる材料を読めなければ作らない。
+fn plan(store: &Store, now_ms: i64, lang: crate::prompt::PromptLanguage) -> Option<Plan> {
     let r = store.read().ok()?;
+    let hide = crate::masking::Hide::load(&r, lang)?;
+    let forgets_seen = evorag_memory::latest_forget(&r).ok()?;
     let mut notes: HashMap<Id, Vec<(Id, NoteBody)>> = HashMap::new();
     r.for_each(KIND_NOTE, |x| {
         if let Read::Ok(e) = x
@@ -107,10 +112,12 @@ fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
     let mut p = Plan {
         work: Vec::new(),
         due_at: None,
+        forgets_seen,
     };
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
-        let turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        let mut turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        hide.apply(&r, &mut turns);
         let have = notes.get(&sid).map(Vec::as_slice).unwrap_or_default();
         for seg in evorag_memory::segments(&turns, now_ms) {
             let ids = seg.ids();
@@ -276,7 +283,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         .version;
     let store = inner.store.clone();
     let now = inner.clock.now().as_millis();
-    let Ok(Some(plan)) = tokio::task::spawn_blocking(move || plan(&store, now)).await else {
+    let lang = inner.language;
+    let Ok(Some(plan)) = tokio::task::spawn_blocking(move || plan(&store, now, lang)).await else {
         return false;
     };
     inner.notes.lock().unwrap_or_else(|e| e.into_inner()).due_at = plan.due_at;
@@ -319,6 +327,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             model_key: server.model_key.clone(),
             rules: NOTE_RULES,
             src_revs: w.segment.src_revs(),
+            forgets_seen: plan.forgets_seen,
         };
         // 書き手が、読んだ出典 (発話と応答) が残っていて改訂の番号が合うことを確かめてから書く。呼び出しの間に
         // セッションが消えた・伏せ字になったら書かない (04 §7.7 の 4)。

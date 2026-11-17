@@ -468,6 +468,7 @@ fn write_forget_mark(root: &Path, attribute: &str, value: &str) {
         target: None,
         scope: None,
         marks: vec![mark.to_hex()],
+        vks: vec![vk.to_hex()],
         turns: Vec::new(),
         redactions: Vec::new(),
         hidden: Vec::new(),

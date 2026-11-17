@@ -142,6 +142,9 @@ pub enum Unverifiable {
     StaleSource,
     /// 直前の応答を 2 回半分にしても、要求が予算に収まらない。
     TooLong,
+    /// 検証の結果の古い値か新しい値が、忘れるの指示の値の鍵 (`vks`) のどれかと同じ。値の項目を書かずに落とす
+    /// (忘れた値の写しを訂正の記録に残さないため、04 §6 の「検証の時機」・§7.5 の「忘れると訂正」)。
+    Forgotten,
 }
 
 impl Unverifiable {
@@ -154,6 +157,7 @@ impl Unverifiable {
             Self::Failed => "failed",
             Self::StaleSource => "stale_source",
             Self::TooLong => "too_long",
+            Self::Forgotten => "forgotten",
         }
     }
 }
@@ -1236,8 +1240,9 @@ pub struct CorrectionBody {
     pub pattern: String,
     /// `{old}` の穴の本文 (200 文字まで)。古い値の無い型では null。
     pub dir_old: Option<String>,
-    /// `{new}` の穴の本文 (200 文字まで)。
-    pub dir_new: String,
+    /// `{new}` の穴の本文 (200 文字まで)。検証の結果が忘れた値だったときは null (04 §6)。
+    #[serde(default)]
+    pub dir_new: Option<String>,
     /// 検証を済ませたか。
     pub checked: bool,
     /// 検証を済ませたが検証済みにならなかった理由 ([`Rejection`] と [`Unverifiable`] の名前)。落ちた候補は
@@ -1279,7 +1284,7 @@ impl CorrectionBody {
             previous,
             pattern: m.pattern.clone(),
             dir_old: m.dir_old.clone(),
-            dir_new: m.dir_new.clone(),
+            dir_new: Some(m.dir_new.clone()),
             checked: false,
             rejected: None,
             target: None,
@@ -1300,6 +1305,11 @@ impl CorrectionBody {
         let mut b = self.clone();
         b.checked = true;
         b.rejected = verdict.reason().map(str::to_owned);
+        if *verdict == Verdict::Unverifiable(Unverifiable::Forgotten) {
+            // 忘れた値の写しを残さない (04 §6 の「検証の時機」)。
+            b.dir_old = None;
+            b.dir_new = None;
+        }
         if let Verdict::Verified(v) = verdict {
             b.stage = STAGE_VERIFIED.into();
             b.target = Some(v.target().as_str().into());
@@ -1318,14 +1328,17 @@ impl CorrectionBody {
 
     /// まだ検証していない候補なら、その形 (`id` は記録の ID)。
     pub fn to_candidate(&self, id: Id) -> Option<CorrectionCandidate> {
-        (self.stage == STAGE_CANDIDATE && !self.checked).then(|| CorrectionCandidate {
+        if self.stage != STAGE_CANDIDATE || self.checked {
+            return None;
+        }
+        Some(CorrectionCandidate {
             id,
             turn: self.turn,
             rev: self.rev,
             previous: self.previous,
             pattern: self.pattern.clone(),
             dir_old: self.dir_old.clone(),
-            dir_new: self.dir_new.clone(),
+            dir_new: self.dir_new.clone()?,
         })
     }
 
@@ -1402,10 +1415,14 @@ pub enum CandidateSkip {
     Exists,
     /// ターンが無い・読めない・改訂の番号が読んだときと違う (読んでから書くまでに削除・忘れるが入った)。
     Stale,
+    /// ターンが忘れるの指示の `turns`・`redactions`・`hidden` に入る (忘れた値の写しを訂正の記録に戻さないため、
+    /// 04 §6 の「候補を見つける時機」)。
+    Forgotten,
 }
 
 /// 候補を書く操作 (記録と、候補の発話への関係)。事実を書く経路のロックの下で呼ぶ。そのターンに訂正の記録が
-/// もうあるか、ターンが無い・改訂の番号が `body.rev` と違うなら書かない。
+/// もうあるか、ターンが無い・改訂の番号が `body.rev` と違うか、ターンが忘れるの指示に入る
+/// ([`crate::ForgetScope`]) なら書かない。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -1422,6 +1439,12 @@ pub fn candidate_ops(
     if !tx.links_to(body.turn, REL_CORRECTION_OF)?.is_empty() {
         return Ok(Err(CandidateSkip::Exists));
     }
+    if crate::forget::ForgetScope::load(tx)?
+        .turns
+        .contains(&body.turn)
+    {
+        return Ok(Err(CandidateSkip::Forgotten));
+    }
     let mut env = Envelope::new(ids.next_id(), KIND_CORRECTION, CORRECTION_V, now, "");
     env.set_body(body)?;
     let mut ops = derive_correction(&env);
@@ -1433,7 +1456,10 @@ pub fn candidate_ops(
 /// 番号が候補の `rev` と違う (ターンが無いものを含む) なら、結果の代わりに `stale_source` を書く (04 §6 の
 /// 「検証の時機」)。記録が無い・もう検証した・新しい `v` や知らない段階の記録なら `None` (書き換えない)。
 ///
-/// 書いた結果を返す (`stale_source` に替えたときは、それ)。
+/// 検証済みの結果の古い値か新しい値の値の鍵が、忘れるの指示の `vks` のどれかと同じなら、値の項目を null にして
+/// `forgotten` で落とす (04 §6 の「検証の時機」)。
+///
+/// 書いた結果を返す (`stale_source`・`forgotten` に替えたときは、それ)。
 ///
 /// # Errors
 /// 記録を読めない・本体を書けないとき。
@@ -1459,10 +1485,14 @@ pub fn checked_op(
         Some(Read::Ok(t)) => Some(crate::extract::turn_rev(&t)),
         _ => None,
     };
-    let verdict = if current == Some(body.rev) {
-        verdict
-    } else {
+    let verdict = if current != Some(body.rev) {
         Verdict::Unverifiable(Unverifiable::StaleSource)
+    } else if let Verdict::Verified(v) = &verdict
+        && crate::forget::ForgetScope::load(tx)?.forgets_value(v.old_vk(), v.new_vk())
+    {
+        Verdict::Unverifiable(Unverifiable::Forgotten)
+    } else {
+        verdict
     };
     env.updated_at = now;
     env.set_body(&body.checked(&verdict))?;

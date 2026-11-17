@@ -414,6 +414,8 @@ struct Item {
     /// ノートの鍵の位置 (チャンクは `None`)。
     key: Option<u32>,
     text: String,
+    /// チャンクの出典のターンの改訂の番号 (03 §3.3 の `src_rev`)。ノートの鍵は `None` (ノートの `src_revs` で判定)。
+    src_rev: Option<u32>,
 }
 
 /// 埋め込む本文を読む。チャンクは範囲を元のターンの本文から取り、ノートは鍵のそれぞれを 1 件にする。
@@ -432,6 +434,7 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
                     session: n.session,
                     key: Some(i as u32),
                     text: k.clone(),
+                    src_rev: None,
                 });
             }
             continue;
@@ -457,6 +460,7 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
             session: c.session,
             key: None,
             text: evorag_retrieval::chunk::slice(&tb.text, span),
+            src_rev: Some(c.src_rev()),
         });
     }
     out
@@ -604,6 +608,7 @@ async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<
                 model_key: key.to_owned(),
                 dim: v.len() as u32,
                 key: item.key,
+                src_rev: item.src_rev,
             };
             match w.embedding(&body, &v) {
                 Ok((_, o)) => ops.extend(o),

@@ -80,6 +80,11 @@ pub struct EmbeddingBody {
     /// 前からあるチャンクの埋め込みの保存形を変えない)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<u32>,
+    /// 作ったときの出典のターンの改訂の番号 (03 §3.3 の `src_rev`、v0.3 の任意の項目)。チャンクの埋め込みは
+    /// チャンクの出典のターンの番号を持つ。ノートの鍵の埋め込みは null (ノートの `src_revs` で判定する)。
+    /// 無い・null は 0 とみなす ([`SrcRev::of`])。
+    #[serde(default)]
+    pub src_rev: Option<u32>,
 }
 
 /// 関係: ノート → 出典の往復の発話のターン (04 §2)。
@@ -105,6 +110,11 @@ pub struct NoteBody {
     /// 作り直す。
     #[serde(default)]
     pub src_revs: Vec<SrcRev>,
+    /// 鍵を作る入力を読んだときに見えていた、最も新しい忘れるの指示の ID (v0.3 の任意の項目、04 §7.2 の当て直し
+    /// の一覧の 4)。指示が無ければ null。忘れるの当て直しは、伏せ字にしないときの `[非表示]` の範囲を持つ往復の
+    /// ノートのうち、これが無いか指示より前のもの (その範囲を伏せずに作ったもの) を消す。
+    #[serde(default)]
+    pub forgets_seen: Option<Id>,
 }
 
 /// ターンの本体の、改訂の番号の項目の名前 (04 §7.3、03 §3.3 の任意の項目。無ければ 0)。
@@ -115,6 +125,14 @@ pub const TURN_REV_FIELD: &str = "rev";
 pub struct SrcRev {
     pub turn: Id,
     pub rev: u32,
+}
+
+impl SrcRev {
+    /// 任意の項目 `src_rev` の読み方 (03 §3.3): 無ければ 0。
+    #[must_use]
+    pub fn of(src_rev: Option<u32>) -> u32 {
+        src_rev.unwrap_or(0)
+    }
 }
 
 /// 関係: チャンク → 元のターン (05 §2.4)。
@@ -134,6 +152,19 @@ pub struct ChunkBody {
     pub end: u32,
     /// 区切り方の版 (05 §2.4)。変われば作り直す。
     pub rules: u32,
+    /// 作ったときの出典のターンの改訂の番号 (03 §3.3 の `src_rev`、v0.3 の任意の項目)。無ければ 0 とみなす
+    /// ([`SrcRev::of`])。今のターンの番号と合わないチャンクは、伏せ字の前の本文から作ったものとして消す・使わない
+    /// (04 §7.2 の当て直しの 4、§7.7 の 1)。
+    #[serde(default)]
+    pub src_rev: Option<u32>,
+}
+
+impl ChunkBody {
+    /// 作ったときの出典のターンの改訂の番号 (無ければ 0)。
+    #[must_use]
+    pub fn src_rev(&self) -> u32 {
+        SrcRev::of(self.src_rev)
+    }
 }
 
 /// 関係: 想起への操作 → 問いの応答のターン (05 §5.2)。
@@ -347,6 +378,9 @@ pub struct JobBody {
     pub task: String,
     /// 手順の対象の記録の ID。
     pub ids: Vec<Id>,
+    /// `forget_backups` の job の、忘れるの指示の ID (03 §7.3)。ほかの手順では null。
+    #[serde(default)]
+    pub directive: Option<Id>,
 }
 
 fn link(from: Id, rel: &str, to: Id) -> WriteOp {

@@ -642,6 +642,7 @@ pub fn purge_job(writes: &Writes<'_>, ids: Vec<Id>) -> Result<(Id, WriteOp), Bod
         &JobBody {
             task: JOB_PURGE_BACKUPS.into(),
             ids,
+            directive: None,
         },
     )?;
     Ok((id, WriteOp::Put(e)))
@@ -657,6 +658,7 @@ pub fn index_job(writes: &Writes<'_>, ids: Vec<Id>) -> Result<(Id, WriteOp), Bod
         &JobBody {
             task: JOB_PURGE_INDEXES.into(),
             ids,
+            directive: None,
         },
     )?;
     Ok((id, WriteOp::Put(e)))

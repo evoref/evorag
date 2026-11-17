@@ -1169,6 +1169,15 @@ id = "AC-FR-307-4"
 requirement = "FR-307"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-store/src/forget.rs::applying_twice_is_the_same_as_once", "crates/evorag-store/src/forget.rs::several_directives_apply_in_order_and_report_gaps", "crates/evorag-store/tests/forget_backups.rs::a_backup_is_rewritten_with_the_turn_redacted_and_targets_dropped"]
+tests = ["crates/evorag-store/src/forget.rs::applying_twice_is_the_same_as_once", "crates/evorag-store/src/forget.rs::several_directives_apply_in_order_and_report_gaps", "crates/evorag-store/tests/forget_backups.rs::a_backup_is_rewritten_with_the_turn_redacted_and_targets_dropped", "crates/evorag-memory/src/fold_cases.rs::forget_cases_hold_in_the_store_and_replay_the_same", "crates/evorag-memory/src/forget.rs::replay_drops_stale_derived_records_and_reports_mismatches"]
 manual = ""
-note = "純粋な核 (04 §7.2 の apply_forget) と、退避の写し直し (03 §7.3 の forget_backups) で判定する。生きている DB とジャーナルの層の当て直しは、それを足すときに試験を足す。"
+note = "純粋な核 (04 §7.2 の apply_forget)、退避の写し直し (03 §7.3 の forget_backups)、生きている DB の層 (replay_forgets。回帰ケース F01〜F15 で、忘れるの直後の当て直しが何も変えないこと、指示と伏せ字の行だけを取り込んで当て直すと操作と同じ事実とターンになること) で判定する。起動時・取り込み・restore からの呼び出しはコアの層で足す。"
+
+[[ac]]
+id = "AC-FR-307-5"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/src/fold_cases.rs::forget_cases_hold_in_the_store_and_replay_the_same", "crates/evorag-memory/src/forget.rs::unreadable_or_stale_sources_abort_a_redacting_forget"]
+manual = ""
+note = "メモリの層の計画 (plan_forget) で判定する。本文が記録と食い違うターン (回帰ケース F11)、読めない出典のターン、出典の改訂の番号が今と合わないときは、操作の全体を中止し、何も書かない。画面の見本の警告は、コアと画面の層で足す。"

@@ -501,7 +501,8 @@ async fn save(
                         written += 1;
                     }
                     Err(CandidateSkip::Stale) => stale += 1,
-                    Err(CandidateSkip::Exists) => {}
+                    // そのターンに記録がもうある、または忘れたターン (04 §6 の「候補を見つける時機」)。
+                    Err(CandidateSkip::Exists | CandidateSkip::Forgotten) => {}
                 }
             }
             if stale > 0 {

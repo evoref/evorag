@@ -413,6 +413,7 @@ mod tests {
             model_key: "k".into(),
             rules: NOTE_RULES,
             src_revs: Vec::new(),
+            forgets_seen: None,
         };
         let body = NoteBody {
             src_revs: seg.src_revs(),

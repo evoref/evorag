@@ -123,6 +123,7 @@ const GATE_REASONS: &[&str] = &[
     "mixed_script",
     "imperative",
     "instruction_ref",
+    "redaction_marker",
     "too_long",
     "forgotten",
 ];
