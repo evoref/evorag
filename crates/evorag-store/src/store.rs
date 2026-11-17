@@ -654,7 +654,36 @@ impl Store {
         }
         self.check_forget_key(&scan.metas, true, report)?;
         *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = Some(journal);
+        // ジャーナルの取り込みの後に、記録した ID の最大を ID の下限にする (03 §3.3)。
+        if let Some(max) = self
+            .max_record_id()
+            .map_err(|e| OpenError::Unreadable(e.to_string()))?
+        {
+            self.ids.raise_floor(max);
+        }
         Ok(())
+    }
+
+    /// 知っている種類の記録の ID の最大 (種類ごとの最後の記録を見る。全件は読まない、NFR-101)。
+    pub fn max_record_id(&self) -> Result<Option<Id>, StoreError> {
+        let tx = self.db.begin_read().map_err(db)?;
+        let table = tx.open_table(RECORDS).map_err(db)?;
+        let mut max = None;
+        for kind in self.kinds.keys().copied().chain([KIND_QUARANTINE]) {
+            let start = kind_prefix(kind);
+            let end = key::prefix_end(&start);
+            let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+            let mut range = table
+                .range::<&[u8]>((Bound::Included(start.as_slice()), end))
+                .map_err(db)?;
+            if let Some(item) = range.next_back() {
+                let (k, _) = item.map_err(db)?;
+                if let Some((_, id)) = split_record_key(k.value()) {
+                    max = max.max(Some(id));
+                }
+            }
+        }
+        Ok(max)
     }
 
     /// ジャーナルの `memory.forget_key` の行を、連番に関わらず探す (03 §3.1.1)。
