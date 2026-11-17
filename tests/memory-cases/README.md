@@ -69,7 +69,7 @@
 
 `m = "negated"` の候補は関門を通り、統合 (§5.3 の「否定」) に渡る (`expect = "accept"`)。
 
-注: `redaction_marker` (04 §5.2、2026-11-17) の事例は、関門の実装と同じ PR で足す (`gates.toml` の事例は `extraction_cases.rs` がすべて走らせるので、実装より先に置くと試験が落ちる)。
+注: `redaction_marker` (04 §5.2、2026-11-17) の事例は G92〜G94。
 
 ## consolidation.toml と forget.toml
 
