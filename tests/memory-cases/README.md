@@ -45,7 +45,7 @@
 
 `[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化の後の照合で通ったときの `evidence_normalized`)。
 
-関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref`。
+関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
 
 | `expect` | 関門 | 意味 |
 |---|---|---|
@@ -63,12 +63,13 @@
 | `mixed_script` | 6 | 1 つの語に複数の文字体系を混ぜた並び (Script 属性。UTS #39 highly restrictive の組だけを許す) |
 | `imperative` | 6 | 命令形の文・依頼の印 (全言語を合わせて当てる) |
 | `instruction_ref` | 6 | ほかの指示への言及 |
+| `redaction_marker` | 6 | 値か根拠が伏せ字の印 (`[伏せ字]`・`[redacted]`) を含む (下の注) |
 | `too_long` | 7 | 値が属性の上限を超える |
 | `forgotten` | 8 | 再び覚えない印に当たる |
 
 `m = "negated"` の候補は関門を通り、統合 (§5.3 の「否定」) に渡る (`expect = "accept"`)。
 
-関門 6 の最後に当てる伏せ字の印 (値か根拠が `[伏せ字]`・`[redacted]` を含む。04 §5.2、2026-11-17) の理由 `redaction_marker` の事例は、関門の実装と同じ PR で足す (`gates.toml` の事例は `extraction_cases.rs` がすべて走らせるので、実装より先に置くと試験が落ちる)。
+注: `redaction_marker` (04 §5.2、2026-11-17) の事例は、関門の実装と同じ PR で足す (`gates.toml` の事例は `extraction_cases.rs` がすべて走らせるので、実装より先に置くと試験が落ちる)。
 
 ## consolidation.toml と forget.toml
 
