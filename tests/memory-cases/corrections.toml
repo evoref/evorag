@@ -164,3 +164,74 @@ expect_candidate = true
 direction = { old = "大阪", new = "東京" }
 llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京に住んでいます" }
 expect = "verified"
+
+[[case]]
+id = "K16"
+title = "一次のふるいと型に当たっても、検証の LLM が訂正ではないと答えたら捨てる"
+spec = "04 §6"
+previous = "おすすめの本を 3 冊挙げました"
+text = "それじゃなくて別のを見せて"
+expect_candidate = true
+direction = { old = "それ", new = "別のを見せて" }
+llm = { target = "response", old = "", new = "", e = "" }
+expect = "not_correction"
+
+[[case]]
+id = "K17"
+title = "括弧の内側の訂正 (引用して貼った他人の文) は、事実を置き換えない"
+spec = "04 §6、§5.2 の関門 4"
+live = [{ s = "self", a = "name", v = "田中" }]
+previous = "その記事を読みました"
+text = "記事に「田中じゃなくて佐藤」と書いてありました"
+expect_candidate = true
+direction = { old = "田中", new = "佐藤" }
+llm = { target = "fact", old = "田中", new = "佐藤", e = "田中じゃなくて佐藤" }
+expect = "quoted"
+
+[[case]]
+id = "K18"
+title = "新しい値の穴は同じ文の中だけ。後ろの文の語を新しい値にできない"
+spec = "04 §6 の穴の範囲"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です。妻は花子です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "花子", e = "大阪じゃなくて東京です。妻は花子です" }
+expect = "direction"
+
+[[case]]
+id = "K19"
+title = "末尾の穴の値は穴の始まりに置く。間に語が入れば落とす (安全の側)"
+spec = "04 §6 の値の位置"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて、今は東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて、今は東京です" }
+expect = "direction"
+
+[[case]]
+id = "K20"
+title = "古い値の無い型は、検証済みでも事実を変えない"
+spec = "04 §6 の事実への効き方"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪の天気をお伝えしました"
+text = "正しくは東京です"
+expect_candidate = true
+direction = { new = "東京" }
+llm = { target = "response", old = "大阪", new = "東京", e = "正しくは東京です" }
+expect = "verified"
+replaces = false
+
+[[case]]
+id = "K21"
+title = "古い値が関門 6 に外れる (URL) なら捨てる"
+spec = "04 §6 の関門 4"
+previous = "詳しくは https://example.com/a を見てください"
+text = "https://example.com/a じゃなくて東京の話です"
+expect_candidate = true
+direction = { old = "https://example.com/a", new = "東京の話" }
+llm = { target = "fact", old = "https://example.com/a", new = "東京", e = "https://example.com/a じゃなくて東京の話です" }
+expect = "old_not_found"
