@@ -27,6 +27,7 @@ pub mod version;
 mod winacl;
 pub mod writer;
 
+pub use compact::{CompactStop, Compaction};
 pub use envelope::{BodyError, BodyPatch, DecodeError, Envelope};
 pub use journal::{JOURNAL_DIR, JournalCut, RevSpan, RewriteError, RewriteFault, RewriteReport};
 pub use json::{envelope_from_json, envelope_to_json};

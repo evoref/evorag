@@ -265,6 +265,10 @@ exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました�
 export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
 export_pending = "ジャーナルに、まだデータベースに入っていない {count} 行があります。evorag を一度起動して終了してから書き出すと、それも含まれます。"
 export_not_empty = "{path} は空ではありません。空のフォルダか、まだ無いフォルダを指定してください。"
+export_refused_journal = "ジャーナルに、まだデータベースに入っていない {count} 行があるので、書き出しませんでした。evorag を一度起動して終了してから、もう一度書き出してください。"
+export_refused_forget = "忘れるの当て直しが済んでいないので、書き出しませんでした。evorag を一度起動して終了してから、もう一度書き出してください。"
+compact_low_space = "空きが足りないので、消した記録の跡をデータベースのファイルから除く処理 (compact) を見送りました (空き {free} MiB、必要 {need} MiB)。空きを作ると、次の起動で行います。"
+compact_failed = "消した記録の跡をデータベースのファイルから除く処理 (compact) ができませんでした ({detail})。次の起動でやり直します。"
 setup_guide = """
 llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
 次の手順で llama-server を用意してから、もう一度 evorag setup を実行してください。
@@ -349,6 +353,7 @@ probe_rerank = "モデルの点検 (rerank): 往復 6 件のリランク {ms} ms
 probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
 probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
+compact_pending = "データベースのファイルの空きの領域に、消した記録の跡が残っています。次の起動で除きます (compact。空きが足りなければ見送ります)"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
 index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"

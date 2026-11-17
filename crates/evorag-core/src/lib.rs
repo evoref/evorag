@@ -439,7 +439,7 @@ impl Core {
 
         let mut kinds = evorag_memory::kinds();
         kinds.sort_by_key(|k| k.name);
-        let (store, open_report) = Store::open(OpenOptions {
+        let (store, mut open_report) = Store::open(OpenOptions {
             data_root: cfg.data_root,
             evorag_version: cfg.evorag_version,
             kinds,
@@ -450,6 +450,10 @@ impl Core {
         if let Some(r) = store.read_only() {
             return Err(StartError::ReadOnly(format!("{r:?}")));
         }
+        // 起動の順 (03 §8、04 §7.2): ジャーナルの取り込みと開くときの削除 (`Store::open` の中) → 忘れるの当て直し
+        // → compact → 照会と命令の受け付け。忘れるの当て直しは、この compact より前に置く。compact は DB の
+        // ファイルを置き換えるので、書き手を作る前に行う。空きが足りなければ見送り、結果を画面に知らせる。
+        let store = store.compact_if_pending(&mut open_report, cfg.probe.free_bytes)?;
         let store = Arc::new(store);
 
         // 応答のモデルを、記録と照合する (06 §3.1)。違えば、何も書かずに止める。

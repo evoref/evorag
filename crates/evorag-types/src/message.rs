@@ -369,6 +369,14 @@ message_keys! {
     CliExportPending => "cli.export_pending",
     /// 引数: `path`。
     CliExportNotEmpty => "cli.export_not_empty",
+    /// 取り込んでいないジャーナルの行があるので書き出さない (03 §11)。引数: `count`。
+    CliExportRefusedJournal => "cli.export_refused_journal",
+    /// 当て直しの済んでいない忘れるがあるので書き出さない (03 §11)。
+    CliExportRefusedForget => "cli.export_refused_forget",
+    /// 空きが足りないので起動時の compact を見送った (03 §8)。引数: `free`、`need` (MiB)。
+    CliCompactLowSpace => "cli.compact_low_space",
+    /// 起動時の compact に失敗した (元のファイルのまま)。引数: `detail`。
+    CliCompactFailed => "cli.compact_failed",
     // `evorag doctor` と `evorag backups list` (03 §10)。
     /// 引数: `path`。
     DoctorConfig => "doctor.config",
@@ -410,6 +418,8 @@ message_keys! {
     DoctorProbeNone => "doctor.probe_none",
     /// 引数: `count`, `path`。
     DoctorBroken => "doctor.broken",
+    /// 次の起動で compact する (`compact.pending`、03 §8)。
+    DoctorCompactPending => "doctor.compact_pending",
     /// 引数: `docs`, `segments`。
     DoctorIndexOk => "doctor.index_ok",
     DoctorIndexMissing => "doctor.index_missing",

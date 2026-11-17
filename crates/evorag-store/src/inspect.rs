@@ -47,6 +47,13 @@ impl Inspection {
             .get(crate::store::KIND_QUARANTINE)
             .map_or(0, |c| c.ok)
     }
+
+    /// 次の起動で compact するか (`meta` の `compact.pending`、03 §3.1.1。無い・知らない値は「要らない」)。
+    pub fn compact_pending(&self) -> bool {
+        self.meta
+            .get(meta::COMPACT_PENDING)
+            .is_some_and(|v| v == crate::compact::PENDING)
+    }
 }
 
 /// データ根を、何も書かずに点検する。使っているプロセスがあれば断る (03 §9)。
