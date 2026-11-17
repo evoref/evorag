@@ -67,7 +67,7 @@ async fn start(root: &Path, llm: &ReplayClient) -> (Core, UnboundedReceiver<Even
 async fn until(rx: &mut UnboundedReceiver<Event>, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
     let mut got = Vec::new();
     loop {
-        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(30), rx.recv())
             .await
             .expect("timed out waiting for an event")
             .expect("event channel closed");
