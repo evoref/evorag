@@ -406,3 +406,38 @@ fn opening_removes_leftover_temporary_files_and_collects_revisions() {
     // 書き直しが済んでいないことが、集めた範囲から分かる (伏せ字の後の番号 1 に対して min 0)。
     assert_eq!(store.journal_rev_span(id), Some(RevSpan { min: 0, max: 1 }));
 }
+
+/// `RewriteJournal` の `All` は、消した記録の ID にだけ当てる。生きている記録の行は除かず、`skipped` に返す。
+/// verifies: 03 §6 (削除と忘れる)
+#[test]
+fn rewriting_all_lines_of_a_live_record_is_refused() {
+    let dir = TempDir::new("rewrite-live");
+    let store = open(dir.path());
+    let (h, t) = start(&store);
+    let live = store.ids().next_id();
+    let gone = store.ids().next_id();
+    h.submit_wait(WriteRequest::conversation(vec![
+        WriteOp::Put(turn(&store, live, "生きている本文", 0, None)),
+        WriteOp::Put(turn(&store, gone, "消す本文", 0, None)),
+    ]))
+    .unwrap();
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Delete {
+        kind: "turnish".into(),
+        id: gone,
+    }]))
+    .unwrap();
+    let cuts: BTreeMap<Id, JournalCut> = [(live, JournalCut::All), (gone, JournalCut::All)]
+        .into_iter()
+        .collect();
+    let out = h
+        .submit_wait(WriteRequest::background(vec![WriteOp::RewriteJournal(
+            cuts,
+        )]))
+        .unwrap();
+    let report = out.journal_rewrite.unwrap().unwrap();
+    assert_eq!(report.skipped, vec![live]);
+    let lines = journal_lines(dir.path());
+    assert!(lines.iter().any(|l| l.contains("生きている本文")));
+    assert!(!lines.iter().any(|l| l.contains("消す本文")));
+    stop(&h, t);
+}

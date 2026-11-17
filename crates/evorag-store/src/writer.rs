@@ -375,15 +375,24 @@ impl Writer {
 
     /// ジャーナルを書き直す。ジャーナルのロックを持ったまま行うので、書き直しの間に追記は入らない (03 §6 の
     /// 「追記との直列」)。読むだけで開いていてジャーナルが無ければ、何もしない。
+    ///
+    /// [`JournalCut::All`] は、消した記録の ID ([`Store::was_deleted`]) にだけ当てる。生きている記録の行を
+    /// 消さないため。ほかの ID は当てずに [`RewriteReport::skipped`] に入れる。
     fn rewrite_journal(
         &self,
         cuts: &BTreeMap<Id, JournalCut>,
     ) -> Result<RewriteReport, RewriteError> {
+        let (allowed, refused): (BTreeMap<Id, JournalCut>, BTreeMap<Id, JournalCut>) = cuts
+            .iter()
+            .map(|(&id, &cut)| (id, cut))
+            .partition(|&(id, cut)| cut != JournalCut::All || self.store.was_deleted(id));
         let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(journal) => journal.rewrite(cuts),
-            None => Ok(RewriteReport::default()),
-        }
+        let mut report = match guard.as_mut() {
+            Some(journal) => journal.rewrite(&allowed)?,
+            None => RewriteReport::default(),
+        };
+        report.skipped.extend(refused.into_keys());
+        Ok(report)
     }
 }
 

@@ -140,6 +140,22 @@ pub enum RewriteFault {
     FailSwap { nth: usize },
     /// 入れ替えた後、集めた結果を更新する前に止まる (強制終了をまねる)。
     StopAfterSwap,
+    /// 入れ替えた今の月のファイルを開き直すとき、`times` 回だけ共有違反 (一時の失敗) にする。
+    ReopenBusy { times: usize },
+    /// 入れ替えた今の月のファイルを開き直せないようにする (一時でない失敗)。
+    ReopenFails,
+}
+
+/// 試験の注入で使う、一時の共有違反 (Windows の `ERROR_SHARING_VIOLATION`)。
+fn sharing_violation() -> io::Error {
+    #[cfg(windows)]
+    {
+        io::Error::from_raw_os_error(32)
+    }
+    #[cfg(not(windows))]
+    {
+        io::Error::from(io::ErrorKind::WouldBlock)
+    }
 }
 
 /// 集めた `put` の行の 1 つ。
@@ -201,6 +217,8 @@ pub struct Journal {
     index: PutIndex,
     /// 書き直しで入れ替えたファイルを、追記のために開き直せなかった。以後は追記しない (03 §6 の「失敗」)。
     stopped: Option<String>,
+    /// このプロセスが最後に追記したファイルの名前 (今の月のファイル)。
+    current: Option<String>,
     /// 試験のための注入: 次の追記を失敗させる。
     fail_next: AtomicBool,
     /// 試験のための注入: 次の書き直しを失敗させる。
@@ -324,54 +342,23 @@ fn raw_put(v: &Json, monotonic: &Monotonic) -> Option<(Id, Option<u64>)> {
     Some((id, rev))
 }
 
-/// 読み直しの検査で比べる、行の形。
-#[derive(Debug, PartialEq, Eq)]
-enum Shape {
-    Blank,
-    /// チェックサムが合わない。
-    Bad,
-    /// チェックサムが合う (分かれば連番)。
-    Valid(Option<u64>),
-}
-
-fn shape(raw: &[u8]) -> Shape {
-    let l = trim_newline(raw);
-    if l.iter().all(u8::is_ascii_whitespace) {
-        return Shape::Blank;
-    }
-    match verified_body(l) {
-        None => Shape::Bad,
-        Some(body) => Shape::Valid(
-            serde_json::from_slice::<Json>(&body)
-                .ok()
-                .and_then(|v| v.get("seq").and_then(Json::as_u64)),
-        ),
-    }
-}
-
-/// 書き直した一時のファイルを読み直し、長さ・行の数・行ごとの `sum`・連番の順が、残した行と合うかを確かめる。
-fn verify(tmp: &Path, len: usize, want: &[Shape]) -> Result<(), String> {
+/// 書き直した一時のファイルを読み直し、書いたバイト列 (残した行) とちょうど同じかを確かめる (行ごとの `sum`・
+/// 行の数・連番の順も、これで確かめたことになる)。
+fn verify(tmp: &Path, kept: &[u8]) -> Result<(), String> {
     let got = std::fs::read(tmp).map_err(|e| e.to_string())?;
-    if got.len() != len {
-        return Err(format!("{len} bytes written, {} read back", got.len()));
+    if got == kept {
+        return Ok(());
     }
-    let shapes: Vec<Shape> = got.split_inclusive(|&b| b == b'\n').map(shape).collect();
-    if shapes.len() != want.len() {
-        return Err(format!(
-            "{} lines kept, {} read back",
-            want.len(),
-            shapes.len()
-        ));
-    }
-    match shapes.iter().zip(want).position(|(g, w)| g != w) {
-        Some(at) => Err(format!(
-            "line {}: expected {:?}, read {:?}",
-            at + 1,
-            want[at],
-            shapes[at]
-        )),
-        None => Ok(()),
-    }
+    let at = got
+        .iter()
+        .zip(kept)
+        .position(|(g, k)| g != k)
+        .unwrap_or(got.len().min(kept.len()));
+    Err(format!(
+        "{} bytes written, {} read back, first difference at byte {at}",
+        kept.len(),
+        got.len()
+    ))
 }
 
 fn month(ts: Timestamp) -> String {
@@ -485,10 +472,20 @@ impl Journal {
     pub fn open(root: &Path, last_seq: u64, monotonic: Monotonic) -> io::Result<(Self, Scan)> {
         let dir = root.join(JOURNAL_DIR);
         fsutil::create_private_dir(&dir)?;
-        // 入れ替えの前に止まった一時のファイルは要らない (元のファイルが残っている)。
-        for e in std::fs::read_dir(&dir)?.filter_map(Result::ok) {
-            if e.file_name().to_string_lossy().ends_with(TMP_SUFFIX) {
-                let _ = std::fs::remove_file(e.path());
+        // 残っている一時のファイル (03 §6)。元のファイルがあれば、入れ替えの前に止まったので要らない。元のファイルが
+        // 無ければ、読み直しの検査を通った後の入れ替えの途中で止まった完全な写しなので、元の名前に戻す。
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(TMP_SUFFIX))
+            .collect();
+        for name in leftovers {
+            let tmp = dir.join(&name);
+            let original = dir.join(name.trim_end_matches(".tmp"));
+            if original.exists() {
+                let _ = std::fs::remove_file(&tmp);
+            } else {
+                fsutil::rename_durable(&tmp, &original)?;
             }
         }
         let mut scan = Scan::default();
@@ -554,14 +551,17 @@ impl Journal {
             monotonic,
             index,
             stopped: None,
+            current: None,
             fail_next: AtomicBool::new(false),
             fault: None,
         };
-        // 削除の行があるのに `put` の行が残っていれば、除く (除く前に止まった、03 §6)。入れ替えられなくても
-        // 開くのは止めない (次に開くときに、もう一度試す)。
+        // 削除の行があるのに `put` の行が残っていれば、除く (除く前に止まった、03 §6)。チェックサムの合わない行が
+        // あれば、その行の ID は集められないので、削除の行のある ID をすべて当てる (正しい `put` の行がもう無くても、
+        // 消した ID を含む壊れた行を除くため)。入れ替えられなくても開くのは止めない (次に開くときに、もう一度試す)。
+        let all = !journal.index.bad.is_empty();
         let leftover: BTreeMap<Id, JournalCut> = deleted
             .keys()
-            .filter(|id| journal.index.puts.contains_key(*id))
+            .filter(|id| all || journal.index.puts.contains_key(*id))
             .map(|id| (*id, JournalCut::All))
             .collect();
         if let Err(e) = journal.rewrite(&leftover) {
@@ -621,6 +621,7 @@ impl Journal {
         self.next_seq = seq;
         // 追記した `put` の行も集める (このプロセスで追記したファイルを、書き直すファイルに足す、03 §6)。
         let file = self.index.file(&name);
+        self.current = Some(name);
         if mended {
             self.index.bad.insert(file);
         }
@@ -647,8 +648,10 @@ impl Journal {
     /// - 書き直すファイルは、集めた `put` の行のあるファイル (と、チェックサムの合わない行のあるファイル) から
     ///   選ぶ。ID の時刻では選ばない。
     /// - 残す行は、読んだバイト列のまま写す。ほかの行の中に ID が文字列として現れても除かない。
-    /// - 一時のファイル (`<年>-<月>.jsonl.tmp`、所有者だけの権限) を書き切ってから読み直し、行ごとの `sum`・
-    ///   行の数・連番の順を確かめてから入れ替える。
+    /// - 一時のファイル (`<年>-<月>.jsonl.tmp`、所有者だけの権限) を書き切ってから読み直し、残した行のバイト列と
+    ///   ちょうど同じであること (行ごとの `sum`・行の数・連番の順を含む) を確かめてから入れ替える。
+    /// - このプロセスが追記している今の月のファイルを入れ替えたら、追記のために開き直せることを確かめる (一時の
+    ///   共有違反は少し待って試し直す)。開き直せなければ、以後の追記を止める。
     /// - 追記と直列にするため、書き手スレッドがジャーナルのロックを持ったまま呼ぶ (`&mut self`)。
     ///
     /// # Errors
@@ -730,7 +733,6 @@ impl Journal {
             Err(e) => return Err(io_err(e)),
         };
         let mut kept = Vec::with_capacity(bytes.len());
-        let mut shapes = Vec::new();
         let mut refs = Vec::new();
         let mut removed = 0;
         let mut any_bad = false;
@@ -738,7 +740,6 @@ impl Journal {
             let l = trim_newline(raw);
             if l.iter().all(u8::is_ascii_whitespace) {
                 kept.extend_from_slice(raw);
-                shapes.push(Shape::Blank);
                 continue;
             }
             let seen = inspect(l, &self.monotonic);
@@ -767,17 +768,11 @@ impl Journal {
             {
                 refs.push((id, PutRef { file, rev }));
             }
-            shapes.push(match seen.decoded {
-                Decoded::Bad => {
-                    any_bad = true;
-                    Shape::Bad
-                }
-                Decoded::Newer(seq) => {
-                    report.kept_newer += 1;
-                    Shape::Valid(seq)
-                }
-                Decoded::Line(line) => Shape::Valid(Some(line.seq)),
-            });
+            match seen.decoded {
+                Decoded::Bad => any_bad = true,
+                Decoded::Newer(_) => report.kept_newer += 1,
+                Decoded::Line(_) => {}
+            }
         }
         if removed == 0 {
             // 前の試みで入れ替えた後に止まったときも、集めた結果をファイルに合わせる。
@@ -814,7 +809,7 @@ impl Journal {
             }
             _ => {}
         }
-        if let Err(reason) = verify(&tmp, kept.len(), &shapes) {
+        if let Err(reason) = verify(&tmp, &kept) {
             let _ = std::fs::remove_file(&tmp);
             return Err(RewriteError::Verify {
                 file: name.to_owned(),
@@ -827,7 +822,7 @@ impl Journal {
                 self.fault = None;
                 Err(io::Error::other("injected failure to replace the file"))
             }
-            _ => fsutil::rename_durable(&tmp, &path),
+            _ => fsutil::rename_replace(&tmp, &path),
         };
         if let Err(e) = swap {
             let _ = std::fs::remove_file(&tmp);
@@ -842,15 +837,53 @@ impl Journal {
                 "injected stop after replacing the file",
             )));
         }
-        // 追記のために開き直せることを確かめる。開き直せなければ、以後は追記しない (03 §6)。
-        if let Err(e) = OpenOptions::new().read(true).write(true).open(&path) {
-            self.stopped = Some(format!("{name} could not be reopened: {e}"));
-            return Err(io_err(e));
-        }
+        // 入れ替えは済んだ。フォルダの書き切りの失敗は、入れ替えの失敗とは分けて返す (集めた結果は更新する)。
+        let synced = fsutil::sync_dir(&self.dir);
+        let reopened = if self.current.as_deref() == Some(name) {
+            self.reopen(&path)
+        } else {
+            Ok(())
+        };
         self.refresh(file, cuts, refs, any_bad);
         report.files += 1;
         report.removed += removed;
+        if let Err(e) = reopened {
+            // 追記のために開き直せない。以後は追記しない (03 §6 の「失敗」)。
+            self.stopped = Some(format!("{name} could not be reopened: {e}"));
+            return Err(io_err(e));
+        }
+        synced.map_err(io_err)?;
         Ok(true)
+    }
+
+    /// 入れ替えた今の月のファイルを、追記のために開き直せるかを確かめる。ほかのプログラムが一時的に掴んでいる
+    /// ときは、rename と同じ間隔で試し直す。
+    fn reopen(&mut self, path: &Path) -> io::Result<()> {
+        let (mut busy, fails) = match self.fault {
+            Some(RewriteFault::ReopenBusy { times }) => {
+                self.fault = None;
+                (times, false)
+            }
+            Some(RewriteFault::ReopenFails) => {
+                self.fault = None;
+                (0, true)
+            }
+            _ => (0, false),
+        };
+        fsutil::retry_transient(|| {
+            if fails {
+                return Err(io::Error::other("injected failure to reopen the file"));
+            }
+            if busy > 0 {
+                busy -= 1;
+                return Err(sharing_violation());
+            }
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map(drop)
+        })
     }
 
     /// 書き直したファイルについて、対象の ID の集めた行を、残した行で置き換える。
@@ -1393,5 +1426,121 @@ mod tests {
         assert_eq!((report.files, report.removed), (1, 1));
         assert!(!raw_lines(&december).iter().any(|l| has(l, "伏せる前")));
         assert_eq!(j.rev_span(id), Some(RevSpan { min: 1, max: 1 }));
+    }
+
+    /// 元のファイルが無いのに一時のファイルが残っていれば (検査を通った後の入れ替えの途中で止まった)、元の名前に
+    /// 戻して読む。元のファイルがあれば、一時のファイルを消す。
+    /// verifies: 03 §6 (書き直し方)、09 §3.5 (ジャーナルの書き直しの途中)
+    #[test]
+    fn a_leftover_tmp_is_renamed_back_only_when_the_original_is_missing() {
+        let dir = TempDir::new("journal-tmp-recover");
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        j.append(NOW, &[LineOp::Put(env(1, "一"))]).unwrap();
+        j.append(LATER, &[LineOp::Put(env(2, "二"))]).unwrap();
+        drop(j);
+        let jdir = dir.path().join(JOURNAL_DIR);
+        // 11 月: 元のファイルが無く、一時のファイルだけがある。
+        std::fs::rename(jdir.join("2025-11.jsonl"), jdir.join("2025-11.jsonl.tmp")).unwrap();
+        // 12 月: 元のファイルも一時のファイルもある。
+        std::fs::write(jdir.join("2025-12.jsonl.tmp"), b"stale").unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        assert!(tmp_files(&dir).is_empty());
+        assert_eq!(scan.lines.len(), 2, "the November line is read back");
+        assert!(raw_lines(&path(&dir)).iter().any(|l| has(l, "一")));
+        assert!(
+            !std::fs::read(jdir.join("2025-12.jsonl"))
+                .unwrap()
+                .starts_with(b"stale")
+        );
+    }
+
+    /// 削除の書き直しが 2 つ目の月の入れ替えの前に止まり、1 つ目の月の `put` の行は除いたが、2 つ目の月に
+    /// 削除した ID を含む壊れた行が残ったとき: 次に開くと、正しい `put` の行がもう無くても、その壊れた行を除く。
+    /// verifies: 03 §6 (除く行の (a)・除く前に止まったとき)
+    #[test]
+    fn a_bad_line_naming_a_deleted_id_is_removed_at_the_next_open() {
+        let dir = TempDir::new("journal-bad-after-partial");
+        let gone = Id::from_bytes([1; 16]);
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        j.append(NOW, &[LineOp::Put(env(1, "消す本文"))]).unwrap();
+        j.append(LATER, &[LineOp::Put(env(2, "残す"))]).unwrap();
+        drop(j);
+        let december = dir.path().join("journal/2025-12.jsonl");
+        let broken = format!(
+            "{{\"seq\":9,\"op\":\"put\",\"env\":{{\"id\":\"{gone}\",\"body\":{{\"text\":\"壊れた本文\"}}}},\"sum\":\"0\"}}\n"
+        );
+        push_raw(&december, broken.as_bytes());
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        j.append(
+            LATER,
+            &[LineOp::Delete {
+                kind: "turn".into(),
+                id: gone,
+            }],
+        )
+        .unwrap();
+        j.inject_rewrite_fault(RewriteFault::FailSwap { nth: 1 });
+        let err = j.rewrite(&cut(gone, JournalCut::All)).unwrap_err();
+        assert!(err.is_swap(), "{err:?}");
+        assert!(!raw_lines(&path(&dir)).iter().any(|l| has(l, "消す本文")));
+        assert!(raw_lines(&december).iter().any(|l| has(l, "壊れた本文")));
+        drop(j);
+        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        assert_eq!(scan.rewrite_failed, None);
+        let after = raw_lines(&december);
+        assert!(!after.iter().any(|l| has(l, "壊れた本文")));
+        assert!(after.iter().any(|l| has(l, "残す")));
+        assert!(after.iter().any(|l| has(l, "\"delete\"")));
+    }
+
+    /// 今の月のファイルを入れ替えた後に開き直せなければ、以後の追記を止める。今の月でないファイルは開き直さない。
+    /// verifies: 03 §6 (追記との直列・失敗)
+    #[test]
+    fn appends_stop_when_the_current_month_cannot_be_reopened() {
+        let dir = TempDir::new("journal-reopen-fails");
+        let id = Id::from_bytes([1; 16]);
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let other = Id::from_bytes([3; 16]);
+        j.append(NOW, &[LineOp::Put(turn(3, "11月だけ", 0))])
+            .unwrap();
+        j.append(NOW, &[LineOp::Put(turn(3, "[伏せ字]", 1))])
+            .unwrap();
+        j.append(NOW, &[LineOp::Put(turn(1, "伏せる前・11月", 0))])
+            .unwrap();
+        j.append(LATER, &[LineOp::Put(turn(1, "伏せる前・12月", 0))])
+            .unwrap();
+        j.append(LATER, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
+            .unwrap();
+        // 今の月 (最後に追記したファイル) は 12 月。11 月だけを書き直すときは開き直さない (注入は使われない)。
+        j.inject_rewrite_fault(RewriteFault::ReopenFails);
+        assert_eq!(
+            j.rewrite(&cut(other, JournalCut::Below(1))).unwrap().files,
+            1
+        );
+        // 12 月を入れ替えると開き直す。開き直せなければ止まる。
+        let err = j.rewrite(&cut(id, JournalCut::Below(1))).unwrap_err();
+        assert!(matches!(err, RewriteError::Io { .. }), "{err:?}");
+        assert_eq!(j.rev_span(id), Some(RevSpan { min: 1, max: 1 }));
+        assert!(j.append(LATER, &[LineOp::Put(env(6, "x"))]).is_err());
+    }
+
+    /// 開き直しの一時の共有違反は、少し待って試し直す (Windows)。
+    /// verifies: 03 §6 (失敗)
+    #[cfg(windows)]
+    #[test]
+    fn a_transient_reopen_failure_is_retried() {
+        let dir = TempDir::new("journal-reopen-busy");
+        let id = Id::from_bytes([1; 16]);
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
+            .unwrap();
+        j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
+            .unwrap();
+        j.inject_rewrite_fault(RewriteFault::ReopenBusy { times: 2 });
+        assert_eq!(
+            j.rewrite(&cut(id, JournalCut::Below(1))).unwrap().removed,
+            1
+        );
+        assert_eq!(j.append(NOW, &[LineOp::Put(env(2, "次"))]).unwrap(), 3);
     }
 }
