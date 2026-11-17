@@ -148,6 +148,58 @@ fn band_lines(app: &App, t: &TurnView, width: usize, lines: &mut Vec<Line<'stati
     }
 }
 
+/// `/private` の確認の画面の本文 (07 §3): 消しはしないこと、今のセッションのこれまでのやり取りには残ること、
+/// llama-server には今の値を送らなくなるだけであること、多値の属性では兄弟の値が対象にならないこと、
+/// `llm.allow_remote` の構成では発話の本文が外の機械に出うること。効く範囲を選べ、既定のまま Enter で実行する。
+pub fn private_confirm_text(
+    app: &App,
+    label: &str,
+    multi: bool,
+    scope: evorag_types::api::PrivateScope,
+) -> String {
+    use evorag_types::api::PrivateScope;
+    let c = &app.catalog;
+    let mut text = c.with(MessageKey::UiPrivateBody, &[("label", label)]);
+    if multi {
+        text.push('\n');
+        text.push_str(&c.key(MessageKey::UiPrivateMulti));
+    }
+    if app.status.remote_llm {
+        text.push('\n');
+        text.push_str(&c.key(MessageKey::UiPrivateRemote));
+    }
+    text.push('\n');
+    for (s, k) in [
+        (
+            PrivateScope::Successors,
+            MessageKey::UiPrivateScopeSuccessors,
+        ),
+        (PrivateScope::ValueOnly, MessageKey::UiPrivateScopeValueOnly),
+    ] {
+        let cursor = if s == scope { "▶" } else { " " };
+        text.push_str(&format!("\n{cursor} {}", c.key(k)));
+    }
+    text.push_str("\n\n");
+    text.push_str(&c.key(MessageKey::UiPrivateHint));
+    text
+}
+
+/// `/private off` の確認の画面の本文。ほかの行の印も外れるときは、その行を示す (04 §7.5)。
+pub fn private_off_text(app: &App, label: &str, others: &[String]) -> String {
+    let c = &app.catalog;
+    let mut text = c.with(MessageKey::UiPrivateOffBody, &[("label", label)]);
+    if !others.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(&c.key(MessageKey::UiPrivateOffOthers));
+        for o in others {
+            text.push_str(&format!("\n  {o}"));
+        }
+    }
+    text.push_str("\n\n");
+    text.push_str(&c.key(MessageKey::UiPrivateOffHint));
+    text
+}
+
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let [v] = Layout::vertical([Constraint::Length(h.min(area.height))])
         .flex(Flex::Center)
@@ -259,8 +311,67 @@ pub fn draw(app: &App, f: &mut Frame) {
 
     match &app.mode {
         Mode::Chat => {}
+        Mode::Panel {
+            title,
+            body,
+            scroll,
+        } => {
+            // 事実の一覧などのスクロールできる窓 (07 §3)。
+            let r = centered(
+                area,
+                area.width.saturating_sub(4).min(100),
+                area.height.saturating_sub(2),
+            );
+            f.render_widget(Clear, r);
+            let hint = app.catalog.key(MessageKey::UiPanelHint);
+            f.render_widget(
+                Paragraph::new(body.clone())
+                    .wrap(Wrap { trim: false })
+                    .scroll((u16::try_from(*scroll).unwrap_or(u16::MAX), 0))
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title(format!(" {title} "))
+                            .title_bottom(format!(" {hint} ")),
+                    ),
+                r,
+            );
+        }
+        Mode::ConfirmPrivate {
+            label,
+            multi,
+            scope,
+            ..
+        } => {
+            let r = centered(area, 78, 20);
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(private_confirm_text(app, label, *multi, *scope))
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title(app.catalog.key(MessageKey::UiPrivateTitle)),
+                    ),
+                r,
+            );
+        }
+        Mode::ConfirmPrivateOff { label, others, .. } => {
+            let r = centered(area, 78, (others.len() as u16 + 8).min(20));
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(private_off_text(app, label, others))
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title(app.catalog.key(MessageKey::UiPrivateOffTitle)),
+                    ),
+                r,
+            );
+        }
         Mode::Help => {
-            let r = centered(area, 78, 16);
+            let r = centered(area, 78, 26);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(app.catalog.key(MessageKey::UiHelpBody))
@@ -424,6 +535,7 @@ mod tests {
                 limited: false,
                 recall: None,
                 background: None,
+                remote_llm: false,
             },
         );
         let sid = Id::from_bytes([1; 16]);

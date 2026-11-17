@@ -79,7 +79,8 @@ pub(crate) fn touch(inner: &Inner) {
 /// 鍵の残りは次の sleep-time の手順で索引に合わせる。
 ///
 /// セッションの削除と起動時の突き合わせは、消した事実の鍵を書き込みの直後に索引から除いてから、ここを呼ぶ。
-/// M3.4 で忘れる・private の操作の経路を足すときも、鍵を同じく除き (04 §5.5)、ここを呼ぶ。
+/// 事実への操作 (fact_ops.rs) も、private になった事実の鍵を同じく除き (04 §5.5)、ここを呼ぶ。忘れるの経路を足す
+/// ときも同じにする。
 pub(crate) fn invalidate(inner: &Inner) {
     let mut st = state(inner);
     st.invalidations += 1;
@@ -358,7 +359,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
 }
 
 /// 試験のため: 事実を private にする (事実への指示を足し、次のターンの前に表を作り直させる、04 §7.5・§5.4)。
-/// 事実を書く経路のロックの下で、[`add_directive`] の操作を書く。画面からの操作は M3.4 で足す。
+/// 事実を書く経路のロックの下で、[`add_directive`] の操作を書く。鍵は次の sleep-time の手順で索引から除く
+/// (画面からの操作 `/private` は fact_ops.rs で、知らせの前に除く)。
 /// 書けたら `true`。
 pub(crate) async fn make_private(
     inner: &Arc<Inner>,

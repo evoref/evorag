@@ -398,11 +398,13 @@ fn partner(turns: &[Turn], id: Id, b: &TurnBody) -> Option<Id> {
     }
 }
 
-/// 選んだターンを、その往復の相手と一緒に、セッションごとの出典にまとめる (スコアの順)。
-fn sources(store: &Store, hits: &[Id]) -> Vec<Source> {
+/// 選んだターンを、その往復の相手と一緒に、セッションごとの出典にまとめる (スコアの順)。本文には `[非表示]` の
+/// 置き換えを当てる (04 §7.5、05 §3.4)。
+fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
     let Ok(rtx) = store.read() else {
         return Vec::new();
     };
+    let hide = crate::masking::Hide::load(&rtx, lang);
     let mut order: Vec<Id> = Vec::new();
     let mut picked: HashMap<Id, HashSet<Id>> = HashMap::new();
     let mut session_turns: HashMap<Id, Vec<Turn>> = HashMap::new();
@@ -430,12 +432,13 @@ fn sources(store: &Store, hits: &[Id]) -> Vec<Source> {
                 .map(|s| s.body.title)
                 .unwrap_or_default();
             let set = &picked[&sid];
-            let turns = session_turns
+            let mut turns: Vec<Turn> = session_turns
                 .remove(&sid)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|t| set.contains(&t.envelope.id))
                 .collect();
+            hide.apply(&rtx, &mut turns);
             Source {
                 session: sid,
                 title,
@@ -455,11 +458,13 @@ struct Exchange {
     turns: Vec<Turn>,
 }
 
-/// 語彙の上位のターンを往復にまとめ、上位 `limit` 往復にする (05 §3.3 の 2)。
-fn exchanges(store: &Store, ranked: &[Id], limit: usize) -> Vec<Exchange> {
+/// 語彙の上位のターンを往復にまとめ、上位 `limit` 往復にする (05 §3.3 の 2)。本文には `[非表示]` の置き換えを
+/// 当てる (リランクの要求にも private の値を送らない、04 §7.5)。
+fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -> Vec<Exchange> {
     let Ok(rtx) = store.read() else {
         return Vec::new();
     };
+    let hide = crate::masking::Hide::load(&rtx, lang);
     let mut session_turns: HashMap<Id, Vec<Turn>> = HashMap::new();
     let mut out: Vec<Exchange> = Vec::new();
     for id in ranked {
@@ -483,11 +488,12 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize) -> Vec<Exchange> {
         if out.iter().any(|x| x.rep == rep) {
             continue;
         }
-        let members: Vec<Turn> = turns
+        let mut members: Vec<Turn> = turns
             .iter()
             .filter(|t| t.envelope.id == *id || Some(t.envelope.id) == other)
             .cloned()
             .collect();
+        hide.apply(&rtx, &mut members);
         let pos = turns.iter().position(|t| t.envelope.id == rep).unwrap_or(0);
         out.push(Exchange {
             rep,
@@ -711,7 +717,8 @@ pub(crate) async fn eval_exchanges(
             .search(&qv, CANDIDATES, &|row| row.session == session);
         lists.push(vector_turns(store, &rows, session));
     }
-    exchanges(store, &rrf(&lists), limit)
+    // ID だけを返すので、置き換えの言語はどちらでもよい。
+    exchanges(store, &rrf(&lists), limit, PromptLanguage::Ja)
         .into_iter()
         .map(|x| x.turns.iter().map(|t| t.envelope.id).collect())
         .collect()
@@ -886,7 +893,7 @@ async fn select_for(
         }
     }
     let ranked = rrf(&lists);
-    let ex = exchanges(store, &ranked, u.top);
+    let ex = exchanges(store, &ranked, u.top, lang);
     if ex.is_empty() {
         return none(RecallDecision::Abstain, obs);
     }
@@ -1008,7 +1015,7 @@ async fn finish(
     let mut used = 0;
     let mut attached = Vec::new();
     let mut counts = Vec::new();
-    for s in sources(store, &hits) {
+    for s in sources(store, &hits, lang) {
         if s.session == session || s.turns.is_empty() {
             continue;
         }
@@ -1047,9 +1054,9 @@ async fn finish(
     }
 }
 
-/// 往復 (代表のターンと、その相手) のターン。帯の詳細に使う (05 §5.2)。
-pub fn exchange_turns(store: &Store, target: Id) -> Option<Vec<Turn>> {
-    sources(store, &[target])
+/// 往復 (代表のターンと、その相手) のターン。帯の詳細に使う (05 §5.2)。本文には `[非表示]` の置き換えを当てる。
+pub fn exchange_turns(store: &Store, target: Id, lang: PromptLanguage) -> Option<Vec<Turn>> {
+    sources(store, &[target], lang)
         .into_iter()
         .next()
         .map(|s| s.turns)
@@ -1073,8 +1080,13 @@ pub fn next_source_number(turns: &[Turn]) -> u32 {
         .unwrap_or(1)
 }
 
-/// 応答の出典 `n` (このセッションの通し番号) のターン。
-pub fn source_turns(store: &Store, answer: &TurnBody, n: usize) -> Option<Vec<Turn>> {
+/// 応答の出典 `n` (このセッションの通し番号) のターン。本文には `[非表示]` の置き換えを当てる (表示に使う)。
+pub fn source_turns(
+    store: &Store,
+    answer: &TurnBody,
+    n: usize,
+    lang: PromptLanguage,
+) -> Option<Vec<Turn>> {
     let counts = &answer.recall.as_ref()?.sources;
     // その応答の中での位置 (0 から)。
     let i = n.checked_sub(source_base(answer) as usize)?;
@@ -1090,6 +1102,7 @@ pub fn source_turns(store: &Store, answer: &TurnBody, n: usize) -> Option<Vec<Tu
             out.push(Turn { envelope: e, body });
         }
     }
+    crate::masking::Hide::load(&rtx, lang).apply(&rtx, &mut out);
     (!out.is_empty()).then_some(out)
 }
 

@@ -278,18 +278,59 @@ impl Directives {
     /// 事実が private か (04 §7.5)。`successors` は、同じ (主語, 属性) で、出典の最も新しいターンが指示
     /// より後の事実 (指示の後に言われた値) にも効く。
     pub fn is_private(&self, f: &Fact) -> bool {
-        self.list.iter().any(|d| {
-            let DirectiveKind::Private { scope } = d.kind else {
-                return false;
-            };
-            if d.subject != f.subject || d.attribute != f.attribute || self.private_cancelled(d.id)
-            {
-                return false;
-            }
-            let same_value = d.vk.is_some() && d.vk == f.vk;
-            let successor = scope == Scope::Successors && f.latest_turn().is_some_and(|t| t > d.id);
-            same_value || successor
-        })
+        !self.private_cover(f).is_empty()
+    }
+
+    /// 事実に効いている、解かれていない private の指示と、その効き方 (指示の ID の順)。`/private off` は、
+    /// これをすべて解く (04 §7.5 の「private の解除」)。
+    pub fn private_cover(&self, f: &Fact) -> Vec<(&Directive, Cover)> {
+        self.list
+            .iter()
+            .filter_map(|d| {
+                let DirectiveKind::Private { scope } = d.kind else {
+                    return None;
+                };
+                if d.subject != f.subject
+                    || d.attribute != f.attribute
+                    || self.private_cancelled(d.id)
+                {
+                    return None;
+                }
+                if d.vk.is_some() && d.vk == f.vk {
+                    Some((d, Cover::SameValue))
+                } else if scope == Scope::Successors && f.latest_turn().is_some_and(|t| t > d.id) {
+                    Some((d, Cover::Successor))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// (主語, 属性) の、解かれていない後継まで効く private の指示 (指示の ID の順)。
+    pub fn successor_rules(&self, subject: &str, attribute: &str) -> Vec<&Directive> {
+        self.list
+            .iter()
+            .filter(|d| {
+                d.kind
+                    == DirectiveKind::Private {
+                        scope: Scope::Successors,
+                    }
+                    && d.subject == subject
+                    && d.attribute == attribute
+                    && !self.private_cancelled(d.id)
+            })
+            .collect()
+    }
+
+    /// 指示 `id`。
+    pub fn get(&self, id: Id) -> Option<&Directive> {
+        self.list.iter().find(|d| d.id == id)
+    }
+
+    /// 忘れるの指示 `id` の印が、印を解く指示で解かれたか。
+    pub fn is_unblocked(&self, id: Id) -> bool {
+        self.forget_cancelled(id)
     }
 
     /// 再び覚えない印に当たるか (04 §7.6)。解かれた印は当てない。知らない指示の印も当てる。
@@ -329,6 +370,15 @@ impl Directives {
             })
             .collect()
     }
+}
+
+/// private の指示が事実に効く形 (04 §7.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cover {
+    /// 指示と同じ値の鍵。
+    SameValue,
+    /// 後継まで効く指示の後に言われた値。
+    Successor,
 }
 
 /// 採るか戻すか (04 §7.4)。

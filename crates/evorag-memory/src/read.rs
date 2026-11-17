@@ -14,7 +14,7 @@ pub enum MemoryError {
     Body(#[from] evorag_store::BodyError),
     #[error("record {0} not found")]
     NotFound(Id),
-    /// 今は書き込みの入口から足せない指示 (忘れる・印を解くは M3.4 で、伏せ字とともに足す)。
+    /// 書き込みの入口から足せない指示 (忘れるは、伏せ字とともに `apply_forget` で足す。知らない指示は書かない)。
     #[error("this fact directive cannot be added here: {0}")]
     UnsupportedDirective(&'static str),
 }

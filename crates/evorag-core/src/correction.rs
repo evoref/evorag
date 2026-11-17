@@ -134,7 +134,10 @@ impl Drop for Tally {
 /// 検証に渡す材料 (候補の発話・直前の応答・それより前の発話・今の値)。
 struct Material {
     text: String,
+    /// 直前の応答の保存した本文 (検証の関門が照合に使う)。
     previous: Option<String>,
+    /// 直前の応答に `[非表示]` の置き換えを当てたもの (検証のプロンプトにだけ入れる、04 §6・§7.5)。
+    previous_prompt: Option<String>,
     earlier: Vec<String>,
     live: Vec<String>,
 }
@@ -146,7 +149,11 @@ enum Prepared {
 }
 
 /// 候補の材料を読む。記録を読めなければ `None`。
-fn prepare(store: &Store, c: &CorrectionCandidate) -> Option<Prepared> {
+fn prepare(
+    store: &Store,
+    c: &CorrectionCandidate,
+    lang: crate::prompt::PromptLanguage,
+) -> Option<Prepared> {
     let r = store.read().ok()?;
     let turn = match r.get(KIND_TURN, c.turn).ok()? {
         Some(Read::Ok(e)) => e,
@@ -159,10 +166,12 @@ fn prepare(store: &Store, c: &CorrectionCandidate) -> Option<Prepared> {
         return Some(Prepared::Stale);
     }
     let mut previous = None;
+    let mut previous_prompt = None;
     let mut earlier = Vec::new();
     for t in session_turns(&r, body.session).ok()? {
         if Some(t.envelope.id) == c.previous {
             previous = Some(t.body.text.clone());
+            previous_prompt = Some(crate::masking::Hide::load(&r, lang).text(&r, &t));
         }
         // 同じセッションの、候補の発話より前の利用者の発話 (前のふるいの後の本文、04 §6 の「検証の時機」)。
         if t.envelope.id < c.turn && t.body.role == TurnRole::User {
@@ -181,6 +190,7 @@ fn prepare(store: &Store, c: &CorrectionCandidate) -> Option<Prepared> {
     Some(Prepared::Ready(Material {
         text: body.text,
         previous,
+        previous_prompt,
         earlier,
         live,
     }))
@@ -271,9 +281,8 @@ fn count_failure(inner: &Inner, id: Id) -> u32 {
 /// 検証の利用者のメッセージを、予算 (2,048 − システムのメッセージ − 64。見積もりなら 2 割減らす、04 §5.2.1) に
 /// 収める。直前の応答は末尾の 800 文字から始め、収まらなければ半分ずつ 2 回まで切る。収まらなければ `None`。
 ///
-/// 直前の応答には、想起で添えるときと同じ `[非表示]` の置き換え (04 §7.5) を当ててから入れる (04 §6 の「検証の
-/// 時機」)。置き換え (伏せ字にしないで忘れた値と private の値の範囲) は忘れる・private の操作 (M3.4) と一緒に
-/// 入るので、今は当てる範囲が無い。
+/// 直前の応答には、想起で添えるときと同じ `[非表示]` の置き換え (04 §7.5) を当てたもの (`Material::previous_prompt`)
+/// を渡す (04 §6 の「検証の時機」)。検証の関門は、置き換えの前の保存した本文で照合する。
 async fn fit_input(
     inner: &Inner,
     llm: &dyn LlmClient,
@@ -394,7 +403,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         };
         let store = inner.store.clone();
         let candidate = c.clone();
-        let prepared = tokio::task::spawn_blocking(move || prepare(&store, &candidate))
+        let lang = inner.language;
+        let prepared = tokio::task::spawn_blocking(move || prepare(&store, &candidate, lang))
             .await
             .ok()
             .flatten();
@@ -439,7 +449,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                     &server.model_key,
                     limit,
                     counting,
-                    m.previous.as_deref(),
+                    m.previous_prompt.as_deref(),
                     &utterance,
                 )
                 .await;

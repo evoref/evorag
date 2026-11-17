@@ -33,6 +33,7 @@ fn app() -> App {
             limited: false,
             recall: None,
             background: None,
+            remote_llm: false,
         },
     );
     let turns = (0..TURNS)

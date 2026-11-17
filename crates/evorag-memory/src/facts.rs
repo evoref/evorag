@@ -221,6 +221,37 @@ pub struct FactDirectiveBody {
     pub history: bool,
     #[serde(default)]
     pub redact: bool,
+    /// 指示を足した経路 (04 §7.5): `user` (利用者の操作) か `delete` (セッションの削除・規則 12 の掃除で足した、
+    /// その値だけの private)。無い記録と知らない値は `user` として読む ([`FactDirectiveBody::origin`])。
+    #[serde(default = "origin_user")]
+    pub origin: String,
+}
+
+/// 指示の経路: 利用者の操作 (既定)。
+pub const ORIGIN_USER: &str = "user";
+/// 指示の経路: セッションの削除・出典の無い事実の掃除で足した (04 §7.5 の「後継」)。
+pub const ORIGIN_DELETE: &str = "delete";
+
+fn origin_user() -> String {
+    ORIGIN_USER.to_owned()
+}
+
+/// 指示を足した経路 (04 §7.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// 利用者の操作。`origin` の無い記録と知らない値も、こちらとして読む。
+    User,
+    /// セッションの削除・出典の無い事実の掃除で足した。
+    Delete,
+}
+
+impl Origin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Origin::User => ORIGIN_USER,
+            Origin::Delete => ORIGIN_DELETE,
+        }
+    }
 }
 
 const OP_FORGET: &str = "forget";
@@ -298,6 +329,17 @@ impl FactDirectiveBody {
             hidden: Vec::new(),
             history: false,
             redact: false,
+            origin: origin_user(),
+        }
+    }
+
+    /// 指示を足した経路。知らない値は利用者の操作として読む。
+    #[must_use]
+    pub fn origin(&self) -> Origin {
+        if self.origin == ORIGIN_DELETE {
+            Origin::Delete
+        } else {
+            Origin::User
         }
     }
 }
@@ -817,8 +859,10 @@ pub fn drop_turns(
         &mut new_id,
     );
     let mut ops = Vec::new();
+    // 削除で足す指示は `origin = "delete"` で書く (`/memory` で「削除で足した指示」と見分ける、
+    // [`kept_after_delete`])。
     for d in &dropped.directives {
-        ops.extend(directive_ops(d, now)?);
+        ops.extend(directive_ops(d, None, Origin::Delete, now)?);
     }
     ops.extend(diff_ops(&before, &set, now)?);
     let mut deleted = dropped.deleted.clone();
@@ -850,20 +894,132 @@ pub fn drop_turns(
 }
 
 /// 指示の記録を足す操作 (本体と、その関係・副索引)。種類 `fact_directive` はジャーナルにも書かれる。
-fn directive_ops(d: &Directive, now: Timestamp) -> Result<Vec<WriteOp>, BodyError> {
+/// `fact` は操作したときの事実の ID (参考。当てるときは使わない、04 §7.5)、`origin` は指示を足した経路。
+fn directive_ops(
+    d: &Directive,
+    fact: Option<Id>,
+    origin: Origin,
+    now: Timestamp,
+) -> Result<Vec<WriteOp>, BodyError> {
     let mut env = Envelope::new(d.id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, now, "");
-    env.set_body(&FactDirectiveBody::from_directive(d))?;
+    let mut body = FactDirectiveBody::from_directive(d);
+    body.fact = fact;
+    body.origin = origin.as_str().to_owned();
+    env.set_body(&body)?;
     let mut ops = derive_directive(&env);
     ops.insert(0, WriteOp::Put(env));
     Ok(ops)
 }
 
+/// 足す事実への指示 1 つ ([`add_directives`])。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDirective {
+    pub kind: DirectiveKind,
+    pub subject: String,
+    pub attribute: String,
+    pub vk: Option<ValueKey>,
+    /// 操作したときの事実の ID (参考として本体の `fact` に書く。当てるときは使わない、04 §7.5)。
+    pub fact: Option<Id>,
+}
+
+/// 事実への指示を足した書き込み ([`add_directives`])。
+#[derive(Debug, Clone, Default)]
+pub struct DirectivesAdded {
+    /// 足した指示の ID (渡した順)。
+    pub ids: Vec<Id>,
+    /// 書き込みの操作 (指示の記録と、効き目を当てた事実の差)。
+    pub ops: Vec<WriteOp>,
+    /// この操作で private になった事実 (ID の順)。呼ぶ側は、コミットの直後に (利用者に知らせる前に)、その
+    /// 検索の鍵を索引から除く (04 §5.5)。
+    pub hidden: Vec<Id>,
+}
+
 /// 事実への指示を足し、その効き目を事実に当てた書き込みの操作を返す (04 §7.5)。
-/// 採る・戻すは指示の時点で 1 回当て、private とその解除は事実の写しを計算し直す。
+/// 採る・戻すは指示の時点で 1 回当て、private とその解除と印を解くは常に効く制約として計算し直す。
+/// 指示は 1 つの読み取りから続けて畳むので、`/private off` で複数の指示を解くときも 1 回で渡す。
 ///
 /// # Errors
-/// 記録を読めない・本体を書けないとき。今は足せない指示 (忘れる・印を解く・知らない指示、値の鍵の無い
-/// 採る・戻す) は `UnsupportedDirective`。
+/// 記録を読めない・本体を書けないとき。足せない指示 (忘れる・知らない指示、値の鍵の無い採る・戻す、相手の
+/// 無い解除) は `UnsupportedDirective`。
+pub fn add_directives(
+    tx: &ReadTxn<'_>,
+    ctx: &FactCtx<'_>,
+    list: Vec<NewDirective>,
+) -> Result<DirectivesAdded, MemoryError> {
+    let before = load_facts(tx)?;
+    let mut dirs = load_directives(tx)?;
+    let mut out = DirectivesAdded::default();
+    let mut events: Vec<Event> = Vec::new();
+    for n in list {
+        let choice = match n.kind {
+            DirectiveKind::Private { .. }
+            | DirectiveKind::PrivateOff { .. }
+            | DirectiveKind::Unblock { .. } => None,
+            DirectiveKind::Accept => Some(Choice::Accept),
+            DirectiveKind::Revert => Some(Choice::Revert),
+            DirectiveKind::Forget { .. } => {
+                return Err(MemoryError::UnsupportedDirective(
+                    "forget comes with redaction (apply_forget)",
+                ));
+            }
+            DirectiveKind::Unknown { .. } => {
+                return Err(MemoryError::UnsupportedDirective(
+                    "unknown directives are read, never written",
+                ));
+            }
+        };
+        let id = ctx.ids.next_id();
+        if let Some(choice) = choice {
+            let Some(vk) = n.vk else {
+                return Err(MemoryError::UnsupportedDirective(
+                    "accept and revert need a value key",
+                ));
+            };
+            events.push(Event::Choose {
+                directive: id,
+                subject: n.subject.clone(),
+                attribute: n.attribute.clone(),
+                vk,
+                choice,
+            });
+        }
+        let d = Directive {
+            id,
+            kind: n.kind,
+            subject: n.subject,
+            attribute: n.attribute,
+            vk: n.vk,
+        };
+        out.ops
+            .extend(directive_ops(&d, n.fact, Origin::User, ctx.now)?);
+        out.ids.push(id);
+        dirs.push(d);
+    }
+    let mut set = before.set.clone();
+    // fold は最後に private を計算し直す (出来事が無くても)。
+    ctx.fold(&mut set, &dirs, events);
+    let was_private: BTreeSet<Id> = before
+        .set
+        .facts
+        .iter()
+        .filter(|f| f.private)
+        .map(|f| f.id)
+        .collect();
+    out.hidden = set
+        .facts
+        .iter()
+        .filter(|f| f.private && !was_private.contains(&f.id))
+        .map(|f| f.id)
+        .collect();
+    out.hidden.sort_unstable();
+    out.ops.extend(diff_ops(&before, &set, ctx.now)?);
+    Ok(out)
+}
+
+/// 事実への指示を 1 つ足す ([`add_directives`])。足した指示の ID と書き込みの操作を返す。
+///
+/// # Errors
+/// [`add_directives`] と同じ。
 pub fn add_directive(
     tx: &ReadTxn<'_>,
     ctx: &FactCtx<'_>,
@@ -872,54 +1028,106 @@ pub fn add_directive(
     attribute: &str,
     vk: Option<ValueKey>,
 ) -> Result<(Id, Vec<WriteOp>), MemoryError> {
-    let choice = match kind {
-        DirectiveKind::Private { .. } | DirectiveKind::PrivateOff { .. } => None,
-        DirectiveKind::Accept => Some(Choice::Accept),
-        DirectiveKind::Revert => Some(Choice::Revert),
-        DirectiveKind::Forget { .. } | DirectiveKind::Unblock { .. } => {
-            return Err(MemoryError::UnsupportedDirective(
-                "forget and unblock come with redaction (M3.4)",
-            ));
-        }
-        DirectiveKind::Unknown { .. } => {
-            return Err(MemoryError::UnsupportedDirective(
-                "unknown directives are read, never written",
-            ));
-        }
-    };
-    if choice.is_some() && vk.is_none() {
-        return Err(MemoryError::UnsupportedDirective(
-            "accept and revert need a value key",
-        ));
-    }
-    let id = ctx.ids.next_id();
-    let d = Directive {
-        id,
-        kind,
-        subject: subject.to_owned(),
-        attribute: attribute.to_owned(),
-        vk,
-    };
-    let mut ops = directive_ops(&d, ctx.now)?;
-
-    let before = load_facts(tx)?;
-    let mut dirs = load_directives(tx)?;
-    dirs.push(d);
-    let mut set = before.set.clone();
-    let events: Vec<Event> = match (choice, vk) {
-        (Some(choice), Some(vk)) => vec![Event::Choose {
-            directive: id,
+    let added = add_directives(
+        tx,
+        ctx,
+        vec![NewDirective {
+            kind,
             subject: subject.to_owned(),
             attribute: attribute.to_owned(),
             vk,
-            choice,
+            fact: None,
         }],
-        _ => Vec::new(),
-    };
-    // fold は最後に private を計算し直す (出来事が無くても)。
-    ctx.fold(&mut set, &dirs, events);
-    ops.extend(diff_ops(&before, &set, ctx.now)?);
-    Ok((id, ops))
+    )?;
+    Ok((added.ids[0], added.ops))
+}
+
+/// 読める指示の本体を、ID とともに順に渡す (`v` が新しい・形の違う・正規化の版の違う指示は飛ばす)。
+fn for_each_directive_body(
+    tx: &ReadTxn<'_>,
+    mut f: impl FnMut(Id, FactDirectiveBody),
+) -> Result<(), MemoryError> {
+    tx.for_each(KIND_FACT_DIRECTIVE, |r| {
+        if let Read::Ok(e) = r
+            && e.v == FACT_DIRECTIVE_V
+            && let Ok(b) = e.body_as::<FactDirectiveBody>()
+            && b.norm.is_none_or(|n| n == NORM_V1)
+        {
+            f(e.id, b);
+        }
+        true
+    })?;
+    Ok(())
+}
+
+/// セッションの削除・出典の無い事実の掃除で足した private の指示 (`origin = "delete"`、[`drop_turns`])。
+/// `/memory` の private の理由の表示で、利用者が選んだ値と見分ける (04 §7.5 の「private の理由の表示」)。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn kept_after_delete(tx: &ReadTxn<'_>) -> Result<BTreeSet<Id>, MemoryError> {
+    let mut out = BTreeSet::new();
+    for_each_directive_body(tx, |id, b| {
+        if b.op == OP_PRIVATE && b.origin() == Origin::Delete {
+            out.insert(id);
+        }
+    })?;
+    Ok(out)
+}
+
+/// 伏せ字にしないで忘れたときに、想起で `[非表示]` にする範囲 (忘れるの指示の `hidden`、04 §7.1)。
+/// 印を解いても範囲は効いたままにする (印を解くは関門 8 だけを変える)。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn load_hidden(tx: &ReadTxn<'_>) -> Result<Vec<HiddenBody>, MemoryError> {
+    let mut out = Vec::new();
+    for_each_directive_body(tx, |_, b| {
+        if b.op == OP_FORGET {
+            out.extend(b.hidden);
+        }
+    })?;
+    Ok(out)
+}
+
+/// 忘れるの指示 1 つ (`/memory forgotten` の材料。値は持たない、04 §7.6)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetRecord {
+    pub id: Id,
+    pub subject: String,
+    pub attribute: String,
+    /// 再び覚えない印の数 (忘れた値の数)。
+    pub marks: usize,
+    /// 忘れた事実の出典のターン。
+    pub turns: Vec<Id>,
+    /// 出典の発話を伏せ字にしたか。
+    pub redact: bool,
+    /// 印を解く指示で解かれた。
+    pub unblocked: bool,
+}
+
+/// 忘れるの指示を、指示の ID の順に読む。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn load_forgets(tx: &ReadTxn<'_>) -> Result<Vec<ForgetRecord>, MemoryError> {
+    let dirs = load_directives(tx)?;
+    let mut out = Vec::new();
+    for_each_directive_body(tx, |id, b| {
+        if b.op == OP_FORGET {
+            out.push(ForgetRecord {
+                id,
+                subject: b.subject,
+                attribute: b.attribute,
+                marks: b.marks.len(),
+                turns: b.turns,
+                redact: b.redact,
+                unblocked: dirs.is_unblocked(id),
+            });
+        }
+    })?;
+    out.sort_by_key(|r| r.id);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1285,6 +1493,29 @@ mod tests {
         drop(tx);
         handle.shutdown();
         thread.join().expect("writer");
+    }
+
+    /// `origin` の無い記録 (古い版) と知らない値は利用者の操作として読み、`delete` だけを削除で足した指示とする
+    /// (04 §7.5)。
+    #[test]
+    fn a_missing_or_unknown_origin_reads_as_user() {
+        let body = |origin: Option<&str>| {
+            let mut v = serde_json::json!({
+                "op": "private", "subject": "self", "attribute": "dietary",
+                "vk": "ab".repeat(32), "norm": 1, "scope": "value_only",
+            });
+            if let Some(o) = origin {
+                v["origin"] = o.into();
+            }
+            envelope(KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, &v)
+                .body_as::<FactDirectiveBody>()
+                .expect("a readable body")
+        };
+        assert_eq!(body(None).origin(), Origin::User);
+        assert_eq!(body(None).origin, ORIGIN_USER);
+        assert_eq!(body(Some("someday")).origin(), Origin::User);
+        assert_eq!(body(Some("user")).origin(), Origin::User);
+        assert_eq!(body(Some("delete")).origin(), Origin::Delete);
     }
 
     #[test]

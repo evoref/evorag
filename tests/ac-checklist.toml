@@ -1132,10 +1132,28 @@ note = "セッションだけを出典とする事実は消え、他の出典を
 id = "AC-FR-310-2"
 requirement = "FR-310"
 level = "Must"
-status = "later"
-tests = []
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_ops.rs::an_outdated_row_or_a_wrong_precondition_is_rejected", "crates/evorag-tui/src/app.rs::the_fact_list_opens_in_a_panel_with_numbers_and_marks", "crates/evorag-tui/src/app.rs::an_outdated_list_is_replaced_and_numbers_follow_the_new_one"]
 manual = ""
-note = "v0.3 の M3.4 (/memory・/forget・/private) で試験を足す。"
+note = "一覧と番号、/private と /memory accept・history・revert・forgotten・unblock、一覧を表示した後に変わった行の拒否と新しい一覧。/forget の番号での操作は /forget を足すときに試験を足す。"
+
+[[ac]]
+id = "AC-FR-308-1"
+requirement = "FR-308"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_table.rs::private_facts_stay_out_of_the_table_and_the_keys", "crates/evorag-memory/src/mask.rs::a_private_value_is_hidden_in_its_exchange_only", "crates/evorag-tui/src/app.rs::private_asks_with_the_scope_and_sends_the_row_reference"]
+manual = ""
+note = "事実の表・検索の鍵・添えた往復 ([非表示])。リプレイと回帰台帳の事例 (13 §4) は v0.4 で足すときに同じ置き換えを当てる。"
+
+[[ac]]
+id = "AC-FR-308-2"
+requirement = "FR-308"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_ops.rs::private_off_of_a_successors_rule_clears_every_row_it_covers", "crates/evorag-tui/src/app.rs::private_off_lists_the_other_rows_sharing_a_directive"]
+manual = ""
+note = "/private off は行に効いているすべての private の指示を解く。後継まで効く指示を解くと、同じ指示で private だったほかの行も外れる。"
 
 [[ac]]
 id = "AC-NFR-506-3"

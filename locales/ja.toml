@@ -29,6 +29,15 @@ band_not_latest = "帯の記録を添えて作り直せるのは、最新の応�
 band_unknown = "その記録は、この応答の帯にありません。"
 feedback_not_saved = "印を記録できませんでした。もう一度試してください。"
 
+[error.facts]
+list_outdated = "一覧が更新されました。指した行が、一覧を表示した後に変わったので、実行しませんでした。新しい一覧の番号で選び直してください。"
+not_allowed = "その行には、その操作はできません (private でない行への /private off、矛盾でない行への /memory accept など)。"
+disabled = "事実の鍵 (memory.forget_key) が使えないので、事実への操作はできません (evorag doctor で詳しく見られます)。"
+blocked = "その値は忘れた値なので、戻せません。/memory forgotten と /memory unblock で、再び覚えない印を先に解いてください。"
+not_saved = "事実への操作を記録できませんでした ({detail})。"
+no_list = "番号の付いた一覧がまだありません。先に {list} を打ってください。"
+bad_number = "番号「{n}」は、表示した一覧にありません (事実は F1、履歴は H1、忘れた事実は X1 の形。頭の文字は省けます)。"
+
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
 interrupted_by_shutdown = "終了のため中断しました。受け取ったところまでを保存しました。"
@@ -85,7 +94,11 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /good, /bad [理由]  直前の応答を評価する
 /model [名前]    使っているモデルの表示と、設定にある候補への切り替え
 /sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
-/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由と、このセッションの出典
+/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由、このセッションの出典、事実の一覧 (F1…)
+/memory accept F1    矛盾の値を今の値にする
+/memory history F1   その属性の置き換えの履歴 (H1…)。/memory revert H1 で今の値に戻す
+/memory forgotten    忘れた事実の一覧 (X1…)。/memory unblock X1 で再び覚えない印を解く
+/private F1      事実を応答に添えないようにする (確認あり)。/private off F1 で解く
 /style [項目 値]  答え方の既定 (言語・長さ・書式)。値なしで選ぶ窓を開く (すべてのセッションに効く)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
@@ -118,6 +131,68 @@ changed = "覚えた事実: {parts}"
 added = "事実 +{n}"
 replaced = "置き換え {n}"
 contested = "矛盾 {n}"
+
+[ui.facts]
+title = "メモリ"
+header = "事実の一覧 (利用者の発言から作ったもの):"
+empty = "  まだ事実はありません。"
+self = "あなた"
+row = "  F{n} {subject}・{attr}: {value}{marks}"
+vacant = "  F{n} {subject}・{attr}: (今の値なし。履歴 {history} 件、/memory history F{n} で見られます)"
+rule_only = "  F{n} {subject}・{attr}: (値なし。この属性にあとで入る値も private にする指示だけが残っています)"
+mark_contested = " [矛盾]"
+mark_planned = " [予定]"
+mark_changed = " ← 前に見てから変わりました"
+mark_private_successors = " [private: 選んだ値 (後の値にも効く)]"
+mark_private_value_only = " [private: 選んだ値]"
+mark_private_successor = " [private: 指示の後に言われた値]"
+mark_private_kept = " [private: セッションの削除で残した]"
+mark_history = " (履歴 {n} 件)"
+mark_private = " [private]"
+note_sleep_off = "  事実を新しく作っていません (memory.sleep_time = false)。"
+note_probe = "  モデルの点検で型縛りの出力が使えなかったので、事実を新しく作っていません (evorag doctor)。"
+note_key = "  事実の鍵 (memory.forget_key) が使えないので、事実の機能を止めています。事実への操作もできません (evorag doctor)。"
+hint = "/private F1・/private off F1・/memory accept F1・/memory history F1 で操作します。番号はこの一覧のものです。"
+history_title = "{subject}・{attr} の置き換えの履歴:"
+history_row = "  H{n} {value} ({at} まで){marks}"
+history_empty = "  履歴はありません。"
+history_hint = "/memory revert H1 で、その値を今の値に戻します。"
+forgotten_title = "忘れた事実 (値は表示しません):"
+forgotten_row = "  X{n} {subject}・{attr} ({at} に忘れた、値 {values} 件、{how}) 出典: {sessions}"
+forgotten_redacted = "発話を伏せ字にした"
+forgotten_kept = "発話はそのまま"
+forgotten_deleted = "消したターン {n} 件"
+forgotten_empty = "  忘れた事実はありません。"
+forgotten_hint = "/memory unblock X1 で再び覚えない印を解くと、同じ値をまた覚えられるようになります。"
+done_private = "private にしました。事実の表と検索の鍵から外し、想起で添える往復の中の値を伏せます。"
+done_private_off = "private を解きました。"
+done_accept = "その値を今の値にしました。"
+done_revert = "その値を今の値に戻しました。"
+done_unblock = "再び覚えない印を解きました。"
+slow_next = "次の応答は、事実の表を作り直すので、始まるまで少し長くかかります。"
+
+[ui.panel]
+hint = "↑↓・PageUp・PageDown でスクロール、Esc で閉じる"
+
+[ui.private]
+title = "private にする"
+body = """{label}
+
+この値を事実の表と検索の鍵から外し、想起で添える往復の中の値を [非表示] にします。
+・記録は消しません (/private off で解けます)。
+・今のセッションのこれまでのやり取りには残ります。
+・llama-server には今の値を送らなくなるだけです (llama-server が覚えているものは消えません)。"""
+multi = "・この属性は値を並べて持つので、すでにある兄弟の値 (同じ属性のほかの値) は対象になりません。"
+remote = "・llm.allow_remote の構成では、発話の本文が裏の処理の呼び出しで外の機械に出ることがあります。"
+scope_successors = "この値と、同じ属性にあとで入る値 (既定)"
+scope_value_only = "この値だけ"
+hint = "↑↓ で効く範囲を選び、Enter で実行、Esc でやめる"
+
+[ui.private_off]
+title = "private を解く"
+body = "{label}\n\nこの行に効いているすべての private の指示を解きます。"
+others = "次の行の private の印も外れます:"
+hint = "Enter で実行、Esc でやめる"
 
 [ui.band]
 related = "関係しそうな記録 (この応答には使っていません)"
@@ -308,3 +383,27 @@ degraded_rerank_error = "縮退: リランカーが答えなかったので、�
 degraded_no_threshold = "縮退: リランカーのしきい値が無いので、自動では添えず候補だけを出しました。→ 較正が終わるのを待つか、evorag setup を使います。"
 degraded_no_index = "縮退: 以前の会話の索引を使えませんでした。→ evorag rebuild --index で作り直せます。"
 degraded_other = "縮退: {reason}"
+
+# 属性の表示名 (`/memory` の事実の一覧、07 §3)。文言キーではなく、属性の一覧
+# (crates/evorag-memory/attributes.toml) と同じ名前を持つ (`cargo xtask i18n` で検査する)。
+[attr]
+name = "名前"
+relation = "関係"
+residence = "住んでいる所"
+dietary = "食べないもの"
+occupation = "仕事"
+age = "年齢"
+household = "同居の家族"
+pet = "ペット"
+spoken_language = "話す言語"
+hometown = "出身地"
+birthday = "誕生日"
+education = "学んだこと"
+skill = "技能"
+device = "機器"
+software = "ソフト"
+hobby = "趣味"
+likes = "好きなもの"
+dislikes = "苦手なもの"
+goal = "目標"
+event = "予定"
