@@ -1116,3 +1116,41 @@ status = "test"
 tests = ["crates/evorag-core/tests/embeddings.rs::switching_the_embedding_model_rebuilds_and_keeps_one_previous_generation", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-core/tests/model_binding.rs"]
 manual = ""
 note = "記録と違う埋め込みのモデルでは役割を使わない (model_binding の試験、M2.2)。切り替えると全件を作り直し、前のモデルの索引を 1 世代残す。作り直しの間の状態の行は「想起: 作り直し中 N%」。ベクトルの検索を想起に使うのは M2.6 (それまでは語彙の候補とリランクで答える)。"
+
+# ---- v0.3 で足した AC のうち、要件が v0.2 までに Must のもの (v0.3 の段で試験を足す) ----
+
+[[ac]]
+id = "AC-FR-309-3"
+requirement = "FR-309"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.3 の M3.4 (セッションの削除の事実への波及) で試験を足す。"
+
+[[ac]]
+id = "AC-FR-310-2"
+requirement = "FR-310"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.3 の M3.4 (/memory・/forget・/private) で試験を足す。"
+
+[[ac]]
+id = "AC-NFR-504-2"
+requirement = "NFR-504"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.3 の M3.2 (抽出の関門 6・7) で試験を足す。"
+
+[[ac]]
+id = "AC-NFR-506-3"
+requirement = "NFR-506"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.3 の M3.4 (忘れるの確認の文言) で確かめる。"
