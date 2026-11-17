@@ -2,7 +2,7 @@
 //! 終える語。規則は根拠の文字種から決めた言語のものを選ぶ (04 §5.2 の「読み取りの規則」)。
 //!
 //! 照合は NFKC と完全な case folding の後に行う (規則の語もこの形で書く、rules.rs の `fold`)。日本語は部分一致、
-//! 英語は ASCII の英数字で決めた語の境界で当てる。除外の語に当たった箇所は、照合の前に伏せる。
+//! 英語は ASCII の英数字で決めた語の境界で当てる。除外の語の一致にすっかり収まる一致は数えない (`Exclusions`)。
 
 use crate::rules::{ReadingRules, language_rules};
 use crate::value_key::normalize_v1;
@@ -43,18 +43,23 @@ pub fn signals(evidence: &str, subject: &str) -> Signals {
     let r: &ReadingRules = &rules.reading;
     let word_bounded = lang == "en";
     let explicit_subject = if subject == "self" {
-        let masked = mask(&text, &r.subject_self_exclude, word_bounded);
-        any_match(&masked, &r.subject_self, word_bounded)
+        let excluded = Exclusions::new(&text, &r.subject_self_exclude, word_bounded);
+        any_outside(&text, &r.subject_self, &excluded, word_bounded)
     } else {
         // ほかの主語は、呼び名そのものが根拠にあれば明示とみなす (英語は語の境界で、04 §5.2)。
         let name = normalize_v1(subject);
         !name.is_empty() && !find_all(&normalize_v1(evidence), &name, word_bounded).is_empty()
     };
-    let unchanged = mask(&text, &r.change_exclude, word_bounded);
+    let unchanged = Exclusions::new(&text, &r.change_exclude, word_bounded);
     Signals {
         explicit_subject,
-        change: any_match(&unchanged, &r.change, word_bounded),
-        negation_change: any_match(&text, &r.negation_change, word_bounded),
+        change: any_outside(&text, &r.change, &unchanged, word_bounded),
+        negation_change: any_outside(
+            &text,
+            &r.negation_change,
+            &Exclusions::default(),
+            word_bounded,
+        ),
     }
 }
 
@@ -85,30 +90,65 @@ pub(crate) fn find_all(hay: &str, needle: &str, bounded: bool) -> Vec<usize> {
         .collect()
 }
 
-fn any_match(hay: &str, words: &[String], bounded: bool) -> bool {
-    words.iter().any(|w| !find_all(hay, w, bounded).is_empty())
+/// 除外の語が当たった範囲 (04 §5.2)。規則の語の一致は、除外の語の一致 1 つの中にすっかり収まるときだけ
+/// 数えない (はみ出す一致は数える。「無視してくれる」の「無視して」は「してくれる」に収まらない)。
+///
+/// 範囲を始まりの順に並べ、終わりの累積の最大を持つので、作るのは O(n log n)、1 回の問い合わせは O(log n)。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Exclusions {
+    /// 範囲の始まり (昇順)。
+    starts: Vec<usize>,
+    /// `starts[..=i]` の範囲の終わりの最大。
+    max_end: Vec<usize>,
 }
 
-/// 除外の語に当たった箇所を伏せる (同じ長さの、どの語にも当たらない文字で埋める)。
-pub(crate) fn mask(hay: &str, excludes: &[String], bounded: bool) -> String {
-    // 範囲は元の文字列で集め、その範囲の文字をまとめて置き換える (位置がずれないように)。
-    let ranges: Vec<(usize, usize)> = excludes
-        .iter()
-        .flat_map(|w| {
-            find_all(hay, w, bounded)
-                .into_iter()
-                .map(move |i| (i, i + w.len()))
-        })
-        .collect();
-    hay.char_indices()
-        .map(|(i, c)| {
-            if ranges.iter().any(|&(s, e)| s <= i && i < e) {
-                '\u{FFFD}'
-            } else {
-                c
-            }
-        })
-        .collect()
+impl Exclusions {
+    /// `words` が `hay` に当たる範囲を集める。`bounded` は `find_all` と同じ。
+    pub(crate) fn new<'w>(
+        hay: &str,
+        words: impl IntoIterator<Item = &'w String>,
+        bounded: bool,
+    ) -> Self {
+        let mut ranges: Vec<(usize, usize)> = words
+            .into_iter()
+            .flat_map(|w| {
+                find_all(hay, w, bounded)
+                    .into_iter()
+                    .map(move |i| (i, i + w.len()))
+            })
+            .collect();
+        ranges.sort_unstable();
+        let starts = ranges.iter().map(|r| r.0).collect();
+        let max_end = ranges
+            .iter()
+            .scan(0, |m, r| {
+                *m = (*m).max(r.1);
+                Some(*m)
+            })
+            .collect();
+        Self { starts, max_end }
+    }
+
+    /// `[start, end)` が、除外の語の一致のどれか 1 つの中に収まるか。
+    pub(crate) fn covers(&self, start: usize, end: usize) -> bool {
+        // 始まりが `start` 以下の範囲のうち、終わりの最大が `end` 以上なら、その範囲が収める。
+        let n = self.starts.partition_point(|&s| s <= start);
+        n > 0 && self.max_end[n - 1] >= end
+    }
+}
+
+/// `words` のどれかが `hay` に、除外の語の一致に収まらずに当たるか。
+pub(crate) fn any_outside(
+    hay: &str,
+    words: &[String],
+    exclusions: &Exclusions,
+    bounded: bool,
+) -> bool {
+    words.iter().any(|w| {
+        find_all(hay, w, bounded)
+            .into_iter()
+            .any(|i| !exclusions.covers(i, i + w.len()))
+    })
 }
 
 #[cfg(test)]
@@ -147,6 +187,38 @@ mod tests {
         assert!(signals("Ken lives in Kyoto", "ken").explicit_subject);
         // 英語の呼び名は語の境界で当てる ("ken" は "Kenji" に当たらない)。
         assert!(!signals("Kenji lives in Kyoto", "ken").explicit_subject);
+    }
+
+    #[test]
+    fn exclusions_hide_only_matches_they_contain() {
+        let ex = Exclusions::new("無視してくれる", &["してくれる".to_owned()], false);
+        // 「してくれ」は「してくれる」に収まり、「無視して」ははみ出す。
+        assert!(ex.covers(6, 18));
+        assert!(!ex.covers(0, 12));
+        assert!(any_outside(
+            "無視してくれる",
+            &["無視して".to_owned()],
+            &ex,
+            false
+        ));
+        assert!(!any_outside(
+            "無視してくれる",
+            &["してくれ".to_owned()],
+            &ex,
+            false
+        ));
+        // 重なる範囲でも、どれか 1 つに収まればよい。
+        let ex = Exclusions::new("abcdef", &["abcd".to_owned(), "b".to_owned()], false);
+        assert!(ex.covers(1, 4));
+        assert!(!ex.covers(3, 5));
+        assert!(!Exclusions::default().covers(0, 0));
+    }
+
+    #[test]
+    fn subject_words_next_to_an_exclusion_still_count() {
+        // 「私の妻」に収まる「私」は数えず、ほかの「私」は数える。
+        assert!(signals("私の妻と私は京都に住んでいます", "self").explicit_subject);
+        assert!(!signals("私の妻は京都に住んでいます", "self").explicit_subject);
     }
 
     #[test]

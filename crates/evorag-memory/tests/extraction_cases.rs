@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use evorag_memory::{
     Directive, DirectiveKind, Directives, Event, EvidenceMatch, FactSet, FoldEnv, ForgetKey,
     GateEnv, GateReason, Prefiltered, RawCandidate, RawMood, Safety, Screened, Tense, Utterance,
-    attributes, block_mark, check_candidate, check_value, fold, normalize_v1, prefilter, value_key,
+    all_language_rules, attributes, block_mark, check_candidate, check_candidates, check_value,
+    fold, normalize_v1, prefilter, value_key,
 };
 use evorag_types::Id;
 use toml::Value;
@@ -197,12 +198,7 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
             assert_eq!(c.attribute, raw.attribute, "{id}");
             assert_eq!(c.value, raw.value, "{id}");
             assert_eq!(c.vk, value_key(&key, &raw.value), "{id}");
-            let subject = if raw.subject == "self" {
-                raw.subject.clone()
-            } else {
-                normalize_v1(&raw.subject)
-            };
-            assert_eq!(c.subject, subject, "{id}");
+            assert_eq!(c.subject, expected_subject(&raw.subject), "{id}");
             assert_eq!(
                 c.old_vk,
                 raw.old.as_deref().map(|o| value_key(&key, o)),
@@ -218,6 +214,20 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
     }
 }
 
+/// 候補の主語が統合に渡る形: `self`、本人を指す語 (どれかの言語の `reading.subject_self`) なら `self`、
+/// ほかは正規化 v1 の後の呼び名。
+fn expected_subject(raw: &str) -> String {
+    let s = normalize_v1(raw);
+    let names_self = all_language_rules()
+        .iter()
+        .any(|r| r.reading.subject_self.contains(&s));
+    if raw == "self" || names_self {
+        "self".to_owned()
+    } else {
+        s
+    }
+}
+
 fn run_gates(ids: &[&str]) -> usize {
     let cases = select("gates.toml", ids);
     for case in &cases {
@@ -228,12 +238,12 @@ fn run_gates(ids: &[&str]) -> usize {
 
 #[test]
 fn prefilter_cases_pass() {
-    assert_eq!(run_prefilter(&[]), 13);
+    assert_eq!(run_prefilter(&[]), 18);
 }
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 52);
+    assert_eq!(run_gates(&[]), 85);
 }
 
 #[test]
@@ -323,4 +333,65 @@ fn negations_questions_and_hypotheticals_make_no_fact() {
 #[test]
 fn instructions_in_another_language_are_rejected() {
     run_gates(&["G25", "G26"]);
+}
+
+/// 本人を指す語 (「私」「I」) の主語は `self` にそろえて統合に渡す。同じ発話の候補をまとめて当てても、
+/// 1 件ずつ当てたのと同じ結果になる。
+#[test]
+fn self_words_are_passed_on_as_self_and_batches_match_single_checks() {
+    let text = "私は東京に住んでいて、妻は大阪出身です";
+    let key = ForgetKey::from_bytes(KEY);
+    let dirs = Directives::default();
+    let safety = Safety::bundled();
+    let env = GateEnv {
+        attributes: attributes(),
+        safety: &safety,
+        key: &key,
+        directives: &dirs,
+    };
+    let filtered = Prefiltered::from_stored(text);
+    let utterance = Utterance {
+        turn: id_at(2, 0),
+        rev: 0,
+        text,
+        filtered: &filtered,
+    };
+    let raw = |s: &str, a: &str, v: &str, e: &str| RawCandidate {
+        subject: s.to_owned(),
+        attribute: a.to_owned(),
+        value: v.to_owned(),
+        evidence: e.to_owned(),
+        mood: RawMood::Fact,
+        tense: Tense::Current,
+        old: None,
+    };
+    let raws = [
+        raw("私", "residence", "東京", "私は東京に住んでいて"),
+        raw("I", "skill", "東京", "私は東京に住んでいて"),
+        raw("妻", "hometown", "大阪", "妻は大阪出身です"),
+        raw("妻", "skill", "大阪", "妻は大阪出身です"),
+    ];
+    let batch = check_candidates(&env, &utterance, &raws);
+    let single: Vec<_> = raws
+        .iter()
+        .map(|r| check_candidate(&env, &utterance, r))
+        .collect();
+    assert_eq!(batch, single);
+    let subjects: Vec<Result<&str, GateReason>> = batch
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .map(|a| a.candidate.subject.as_str())
+                .map_err(|e| *e)
+        })
+        .collect();
+    assert_eq!(
+        subjects,
+        [
+            Ok("self"),
+            Ok("self"),
+            Ok("妻"),
+            Err(GateReason::SubjectNotAllowed)
+        ]
+    );
 }

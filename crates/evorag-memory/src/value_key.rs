@@ -103,6 +103,7 @@ impl Mapped {
     }
 
     /// 正規化の後の本文 (`normalize_v1` と同じ)。
+    #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }

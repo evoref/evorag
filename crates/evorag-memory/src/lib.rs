@@ -32,7 +32,7 @@ pub use fold::{
 };
 pub use gates::{
     Accepted, EvidenceMatch, GateEnv, GateReason, RawCandidate, RawMood, Safety, Utterance,
-    check_candidate, check_value,
+    check_candidate, check_candidates, check_value,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,

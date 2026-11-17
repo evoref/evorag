@@ -56,11 +56,11 @@
 | `mood` | 3 | 叙法が `question` か `hypothetical` |
 | `quoted` | 4 | 値が根拠の中で引用の括弧の内側にある (属性の例外を除く) |
 | `subject_not_allowed` | 5 | 主語が `self` 以外で、属性がそれを許さない |
-| `forbidden_category` | 6 | 一般カテゴリ Cc・Cf の文字 |
+| `forbidden_category` | 6 | 一般カテゴリ Cc・Cf・Co・Cn・Cs の文字と、Default_Ignorable の文字 (04 §5.2 の関門 6) |
 | `forbidden_char` | 6 | 行・段落の区切り、表の区切り |
 | `url` | 6 | URL・スキームの印 |
 | `role_marker` | 6 | 役割の詐称・区切りの模倣 |
-| `mixed_script` | 6 | ラテン文字とキリル・ギリシャ文字を 1 つの語に混ぜた並び |
+| `mixed_script` | 6 | 1 つの語に複数の文字体系を混ぜた並び (Script 属性。UTS #39 highly restrictive の組だけを許す) |
 | `imperative` | 6 | 命令形の文・依頼の印 (全言語を合わせて当てる) |
 | `instruction_ref` | 6 | ほかの指示への言及 |
 | `too_long` | 7 | 値が属性の上限を超える |

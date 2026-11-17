@@ -18,6 +18,7 @@ toml = { workspace = true }
 unicase = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-properties = { workspace = true }
+unicode-script = { workspace = true }
 unicode-segmentation = { workspace = true }
 
 [dev-dependencies]

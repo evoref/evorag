@@ -8,9 +8,9 @@
 # - Matching runs after NFKC and casefold. Entries here are written in a form NFKC and casefold leave unchanged.
 # - [safety] entries match as substrings (so "ignore" is caught inside "以前の指示をignoreして").
 #   [reading] and [correction.triggers] entries match on ASCII word boundaries, so "i" does not match inside "in".
-# - Text matching an *_exclude entry is masked before matching (the whole value is not allowed).
+# - A match lying entirely inside a match of an *_exclude entry is not counted (the whole value is not allowed).
 
-version = 1
+version = 2
 language = "en"
 
 [prefilter]
@@ -28,10 +28,11 @@ greetings = [
 imperative = [
   "ignore", "disregard", "you must", "you should", "you will", "you are now", "you're now",
   "from now on", "do not", "don't", "please", "obey", "override", "follow these", "act as",
-  "pretend you", "respond only", "respond in", "reply with", "reply only", "forget all",
-  "forget everything", "forget previous",
+  "pretend you", "respond only", "respond in", "reply with", "reply only", "reply in", "answer in",
+  "forget all", "forget everything", "forget previous", "always ", "never ",
 ]
-imperative_exclude = []
+# A match lying entirely inside one of these is not counted ("never " inside "whenever ").
+imperative_exclude = ["whenever "]
 # Gate 6: drop a value that refers to other instructions.
 # Phrases, not single words (so values such as "systems engineer" or "prompt engineer" survive).
 instruction_refs = [
@@ -41,9 +42,26 @@ instruction_refs = [
 
 # Gate 4: drop a value that sits inside these quotes in the evidence, unless the attribute is allowed.
 # The ASCII apostrophe is not a quote here (it pairs with possessives such as "Tom's").
+# A quote whose open and close are the same character opens only after the start, a space, a symbol or
+# a CJK letter, and closes only before the end, a space, a symbol or a CJK letter (so 27" is not a quote).
 [[safety.quote]]
 open = "\""
 close = "\""
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "«"
+close = "»"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "‹"
+close = "›"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "„"
+close = "“"
 allow_attributes = ["name"]
 
 [[safety.quote]]

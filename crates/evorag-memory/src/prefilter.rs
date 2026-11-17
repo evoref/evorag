@@ -2,6 +2,10 @@
 //!
 //! - コードブロック (``` か ~~~ の囲み) と、引用の記号 (`>`・`＞`) で始まる行を除く。送る本文は残りの行を
 //!   つないだもので、送る本文の位置を保存した本文の位置に戻す対応表を持つ (関門 1 の span に使う)。
+//! - 行の区切りは `\r\n`・`\n`・`\r`・U+0085・U+2028・U+2029。囲みと引用の記号は、行の頭の空白と表示されない
+//!   文字 (Default_Ignorable_Code_Point。BOM・ゼロ幅文字など) を読み飛ばしてから見る。
+//! - 囲みを閉じる行は、開いた行と同じ文字を同じ数以上並べ、ほかには空白だけを持つ行 (開く行は後ろに言語名
+//!   などを書けるが、閉じる行は書けない)。
 //! - 送らない理由は、モード → 空 → 挨拶・相槌 → 短い の順に当て、最初に当たったものにする。
 //! - 挨拶・相槌の一覧は安全の規則として全言語を合わせて当て、短さのしきい値は、残りの本文の文字種から決めた
 //!   言語のものを使う。
@@ -11,7 +15,7 @@ use std::ops::Range;
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::chars::is_separator;
+use crate::chars::{is_default_ignorable, is_separator};
 use crate::lexical::evidence_language;
 use crate::rules::{all_language_rules, fold, language_rules};
 
@@ -72,12 +76,13 @@ impl Prefiltered {
         let mut kept: Vec<Range<usize>> = Vec::new();
         let mut fence: Option<(char, usize)> = None;
         let mut at = 0;
-        for line in stored.split_inclusive('\n') {
+        for line in lines(stored) {
             let range = at..at + line.len();
             at = range.end;
-            let lead = line.trim_start();
+            let lead =
+                line.trim_start_matches(|c: char| c.is_whitespace() || is_default_ignorable(c));
             if let Some((ch, len)) = fence {
-                if fence_of(lead).is_some_and(|(c, n)| c == ch && n >= len) {
+                if closes_fence(lead, ch, len) {
                     fence = None;
                 }
                 continue;
@@ -130,25 +135,53 @@ impl Prefiltered {
         &self.text
     }
 
-    /// 送る本文の範囲を、保存した本文の範囲に直す (除いた分を足し戻す)。範囲が本文の外なら `None`。
+    /// 送る本文の範囲を、保存した本文の範囲に直す (除いた分を足し戻す)。
     ///
-    /// 始まりと終わりを別々に直すので、除いた行をまたぐ範囲は、除いた行を含む範囲になる。
+    /// 範囲が本文の外にあるか、除いた行をまたぐ (2 つの片にかかる) なら `None`。除いた行の前後をつないで
+    /// できた並びは、利用者の発話のどこにも続いて現れないため (04 §5.2 の関門 1)。
     pub fn to_stored(&self, sent: Range<usize>) -> Option<Range<usize>> {
         if sent.start > sent.end || sent.end > self.text.len() {
             return None;
         }
-        let piece_at = |pos: usize| {
-            self.pieces
-                .iter()
-                .find(|p| p.sent <= pos && pos < p.sent + p.len)
-        };
-        let start = piece_at(sent.start).map(|p| p.stored + (sent.start - p.sent));
-        if sent.is_empty() {
-            return start.map(|s| s..s);
+        // 始まりを含む片 (片は送る本文の位置の昇順に並ぶ)。
+        let i = self
+            .pieces
+            .partition_point(|p| p.sent <= sent.start)
+            .checked_sub(1)?;
+        let p = &self.pieces[i];
+        let piece_end = p.sent + p.len;
+        if sent.start >= piece_end || sent.end > piece_end {
+            return None;
         }
-        let p = piece_at(sent.end - 1)?;
-        Some(start?..p.stored + (sent.end - p.sent))
+        Some(p.stored + (sent.start - p.sent)..p.stored + (sent.end - p.sent))
     }
+}
+
+/// 行の区切り (`\r\n`・`\n`・`\r`・U+0085・U+2028・U+2029) で分けた行。区切りは行の後ろに含める。
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest
+            .char_indices()
+            .find_map(|(i, c)| match c {
+                '\r' if rest[i + 1..].starts_with('\n') => Some(i + 2),
+                '\n' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}' => Some(i + c.len_utf8()),
+                _ => None,
+            })
+            .unwrap_or(rest.len());
+        let (line, tail) = rest.split_at(end);
+        rest = tail;
+        Some(line)
+    })
+}
+
+/// 囲みを閉じる行か: 開いた行と同じ文字 (`ch`) が `len` 個以上並び、ほかは空白だけ。
+fn closes_fence(lead: &str, ch: char, len: usize) -> bool {
+    let body = lead.trim_end();
+    fence_of(body).is_some_and(|(c, n)| c == ch && n >= len && n == body.chars().count())
 }
 
 /// 囲みの行なら、その文字と長さ (3 以上)。
@@ -325,10 +358,43 @@ mod tests {
         assert_eq!(&stored[r], "two");
         let r = p.to_stored(0..4).expect("inside");
         assert_eq!(&stored[r], "kept");
-        // 除いた行をまたぐ範囲は、除いた行を含む。
-        let whole = p.to_stored(0..p.text().len()).expect("inside");
-        assert_eq!(&stored[whole], "kept one\n```\ncode\n```\nkept two");
+        // 除いた行をまたぐ範囲は戻さない。
+        assert_eq!(p.to_stored(0..p.text().len()), None);
         assert_eq!(p.to_stored(0..p.text().len() + 1), None);
+        assert_eq!(p.to_stored(9..9), Some(31..31));
+        let end = p.text().len();
+        assert_eq!(p.to_stored(end..end), None);
+    }
+
+    #[test]
+    fn lines_split_on_every_line_break() {
+        let got: Vec<&str> = lines("a\r\nb\rc\nd\u{2028}e\u{2029}f\u{0085}g").collect();
+        assert_eq!(
+            got,
+            [
+                "a\r\n",
+                "b\r",
+                "c\n",
+                "d\u{2028}",
+                "e\u{2029}",
+                "f\u{0085}",
+                "g"
+            ]
+        );
+        assert_eq!(lines("").count(), 0);
+        assert_eq!(lines("x\n").collect::<Vec<_>>(), ["x\n"]);
+    }
+
+    #[test]
+    fn a_fence_closes_only_on_a_bare_line() {
+        // 言語名を付けた行は閉じない。閉じる行は同じ文字を同じ数以上並べる。
+        let p = Prefiltered::from_stored("```\na\n```rust\nb\n~~~\nc\n````  \nkept");
+        assert_eq!(p.text(), "kept");
+        // 行の頭の空白と表示されない文字を読み飛ばす。
+        let p = Prefiltered::from_stored("\u{FEFF}```\nhidden\n\u{200B} ```\nkept");
+        assert_eq!(p.text(), "kept");
+        let p = Prefiltered::from_stored("\u{2060}\u{3000}> hidden\nkept");
+        assert_eq!(p.text(), "kept");
     }
 
     #[test]
