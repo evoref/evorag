@@ -639,9 +639,11 @@ async fn a_fact_key_recalls_the_source_exchange() {
         evorag_version: "0.0.6".into(),
         config_file: None,
         index_only: true,
+        facts: None,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 5)),
     })
+    .await
     .unwrap();
     let again = chat(&[reply(REPLY)]);
     let (core, mut rx) = start(dir.path(), &again, 9).await;

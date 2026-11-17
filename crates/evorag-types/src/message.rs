@@ -339,6 +339,23 @@ message_keys! {
     CliRebuiltIndex => "cli.rebuilt_index",
     /// 引数: `detail`。
     CliRebuildFailed => "cli.rebuild_failed",
+    /// `rebuild --facts` で抽出を始める。
+    CliRebuildingFacts => "cli.rebuilding_facts",
+    /// 引数: `backup`・`removed`・`docs`・`utterances`・`facts`・`old`・`skipped`・`corrections`。
+    CliRebuiltFacts => "cli.rebuilt_facts",
+    /// 抽出できずに飛ばした発話がある (作り直しが部分的)。引数: `lost`・`truncated`・`invalid`・`rejected`・`failed`。
+    CliRebuiltFactsPartial => "cli.rebuilt_facts_partial",
+    /// 引数: `url`・`detail`。
+    CliRebuildFactsUnreachable => "cli.rebuild_facts_unreachable",
+    /// 引数: `recorded`・`connected`。
+    CliRebuildFactsModelMismatch => "cli.rebuild_facts_model_mismatch",
+    CliRebuildFactsNoProbe => "cli.rebuild_facts_no_probe",
+    CliRebuildFactsProbeFailed => "cli.rebuild_facts_probe_failed",
+    /// 引数: `n_ctx`。
+    CliRebuildFactsContextTooSmall => "cli.rebuild_facts_context_too_small",
+    /// 引数: `detail`。
+    CliRebuildFactsKeyUnusable => "cli.rebuild_facts_key_unusable",
+    CliRebuildFactsForgetPending => "cli.rebuild_facts_forget_pending",
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
     CliLlmUnauthorized => "cli.llm_unauthorized",

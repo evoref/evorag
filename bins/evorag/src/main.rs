@@ -86,8 +86,11 @@ enum Sub {
     /// 派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)
     Rebuild {
         /// 索引だけを作り直す
-        #[arg(long)]
+        #[arg(long, conflicts_with = "facts")]
         index: bool,
+        /// 事実も会話から抽出し直す (llama-server を使う。事実への指示と検証済みの訂正は当て直す)
+        #[arg(long)]
+        facts: bool,
     },
     /// 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
@@ -102,26 +105,68 @@ enum BackupsAction {
     List,
 }
 
-/// `evorag rebuild [--index]` (03 §10、FR-212)。
+/// `rebuild` の作り直す範囲。
+enum RebuildScope {
+    /// 索引だけ (`--index`)。
+    Index,
+    /// 派生データの全体。
+    Derived,
+    /// 事実も抽出し直す (`--facts`)。llama-server の接続先 (案内に示す) と使い方を持つ。
+    Facts {
+        url: String,
+        source: evorag_core::rebuild::FactsSource,
+    },
+}
+
+/// `evorag rebuild [--index] [--facts]` (03 §10、FR-212)。
 fn rebuild(
     catalog: &Catalog,
     data_root: &std::path::Path,
     config_file: &std::path::Path,
-    index_only: bool,
+    scope: RebuildScope,
+    rt: &tokio::runtime::Runtime,
     clock: Arc<dyn evorag_types::Clock>,
 ) -> ExitCode {
+    use evorag_core::rebuild::{FactsUnavailable, RebuildError};
+
     let ids = Arc::new(UuidV7Gen::new(clock.clone()));
-    match evorag_core::rebuild::run(evorag_core::rebuild::RebuildOptions {
-        data_root: data_root.to_path_buf(),
-        evorag_version: VERSION.to_owned(),
-        config_file: Some(config_file.to_path_buf()),
-        index_only,
-        clock,
-        ids,
-    }) {
+    let index_only = matches!(scope, RebuildScope::Index);
+    let (url, facts) = match scope {
+        RebuildScope::Facts { url, source } => {
+            eprintln!("{}", catalog.key(MessageKey::CliRebuildingFacts));
+            (url, Some(source))
+        }
+        RebuildScope::Index | RebuildScope::Derived => (String::new(), None),
+    };
+    match rt.block_on(evorag_core::rebuild::run(
+        evorag_core::rebuild::RebuildOptions {
+            data_root: data_root.to_path_buf(),
+            // semver だけを書く (`VERSION` は作りの情報を含み、`meta` の版として読めない)。
+            evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
+            config_file: Some(config_file.to_path_buf()),
+            index_only,
+            facts,
+            clock,
+            ids,
+        },
+    )) {
         Ok(r) => {
             let backup = r.backup.display().to_string();
-            let m = if index_only {
+            let m = if let Some(f) = &r.facts {
+                catalog.with(
+                    MessageKey::CliRebuiltFacts,
+                    &[
+                        ("backup", &backup),
+                        ("removed", &r.removed.to_string()),
+                        ("docs", &r.docs.to_string()),
+                        ("utterances", &f.utterances.to_string()),
+                        ("facts", &f.facts.to_string()),
+                        ("old", &f.removed.to_string()),
+                        ("skipped", &f.not_sent().to_string()),
+                        ("corrections", &f.corrections.to_string()),
+                    ],
+                )
+            } else if index_only {
                 catalog.with(
                     MessageKey::CliRebuiltIndex,
                     &[("backup", &backup), ("docs", &r.docs.to_string())],
@@ -137,11 +182,66 @@ fn rebuild(
                 )
             };
             eprintln!("{m}");
+            // 抽出できずに飛ばした発話があれば、作り直しが部分的だったことを理由ごとに示す。
+            if let Some(f) = r.facts.as_ref().filter(|f| f.lost() > 0) {
+                let n = |reason: &str| f.skipped_for(reason).to_string();
+                let m = catalog.with(
+                    MessageKey::CliRebuiltFactsPartial,
+                    &[
+                        ("lost", &f.lost().to_string()),
+                        ("truncated", &n("truncated")),
+                        ("invalid", &n("invalid_output")),
+                        ("rejected", &n("rejected")),
+                        ("failed", &n("failed")),
+                    ],
+                );
+                eprintln!("{}", m.replace("\\n", "\n"));
+            }
             ExitCode::SUCCESS
         }
-        Err(evorag_core::rebuild::RebuildError::Open(OpenError::Lock(LockError::InUse {
-            pid,
-        }))) => data_root_in_use(catalog, data_root, pid),
+        Err(RebuildError::Open(OpenError::Lock(LockError::InUse { pid }))) => {
+            data_root_in_use(catalog, data_root, pid)
+        }
+        // 事実の作り直しを、何も書かずに止めた (07 §5 の終了コード: 3 は繋がらない、6 はモデルの違い)。
+        Err(RebuildError::LlmUnreachable(e)) => fail(
+            catalog,
+            3,
+            MessageKey::CliRebuildFactsUnreachable,
+            &[("url", &url), ("detail", &e.to_string())],
+        ),
+        Err(RebuildError::ModelMismatch {
+            recorded,
+            connected,
+        }) => fail(
+            catalog,
+            6,
+            MessageKey::CliRebuildFactsModelMismatch,
+            &[("recorded", &recorded), ("connected", &connected)],
+        ),
+        Err(RebuildError::FactsUnavailable(why)) => {
+            let n_ctx;
+            let detail;
+            let (key, args): (MessageKey, &[(&str, &str)]) = match why {
+                FactsUnavailable::NotProbed => (MessageKey::CliRebuildFactsNoProbe, &[]),
+                FactsUnavailable::ProbeFailed => (MessageKey::CliRebuildFactsProbeFailed, &[]),
+                FactsUnavailable::ContextTooSmall { n_ctx: n } => {
+                    n_ctx = n.to_string();
+                    (
+                        MessageKey::CliRebuildFactsContextTooSmall,
+                        &[("n_ctx", &n_ctx)],
+                    )
+                }
+                FactsUnavailable::Key(problem) => {
+                    detail = format!("{problem:?}");
+                    (
+                        MessageKey::CliRebuildFactsKeyUnusable,
+                        &[("detail", &detail)],
+                    )
+                }
+                FactsUnavailable::ForgetPending => (MessageKey::CliRebuildFactsForgetPending, &[]),
+            };
+            fail(catalog, 1, key, args)
+        }
         Err(e) => fail(
             catalog,
             1,
@@ -350,8 +450,38 @@ fn main() -> ExitCode {
             clock.now().as_millis(),
         );
     }
-    if let Some(Sub::Rebuild { index }) = &args.command {
-        return rebuild(&catalog, &data_root, &config_file, *index, clock.clone());
+    // 補助の呼び出しに足す JSON (06 §6)。事実の作り直しの抽出にも使う。
+    let aux_request_extra: evorag_llm::RequestExtra = cfg
+        .llm
+        .chat
+        .aux_request_extra
+        .as_ref()
+        .and_then(|t| serde_json::to_value(t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(Sub::Rebuild { index, facts }) = &args.command {
+        let scope = if *facts {
+            RebuildScope::Facts {
+                url: url.clone(),
+                source: evorag_core::rebuild::FactsSource {
+                    llm: llm.clone(),
+                    aux_request_extra: aux_request_extra.clone(),
+                    prompt_language,
+                },
+            }
+        } else if *index {
+            RebuildScope::Index
+        } else {
+            RebuildScope::Derived
+        };
+        return rebuild(
+            &catalog,
+            &data_root,
+            &config_file,
+            scope,
+            &rt,
+            clock.clone(),
+        );
     }
     if let Some(Sub::Restore { backup }) = &args.command {
         return match evorag_store::restore::restore(
@@ -394,15 +524,6 @@ fn main() -> ExitCode {
         .llm
         .chat
         .request_extra
-        .as_ref()
-        .and_then(|t| serde_json::to_value(t).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    // 補助の呼び出しに足す JSON (06 §6)。
-    let aux_request_extra: evorag_llm::RequestExtra = cfg
-        .llm
-        .chat
-        .aux_request_extra
         .as_ref()
         .and_then(|t| serde_json::to_value(t).ok())
         .and_then(|v| v.as_object().cloned())
