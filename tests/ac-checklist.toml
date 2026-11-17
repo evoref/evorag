@@ -666,7 +666,7 @@ id = "AC-NFR-506-1"
 requirement = "NFR-506"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-core/tests/chat_path.rs::deleting_a_session_purges_it_from_the_backups", "crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart"]
+tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-core/tests/chat_path.rs::deleting_a_session_purges_it_from_the_backups", "crates/evorag-core/tests/chat_path.rs::a_purge_that_cannot_open_a_backup_keeps_its_job", "crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart"]
 manual = ""
 note = "AC-FR-105-1 と AC-FR-309-1 が通ること。削除の確認の文言が範囲を示すことの判定は未確認。"
 

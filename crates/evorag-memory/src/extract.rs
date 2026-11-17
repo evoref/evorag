@@ -394,20 +394,22 @@ struct TurnFields {
     session: Id,
     role: String,
     text: String,
-    /// 改訂の番号 (04 §7.3、03 §3.3 の任意の項目)。無ければ 0。項目は M3.4 (伏せ字) で書き始める。
-    #[serde(default)]
-    rev: u32,
 }
 
-/// ターンの改訂の番号 (04 §7.3)。項目が無い・読めないターンは 0 (03 §12.1 の「改訂の番号の無いターンは
-/// 0 として読む」)。
+/// ターンの改訂の番号 (04 §7.3、03 §3.3 の任意の項目)。項目が無ければ 0 (03 §12.1 の「改訂の番号の無いターンは
+/// 0 として読む」)。整数でない・`u32` に収まらない値は読めない (`None`)。書き手の前提
+/// ([`crate::expect_turn`] が作る `WriteOp::Expect`) と同じ読み方 (`Envelope::body_uint`) で読むので、
+/// ここで読めた番号は、書き手でも同じ番号として合う。
+pub fn turn_rev_checked(turn: &Envelope) -> Option<u32> {
+    turn.body_uint(crate::TURN_REV_FIELD)
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+/// ターンの改訂の番号 ([`turn_rev_checked`])。読めない値は 0 として扱う (事実と訂正の照合は、この関数どうしで
+/// 比べる)。派生の記録を書く前提 ([`crate::expect_turn`]) には使わず、[`turn_rev_checked`] で読めないターンを
+/// 飛ばす (書き手の前提が合わずに作り直しを繰り返さないため)。
 pub fn turn_rev(turn: &Envelope) -> u32 {
-    #[derive(Deserialize)]
-    struct Rev {
-        #[serde(default)]
-        rev: u32,
-    }
-    turn.body_as::<Rev>().map_or(0, |r| r.rev)
+    turn_rev_checked(turn).unwrap_or(0)
 }
 
 /// 抽出の対象の候補になる、利用者の発話 1 つ。
@@ -442,7 +444,7 @@ pub fn user_utterances_after(
             && let Ok(t) = e.body_as::<TurnFields>()
             && t.role == "user"
         {
-            turns.push((e.id, t));
+            turns.push((e.id, turn_rev(&e), t));
         }
         true
     };
@@ -452,7 +454,7 @@ pub fn user_utterances_after(
     }
     let mut modes: std::collections::HashMap<Id, String> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(turns.len());
-    for (turn, t) in turns {
+    for (turn, rev, t) in turns {
         let mode = match modes.get(&t.session) {
             Some(m) => m.clone(),
             None => {
@@ -467,7 +469,7 @@ pub fn user_utterances_after(
         out.push(UserUtterance {
             turn,
             session: t.session,
-            rev: t.rev,
+            rev,
             mode,
             text: t.text,
         });

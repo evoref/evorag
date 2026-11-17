@@ -99,6 +99,9 @@ pub(crate) enum Step {
     FactTable,
     /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
     Backup,
+    /// 済まなかった整理の job (消した ID を索引と退避から除く、03 §7.3、04 §7.7 の 2・5) を試し直す。
+    /// sleep-time の手順。
+    Cleanup,
 }
 
 /// sleep-time の手順を動かせる状態か。
@@ -146,6 +149,12 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     }
     if !waiting(Step::FactTable) && crate::fact_table::needed(inner) {
         return Some(Step::FactTable);
+    }
+    if !waiting(Step::Cleanup)
+        && inner.startup_done.load(Ordering::SeqCst)
+        && crate::cleanup_needed(inner)
+    {
+        return Some(Step::Cleanup);
     }
     if !waiting(Step::Backup)
         && inner.startup_done.load(Ordering::SeqCst)
@@ -326,6 +335,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
             Step::Extract => crate::extraction::run(inner).await,
             Step::Verify => crate::correction::run(inner).await,
             Step::FactTable => crate::fact_table::run(inner).await,
+            Step::Cleanup => crate::run_cleanup_jobs(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

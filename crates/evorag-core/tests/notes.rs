@@ -413,3 +413,167 @@ fn embeddings(root: &Path) -> Vec<evorag_memory::EmbeddingBody> {
         .map(|(_, b)| b)
         .collect()
 }
+
+/// ノートの鍵を作る呼び出しだけを、試験が開けるまで止める llama-server。
+struct Gated {
+    inner: ReplayClient,
+    /// 鍵を作る呼び出しが来た。
+    entered: Arc<tokio::sync::Notify>,
+    /// 開けたら、呼び出しを続ける。
+    open: Arc<tokio::sync::Semaphore>,
+}
+
+impl evorag_llm::LlmClient for Gated {
+    fn health(&self) -> evorag_llm::BoxFuture<'_, Result<(), evorag_llm::LlmError>> {
+        self.inner.health()
+    }
+    fn server_info(
+        &self,
+    ) -> evorag_llm::BoxFuture<'_, Result<evorag_llm::ServerInfo, evorag_llm::LlmError>> {
+        self.inner.server_info()
+    }
+    fn count_tokens<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> evorag_llm::BoxFuture<'a, Result<usize, evorag_llm::LlmError>> {
+        self.inner.count_tokens(text)
+    }
+    fn chat(
+        &self,
+        req: evorag_llm::ChatRequest,
+    ) -> evorag_llm::BoxFuture<'_, Result<Box<dyn evorag_llm::ChatStream>, evorag_llm::LlmError>>
+    {
+        let is_note = req
+            .extra
+            .get("response_format")
+            .is_some_and(|f| f.to_string().contains("note_keys"));
+        Box::pin(async move {
+            if is_note {
+                self.entered.notify_one();
+                let _permit = self.open.acquire().await.expect("gate");
+            }
+            self.inner.chat(req).await
+        })
+    }
+    fn slots(
+        &self,
+    ) -> evorag_llm::BoxFuture<'_, Result<Vec<evorag_llm::SlotState>, evorag_llm::LlmError>> {
+        self.inner.slots()
+    }
+}
+
+/// 鍵を作る呼び出しの間にセッションが消えたら、出来たノートを書かない (出典が DB に無いノートを残さない)。
+/// verifies: AC-FR-309-2 (セッションを消すと、そのノートが消える)、04 §7.7 の 4 (派生物は出典を確かめてから書く)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_for_a_session_deleted_during_the_call_is_not_saved() {
+    let dir = TempDir::new("notes-deleted-midway");
+    prepare(dir.path(), true);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+    let gated = Arc::new(Gated {
+        inner: chat(&[reply(REPLY), reply(KEYS), reply(NO_FACTS)], false),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        open: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), gated.clone())
+        .await
+        .unwrap();
+    core.settle().await;
+    core.hold(true);
+    core.command(Command::NewSession { title: "s".into() });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    say(&core, &mut rx, "架空の話題について").await;
+    clock.advance(SEGMENT_QUIET_MS);
+    let entered = gated.entered.notified();
+    core.hold(false);
+    tokio::time::timeout(Duration::from_secs(30), entered)
+        .await
+        .expect("the note call starts");
+    // 呼び出しの間にセッションを消す (画面の操作ではないので、裏の処理は止めない)。
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    gated.open.add_permits(1);
+    core.settle().await;
+    core.settle_background().await;
+    core.shutdown().await;
+    assert!(
+        notes(dir.path()).is_empty(),
+        "no note for the deleted session"
+    );
+}
+
+fn note_envelopes(root: &Path) -> Vec<evorag_store::Envelope> {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
+    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.6".into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+        config_file: None,
+    })
+    .unwrap();
+    let rtx = store.read().unwrap();
+    let mut out = Vec::new();
+    rtx.for_each(KIND_NOTE, |r| {
+        if let Read::Ok(e) = r {
+            out.push(e);
+        }
+        true
+    })
+    .unwrap();
+    out
+}
+
+/// ノートは出典の改訂の番号を持つ。出典のターンの番号が変わった (伏せ字にした) ノートは、起動時の突き合わせが
+/// 消し、ノートの手順が今の本文から作り直す。
+/// verifies: 03 §3.3 (`src_revs`)、04 §7.7 の 1・4
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_made_before_a_revision_is_redone() {
+    let dir = TempDir::new("notes-revision");
+    prepare(dir.path(), true);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+    let llm = chat(&[reply(REPLY), reply(KEYS), reply(NO_FACTS)], false);
+    let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
+        .await
+        .unwrap();
+    core.settle().await;
+    core.hold(true);
+    core.command(Command::NewSession { title: "s".into() });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let answer = say(&core, &mut rx, "架空の話題について").await;
+    let u1 = answer.reply_to.unwrap();
+    clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
+    core.settle_background().await;
+    assert!(core.bump_turn_revision(u1).await);
+    core.shutdown().await;
+    let before = note_envelopes(dir.path());
+    assert_eq!(before.len(), 1);
+    let revs = before[0].body_as::<NoteBody>().unwrap().src_revs;
+    assert!(
+        revs.contains(&evorag_memory::SrcRev { turn: u1, rev: 0 })
+            && revs.contains(&evorag_memory::SrcRev {
+                turn: answer.id,
+                rev: 0
+            }),
+        "{revs:?}"
+    );
+
+    let llm = chat(&[reply(KEYS), reply(NO_FACTS), reply(NO_FACTS)], false);
+    let (core, _rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm))
+        .await
+        .unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    core.shutdown().await;
+    let after = note_envelopes(dir.path());
+    assert_eq!(after.len(), 1, "the stale note is replaced");
+    assert_ne!(after[0].id, before[0].id);
+    assert!(
+        after[0]
+            .body_as::<NoteBody>()
+            .unwrap()
+            .src_revs
+            .contains(&evorag_memory::SrcRev { turn: u1, rev: 1 })
+    );
+}

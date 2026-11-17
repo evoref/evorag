@@ -627,3 +627,74 @@ async fn facts_left_by_an_older_version_lose_the_deleted_sources() {
     );
     assert!(file_contains(&backup, "pet"), "the kept fact stays");
 }
+
+/// 消す前の退避から戻すと (restore)、開くときにジャーナルの削除の行を当て直す。当て直した削除は索引と退避の
+/// 整理の job になり、戻した元の退避からも、消した本文が除かれる。
+/// verifies: AC-NFR-506-2、04 §7.2 (当て直し)、03 §7.3
+#[tokio::test(flavor = "multi_thread")]
+async fn deletes_replayed_after_a_restore_are_purged_from_the_backups() {
+    const TEXT: &str = "架空の戻した後に消える本文";
+    let dir = TempDir::new("orphans-restore-purge");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), clock.clone()),
+        Arc::new(chat(&[reply(REPLY)], false)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.hold(true);
+    core.command(Command::NewSession { title: "s".into() });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let a = say(&core, &mut rx, TEXT).await;
+    core.shutdown().await;
+    // 消す前の DB を写しておく (戻す元の退避)。
+    let db = dir.path().join("evorag.redb");
+    let before = dir.path().join("evorag.redb.before");
+    std::fs::copy(&db, &before).unwrap();
+
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 60_000)));
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 41));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(chat(&[], false))).await.unwrap();
+    core.settle().await;
+    core.command(Command::OpenSession { id: a.session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.shutdown().await;
+
+    // 消す前の退避から戻す (戻す元の退避も、保持している退避として残る)。
+    let source = dir.path().join("backups").join("daily").join("20251101");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::copy(&before, source.join("evorag.redb")).unwrap();
+    std::fs::copy(&before, &db).unwrap();
+    assert!(file_contains(&source.join("evorag.redb"), TEXT));
+
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 120_000)));
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 51));
+    let (core, _rx, _) = Core::start(cfg, Arc::new(chat(&[], false))).await.unwrap();
+    core.settle().await;
+    assert!(core.sessions(10).iter().all(|s| s.id != a.session));
+    assert_eq!(
+        core.pending_cleanup_jobs(),
+        0,
+        "the replayed deletes are purged"
+    );
+    core.shutdown().await;
+    assert!(
+        !file_contains(&source.join("evorag.redb"), TEXT),
+        "the restored-from backup no longer holds the deleted text"
+    );
+    let store = open(
+        dir.path(),
+        Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 180_000))),
+        61,
+    );
+    assert!(
+        store.pending_deletes().unwrap().ids.is_empty(),
+        "the store-side mark is cleared with the job"
+    );
+}

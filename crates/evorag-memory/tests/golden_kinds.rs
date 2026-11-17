@@ -263,6 +263,16 @@ fn note_v1() {
             keys: vec!["観葉植物の水やり".into(), "モンステラ".into()],
             model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
             rules: 1,
+            src_revs: vec![
+                SrcRev {
+                    turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                    rev: 0,
+                },
+                SrcRev {
+                    turn: id("019a6a2b-0000-7000-8000-000000000003"),
+                    rev: 1,
+                },
+            ],
         },
     );
 }

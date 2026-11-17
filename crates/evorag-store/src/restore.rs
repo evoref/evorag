@@ -60,16 +60,36 @@ fn journal_seq_of(file: &Path) -> Option<u64> {
     String::from_utf8_lossy(v.value()).parse().ok()
 }
 
-/// 保持している退避の一覧 (新しい順)。`backups` を省くとデータ根の `backups/`。
-pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
+/// 退避を置くフォルダ (種類ごと)。日次と週次は `backups` (省くとデータ根の `backups/`) の下。移行と作り直しの
+/// 前の退避は、`storage.backup_dir` に関わらずデータ根の `backups/pre-op/` に作る (03 §7.2) ので、そこも必ず
+/// 含める (`backups` の下の `pre-op/` も、同じフォルダでなければ含める)。
+fn backup_bases(root: &Path, backups: Option<&Path>) -> Vec<(PathBuf, BackupKind)> {
     let base = backups.map_or_else(|| root.join(BACKUPS_DIR), Path::to_path_buf);
+    let mut out = vec![
+        (base.join(DAILY_DIR), BackupKind::Daily),
+        (base.join(WEEKLY_DIR), BackupKind::Weekly),
+        (root.join(BACKUPS_DIR).join(PRE_OP_DIR), BackupKind::PreOp),
+    ];
+    let other = base.join(PRE_OP_DIR);
+    let same = |a: &Path, b: &Path| {
+        a == b
+            || matches!(
+                (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                (Ok(x), Ok(y)) if x == y
+            )
+    };
+    if !same(&other, &out[2].0) {
+        out.push((other, BackupKind::PreOp));
+    }
+    out
+}
+
+/// 保持している退避の一覧 (新しい順)。`backups` を省くとデータ根の `backups/`。移行と作り直しの前の退避は、
+/// データ根の `backups/pre-op/` からも読む ([`backup_bases`])。
+pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
     let mut out = Vec::new();
-    for (sub, kind) in [
-        (DAILY_DIR, BackupKind::Daily),
-        (WEEKLY_DIR, BackupKind::Weekly),
-        (PRE_OP_DIR, BackupKind::PreOp),
-    ] {
-        let Ok(rd) = std::fs::read_dir(base.join(sub)) else {
+    for (dir, kind) in backup_bases(root, backups) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
         };
         for e in rd.filter_map(Result::ok) {
@@ -87,6 +107,81 @@ pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified).then(b.dir.cmp(&a.dir)));
     out
+}
+
+/// 退避のフォルダに残った作りかけのファイルか。
+///
+/// 名前は、退避を作る処理が使う一時の名前と同じにする: 写しの一時名 (`evorag.partial`、
+/// `backup::logical_copy_excluding` と週次の写し) と、整理の一時名 (`evorag.redb.purging` と、その写しの一時名
+/// `evorag.redb.partial`)。ほかの名前には触れない。
+fn is_leftover(name: &str) -> bool {
+    let purging = format!("{DB_FILE}.purging");
+    [
+        Path::new(DB_FILE).with_extension("partial"),
+        Path::new(&purging).with_extension("partial"),
+        PathBuf::from(&purging),
+    ]
+    .iter()
+    .any(|p| p.as_os_str() == name)
+}
+
+/// 強制終了で残った作りかけの退避を消す (03 §7.3、04 §7.7 の 5)。作りかけのファイル (下の `is_leftover` の名前)
+/// と、作りかけで止まった退避のフォルダ (DB の写しが無く、作りかけのファイルだけを持つもの) は、世代の数え方にも
+/// 整理にも入らないまま、消した記録の本文を持ち続けうるため。利用者が置いたほかのファイルとフォルダには触れない
+/// (中へ再帰しない)。移行と作り直しの前の退避は、データ根の `backups/pre-op/` だけを見る (そこにしか作らない)。
+/// 退避を作る処理と同じ順序で通すこと (`Store` の退避の鍵の下で呼ぶ)。消せなかったものを返す。
+pub fn sweep_leftovers(root: &Path, backups: Option<&Path>) -> Vec<String> {
+    let base = backups.map_or_else(|| root.join(BACKUPS_DIR), Path::to_path_buf);
+    let mut failed = Vec::new();
+    let mut remove = |path: &Path, r: std::io::Result<()>| {
+        if let Err(e) = r
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            failed.push(format!("{}: {e}", path.display()));
+        }
+    };
+    for parent in [
+        base.join(DAILY_DIR),
+        base.join(WEEKLY_DIR),
+        root.join(BACKUPS_DIR).join(PRE_OP_DIR),
+    ] {
+        let Ok(rd) = std::fs::read_dir(&parent) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let dir = e.path();
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let has_db = match std::fs::metadata(dir.join(DB_FILE)) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                // 調べられないフォルダには触れない。
+                Err(_) => continue,
+            };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut leftovers = Vec::new();
+            let mut other = false;
+            for f in entries.filter_map(Result::ok) {
+                let is_file = f.file_type().is_ok_and(|t| t.is_file());
+                if is_file && is_leftover(&f.file_name().to_string_lossy()) {
+                    leftovers.push(f.path());
+                } else if !(has_db && f.file_name() == DB_FILE) {
+                    other = true;
+                }
+            }
+            for f in &leftovers {
+                remove(f, std::fs::remove_file(f));
+            }
+            // 作りかけのファイルだけを持っていたフォルダ (DB の写しが無い) は、空にしてから消す。
+            if !has_db && !other {
+                remove(&dir, std::fs::remove_dir(&dir));
+            }
+        }
+    }
+    failed
 }
 
 /// 退避 `backup` (フォルダか、`evorag.redb` のファイル) から戻す (03 §10)。
@@ -142,41 +237,80 @@ fn mentions(key: &[u8], ids: &BTreeSet<[u8; 16]>) -> bool {
 }
 
 /// 削除した記録を、保持している退避から除いて写し直す (03 §7.3)。写し直した退避の数を返す。
+///
+/// 1 つの退避で失敗しても (開けない・読めない・写せない・入れ替えられない)、ほかの退避は写し直してから失敗を
+/// 返す (呼び手は job を残して再試行する、04 §7.7 の 5)。データ根を開いているプロセスからは
+/// [`crate::Store::purge_backups`] を使う (退避を作る処理と同じ順序で通し、作りかけの退避も片付けるため)。
+///
+/// # Errors
+/// 写し直せなかった退避があるとき。
 pub fn purge_backups(root: &Path, backups: Option<&Path>, ids: &[Id]) -> Result<usize, StoreError> {
+    purge_backups_until(root, backups, ids, &|| false)
+}
+
+/// [`purge_backups`] を、`stop` が真を返したら次の退避に移る前に止めて行う (止めたら失敗を返す)。
+///
+/// # Errors
+/// 写し直せなかった退避があるとき、または止めたとき。
+pub fn purge_backups_until(
+    root: &Path,
+    backups: Option<&Path>,
+    ids: &[Id],
+    stop: &dyn Fn() -> bool,
+) -> Result<usize, StoreError> {
     if ids.is_empty() {
         return Ok(0);
     }
     let set: BTreeSet<[u8; 16]> = ids.iter().map(|i| *i.as_bytes()).collect();
     let mut n = 0;
+    let mut failed = Vec::new();
     for b in list_backups(root, backups) {
-        let file = b.dir.join(DB_FILE);
-        let Ok(db) = Database::open(&file) else {
-            continue;
-        };
-        // 対象を含むかを、記録の表のキーで調べる。
-        let hit = {
-            let rtx = db.begin_read().map_err(crate::store::db)?;
-            let t = rtx
-                .open_table(crate::store::RECORDS)
-                .map_err(crate::store::db)?;
-            let mut hit = false;
-            for item in t.iter().map_err(crate::store::db)? {
-                let (k, _) = item.map_err(crate::store::db)?;
-                if mentions(k.value(), &set) {
-                    hit = true;
-                    break;
-                }
-            }
-            hit
-        };
-        if !hit {
-            continue;
+        if stop() {
+            return Err(StoreError::Io(
+                "the purge was stopped before it finished".into(),
+            ));
         }
-        let tmp = b.dir.join(format!("{DB_FILE}.purging"));
-        backup::logical_copy_excluding(&db, &tmp, &|k| mentions(k, &set))?;
-        drop(db);
-        fsutil::rename_durable(&tmp, &file).map_err(io)?;
-        n += 1;
+        let file = b.dir.join(DB_FILE);
+        match purge_one(&file, &set) {
+            Ok(true) => n += 1,
+            Ok(false) => {}
+            Err(e) => failed.push(format!("{}: {e}", file.display())),
+        }
+    }
+    if !failed.is_empty() {
+        return Err(StoreError::Io(format!(
+            "backups could not be purged: {}",
+            failed.join("; ")
+        )));
     }
     Ok(n)
+}
+
+/// 1 つの退避から `set` の記録を除いて写し直す。写し直したら `true` (含んでいなければ `false`)。
+fn purge_one(file: &Path, set: &BTreeSet<[u8; 16]>) -> Result<bool, StoreError> {
+    let db = Database::open(file).map_err(crate::store::db)?;
+    // 対象を含むかを、記録の表のキーで調べる。
+    let hit = {
+        let rtx = db.begin_read().map_err(crate::store::db)?;
+        let t = rtx
+            .open_table(crate::store::RECORDS)
+            .map_err(crate::store::db)?;
+        let mut hit = false;
+        for item in t.iter().map_err(crate::store::db)? {
+            let (k, _) = item.map_err(crate::store::db)?;
+            if mentions(k.value(), set) {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    };
+    if !hit {
+        return Ok(false);
+    }
+    let tmp = file.with_file_name(format!("{DB_FILE}.purging"));
+    backup::logical_copy_excluding(&db, &tmp, &|k| mentions(k, set))?;
+    drop(db);
+    fsutil::rename_durable(&tmp, file).map_err(io)?;
+    Ok(true)
 }

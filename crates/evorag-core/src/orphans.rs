@@ -52,7 +52,8 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
         if let Read::Ok(e) = x
             && let Ok(n) = e.body_as::<NoteBody>()
         {
-            if sessions.contains(&n.session) && n.exchanges.iter().any(|t| turns.contains(t)) {
+            // 出典が欠けた・改訂の番号が今と合わない (伏せ字の前の本文から作った) ノートも消す (04 §7.7 の 1・4)。
+            if sessions.contains(&n.session) && evorag_memory::note_is_current(&r, &n) {
                 notes.insert(e.id);
             } else {
                 p.notes.push(e.id);
@@ -158,6 +159,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
             .chain(&p.corrections)
             .chain(&gone_facts),
     );
+    let purge_ids = purge.clone();
     let Ok((_, job)) = evorag_memory::purge_job(&w, purge) else {
         return;
     };
@@ -175,19 +177,11 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
     if crate::write(inner, ops).await.is_err() {
         return;
     }
-    // 索引から除く (チャンクの語彙の項目は sync_chunks が除いた)。
-    let gone: HashSet<Id> = gone_chunks
-        .into_iter()
-        .chain(p.notes.iter().copied())
-        .collect();
-    crate::embedding::remove_everywhere(inner, &gone);
-    if let Some(ix) = inner.index.clone() {
-        // ノートの鍵と、消した事実の検索の鍵 (ID は事実の ID、04 §5.5)。
-        let keys: HashSet<Id> = p.notes.into_iter().chain(gone_facts).collect();
-        if !keys.is_empty() {
-            let _ = tokio::task::spawn_blocking(move || ix.remove(&keys)).await;
-        }
-    }
+    // 今と前の世代のすべての索引から除く (ノートの鍵と、消した事実の検索の鍵を含む。ID は事実の ID、04 §5.5)。
+    // 除けなかった分は、この後の整理の job (起動時) が続ける (04 §7.7 の 2)。
+    let gone: HashSet<Id> = purge_ids.into_iter().collect();
+    let worker = inner.clone();
+    let _ = tokio::task::spawn_blocking(move || crate::remove_from_indexes(&worker, &gone)).await;
     if facts_changed {
         // 表を作り直し、鍵の残りを次の sleep-time の手順で合わせる (04 §5.4・§5.5)。
         crate::fact_table::invalidate(inner);

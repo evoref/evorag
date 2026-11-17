@@ -489,6 +489,8 @@ async fn deleting_a_session_purges_it_from_the_backups() {
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     core.command(Command::DeleteSession);
     until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    // 整理を終えるまで待つ (終了の合図があると、整理は次の退避に移る前に止まり、次の起動で続ける)。
+    core.settle().await;
     core.shutdown().await;
 
     let daily = dir.path().join("backups").join("daily");
@@ -706,4 +708,40 @@ async fn a_session_with_a_turn_from_a_newer_version_still_opens() {
     assert_eq!(*unreadable, 1);
     assert_eq!(core.turns(sid).len(), 2);
     core.shutdown().await;
+}
+
+/// 開けない退避があると、退避の整理の job は消えずに残り、次の起動で続きを行う (03 §7.3)。
+/// verifies: AC-NFR-506-1 の退避の部分 (04 §7.7 の 5: 開けない退避があれば job を残して再試行する)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_that_cannot_open_a_backup_keeps_its_job() {
+    let dir = TempDir::new("core-purge-unopenable");
+    let llm = cassette(8192, OK);
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    core.settle().await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "架空の消す本文".into(),
+    });
+    until(&mut rx, finished).await;
+    // 開けない退避 (前の日の分) を置く。
+    let bad = dir.path().join("backups").join("daily").join("20251101");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("evorag.redb"), b"not a database").unwrap();
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    assert_eq!(core.pending_cleanup_jobs(), 1, "the job is kept");
+    core.shutdown().await;
+
+    // 開けない退避を片付けてから起動し直すと、job から続けて終える。
+    std::fs::remove_dir_all(&bad).unwrap();
+    let (core, _rx) = start(dir.path(), &cassette(8192, "")).await;
+    core.settle().await;
+    assert_eq!(core.pending_cleanup_jobs(), 0, "the job is done");
+    core.shutdown().await;
+    let daily = dir.path().join("backups").join("daily");
+    for e in std::fs::read_dir(&daily).unwrap() {
+        let b = e.unwrap().path().join("evorag.redb");
+        assert!(!file_contains(&b, "架空の消す本文"), "{}", b.display());
+    }
 }

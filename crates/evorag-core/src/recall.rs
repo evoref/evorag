@@ -151,8 +151,12 @@ fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id, current: Id) -> Vec<Id> {
             .unwrap_or_default();
     }
     if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_NOTE, id) {
+        // 出典が DB に無い・改訂の番号が今と合わないノート (消した・伏せ字にした前の本文から作ったもの) は
+        // 除く (04 §7.7 の 1)。
         return e
             .body_as::<NoteBody>()
+            .ok()
+            .filter(|n| evorag_memory::note_is_current(rtx, n))
             .map(|n| n.exchanges)
             .unwrap_or_default();
     }
@@ -211,8 +215,10 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
     });
     let mut notes: Vec<(Id, NoteBody)> = Vec::new();
     let _ = rtx.for_each(KIND_NOTE, |r| {
+        // 出典が今と合うノートだけ (04 §7.7 の 1。合わないノートは、ノートの手順が作り直す)。
         if let Read::Ok(e) = r
             && let Ok(b) = e.body_as::<NoteBody>()
+            && evorag_memory::note_is_current(&rtx, &b)
         {
             notes.push((e.id, b));
         }

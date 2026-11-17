@@ -35,7 +35,7 @@ pub use extract::{
     BUDGET_MARGIN, Batch, Counting, EXTRACT_MAX_TOKENS, EXTRACT_VERSION, ExtractJobBody,
     ExtractProgress, ExtractionOutput, JOB_EXTRACT_FACTS, Packing, REQUEST_TOKENS, UserUtterance,
     extraction_fits, extraction_input, extraction_schema, extraction_system, load_extract_progress,
-    pack, parse_extraction, turn_rev, user_utterances_after, utterance_budget,
+    pack, parse_extraction, turn_rev, turn_rev_checked, user_utterances_after, utterance_budget,
 };
 pub use facts::{
     FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
@@ -55,20 +55,22 @@ pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
     DEGRADED_NO_THRESHOLD, DEGRADED_RERANK_DEADLINE, DEGRADED_RERANK_ERROR, DEGRADED_RERANK_SLOW,
     EmbeddingBody, FEEDBACK_ATTACH, FEEDBACK_IRRELEVANT, GenerationRecord, JOB_PURGE_BACKUPS,
-    JobBody, KIND_CHUNK, KIND_EMBEDDING, KIND_JOB, KIND_MODEL_BINDING, KIND_MODEL_PROBE, KIND_NOTE,
-    KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_SETTING, KIND_SIGNAL, KIND_THRESHOLD, KIND_TURN,
-    METHOD_BUNDLED, ModelBindingBody, ModelOrigin, ModelProbeBody, NoteBody,
-    RECALL_BEFORE_UTTERANCE, REL_CHUNK_OF, REL_EMBEDDING_OF, REL_FEEDBACK_ANSWER,
+    JOB_PURGE_INDEXES, JobBody, KIND_CHUNK, KIND_EMBEDDING, KIND_JOB, KIND_MODEL_BINDING,
+    KIND_MODEL_PROBE, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_SETTING, KIND_SIGNAL,
+    KIND_THRESHOLD, KIND_TURN, METHOD_BUNDLED, ModelBindingBody, ModelOrigin, ModelProbeBody,
+    NoteBody, RECALL_BEFORE_UTTERANCE, REL_CHUNK_OF, REL_EMBEDDING_OF, REL_FEEDBACK_ANSWER,
     REL_FEEDBACK_TARGET, REL_IN_SESSION, REL_NOTE_OF, REL_REPLY_TO, REL_TARGET, ROLE_CHAT,
     ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallFeedbackBody, RecallRecord, Reranked,
     SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG,
-    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION,
-    ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, kinds,
+    SessionBody, SessionState, SettingBody, SignalBody, SignalKind, SrcRev, TARGET_CONVERSATION,
+    TURN_REV_FIELD, ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY,
+    kinds,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
-    SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, sanitize_keys, segments,
+    SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, note_is_current, note_matches,
+    sanitize_keys, segments,
 };
 pub use prefilter::{MODE_CHAT, Prefiltered, Screened, SkipReason, prefilter};
 pub use read::{
@@ -76,6 +78,7 @@ pub use read::{
     embedding_bodies, embedding_vector, embeddings_of_chunk, embeddings_of_model,
     feedback_for_answer, list_sessions, load_bindings, load_probe, load_session, load_settings,
     load_threshold, pending_user_turns, session_turns, session_turns_counted,
+    turns_without_session,
 };
 pub use rules::{
     Attribute, Attributes, Cardinality, CommonRules, CorrectionRules, LanguageRules,
@@ -88,5 +91,6 @@ pub use table::{
 };
 pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
 pub use write::{
-    AssistantTurn, Writes, delete_session, deleted_ids, pending_purge_jobs, purge_job,
+    AssistantTurn, CleanupJob, Writes, delete_session, deleted_ids, expect_record, expect_turn,
+    index_job, pending_cleanup_jobs, pending_purge_jobs, purge_job,
 };
