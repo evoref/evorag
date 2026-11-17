@@ -688,4 +688,13 @@ async fn deletes_replayed_after_a_restore_are_purged_from_the_backups() {
         !file_contains(&source.join("evorag.redb"), TEXT),
         "the restored-from backup no longer holds the deleted text"
     );
+    let store = open(
+        dir.path(),
+        Arc::new(ManualClock::new(Timestamp::from_millis(T0 + 180_000))),
+        61,
+    );
+    assert!(
+        store.pending_deletes().unwrap().is_empty(),
+        "the store-side mark is cleared with the job"
+    );
 }

@@ -90,6 +90,9 @@ pub enum WriteOp {
         id: Id,
         field: Option<(String, u64)>,
     },
+    /// 開くときに残した「索引と退避から除く ID」([`Store::pending_deletes`]) を消す。整理の job を書くのと同じ
+    /// 依頼に入れる。
+    ClearPendingDeletes,
 }
 
 /// 書き込みの依頼。`ops` は 1 つのトランザクションで、すべて書くか、何も書かない。
@@ -127,6 +130,8 @@ pub struct WriteOutcome {
     pub put: Vec<Id>,
     /// 書き込みの前に quarantine へ移した記録の数 (03 §8)。
     pub quarantined: usize,
+    /// quarantine へ移せなかった理由 (依頼は続けて書いた)。呼び手が知らせる。
+    pub quarantine_failed: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -274,10 +279,7 @@ impl Writer {
         // 1. DB のトランザクションで操作を当てて、規則を確かめる (断られたらジャーナルにも書かない)。
         let mut out = WriteOutcome::default();
         if self.store.suspect_count() > 0 {
-            // 壊れた記録は、依頼とは別の先のトランザクションで移す (依頼が断られても、移したことが残るように)。
-            let mut q = self.store.write(&self.token, req.durability)?;
-            out.quarantined = q.quarantine_suspects()?;
-            q.commit()?;
+            self.quarantine(req.durability, &mut out);
         }
         let mut tx = self.store.write(&self.token, req.durability)?;
         // 前に消した記録を作り直さない (04 §7.7 の 3)。同じ依頼の中で消してから作っても断る。
@@ -348,6 +350,34 @@ impl Writer {
 }
 
 impl Writer {
+    /// 壊れた記録を、依頼とは別の先のトランザクションで quarantine へ移す (依頼が断られても、移したことが残る
+    /// ように)。できるだけ行い、移せなくても依頼は続ける (発話の追記を止めないため、03 §8)。一時の失敗なら、
+    /// 次の書き込みでもう一度試す。quarantine の記録を書けない状態 (新しい版の quarantine の記録がある) では
+    /// 試し直さない。
+    fn quarantine(&self, durability: Durability, out: &mut WriteOutcome) {
+        let keys = self.store.take_suspects();
+        let moved = self.store.write(&self.token, durability).and_then(|mut q| {
+            let n = q.quarantine_keys(&keys)?;
+            q.commit()?;
+            Ok(n)
+        });
+        match moved {
+            Ok(n) => out.quarantined = n,
+            Err(e) => {
+                let lasting = matches!(
+                    e,
+                    StoreError::KindHasNewerRecords(_)
+                        | StoreError::WrongVersion { .. }
+                        | StoreError::UnknownKind(_)
+                );
+                if !lasting {
+                    self.store.restore_suspects(keys);
+                }
+                out.quarantine_failed = Some(e.to_string());
+            }
+        }
+    }
+
     /// 依頼のうちジャーナルに書くもの (会話と明示の操作の種類の put と削除、一度だけ書く meta) と、
     /// 削除する ID。
     /// `patched` は、依頼の `Patch` の順に、差し替えて書いた封筒。
@@ -494,6 +524,7 @@ pub(crate) fn apply_op(
             tx.delete_blobs(*id)?;
         }
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
+        WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
     }
     Ok(None)
 }

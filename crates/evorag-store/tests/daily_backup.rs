@@ -149,7 +149,7 @@ fn a_purge_reports_a_backup_it_cannot_open() {
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join(DB_FILE), b"not a database").unwrap();
 
-    let r = store.purge_backups(None, &[gone]);
+    let r = store.purge_backups(None, &[gone], &|| false);
     assert!(r.is_err(), "{r:?}");
     let copy = TempDir::new("daily-purge-unopenable-copy");
     std::fs::copy(good.join(DB_FILE), copy.path().join(DB_FILE)).unwrap();
@@ -218,7 +218,7 @@ fn a_purge_reaches_pre_op_backups_when_backups_live_elsewhere() {
     let listed = evorag_store::restore::list_backups(dir.path(), Some(elsewhere.path()));
     assert!(listed.iter().any(|b| b.dir == pre_op), "{listed:?}");
     store
-        .purge_backups(Some(elsewhere.path()), &[gone])
+        .purge_backups(Some(elsewhere.path()), &[gone], &|| false)
         .unwrap();
     assert!(!contains(&daily, gone, clock.clone()));
     assert!(!contains(&pre_op, gone, clock));
@@ -245,8 +245,50 @@ fn partial_backups_left_by_a_crash_are_removed() {
     for name in ["evorag.redb.purging", "evorag.redb.partial"] {
         std::fs::write(daily.join(name), "架空の本文の写し").unwrap();
     }
-    store.purge_backups(None, &[gone]).unwrap();
+    store.purge_backups(None, &[gone], &|| false).unwrap();
     assert!(!half.exists());
     assert!(!pre_op.exists());
     assert_eq!(names(&daily), [DB_FILE]);
+}
+
+/// 片付けは、作りかけのファイルだけを消す。利用者が置いたファイルのあるフォルダと、`storage.backup_dir` の下の
+/// `pre-op/` (移行と作り直しの前の退避はそこに作らない) には触れない。
+/// verifies: 03 §7.3、04 §7.7 の 5
+#[test]
+fn the_sweep_leaves_user_content_alone() {
+    let dir = TempDir::new("daily-sweep-user");
+    let elsewhere = TempDir::new("daily-sweep-elsewhere");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
+    let store = open(dir.path(), clock);
+    let gone = write_one(&store);
+    store.daily_backup(Some(elsewhere.path())).unwrap().unwrap();
+    // DB の写しは無いが、利用者のファイルがある。
+    let mine = elsewhere.path().join(DAILY_DIR).join("20260102");
+    std::fs::create_dir_all(mine.join("notes")).unwrap();
+    std::fs::write(mine.join("evorag.partial"), "架空の写し").unwrap();
+    std::fs::write(mine.join("notes").join("memo.txt"), "利用者のメモ").unwrap();
+    // backup_dir の下の pre-op/ は片付けない。
+    let other_pre_op = elsewhere.path().join("pre-op").join("x");
+    std::fs::create_dir_all(&other_pre_op).unwrap();
+    std::fs::write(other_pre_op.join("evorag.partial"), "架空の写し").unwrap();
+    store
+        .purge_backups(Some(elsewhere.path()), &[gone], &|| false)
+        .unwrap();
+    assert!(mine.join("notes").join("memo.txt").is_file());
+    assert!(!mine.join("evorag.partial").exists(), "the leftover goes");
+    assert!(other_pre_op.join("evorag.partial").is_file());
+}
+
+/// 終了の合図があれば、次の退避に移る前に止めて失敗を返す (job から次の起動で続ける)。
+/// verifies: 03 §7.3
+#[test]
+fn a_purge_stops_between_backups_when_asked() {
+    let dir = TempDir::new("daily-purge-stop");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
+    let store = open(dir.path(), clock.clone());
+    let gone = write_one(&store);
+    let daily = store.daily_backup(None).unwrap().unwrap();
+    let r = store.purge_backups(None, &[gone], &|| true);
+    assert!(r.is_err(), "{r:?}");
+    assert!(contains(&daily, gone, clock));
 }

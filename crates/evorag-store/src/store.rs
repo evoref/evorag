@@ -151,8 +151,18 @@ pub struct OpenReport {
     /// 読むだけで開いたので、ジャーナルにだけある `memory.forget_key` を入れていない。
     pub forget_key_pending: bool,
     /// 開くときにジャーナルの削除の行から消した記録の ID (取り込んだ削除の行と、削除の行があるのに DB に
-    /// 残っていた記録)。呼び手は、索引と退避からも除く (03 §7.3、04 §7.2 の「当て直し」)。
+    /// 残っていた記録)。索引と退避から除く ID として `meta` にも残す ([`Store::pending_deletes`])。
     pub journal_deletes: Vec<Id>,
+    /// 削除の行があるのに DB に残っていて、ほかの記録から関係でつながっているので消さなかった記録の ID。
+    /// 呼び手が知らせる。
+    pub journal_deletes_kept: Vec<Id>,
+}
+
+/// 空白で区切った ID の並びを読む (読めない語は飛ばす)。
+fn parse_ids(v: &str) -> Vec<Id> {
+    v.split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect()
 }
 
 /// `memory.forget_key` の形 (ちょうど 64 桁の小文字の 16 進、03 §3.1.1)。
@@ -669,7 +679,29 @@ impl Store {
         report.journal_newer_lines = scan.newer;
         report.journal_truncated = scan.truncated;
         let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
-        if !scan.lines.is_empty() || !scan.deleted.is_empty() {
+        // 削除の行があるのに DB に残っている記録 (古い版が書き戻したもの) を、読み取りのトランザクションで探す
+        // (毎回の起動で空の書き込みをしないため)。ほかの記録から関係でつながっている記録は、使われているので
+        // 消さずに知らせる。
+        let mut stale_alive = Vec::new();
+        if !scan.deleted.is_empty() {
+            let rtx = self.read().map_err(unreadable)?;
+            for (id, kind) in &scan.deleted {
+                if rtx.get(kind, *id).map_err(unreadable)?.is_none() {
+                    continue;
+                }
+                let linked = rtx
+                    .incoming_links(*id)
+                    .map_err(unreadable)?
+                    .into_iter()
+                    .any(|from| !scan.deleted.contains_key(&from));
+                if linked {
+                    report.journal_deletes_kept.push(*id);
+                } else {
+                    stale_alive.push((*id, kind.clone()));
+                }
+            }
+        }
+        if !scan.lines.is_empty() || !stale_alive.is_empty() {
             let mut tx = self
                 .write_internal(Durability::Immediate)
                 .map_err(unreadable)?;
@@ -683,22 +715,19 @@ impl Store {
                 }
                 self.replay_line(&mut tx, &line.op).map_err(unreadable)?;
             }
-            // 削除の行があるのに DB に残っている記録 (古い版が書き戻したもの) も消す。消したとみなす ID の
-            // 記録を、生きたまま残さない。
-            for (id, kind) in &scan.deleted {
-                if tx.get(kind, *id).map_err(unreadable)?.is_some()
-                    && !report.journal_deletes.contains(id)
-                {
-                    self.replay_line(
-                        &mut tx,
-                        &LineOp::Delete {
-                            kind: kind.to_string(),
-                            id: *id,
-                        },
-                    )
-                    .map_err(unreadable)?;
-                    report.journal_deletes.push(*id);
+            for (id, kind) in stale_alive {
+                if report.journal_deletes.contains(&id) {
+                    continue;
                 }
+                self.replay_line(&mut tx, &LineOp::Delete { kind, id })
+                    .map_err(unreadable)?;
+                report.journal_deletes.push(id);
+            }
+            // 開くときに消した ID は、同じトランザクションで「索引と退避から除く ID」として残す (呼び手が整理の
+            // job にしてから消す。job を書く前に落ちても失わないため)。
+            if !report.journal_deletes.is_empty() {
+                tx.add_pending_deletes(&report.journal_deletes)
+                    .map_err(unreadable)?;
             }
             if let Some(last_line) = scan.lines.last() {
                 tx.set_journal_seq(last_line.seq).map_err(unreadable)?;
@@ -715,7 +744,23 @@ impl Store {
         {
             self.ids.raise_floor(max);
         }
+        // 消した ID も下限に入れる (消した記録の ID を、新しい記録に使い直さないため)。
+        if let Some(max) = scan.deleted.keys().next_back() {
+            self.ids.raise_floor(*max);
+        }
         Ok(())
+    }
+
+    /// 開くときにジャーナルの削除の行から消した記録の ID のうち、まだ整理の job にしていないもの (03 §7.3)。
+    /// 呼び手は、job を書く依頼に [`crate::WriteOp::ClearPendingDeletes`] を入れて消す。
+    ///
+    /// # Errors
+    /// `meta` を読めないとき。
+    pub fn pending_deletes(&self) -> Result<Vec<Id>, StoreError> {
+        Ok(self
+            .meta(meta::PENDING_DELETES)?
+            .map(|v| parse_ids(&v))
+            .unwrap_or_default())
     }
 
     /// 知っている種類の記録の ID の最大 (種類ごとの最後の記録を見る。全件は読まない、NFR-101)。
@@ -910,16 +955,23 @@ impl Store {
 
     /// 消した記録 `ids` を、保持している退避から除いて写し直す (03 §7.3)。写し直した退避の数を返す。
     ///
+    /// `stop` が真を返したら、次の退避に移る前に止めて失敗を返す (終了を待たせない。job から続ける)。
+    ///
     /// 退避を作る処理と同じ順序で通す: 作りかけの退避があれば、それを作り終えるのを待ってから一覧を作る
     /// (削除より前に写し始め、整理の job を書いた後に作り終えた退避も、整理の対象にするため、04 §7.7 の 5)。
     ///
     /// # Errors
     /// 写し直せない退避、または消せない作りかけの退避があるとき (呼び手は job を残して再試行する)。
-    pub fn purge_backups(&self, backups: Option<&Path>, ids: &[Id]) -> Result<usize, StoreError> {
+    pub fn purge_backups(
+        &self,
+        backups: Option<&Path>,
+        ids: &[Id],
+        stop: &dyn Fn() -> bool,
+    ) -> Result<usize, StoreError> {
         let _order = self.backup_order();
         // 作りかけの退避 (強制終了で残った写し) は、整理の対象にならないまま本文を持ち続けるので、先に消す。
         let leftovers = crate::restore::sweep_leftovers(&self.root, backups);
-        let purged = crate::restore::purge_backups(&self.root, backups, ids)?;
+        let purged = crate::restore::purge_backups_until(&self.root, backups, ids, stop)?;
         if !leftovers.is_empty() {
             return Err(StoreError::Io(format!(
                 "partial backups could not be removed: {}",
@@ -1148,6 +1200,19 @@ impl Store {
     }
 
     /// 読んだときに壊れていた記録の数 (まだ quarantine で扱っていないもの)。
+    /// 読んだときに壊れていた記録のキーを取り出す (quarantine へ移すため)。
+    pub(crate) fn take_suspects(&self) -> BTreeSet<Vec<u8>> {
+        std::mem::take(&mut *self.suspects.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// 移せなかったキーを戻す (次の書き込みでもう一度試す)。
+    pub(crate) fn restore_suspects(&self, keys: BTreeSet<Vec<u8>>) {
+        self.suspects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(keys);
+    }
+
     pub fn suspect_count(&self) -> usize {
         self.suspects
             .lock()
@@ -1298,6 +1363,30 @@ impl WriteTxn<'_> {
         Ok(())
     }
 
+    /// 索引と退避から除く ID を `meta` に足す ([`Store::pending_deletes`])。
+    pub(crate) fn add_pending_deletes(&mut self, ids: &[Id]) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        let mut all: BTreeSet<Id> = m
+            .get(meta::PENDING_DELETES.as_bytes())
+            .map_err(db)?
+            .map(|v| parse_ids(&String::from_utf8_lossy(v.value())))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        all.extend(ids.iter().copied());
+        let value: Vec<String> = all.iter().map(Id::to_string).collect();
+        m.insert(meta::PENDING_DELETES.as_bytes(), value.join(" ").as_bytes())
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// [`Store::pending_deletes`] を消す (整理の job を書いたのと同じトランザクションで)。
+    pub(crate) fn clear_pending_deletes(&mut self) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        m.remove(meta::PENDING_DELETES.as_bytes()).map_err(db)?;
+        Ok(())
+    }
+
     /// ジャーナルから取り込んだ最後の連番 (`meta` の `journal.last_seq`)。
     pub(crate) fn set_journal_seq(&mut self, seq: u64) -> Result<(), StoreError> {
         let mut m = self.tx.open_table(META).map_err(db)?;
@@ -1319,28 +1408,21 @@ impl WriteTxn<'_> {
     /// 読んだときに壊れていた記録を、読み直して確かめてから quarantine へ移す (03 §8)。
     /// 移した件数を返す。
     pub fn quarantine_suspects(&mut self) -> Result<usize, StoreError> {
-        let suspects = std::mem::take(
-            &mut *self
-                .store
-                .suspects
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
+        let suspects = self.store.take_suspects();
         match self.quarantine_keys(&suspects) {
             Ok(n) => Ok(n),
             Err(e) => {
                 // 移せなかった (トランザクションごと捨てる) ので、次の書き込みでもう一度試す。
-                self.store
-                    .suspects
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend(suspects);
+                self.store.restore_suspects(suspects);
                 Err(e)
             }
         }
     }
 
-    fn quarantine_keys(&mut self, suspects: &BTreeSet<Vec<u8>>) -> Result<usize, StoreError> {
+    pub(crate) fn quarantine_keys(
+        &mut self,
+        suspects: &BTreeSet<Vec<u8>>,
+    ) -> Result<usize, StoreError> {
         let mut moved = 0;
         for k in suspects {
             let Some((kind, id)) = split_record_key(k) else {
@@ -1460,7 +1542,7 @@ mod tests {
         // 退避を作り始めた (写しは削除の前の時点)。
         let making = store.backup_order();
         std::thread::scope(|s| {
-            let purge = s.spawn(|| store.purge_backups(None, &[gone]));
+            let purge = s.spawn(|| store.purge_backups(None, &[gone], &|| false));
             std::thread::sleep(std::time::Duration::from_millis(200));
             assert!(!purge.is_finished(), "the purge waits for the backup");
             // 整理の一覧を作った後に、退避を作り終える。
@@ -1563,6 +1645,130 @@ mod tests {
         assert_eq!(store.read().unwrap().get("noted", id).unwrap(), None);
         assert_eq!(report.journal_deletes, vec![id]);
         assert!(store.was_deleted(id));
+        // 消した ID は、新しい記録に使い直さない (ID の下限に入る)。
+        assert!(store.ids().next_id() > id);
+        // 索引と退避から除く ID は、整理の job にするまで残る (開き直しても失わない)。
+        assert_eq!(store.pending_deletes().unwrap(), vec![id]);
+        drop(store);
+        let (store, report) = open_noted(dir.path());
+        assert!(report.journal_deletes.is_empty());
+        assert_eq!(store.pending_deletes().unwrap(), vec![id]);
+        let (writer, h) = crate::writer::Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || writer.run());
+        h.submit_wait(crate::WriteRequest::background(vec![
+            crate::WriteOp::ClearPendingDeletes,
+        ]))
+        .unwrap();
+        h.shutdown();
+        t.join().unwrap();
+        assert!(store.pending_deletes().unwrap().is_empty());
+    }
+
+    /// 削除の行があるのに DB に残っている記録でも、ほかの記録から関係でつながっていれば消さずに知らせる。
+    /// verifies: 03 §6、04 §7.7 の 3
+    #[test]
+    fn a_record_with_a_delete_line_that_is_still_linked_is_kept() {
+        let dir = TempDir::new("store-journal-deleted-linked");
+        let (store, _) = open_noted(dir.path());
+        let (writer, h) = crate::writer::Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || writer.run());
+        let id = store.ids().next_id();
+        let env = noted(&store, id);
+        h.submit_wait(crate::WriteRequest::conversation(vec![
+            crate::WriteOp::Put(env.clone()),
+        ]))
+        .unwrap();
+        h.submit_wait(crate::WriteRequest::conversation(vec![
+            crate::WriteOp::Delete {
+                kind: "noted".into(),
+                id,
+            },
+        ]))
+        .unwrap();
+        h.shutdown();
+        t.join().unwrap();
+        drop(store);
+        // 古い版が書き戻し、ほかの記録からつないだ。
+        let (store, _) = open_noted(dir.path());
+        let tok = store.take_write_token().unwrap();
+        let mut tx = store.write(&tok, Durability::Immediate).unwrap();
+        tx.put(&mut env.clone()).unwrap();
+        let mut child = Envelope::new(store.ids().next_id(), "sample", 1, store.clock().now(), "");
+        child
+            .set_body(&Body {
+                text: "架空の派生".into(),
+            })
+            .unwrap();
+        tx.put(&mut child).unwrap();
+        tx.put_link(child.id, "derived_from", id, b"").unwrap();
+        tx.commit().unwrap();
+        drop(store);
+
+        let (store, report) = open_noted(dir.path());
+        assert!(matches!(
+            store.read().unwrap().get("noted", id).unwrap(),
+            Some(Read::Ok(_))
+        ));
+        assert_eq!(report.journal_deletes_kept, vec![id]);
+        assert!(report.journal_deletes.is_empty());
+        assert!(store.pending_deletes().unwrap().is_empty());
+    }
+
+    /// quarantine の記録を書けない状態 (新しい版の quarantine の記録がある) でも、発話の追記は止まらない。
+    /// verifies: 03 §8、03 §4.2 の規則 6
+    #[test]
+    fn writes_go_on_when_quarantine_cannot_be_written() {
+        let dir = TempDir::new("store-quarantine-blocked");
+        let (store, _) = open_noted(dir.path());
+        // 新しい版の quarantine の記録を置き、読んで覚えさせる。
+        let newer = store.ids().next_id();
+        let mut q = Envelope::new(newer, KIND_QUARANTINE, 2, store.clock().now(), "9.9.9");
+        q.set_body(&Body {
+            text: "新しい版".into(),
+        })
+        .unwrap();
+        let broken = store.ids().next_id();
+        {
+            let tx = store.db.begin_write().unwrap();
+            let mut t = tx.open_table(RECORDS).unwrap();
+            let k = record_key(KIND_QUARANTINE, newer);
+            t.insert(k.as_slice(), q.encode(&k).as_slice()).unwrap();
+            t.insert(
+                record_key("sample", broken).as_slice(),
+                [1u8; 24].as_slice(),
+            )
+            .unwrap();
+            drop(t);
+            tx.commit().unwrap();
+        }
+        let r = store.read().unwrap();
+        assert!(matches!(
+            r.get(KIND_QUARANTINE, newer).unwrap(),
+            Some(Read::Ok(_))
+        ));
+        assert!(matches!(
+            r.get("sample", broken).unwrap(),
+            Some(Read::Corrupt { .. })
+        ));
+        drop(r);
+        let (writer, h) = crate::writer::Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || writer.run());
+        let turn = noted(&store, store.ids().next_id());
+        let out = h
+            .submit_wait(crate::WriteRequest::conversation(vec![
+                crate::WriteOp::Put(turn.clone()),
+            ]))
+            .unwrap();
+        assert!(out.quarantine_failed.is_some());
+        assert_eq!(out.quarantined, 0);
+        // 書けない状態は続くので、試し直さない (次の書き込みも同じく通る)。
+        assert_eq!(store.suspect_count(), 0);
+        h.shutdown();
+        t.join().unwrap();
+        assert!(matches!(
+            store.read().unwrap().get("noted", turn.id).unwrap(),
+            Some(Read::Ok(_))
+        ));
     }
 
     /// 断られた依頼の前に見つけた壊れた記録も、quarantine へ移す (依頼とは別のトランザクション)。差し替えを

@@ -489,6 +489,8 @@ async fn deleting_a_session_purges_it_from_the_backups() {
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     core.command(Command::DeleteSession);
     until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    // 整理を終えるまで待つ (終了の合図があると、整理は次の退避に移る前に止まり、次の起動で続ける)。
+    core.settle().await;
     core.shutdown().await;
 
     let daily = dir.path().join("backups").join("daily");

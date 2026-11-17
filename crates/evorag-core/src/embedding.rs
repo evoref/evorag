@@ -158,10 +158,23 @@ pub(crate) async fn open(inner: &Arc<Inner>) {
         tracing::warn!("vector index could not be checked");
         return;
     };
-    if !plan.unsynced.is_empty()
-        && let Ok((_, job)) = evorag_memory::index_job(&writes(inner), plan.unsynced.clone())
-        && write_derived(inner, vec![job]).await.is_ok()
-    {
+    if !plan.unsynced.is_empty() {
+        // 同じ行を除く job が残っていれば、足さない (起動のたびに増やさない)。
+        let want: HashSet<Id> = plan.unsynced.iter().copied().collect();
+        let queued = inner
+            .store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::pending_cleanup_jobs(&r).ok())
+            .unwrap_or_default()
+            .iter()
+            .any(|j| !j.backups && j.ids.iter().copied().collect::<HashSet<Id>>() == want);
+        if !queued
+            && let Ok((_, job)) = evorag_memory::index_job(&writes(inner), plan.unsynced.clone())
+            && let Err(e) = write_derived(inner, vec![job]).await
+        {
+            tracing::warn!(error = %e, "the index cleanup job could not be written");
+        }
         inner
             .cleanup_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);

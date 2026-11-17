@@ -118,10 +118,12 @@ fn is_leftover(name: &str) -> bool {
 }
 
 /// 強制終了で残った作りかけの退避を消す (03 §7.3、04 §7.7 の 5)。作りかけのファイル (`*.partial`・`*.purging`)
-/// と、DB の写しを持たない退避のフォルダ (作りかけで止まったもの) は、世代の数え方にも整理にも入らないまま、
-/// 消した記録の本文を持ち続けうるため。退避を作る処理と同じ順序で通すこと (`Store` の退避の鍵の下で呼ぶ)。
-/// 消せなかったものを返す。
+/// と、作りかけで止まった退避のフォルダ (DB の写しが無く、作りかけのファイルだけを持つもの) は、世代の数え方にも
+/// 整理にも入らないまま、消した記録の本文を持ち続けうるため。利用者が置いたほかのファイルとフォルダには触れない
+/// (中へ再帰しない)。移行と作り直しの前の退避は、データ根の `backups/pre-op/` だけを見る (そこにしか作らない)。
+/// 退避を作る処理と同じ順序で通すこと (`Store` の退避の鍵の下で呼ぶ)。消せなかったものを返す。
 pub fn sweep_leftovers(root: &Path, backups: Option<&Path>) -> Vec<String> {
+    let base = backups.map_or_else(|| root.join(BACKUPS_DIR), Path::to_path_buf);
     let mut failed = Vec::new();
     let mut remove = |path: &Path, r: std::io::Result<()>| {
         if let Err(e) = r
@@ -130,32 +132,44 @@ pub fn sweep_leftovers(root: &Path, backups: Option<&Path>) -> Vec<String> {
             failed.push(format!("{}: {e}", path.display()));
         }
     };
-    for (base, _) in backup_bases(root, backups) {
-        let Ok(rd) = std::fs::read_dir(&base) else {
+    for parent in [
+        base.join(DAILY_DIR),
+        base.join(WEEKLY_DIR),
+        root.join(BACKUPS_DIR).join(PRE_OP_DIR),
+    ] {
+        let Ok(rd) = std::fs::read_dir(&parent) else {
             continue;
         };
         for e in rd.filter_map(Result::ok) {
             let dir = e.path();
-            if !dir.is_dir() {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
-            if !dir.join(DB_FILE).is_file() {
-                remove(&dir, std::fs::remove_dir_all(&dir));
-                continue;
-            }
-            let Ok(files) = std::fs::read_dir(&dir) else {
+            let has_db = match std::fs::metadata(dir.join(DB_FILE)) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                // 調べられないフォルダには触れない。
+                Err(_) => continue,
+            };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            for f in files.filter_map(Result::ok) {
-                let path = f.path();
-                if is_leftover(&f.file_name().to_string_lossy()) {
-                    let r = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
-                    remove(&path, r);
+            let mut leftovers = Vec::new();
+            let mut other = false;
+            for f in entries.filter_map(Result::ok) {
+                let is_file = f.file_type().is_ok_and(|t| t.is_file());
+                if is_file && is_leftover(&f.file_name().to_string_lossy()) {
+                    leftovers.push(f.path());
+                } else if !(has_db && f.file_name() == DB_FILE) {
+                    other = true;
                 }
+            }
+            for f in &leftovers {
+                remove(f, std::fs::remove_file(f));
+            }
+            // 作りかけのファイルだけを持っていたフォルダ (DB の写しが無い) は、空にしてから消す。
+            if !has_db && !other {
+                remove(&dir, std::fs::remove_dir(&dir));
             }
         }
     }
@@ -223,6 +237,19 @@ fn mentions(key: &[u8], ids: &BTreeSet<[u8; 16]>) -> bool {
 /// # Errors
 /// 写し直せなかった退避があるとき。
 pub fn purge_backups(root: &Path, backups: Option<&Path>, ids: &[Id]) -> Result<usize, StoreError> {
+    purge_backups_until(root, backups, ids, &|| false)
+}
+
+/// [`purge_backups`] を、`stop` が真を返したら次の退避に移る前に止めて行う (止めたら失敗を返す)。
+///
+/// # Errors
+/// 写し直せなかった退避があるとき、または止めたとき。
+pub fn purge_backups_until(
+    root: &Path,
+    backups: Option<&Path>,
+    ids: &[Id],
+    stop: &dyn Fn() -> bool,
+) -> Result<usize, StoreError> {
     if ids.is_empty() {
         return Ok(0);
     }
@@ -230,6 +257,11 @@ pub fn purge_backups(root: &Path, backups: Option<&Path>, ids: &[Id]) -> Result<
     let mut n = 0;
     let mut failed = Vec::new();
     for b in list_backups(root, backups) {
+        if stop() {
+            return Err(StoreError::Io(
+                "the purge was stopped before it finished".into(),
+            ));
+        }
         let file = b.dir.join(DB_FILE);
         match purge_one(&file, &set) {
             Ok(true) => n += 1,

@@ -318,6 +318,8 @@ struct Inner {
     /// 整理の job を行う処理の鍵 (同時に 1 つ)。落とされない整理の task には、spawn の前に取った鍵を渡す (終了の
     /// ときに、この鍵を取れたら、出した整理は終わっている)。鍵の順は cleanup_lock → index_lock。
     cleanup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 終了を始めた (退避の整理は、次の退避に移る前に止める。job から次の起動で続ける)。
+    shutting_down: std::sync::atomic::AtomicBool,
     /// 試験のための注入: 索引から除くのを、この回数だけ失敗させる。
     fail_index_removal: std::sync::atomic::AtomicUsize,
     /// 命令の待ち行列を回す task と、その止め方。
@@ -474,18 +476,14 @@ impl Core {
             .spawn(move || writer.run())
             .map_err(|e| StartError::Storage(e.to_string()))?;
 
-        // 開くときにジャーナルから当てた削除 (restore・取り込みの当て直し、03 §6) の ID を、索引と退避からも除く
-        // (04 §7.2 の「当て直し」)。派生の記録は、起動時の突き合わせ (規則 12) が消して、同じく job に書く。
-        if !open_report.journal_deletes.is_empty() {
-            let w = Writes {
-                clock: &*cfg.clock,
-                ids: &*cfg.ids,
-            };
-            let (_, op) = evorag_memory::purge_job(&w, open_report.journal_deletes.clone())
-                .map_err(|e| StartError::Storage(e.to_string()))?;
-            handle
-                .submit_wait(WriteRequest::conversation(vec![op]))
-                .map_err(|e| StartError::Storage(e.to_string()))?;
+        // 開くときにジャーナルから当てた削除 (restore・取り込みの当て直し、03 §6) の ID は、ストアが同じ
+        // トランザクションで残している。起動時の整理 (`run_cleanup_jobs`) が整理の job にして、索引と退避からも
+        // 除く (04 §7.2 の「当て直し」)。派生の記録は、起動時の突き合わせ (規則 12) が消して、同じく job に書く。
+        if !open_report.journal_deletes_kept.is_empty() {
+            tracing::warn!(
+                n = open_report.journal_deletes_kept.len(),
+                "records with a journal delete line are still linked from other records; kept"
+            );
         }
 
         // プロンプトの言語: 記録があればそれを使い、無ければ設定の値を記録する (07 §6.1)。
@@ -637,6 +635,7 @@ impl Core {
             probe: cfg.probe,
             background: Mutex::new(Vec::new()),
             cleanup_pending: std::sync::atomic::AtomicBool::new(false),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             cleanup_lock: Arc::new(tokio::sync::Mutex::new(())),
             fail_index_removal: std::sync::atomic::AtomicUsize::new(0),
             command_loop: Mutex::new(None),
@@ -1008,6 +1007,10 @@ impl Core {
     /// 終了する。生成中なら中断として書き、書き手の待ち行列の会話の追記を書き切ってから戻る (02 §5)。
     /// 戻った後、ほかに複製した `Core` が無ければ、データ根のロックも外れている。
     pub async fn shutdown(self) {
+        // 退避の整理を、次の退避に移る前に止めさせる (終わるまで待たせない。job から次の起動で続ける)。
+        self.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // 新しい命令を受け付けない (処理中の命令は終わるまで待つ)。
         let command_loop = self
             .inner
@@ -1629,7 +1632,12 @@ async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     match rx.await {
-        Ok(Ok(_)) => Ok(()),
+        Ok(Ok(out)) => {
+            if let Some(e) = out.quarantine_failed {
+                tracing::warn!(error = %e, "broken records could not be quarantined; the write went ahead");
+            }
+            Ok(())
+        }
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("the writer stopped".into()),
     }
@@ -1846,9 +1854,11 @@ async fn delete(inner: &Arc<Inner>) {
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
     emit(inner, Event::SessionDeleted { id: sid });
+    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した整理は終わっている)。
+    let guard = inner.cleanup_lock.clone().lock_owned().await;
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        let _guard = worker.cleanup_lock.lock().await;
+        let _guard = guard;
         let job = evorag_memory::CleanupJob {
             job,
             ids,
@@ -1917,6 +1927,7 @@ pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
         worker
             .cleanup_pending
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        adopt_pending_deletes(&worker).await;
         let reader = worker.clone();
         let jobs = tokio::task::spawn_blocking(move || pending_cleanup(&reader))
             .await
@@ -1929,6 +1940,30 @@ pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+/// 開くときにストアが残した「索引と退避から除く ID」(ジャーナルから当て直した削除) を、整理の job にする。
+/// job を書くのと同じ依頼で、ストアの印を消す (その間に落ちても失わない)。書けなければ旗を立て、sleep-time と
+/// 次の起動で試し直す (起動は止めない)。
+async fn adopt_pending_deletes(inner: &Arc<Inner>) {
+    let ids = match inner.store.pending_deletes() {
+        Ok(ids) if !ids.is_empty() => ids,
+        Ok(_) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "deletes replayed at open could not be read");
+            return;
+        }
+    };
+    let written = match evorag_memory::purge_job(&writes(inner), ids) {
+        Ok((_, job)) => write(inner, vec![job, WriteOp::ClearPendingDeletes]).await,
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "deletes replayed at open could not be queued for cleanup");
+        inner
+            .cleanup_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// sleep-time に試し直す整理の job があるか。
@@ -2028,7 +2063,15 @@ fn purge(inner: &Inner, ids: &[Id]) -> bool {
     if !enough_space(inner) {
         return false;
     }
-    match inner.store.purge_backups(inner.backup_dir.as_deref(), ids) {
+    let stop = || {
+        inner
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    match inner
+        .store
+        .purge_backups(inner.backup_dir.as_deref(), ids, &stop)
+    {
         Ok(_) => true,
         Err(e) => {
             tracing::warn!(error = %e, "backups could not be purged");
