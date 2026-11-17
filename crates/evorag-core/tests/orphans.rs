@@ -193,11 +193,18 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
     let keys_b = reply(r#"{"keys": ["車の手入れ"]}"#);
     let keys_a = reply(&format!(r#"{{"keys": ["{MARK}"]}}"#));
-    let llm = chat(&[reply(REPLY), reply(REPLY), keys_b, keys_a], false);
+    // 事実の抽出 (04 §5.2.1) は、ノートの後に 2 つの発話を 1 つの束で送る (候補なし)。
+    let no_facts = reply(r#"{"c": []}"#);
+    let llm = chat(
+        &[reply(REPLY), reply(REPLY), keys_b, keys_a, no_facts],
+        false,
+    );
     let mut cfg = config(dir.path(), clock.clone());
     cfg.embed = Some(Arc::new(embedder()));
     let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
     core.settle().await;
+    // 発話の間は裏の処理を止めておく (事実の抽出が、次の応答の答えを先に使わないように)。
+    core.hold(true);
     core.command(Command::NewSession {
         title: "植物".into(),
     });
@@ -209,6 +216,7 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     let b = say(&core, &mut rx, "オイル交換").await;
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
     core.shutdown().await;
     assert_eq!(llm.remaining(), 0, "both notes were made");
@@ -338,9 +346,15 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
             .any(|(_, b)| added_chunks.contains(&b.target)),
         "the added turn is embedded"
     );
+    // 残るのは事実の抽出の進み具合 (04 §5.2.1) だけ。
     let mut jobs = 0;
-    r.for_each(evorag_memory::KIND_JOB, |_| {
-        jobs += 1;
+    r.for_each(evorag_memory::KIND_JOB, |x| {
+        if let Read::Ok(e) = x
+            && e.body_as::<evorag_memory::JobBody>().unwrap().task
+                != evorag_memory::JOB_EXTRACT_FACTS
+        {
+            jobs += 1;
+        }
         true
     })
     .unwrap();
@@ -365,19 +379,25 @@ async fn derived_records_go_when_a_deletion_is_replayed_from_the_journal() {
     prepare(dir.path(), true);
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
     let llm = chat(
-        &[reply(REPLY), reply(&format!(r#"{{"keys": ["{MARK}"]}}"#))],
+        &[
+            reply(REPLY),
+            reply(&format!(r#"{{"keys": ["{MARK}"]}}"#)),
+            reply(r#"{"c": []}"#),
+        ],
         false,
     );
     let mut cfg = config(dir.path(), clock.clone());
     cfg.embed = Some(Arc::new(embedder()));
     let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
     core.settle().await;
+    core.hold(true);
     core.command(Command::NewSession {
         title: "植物".into(),
     });
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     let a = say(&core, &mut rx, "モンステラの水やり").await;
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
     core.shutdown().await;
     assert_eq!(llm.remaining(), 0, "the note was made");

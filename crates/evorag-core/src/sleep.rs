@@ -3,7 +3,8 @@
 //! 手順は 2 種類ある。
 //! - **起動後の点検** (モデルの点検 06 §3.3、リランカーの較正 05 §3.7): TUI を開いた後に、入力が途切れ
 //!   (`CHECK_QUIET`)、応答を作っていない間に流す。`memory.sleep_time` と `idle_seconds` には縛らない。
-//! - **sleep-time の手順** (埋め込み、ノートなど。M2.5 から): 操作の無い時間が `idle` を過ぎてから。
+//! - **sleep-time の手順** (埋め込み、ノート、事実の抽出と統合など。M2.5 から): 操作の無い時間が `idle` を
+//!   過ぎてから。
 //!
 //! どちらも、利用者が操作したら ([`super::Core::touch`]) 動いている手順の future を落とす。LLM の要求は
 //! 接続ごと閉じるので、llama-server の処理も止まる (06 §4)。止めたところまでの結果は、作り直せるものだけを
@@ -88,6 +89,8 @@ pub(crate) enum Step {
     Embed,
     /// ノートの検索の鍵を作る (04 §2、04 §4 の手順 2)。sleep-time の手順。
     Notes,
+    /// 事実の候補を抽出して統合する (04 §5.2.1、04 §4 の手順 3・5)。sleep-time の手順。
+    Extract,
     /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
     Backup,
 }
@@ -128,6 +131,9 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     }
     if !waiting(Step::Notes) && crate::notes::needed(inner) {
         return Some(Step::Notes);
+    }
+    if !waiting(Step::Extract) && crate::extraction::needed(inner) {
+        return Some(Step::Extract);
     }
     if !waiting(Step::Backup)
         && inner.startup_done.load(Ordering::SeqCst)
@@ -305,6 +311,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
             }
             Step::Embed => crate::embedding::run(inner).await,
             Step::Notes => crate::notes::run(inner).await,
+            Step::Extract => crate::extraction::run(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

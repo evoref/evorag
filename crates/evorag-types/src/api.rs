@@ -337,6 +337,13 @@ pub enum Event {
         /// 型縛りの出力が空、または型に合わない (型縛りの補助の呼び出しを止める)。
         structured_broken: bool,
     },
+    /// 1 回の裏の処理で事実が増えた・置き換わった・矛盾になった (04 §5.2.1・§5.3 の「知らせ」)。
+    /// 件数だけを持ち、値は持たない。
+    FactsChanged {
+        added: usize,
+        replaced: usize,
+        contested: usize,
+    },
     /// embed・rerank の役割の状態が変わった (繋がった、記録と違った、記録した、06 §3)。
     RoleChanged {
         info: ModelRoleInfo,

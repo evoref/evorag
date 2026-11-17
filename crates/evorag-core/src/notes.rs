@@ -38,7 +38,7 @@ pub(crate) fn touch(inner: &Inner) {
 
 /// 今の応答のモデルで、型縛りの補助の呼び出しを使えるか (06 §3.3 の点検で通ったか)。
 /// 点検がまだなら使わない (点検を待つ)。
-fn usable(inner: &Inner) -> bool {
+pub(crate) fn usable(inner: &Inner) -> bool {
     let (_, server, _) = inner.conn();
     inner
         .store
@@ -163,7 +163,7 @@ enum KeysError {
 }
 
 /// 応答のスロット (0) が処理中か (06 §4)。`/slots` が使えなければ見ない。
-async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
+pub(crate) async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
     llm.slots()
         .await
         .is_ok_and(|s| s.iter().any(|x| x.id == 0 && x.is_processing))
@@ -235,9 +235,11 @@ async fn save(
     gone: Vec<Id>,
     made: Option<(Id, NoteBody)>,
 ) -> bool {
+    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した保存は終わっている)。
+    let lock = inner.index_lock.clone().lock_owned().await;
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        let _lock = worker.index_lock.lock().await;
+        let _lock = lock;
         if crate::write_derived(&worker, ops).await.is_err() {
             return false;
         }

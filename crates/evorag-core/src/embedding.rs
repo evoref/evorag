@@ -449,11 +449,13 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if keep.is_empty() {
             continue;
         }
-        // 記録と索引への反映は、鍵の下の落とされない task で行う。
+        // 記録と索引への反映は、鍵の下の落とされない task で行う。鍵は spawn の前に取る (終了の処理が鍵を
+        // 取れたら、出した保存は終わっている)。
+        let lock = inner.index_lock.clone().lock_owned().await;
         let worker = inner.clone();
         let key2 = key.clone();
         let saved = tokio::spawn(async move {
-            let _lock = worker.index_lock.lock().await;
+            let _lock = lock;
             save(&worker, &key2, keep, done).await
         })
         .await;

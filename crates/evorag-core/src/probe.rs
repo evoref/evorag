@@ -6,7 +6,9 @@
 
 use std::time::{Duration, Instant};
 
-use evorag_llm::{ChatEvent, ChatMessage, ChatRequest, Generation, LlmClient, RequestExtra, Role};
+use evorag_llm::{
+    ChatEvent, ChatMessage, ChatRequest, Generation, LlmClient, LlmError, RequestExtra, Role,
+};
 use evorag_memory::ModelProbeBody;
 use serde_json::json;
 
@@ -37,6 +39,8 @@ pub fn issues(p: &ModelProbeBody) -> Vec<ProbeIssue> {
 #[derive(Default)]
 pub(crate) struct Collected {
     pub(crate) text: String,
+    /// 生成が終わった理由 (`stop`・`length` など。サーバが返したときだけ)。
+    pub(crate) finish_reason: Option<String>,
     reasoning: bool,
     usage: Option<evorag_llm::Usage>,
     /// 最初の断片までの時間 (プロンプトの処理の時間とみなす)。
@@ -44,30 +48,56 @@ pub(crate) struct Collected {
     elapsed: Duration,
 }
 
-pub(crate) async fn run_chat(llm: &dyn LlmClient, req: ChatRequest) -> Result<Collected, String> {
+/// 逐次表示を最後まで受け取れなかった理由 (呼ぶ側が失敗の種類で扱いを分ける、06 §7)。
+#[derive(Debug)]
+pub(crate) enum ChatError {
+    /// 締切 (`LIMIT`) までに終わらなかった。
+    TimedOut,
+    /// llama-server の失敗 (繋がらない・HTTP の状態・逐次表示の途中の失敗)。
+    Llm(LlmError),
+}
+
+impl std::fmt::Display for ChatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => f.write_str("timed out"),
+            Self::Llm(e) => e.fmt(f),
+        }
+    }
+}
+
+/// 要求を送り、逐次表示を最後まで受け取る (締切は `LIMIT`)。
+pub(crate) async fn run_chat(
+    llm: &dyn LlmClient,
+    req: ChatRequest,
+) -> Result<Collected, ChatError> {
     let started = Instant::now();
     let fut = async {
-        let mut stream = llm.chat(req).await.map_err(|e| e.to_string())?;
+        let mut stream = llm.chat(req).await.map_err(ChatError::Llm)?;
         let mut c = Collected::default();
         while let Some(ev) = stream.next().await {
-            let ev = ev.map_err(|e| e.to_string())?;
+            let ev = ev.map_err(ChatError::Llm)?;
             if c.first.is_none() && !matches!(ev, ChatEvent::Done { .. }) {
                 c.first = Some(started.elapsed());
             }
             match ev {
                 ChatEvent::Delta(d) => c.text.push_str(&d),
                 ChatEvent::Reasoning(_) => c.reasoning = true,
-                ChatEvent::Done { usage, .. } => {
+                ChatEvent::Done {
+                    finish_reason,
+                    usage,
+                } => {
+                    c.finish_reason = finish_reason;
                     c.usage = usage;
                     break;
                 }
             }
         }
-        Ok::<_, String>(c)
+        Ok::<_, ChatError>(c)
     };
     let mut c = tokio::time::timeout(LIMIT, fut)
         .await
-        .map_err(|_| "timed out".to_owned())??;
+        .map_err(|_| ChatError::TimedOut)??;
     c.elapsed = started.elapsed();
     Ok(c)
 }

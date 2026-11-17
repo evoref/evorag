@@ -512,6 +512,28 @@ impl App {
                 );
                 self.notice(m);
             }
+            Event::FactsChanged {
+                added,
+                replaced,
+                contested,
+            } => {
+                // 件数だけを短く出す (値は出さない、04 §5.3 の「知らせ」)。
+                let parts: Vec<String> = [
+                    (MessageKey::UiFactsAdded, added),
+                    (MessageKey::UiFactsReplaced, replaced),
+                    (MessageKey::UiFactsContested, contested),
+                ]
+                .into_iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(k, n)| self.catalog.with(k, &[("n", &n.to_string())]))
+                .collect();
+                if !parts.is_empty() {
+                    let m = self
+                        .catalog
+                        .with(MessageKey::UiFactsChanged, &[("parts", &parts.join("・"))]);
+                    self.notice(m);
+                }
+            }
             Event::SourcesInfo { memory } => {
                 let k = if memory {
                     MessageKey::UiSourcesOn
@@ -1077,6 +1099,27 @@ mod tests {
         for ch in s.chars() {
             a.on_key(Key::Char(ch));
         }
+    }
+
+    /// 事実が変わった知らせは、0 でない件数だけを並べる (04 §5.3 の「知らせ」)。
+    #[test]
+    fn facts_changes_show_counts_only() {
+        let mut a = app();
+        a.on_event(Event::FactsChanged {
+            added: 2,
+            replaced: 0,
+            contested: 1,
+        });
+        let last = a.notices.last().expect("a notice");
+        assert!(last.contains("事実 +2・矛盾 1"), "{last}");
+        assert!(!last.contains("置き換え"), "{last}");
+        let before = a.notices.len();
+        a.on_event(Event::FactsChanged {
+            added: 0,
+            replaced: 0,
+            contested: 0,
+        });
+        assert_eq!(a.notices.len(), before);
     }
 
     /// verifies: AC-FR-415-1 (入力欄の文字が 500 ms 変わらなければ、その文字で 1 回だけ知らせる)

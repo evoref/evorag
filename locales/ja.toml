@@ -113,6 +113,12 @@ calibration_failed = "リランカーが較正の基準に届かなかったの�
 probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
 
+[ui.notice.facts]
+changed = "覚えた事実: {parts}"
+added = "事実 +{n}"
+replaced = "置き換え {n}"
+contested = "矛盾 {n}"
+
 [ui.band]
 related = "関係しそうな記録 (この応答には使っていません)"
 nearby = "近い記録 (自動では添えていません)"

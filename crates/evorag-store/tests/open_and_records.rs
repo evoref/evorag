@@ -316,6 +316,53 @@ struct QuarantineBody {
 }
 
 /// verifies: AC-FR-215-2 (知らない種類の記録を読み飛ばして数え、消さない)
+/// `for_each_after` は、その種類の記録のうち ID が後のものだけを ID の順に読み、ほかの種類を読まない。
+/// 基準の ID がその種類に無くても (ほかの種類の ID でも) よく、`false` で止まる。
+#[test]
+fn records_after_an_id_are_read_in_id_order() {
+    let dir = TempDir::new("store-after");
+    let store = open(dir.path());
+    let tok = store.take_write_token().unwrap();
+    let mut samples = Vec::new();
+    let mut appends = Vec::new();
+    for i in 0..4 {
+        let mut s = new_record(&store, &SAMPLE, &format!("s{i}"));
+        put(&store, &tok, &mut s);
+        samples.push(s.id);
+        let mut a = new_record(&store, &APPEND, &format!("a{i}"));
+        put(&store, &tok, &mut a);
+        appends.push(a.id);
+    }
+    let r = store.read().unwrap();
+    let after = |kind: &str, id: Id| {
+        let mut seen = Vec::new();
+        r.for_each_after(kind, id, |x| {
+            if let Read::Ok(e) = x {
+                assert_eq!(e.kind, kind);
+                seen.push(e.id);
+            }
+            true
+        })
+        .unwrap();
+        seen
+    };
+    assert_eq!(after("sample", samples[1]), samples[2..]);
+    assert_eq!(
+        after("append", samples[1]),
+        appends[1..],
+        "an id of another kind"
+    );
+    assert_eq!(after("sample", samples[3]), Vec::<Id>::new());
+    assert_eq!(after("sample", Id::from_bytes([0; 16])), samples);
+    let mut first = None;
+    r.for_each_after("sample", samples[0], |x| {
+        first = Some(x);
+        false
+    })
+    .unwrap();
+    assert!(matches!(first, Some(Read::Ok(e)) if e.id == samples[1]));
+}
+
 #[test]
 fn records_of_unknown_kinds_are_counted_and_kept() {
     let dir = TempDir::new("store-unknown");

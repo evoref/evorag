@@ -17,6 +17,8 @@ use evorag_types::{ManualClock, Timestamp, UuidV7Gen};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 const REPLY: &str = "了解です";
+/// 事実の抽出 (04 §5.2.1) への答え: 候補なし。抽出はノートの後に、同じ裏の処理の中で動く。
+const NO_FACTS: &str = r#"{"c": []}"#;
 
 fn reply(text: &str) -> String {
     format!(
@@ -155,11 +157,16 @@ async fn a_note_is_made_once_the_segment_closes() {
     let dir = TempDir::new("notes");
     prepare(dir.path(), true);
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
-    let llm = chat(&[reply(REPLY), reply(REPLY), reply(KEYS)], false);
+    let llm = chat(
+        &[reply(REPLY), reply(REPLY), reply(NO_FACTS), reply(KEYS)],
+        false,
+    );
     let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
         .await
         .unwrap();
     core.settle().await;
+    // 発話の間は裏の処理を止めておく (事実の抽出が、次の応答の答えを先に使わないように)。
+    core.hold(true);
     core.command(Command::NewSession {
         title: "植物".into(),
     });
@@ -172,15 +179,17 @@ async fn a_note_is_made_once_the_segment_closes() {
         .await
         .reply_to
         .unwrap();
+    core.hold(false);
     core.settle_background().await;
     // 区切りがまだついていないので、作らない (起動中はストアを開けないので、要求で確かめる)。
-    assert_eq!(llm.requests().len(), 2);
+    // 事実の抽出だけが 1 回 (2 つの発話を 1 つの束で) 動く。
+    assert_eq!(llm.requests().len(), 3);
 
     // 最後のターンから 10 分過ぎると区切りがつく。
     clock.advance(SEGMENT_QUIET_MS);
     core.settle_background().await;
     core.shutdown().await;
-    let req = &llm.requests()[2];
+    let req = &llm.requests()[3];
     assert_eq!(req.id_slot, Some(1), "the background slot");
     assert_eq!(req.generation.temperature, 0.0);
     assert_eq!(req.generation.seed, Some(1));
@@ -206,24 +215,30 @@ async fn a_grown_segment_is_redone_and_invalid_output_is_skipped() {
     let chats = [
         reply(REPLY),
         reply(KEYS),
+        reply(NO_FACTS),
         reply(REPLY),
         reply("鍵はありません"),
         reply("{\"key\": 1}"),
+        reply(NO_FACTS),
     ];
     let llm = chat(&chats, false);
     let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
         .await
         .unwrap();
     core.settle().await;
+    core.hold(true);
     core.command(Command::NewSession { title: "s".into() });
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     let u1 = say(&core, &mut rx, "一つ目").await.reply_to.unwrap();
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
-    assert_eq!(llm.requests().len(), 2, "the first note");
+    assert_eq!(llm.requests().len(), 3, "the first note and the extraction");
 
+    core.hold(true);
     say(&core, &mut rx, "二つ目").await;
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
     core.shutdown().await;
     // 作り直しは型に合わず (2 回)、飛ばした。前のノートは、作り直せたときにだけ消える。
@@ -261,18 +276,20 @@ async fn notes_wait_for_a_free_slot_need_structured_output_and_go_with_the_sessi
     let dir = TempDir::new("notes-delete");
     prepare(dir.path(), true);
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
-    let llm = chat(&[reply(REPLY), reply(KEYS)], false);
+    let llm = chat(&[reply(REPLY), reply(KEYS), reply(NO_FACTS)], false);
     let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
         .await
         .unwrap();
     core.settle().await;
+    core.hold(true);
     core.command(Command::NewSession { title: "s".into() });
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     say(&core, &mut rx, "一つ目").await;
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
-    // ノートを作った (起動中はストアを開けないので、要求で確かめる)。
-    assert_eq!(llm.requests().len(), 2);
+    // ノートを作り、事実を抽出した (起動中はストアを開けないので、要求で確かめる)。
+    assert_eq!(llm.requests().len(), 3);
     core.command(Command::DeleteSession);
     until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
     core.settle().await;
@@ -293,7 +310,7 @@ async fn a_key_hit_attaches_the_original_exchange() {
         prepare(dir.path(), structured);
         let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
         let chats: Vec<String> = if structured {
-            vec![reply(ANSWERED), reply(keys), reply(REPLY)]
+            vec![reply(ANSWERED), reply(keys), reply(NO_FACTS), reply(REPLY)]
         } else {
             vec![reply(ANSWERED), reply(REPLY)]
         };
@@ -303,13 +320,17 @@ async fn a_key_hit_attaches_the_original_exchange() {
                 .await
                 .unwrap();
         core.settle().await;
+        core.hold(true);
         core.command(Command::NewSession {
             title: "植物".into(),
         });
         until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
         say(&core, &mut rx, ASKED).await;
         clock.advance(SEGMENT_QUIET_MS);
+        core.hold(false);
         core.settle_background().await;
+        // 問いの発話の後に抽出が動かないように (最後の要求を問いの応答にする)。
+        core.hold(true);
         core.command(Command::NewSession {
             title: "今日".into(),
         });
@@ -354,13 +375,15 @@ async fn keys_are_embedded_one_row_each() {
     .unwrap();
     let mut cfg = config(dir.path(), clock.clone());
     cfg.embed = Some(Arc::new(embed));
-    let llm = chat(&[reply(REPLY), reply(KEYS)], false);
+    let llm = chat(&[reply(REPLY), reply(KEYS), reply(NO_FACTS)], false);
     let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
     core.settle().await;
+    core.hold(true);
     core.command(Command::NewSession { title: "s".into() });
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     say(&core, &mut rx, "一つ目").await;
     clock.advance(SEGMENT_QUIET_MS);
+    core.hold(false);
     core.settle_background().await;
     core.shutdown().await;
     let mut keys: Vec<Option<u32>> = embeddings(dir.path())

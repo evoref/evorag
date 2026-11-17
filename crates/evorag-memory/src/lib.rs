@@ -6,6 +6,7 @@
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
 mod chars;
+mod extract;
 mod facts;
 mod fold;
 #[cfg(test)]
@@ -20,6 +21,12 @@ mod rules;
 mod value_key;
 mod write;
 
+pub use extract::{
+    BUDGET_MARGIN, Batch, Counting, EXTRACT_MAX_TOKENS, EXTRACT_VERSION, ExtractJobBody,
+    ExtractProgress, ExtractionOutput, JOB_EXTRACT_FACTS, Packing, REQUEST_TOKENS, UserUtterance,
+    extraction_fits, extraction_input, extraction_schema, extraction_system, load_extract_progress,
+    pack, parse_extraction, turn_rev, user_utterances_after, utterance_budget,
+};
 pub use facts::{
     FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
     REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, add_directive, consolidate, diff_ops,
