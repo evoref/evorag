@@ -535,8 +535,8 @@ async fn an_old_writer_flag_survives_a_stop_before_the_jobs_are_written() {
     assert_eq!(Closed::open_as(root, "0.3.0").recheck_flag(), None);
 }
 
-/// `forget_backups` の job は、日次・週次・移行と作り直しの前の退避のすべてを、伏せ字にして写し直す。済んだら
-/// job を消す。
+/// `forget_backups` の job は、操作のコミットの直後に、日次・週次・移行と作り直しの前の退避のすべてを、伏せ字に
+/// して写し直す。済んだら job を消す。
 ///
 /// verifies: 03 §7.3 (`forget_backups`)、AC-FR-307-1 (退避)
 #[tokio::test(flavor = "multi_thread")]
@@ -560,10 +560,8 @@ async fn the_backup_job_rewrites_daily_weekly_and_pre_op_backups() {
     core.forget_now(key, ForgetOptions::default())
         .await
         .unwrap();
-    assert!(core.pending_cleanup_jobs() > 0, "the backup job waits");
-    core.shutdown().await;
-    // 次の起動で、残った job から写し直す。
-    let (core, _rx, _) = start(root, &chat(&[]), 9, clock_at(T0 + DAY + 2_000)).await;
+    // 待たずに始まった写し直しを待つ。
+    core.settle().await;
     assert_eq!(core.pending_cleanup_jobs(), 0);
     core.shutdown().await;
     let hits = files_with(&root.join("backups"), VALUE);
@@ -572,6 +570,93 @@ async fn the_backup_job_rewrites_daily_weekly_and_pre_op_backups() {
     let pre_op = &root.join("backups").join("pre-op");
     assert!(!files_with(pre_op, MARKER).is_empty());
     let _ = turn;
+}
+
+/// 本文が忘れるの指示と合わないターン (値を含む) は、会話の履歴に送らず、画面には伏せ字の印だけを出し、
+/// チャンクを埋め込まない。
+///
+/// verifies: 04 §7.2 (合わないターン)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mismatched_turn_is_withheld_from_the_history_the_view_and_embeddings() {
+    let dir = TempDir::new("forget-withheld");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    let session = {
+        let c = Closed::open(root);
+        let plan = c.plan(&key);
+        c.write(plan.ops);
+        // 伏せ字の後の番号のまま、値を含む本文に戻す (合わないターン)。
+        c.write(vec![WriteOp::Patch {
+            kind: KIND_TURN.into(),
+            id: turn,
+            fields: BodyPatch::new().set("text", &LIVES).unwrap(),
+            updated_at: None,
+        }]);
+        c.turn(turn).0.session
+    };
+    let llm = chat(&[reply(REPLY)]);
+    let mut cfg = config(root, 9, clock_at(T0 + 2 * 3_600_000));
+    let emb = embedder();
+    cfg.embed = Some(emb.clone() as Arc<dyn evorag_llm::LlmClient>);
+    let (core, mut rx, report) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    core.settle().await;
+    settle(&core).await;
+    assert_eq!(report.forget.mismatched, [turn]);
+    // 画面: 伏せ字の印だけ。
+    let view = core.turns(session);
+    let shown = view
+        .iter()
+        .find(|t| t.id == turn)
+        .expect("the turn is listed");
+    assert_eq!(shown.text, MARKER);
+    core.command(Command::OpenSession { id: session });
+    let ev = until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let Some(Event::SessionOpened { turns, .. }) = ev.last() else {
+        panic!()
+    };
+    assert!(turns.iter().all(|t| !t.text.contains(VALUE)), "{turns:?}");
+    // 会話の履歴にも、先に温める要求にも、値を送らない。
+    ask(&core, &mut rx, "うん").await;
+    core.hold(false);
+    settle(&core).await;
+    let sent: Vec<String> = llm
+        .requests()
+        .iter()
+        .chain(llm.warm_requests().iter())
+        .flat_map(|r| r.messages.iter().map(|m| m.content.clone()))
+        .collect();
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|m| !m.contains(VALUE)), "{sent:?}");
+    assert!(emb.aux_calls().0 > 0, "other chunks are embedded");
+    core.shutdown().await;
+    // 合わないターンのチャンクは埋め込まない。
+    let c = Closed::open(root);
+    let tx = c.store.read().unwrap();
+    let chunks = evorag_memory::chunks_of(&tx, turn).unwrap();
+    assert!(!chunks.is_empty());
+    for (id, _) in chunks {
+        assert!(
+            tx.links_to(id, evorag_memory::REL_EMBEDDING_OF)
+                .unwrap()
+                .is_empty(),
+            "a chunk of the mismatched turn was embedded"
+        );
+    }
+}
+
+/// 埋め込みの llama-server。
+fn embedder() -> Arc<ReplayClient> {
+    Arc::new(
+        ReplayClient::from_json(
+            r#"{
+              "props": {"build_info": "b1-test", "model_path": "/m/emb.gguf", "total_slots": 4,
+                        "default_generation_settings": {"n_ctx": 8192}},
+              "models": {"data": [{"id": "emb", "meta": {"n_params": 5, "size": 6, "n_vocab": 7}}]},
+              "embed": {"dim": 8}
+            }"#,
+        )
+        .unwrap(),
+    )
 }
 
 /// ジャーナルの書き直しの入れ替えに失敗したら、状態に示し、sleep-time に試し直す。

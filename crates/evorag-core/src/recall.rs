@@ -767,16 +767,19 @@ struct Selection {
 }
 
 /// セッションの `upto` までの発話の本文 (新しい順)。
-fn user_texts(store: &Store, session: Id, upto: Id) -> Vec<String> {
-    let turns = store
-        .read()
-        .ok()
-        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
-        .unwrap_or_default();
+fn user_texts(store: &Store, session: Id, upto: Id, lang: PromptLanguage) -> Vec<String> {
+    let Ok(r) = store.read() else {
+        return Vec::new();
+    };
+    let turns = evorag_memory::session_turns(&r, session).unwrap_or_default();
+    // 忘れるの指示と合わない発話は、問いの本文 (語彙・埋め込み・リランクの問い) に使わない (04 §7.2)。確かめ
+    // られなければ使わない。
+    let hide = crate::masking::Hide::load(&r, lang);
     turns
         .iter()
         .rev()
         .filter(|t| t.body.role == TurnRole::User && t.envelope.id <= upto)
+        .filter(|t| hide.as_ref().is_some_and(|h| !h.excluded(&t.envelope)))
         .map(|t| t.body.text.clone())
         .collect()
 }
@@ -791,7 +794,7 @@ async fn select(
     mode: &RerankMode,
     vectors: Option<&VectorQuery>,
 ) -> Selection {
-    let mut users = user_texts(store, session, user_turn).into_iter();
+    let mut users = user_texts(store, session, user_turn, lang).into_iter();
     let query = users.next().unwrap_or_default();
     let previous = users.next();
     select_for(
@@ -821,7 +824,7 @@ pub async fn precompute(
     vectors: Option<&VectorQuery>,
 ) {
     // 送ると、今の最後の発話が「直前の発話」になる。
-    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]))
+    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]), lang)
         .into_iter()
         .next();
     select_for(
@@ -1137,7 +1140,10 @@ pub fn source_turns(
             out.push(Turn { envelope: e, body });
         }
     }
-    crate::masking::Hide::load(&rtx, lang)?.apply(&rtx, &mut out);
+    let hide = crate::masking::Hide::load(&rtx, lang)?;
+    // 忘れるの指示と合わないターンは出さない (04 §7.2)。
+    out.retain(|t| !hide.excluded(&t.envelope));
+    hide.apply(&rtx, &mut out);
     (!out.is_empty()).then_some(out)
 }
 

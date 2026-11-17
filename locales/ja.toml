@@ -283,6 +283,7 @@ export_refused_forget = "忘れるの当て直しが済んでいないので、�
 compact_low_space = "空きが足りないので、消した記録の跡をデータベースのファイルから除く処理 (compact) を見送りました (空き {free} MiB、必要 {need} MiB)。空きを作ると、次の起動で行います。"
 compact_failed = "消した記録の跡をデータベースのファイルから除く処理 (compact) ができませんでした ({detail})。次の起動でやり直します。"
 forget_mismatched = "忘れた内容と本文が合わない発言が {count} 件あります。想起・裏の処理・書き出しには使いません (evorag doctor で件数を確かめられます)。"
+forget_key_missing = "記憶の鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています。発言の伏せ字とジャーナルの書き直しは済ませました (evorag doctor で確かめられます)。"
 forget_journal_pending = "忘れた発言の伏せ字にする前の行が、会話のジャーナルに残っています (ほかのプログラムがファイルを開いているため、書き直せませんでした)。手が空いたときに書き直しを試します。"
 setup_guide = """
 llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
@@ -377,6 +378,7 @@ broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要な�
 compact_pending = "データベースのファイルの空きの領域に、消した記録の跡が残っています。次の起動で除きます (compact。空きが足りなければ見送ります)"
 forget_mismatched = "忘れた内容と本文が合わない発言: {count} 件 (想起・裏の処理・書き出しには使いません)"
 forget_pending = "忘れるの当て直しが済んでいません。evorag を一度起動すると当て直します"
+forget_key_missing = "記憶の鍵 (memory.forget_key) が使えません。忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
 index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"

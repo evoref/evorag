@@ -423,6 +423,9 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
     let Ok(r) = inner.store.read() else {
         return Vec::new();
     };
+    // 忘れるの指示と合わないターンのチャンクは埋め込まない (04 §7.2。伏せる前の本文かもしれないため)。確かめ
+    // られなければ、この回はチャンクを埋め込まない (どちらも、このプロセスの間は飛ばす)。
+    let hide = crate::masking::Hide::load(&r, inner.language);
     let mut out = Vec::new();
     for id in ids {
         if let Ok(Some(Read::Ok(e))) = r.get(KIND_NOTE, *id)
@@ -448,6 +451,9 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
         let Ok(Some(Read::Ok(t))) = r.get(KIND_TURN, c.turn) else {
             continue;
         };
+        if hide.as_ref().is_none_or(|h| h.excluded(&t)) {
+            continue;
+        }
         let Ok(tb) = t.body_as::<TurnBody>() else {
             continue;
         };

@@ -16,7 +16,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use evorag_memory::{
     ChunkBody, CorrectionBody, Directives, EmbeddingBody, FactBody, FactDirectiveBody, ForgetAbort,
@@ -35,9 +34,6 @@ use evorag_types::api::FactKey;
 
 use crate::Inner;
 
-/// 続けてした忘れるの退避の写し直しをまとめる間 (03 §7.3 の「既定 5 秒」)。
-pub(crate) const BATCH: Duration = Duration::from_secs(5);
-
 /// 事実の副索引の項目: 値の鍵の 16 進 (`evorag-memory` の `fact` の副索引と同じ名前)。退避を飛ばすかの判定で、
 /// 忘れた値の事実がありうるかを引く (03 §7.3 の「飛ばす退避」)。
 const FACT_VK_LOOKUP: &str = "vk";
@@ -51,6 +47,8 @@ pub(crate) struct State {
     journal_pending: bool,
     /// sleep-time のほかの手順の前に、当て直しを確かめ直す。
     recheck: bool,
+    /// 再び覚えない印の鍵が使えないので、鍵に頼る層 (印に当たる事実の取り消し、退避の写しの事実) を当てていない。
+    key_missing: bool,
 }
 
 /// 忘れるの状態 (状態の行と、試験のため)。
@@ -60,6 +58,9 @@ pub struct ForgetStatus {
     pub mismatched: Vec<Id>,
     /// ジャーナルに、伏せ字の前の行が残っている (書き直しの入れ替えに失敗した。sleep-time に試し直す)。
     pub journal_pending: bool,
+    /// `memory.forget_key` が使えないので、忘れた値に当たる事実の取り消し (と退避の写しの事実) を当てていない
+    /// (ほかの層は当てた、03 §3.1.1)。
+    pub key_missing: bool,
 }
 
 fn state(inner: &Inner) -> std::sync::MutexGuard<'_, State> {
@@ -72,6 +73,7 @@ pub(crate) fn status(inner: &Inner) -> ForgetStatus {
     ForgetStatus {
         mismatched: st.mismatched.iter().copied().collect(),
         journal_pending: st.journal_pending,
+        key_missing: st.key_missing,
     }
 }
 
@@ -220,8 +222,13 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
     let mut failed = false;
     let lang = inner.language.as_str();
     let marker = redaction_marker(lang);
-    // 再び覚えない印を使えなければ (鍵が使えない、03 §3.1.1)、DB の層は当てない。合わないターンは数える。
-    if let Some(key) = inner.facts_key.key().cloned() {
+    // 再び覚えない印の鍵が使えなければ (03 §3.1.1)、鍵に頼る層 (印に当たる事実の取り消し) だけを飛ばし、ほかの層
+    // (ターンの本文・span・消す派生の記録・ジャーナル) は当てる。印は鍵で作る HMAC なので、どの印にも当たらない
+    // 置き換えの鍵 (すべて 0) で当て直すと、取り消しだけが起きない。
+    let key = inner.facts_key.key().cloned();
+    let key_missing = key.is_none();
+    {
+        let key = key.unwrap_or_else(|| evorag_memory::ForgetKey::from_bytes([0; 32]));
         let store = inner.store.clone();
         let ids = inner.ids.clone();
         let now = inner.clock.now();
@@ -235,13 +242,26 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
                 ids: &*ids,
                 now,
             };
-            replay_forgets(&r, &env).map_err(|e| e.to_string())
+            let forgets = evorag_memory::latest_forget(&r)
+                .map_err(|e| e.to_string())?
+                .is_some();
+            replay_forgets(&r, &env)
+                .map(|replay| (replay, forgets))
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r);
-        match planned {
+        if key_missing && planned.as_ref().is_ok_and(|(_, forgets)| *forgets) {
+            tracing::warn!(
+                "memory.forget_key is not usable; facts matching forgotten values are not retracted"
+            );
+            state(inner).key_missing = true;
+        }
+        match planned.map(|(replay, _)| replay) {
             Ok(replay) if replay.changed() => {
+                // 先に済ませる処理を、書く前に止める (04 §7.2 の「捨てるキャッシュ」)。
+                drop(inner.pre.stop());
                 // 伏せ字にするターンの `Patch` は、書き手が伏せ字の後の `put` の行を先にジャーナルに書く。
                 match crate::write(inner, replay.ops).await {
                     Ok(()) => {
@@ -305,14 +325,14 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
 
 /// 記録を消した・書き換えた後: 知らせる前に、消した ID を今と前の世代のすべての索引から除き (除けなかった分は
 /// `purge_indexes` の job から試し直す)、先に済ませた処理の結果と問いの埋め込みのキャッシュを捨て (04 §7.2 の
-/// 「捨てるキャッシュ」)、事実の表とノートと抽出を見直させる。呼び手は `index_lock` を持つ。
+/// 「捨てるキャッシュ」)、事実の表とノートと抽出を見直させる。呼び手は `index_lock` を持ち、書く前に先に済ませる
+/// 処理を止めてある。
 async fn after_change(inner: &Arc<Inner>, gone: HashSet<Id>) {
     let worker = inner.clone();
     let _ = tokio::task::spawn_blocking(move || crate::remove_from_indexes(&worker, &gone)).await;
     crate::flag_cleanup(inner);
     inner.query_cache.clear();
     inner.rerank_cache.clear();
-    drop(inner.pre.stop());
     crate::fact_table::invalidate(inner);
     crate::notes::touch(inner);
     crate::extraction::touch(inner);
@@ -417,6 +437,8 @@ pub(crate) async fn execute(
     let worker = inner.clone();
     tokio::spawn(async move {
         let _guards = (index, facts);
+        // 先に済ませる処理を、ロックを取った直後に止める (書いた後に捨てるキャッシュに、書く前の結果を足させない)。
+        drop(worker.pre.stop());
         execute_locked(&worker, key, target, options, expect).await
     })
     .await
@@ -486,23 +508,52 @@ async fn execute_locked(
     }
 }
 
-/// 退避の写し直しを、短い間 ([`BATCH`]) を置いてから始める。その間に続けてした操作の job は、同じ写し直しに
-/// まとまる (03 §7.3)。前に出した待ちは取り消す。終了のときは待たずに止め、job から次の起動で続ける。
+/// 退避の写し直しを、コミットの直後に始める (03 §7.3)。写し直しの途中に足された job は、それが終わった後の次の
+/// 回にまとめて写す (続けてした操作を 1 世代 1 回の写しにまとめる)。終了のときは、次の退避に移る前に止め、job
+/// から次の起動で続ける。
 pub(crate) fn schedule_backups(inner: &Arc<Inner>) {
     crate::flag_cleanup(inner);
+    {
+        let mut b = inner.forget_batch.lock().unwrap_or_else(|e| e.into_inner());
+        if b.running {
+            b.again = true;
+            return;
+        }
+        b.running = true;
+        b.again = false;
+    }
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        tokio::time::sleep(BATCH).await;
-        crate::run_cleanup_jobs(&worker).await;
+        let stopping = |w: &Inner| w.shutting_down.load(std::sync::atomic::Ordering::SeqCst);
+        loop {
+            if !stopping(&worker) {
+                crate::run_cleanup_jobs(&worker).await;
+            }
+            let mut b = worker
+                .forget_batch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if b.again && !stopping(&worker) {
+                b.again = false;
+                continue;
+            }
+            b.running = false;
+            b.again = false;
+            break;
+        }
     });
-    let old = inner
-        .forget_batch
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .replace(task);
-    if let Some(old) = old {
-        old.abort();
-    }
+    let mut bg = inner.background.lock().unwrap_or_else(|e| e.into_inner());
+    bg.retain(|t| !t.is_finished());
+    bg.push(task);
+}
+
+/// 忘れるの退避の写し直しの回 ([`schedule_backups`])。
+#[derive(Debug, Default)]
+pub(crate) struct Batch {
+    /// 写し直しの回が動いている。
+    running: bool,
+    /// 動いている間に、次の回が要ることになった。
+    again: bool,
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -538,40 +589,52 @@ pub(crate) async fn run_backup_jobs(inner: &Arc<Inner>) -> bool {
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r);
-    let jobs = match result {
-        Ok(jobs) => jobs,
+    let done = match result {
+        Ok(done) => done,
         Err(e) => {
             tracing::warn!(error = %e, "backups could not be rewritten for forgets; the job is kept");
             return false;
         }
     };
-    if jobs.is_empty() {
-        return true;
+    if !done.jobs.is_empty() {
+        let ops = done
+            .jobs
+            .iter()
+            .map(|id| WriteOp::Delete {
+                kind: KIND_JOB.into(),
+                id: *id,
+            })
+            .collect();
+        if crate::write_derived(inner, ops).await.is_err() {
+            return false;
+        }
     }
-    let ops = jobs
-        .iter()
-        .map(|id| WriteOp::Delete {
-            kind: KIND_JOB.into(),
-            id: *id,
-        })
-        .collect();
-    crate::write_derived(inner, ops).await.is_ok()
+    done.complete
 }
 
-/// 退避を写し直し、済んだ job の ID を返す。
-fn recopy_backups(inner: &Inner) -> Result<Vec<Id>, String> {
+/// 写し直しの結果。
+#[derive(Debug, Default)]
+struct Recopied {
+    /// 済んだ (消してよい) job。
+    jobs: Vec<Id>,
+    /// 残す job が無い。偽なら、job を残して試し直す (鍵が使えない・指示を読めない)。
+    complete: bool,
+}
+
+/// 退避を写し直し、済んだ job を返す。
+fn recopy_backups(inner: &Inner) -> Result<Recopied, String> {
     let rules = {
         let r = inner.store.read().map_err(|e| e.to_string())?;
         let jobs = backup_jobs(&r)?;
         if jobs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Recopied {
+                jobs: Vec::new(),
+                complete: true,
+            });
         }
-        let key = inner
-            .facts_key
-            .key()
-            .cloned()
-            .ok_or("memory.forget_key is not usable")?;
-        RecopyRules::load(&r, key, jobs)?
+        // 鍵が使えなければ、鍵の要らない判定 (伏せ字・ID・出典の改訂の番号) だけで写し、job は残す
+        // (印に当たる事実は、鍵が使えるようになってから除く、03 §3.1.1)。
+        RecopyRules::load(&r, inner.facts_key.key().cloned(), jobs)?
     };
     if !crate::enough_space(inner) {
         return Err("not enough free space to rewrite backups".into());
@@ -581,8 +644,10 @@ fn recopy_backups(inner: &Inner) -> Result<Vec<Id>, String> {
     let plan = ForgetRecopy {
         remove: rules.remove.clone(),
         turns: rules.turns.clone(),
+        drop_turns: rules.drop_turns.clone(),
         marker: marker.into(),
         candidates: rules.candidates.clone(),
+        scan_from: rules.scan_from,
         drop: &drop,
     };
     let stop = || {
@@ -598,9 +663,22 @@ fn recopy_backups(inner: &Inner) -> Result<Vec<Id>, String> {
         rewritten = count.rewritten,
         skipped = count.skipped,
         jobs = rules.jobs.len(),
+        kept = rules.kept.len(),
         "backups rewritten for forgets"
     );
-    Ok(rules.jobs)
+    if rules.key.is_none() {
+        tracing::warn!(
+            "memory.forget_key is not usable; the forget backup jobs are kept until facts can be matched"
+        );
+        return Ok(Recopied {
+            jobs: Vec::new(),
+            complete: false,
+        });
+    }
+    Ok(Recopied {
+        complete: rules.kept.is_empty(),
+        jobs: rules.jobs,
+    })
 }
 
 /// 伏せ字にしないで忘れた指示 1 つの、写しで除くノートと訂正の材料。
@@ -615,12 +693,19 @@ struct Unredacted {
 
 /// 退避の写しで除く記録の判定 (03 §7.3 の「写し方」)。生きている DB から読んだ材料で、写しの中の記録を見て決める。
 struct RecopyRules {
-    /// まとめた job の ID。
+    /// まとめた job のうち、写し終えたら消せる job の ID。
     jobs: Vec<Id>,
-    key: evorag_memory::ForgetKey,
+    /// 指示を読めないので残す job (写しは、読める材料の分だけ行う)。
+    kept: Vec<Id>,
+    /// 再び覚えない印の鍵。無ければ、印に当たる事実を判定しない。
+    key: Option<evorag_memory::ForgetKey>,
     remove: BTreeSet<Id>,
     turns: BTreeMap<Id, Vec<Redaction>>,
+    /// 指示の記録が形として正しくない伏せ字のターン (写しから記録だけを除く)。
+    drop_turns: BTreeSet<Id>,
     candidates: Vec<LookupProbe>,
+    /// この ID 以上の記録を持つ退避は飛ばさない (副索引で引けない訂正・ノートを除きうるため)。
+    scan_from: Option<Id>,
     dirs: Directives,
     /// すべての忘れるの指示の `vks`。
     vks: BTreeSet<ValueKey>,
@@ -632,7 +717,7 @@ struct RecopyRules {
 impl RecopyRules {
     fn load(
         r: &ReadTxn<'_>,
-        key: evorag_memory::ForgetKey,
+        key: Option<evorag_memory::ForgetKey>,
         jobs: Vec<(Id, JobBody)>,
     ) -> Result<Self, String> {
         let mut bodies: Vec<(Id, FactDirectiveBody)> = Vec::new();
@@ -647,26 +732,41 @@ impl RecopyRules {
         })
         .map_err(|e| e.to_string())?;
         let forgets = TurnForgets::from_directives(bodies.clone());
+        let readable: BTreeSet<Id> = bodies.iter().map(|(id, _)| *id).collect();
+        // 指示を読めない job は消さずに残す (印・伏せ字の材料が足りないまま、済んだことにしない)。
+        let (ok_jobs, kept): (Vec<_>, Vec<_>) = jobs
+            .iter()
+            .partition(|(_, j)| j.directive.is_none_or(|d| readable.contains(&d)));
+        for (id, j) in &kept {
+            tracing::warn!(
+                job = %id,
+                directive = ?j.directive,
+                "the forget directive of a backup job cannot be read; the job is kept"
+            );
+        }
         let directives: BTreeSet<Id> = jobs.iter().filter_map(|(_, j)| j.directive).collect();
-        let mut remove: BTreeSet<Id> = jobs.iter().flat_map(|(_, j)| j.ids.clone()).collect();
+        let remove: BTreeSet<Id> = jobs.iter().flat_map(|(_, j)| j.ids.clone()).collect();
         let mut turns = BTreeMap::new();
+        let mut drop_turns = BTreeSet::new();
         for (id, b) in &bodies {
             if !directives.contains(id) {
                 continue;
             }
             for red in &b.redactions {
                 // 生きている DB から読んだそのターンのすべての指示を、指示の ID の順に当てる。指示の記録が正しく
-                // なければ、そのターンを写しから除く (restore はジャーナルから伏せ字の後の行を足す)。
+                // なければ、そのターンは写しから記録だけを除く (restore はジャーナルから伏せ字の後の行を足す)。
                 match forgets.redactions(red.turn) {
                     Some(steps) => {
                         turns.insert(red.turn, steps);
                     }
                     None => {
-                        remove.insert(red.turn);
+                        drop_turns.insert(red.turn);
                     }
                 }
             }
         }
+        // 訂正とノートは副索引で引けないので、job の指示より後の記録を持つ退避は飛ばさない。
+        let scan_from = directives.iter().copied().min();
         let read_turn = |t: Id| -> Option<TurnBody> {
             match r.get(KIND_TURN, t).ok()?? {
                 Read::Ok(e) => e.body_as::<TurnBody>().ok(),
@@ -675,6 +775,7 @@ impl RecopyRules {
         };
         let sessions = turns
             .keys()
+            .chain(&drop_turns)
             .filter_map(|t| read_turn(*t).map(|b| b.session))
             .collect();
         let vks: BTreeSet<ValueKey> = bodies
@@ -711,11 +812,14 @@ impl RecopyRules {
             })
             .collect();
         Ok(Self {
-            jobs: jobs.into_iter().map(|(id, _)| id).collect(),
+            jobs: ok_jobs.into_iter().map(|(id, _)| *id).collect(),
+            kept: kept.into_iter().map(|(id, _)| *id).collect(),
             key,
             remove,
             turns,
+            drop_turns,
             candidates,
+            scan_from,
             dirs: load_directives(r).map_err(|e| e.to_string())?,
             vks,
             sessions,
@@ -732,23 +836,30 @@ impl RecopyRules {
         };
         match e.kind.as_str() {
             // 印 (印を解く指示の相手でない指示のもの) に当たる事実。取り消さずに消す (04 §7.5)。
-            KIND_FACT => e.body_as::<FactBody>().is_ok_and(|b| {
-                b.state != "retracted"
-                    && b.vk
-                        .as_deref()
-                        .and_then(ValueKey::from_hex)
-                        .is_some_and(|vk| {
-                            self.dirs.is_blocked(&block_mark(
-                                &self.key,
-                                &b.subject,
-                                &b.attribute,
-                                &vk,
-                            ))
-                        })
-            }),
+            // 鍵が無ければ判定しない (job を残し、鍵が使えるようになってから除く)。
+            KIND_FACT => {
+                let Some(key) = &self.key else {
+                    return false;
+                };
+                e.body_as::<FactBody>().is_ok_and(|b| {
+                    b.state != "retracted"
+                        && b.vk
+                            .as_deref()
+                            .and_then(ValueKey::from_hex)
+                            .is_some_and(|vk| {
+                                self.dirs.is_blocked(&block_mark(
+                                    key,
+                                    &b.subject,
+                                    &b.attribute,
+                                    &vk,
+                                ))
+                            })
+                })
+            }
             // 伏せ字にしたターンの訂正、忘れた値の訂正、伏せ字にしないで忘れた指示より前の対象のターンの訂正。
             KIND_CORRECTION => e.body_as::<CorrectionBody>().is_ok_and(|b| {
                 self.turns.contains_key(&b.turn)
+                    || self.drop_turns.contains(&b.turn)
                     || [b.old_vk.as_deref(), b.new_vk.as_deref()]
                         .into_iter()
                         .flatten()

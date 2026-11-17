@@ -68,6 +68,8 @@ pub struct ForgetCheck {
     pub mismatched: usize,
     /// 当て直しの済んでいない忘れるがある (次の起動で当て直す)。
     pub pending: bool,
+    /// 忘れるの指示の数。
+    pub directives: usize,
 }
 
 /// 忘れるの状態を数える (`doctor`)。`prompt_language` はデータ根の `prompt.language` (無ければどの印でもよい)。
@@ -86,6 +88,7 @@ pub fn forget_check(view: &ExportView<'_>, prompt_language: Option<&str>) -> Opt
     Some(ForgetCheck {
         mismatched: p.excluded.len(),
         pending: p.pending,
+        directives: p.directives,
     })
 }
 
@@ -100,6 +103,8 @@ struct Unredacted {
 struct Prepared {
     /// 当て直しの済んでいない忘れるがある。
     pending: bool,
+    /// 忘れるの指示の数。
+    directives: usize,
     /// 忘れるの指示と合わないターン。
     excluded: BTreeSet<Id>,
     /// すべての忘れるの指示の `vks` (訂正)。
@@ -211,6 +216,7 @@ impl Prepared {
             .collect();
         Some(Self {
             pending,
+            directives: bodies.len(),
             excluded,
             vks,
             forgotten,

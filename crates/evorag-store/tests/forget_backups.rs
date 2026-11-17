@@ -244,8 +244,10 @@ fn plan<'a>(
     drop: &'a dyn Fn(&Envelope, &RecopyView<'_>) -> bool,
 ) -> ForgetRecopy<'a> {
     ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::from([ids.removed]),
         turns: BTreeMap::from([(ids.secret_turn, vec![redaction])]),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: vec![LookupProbe {
             kind: "fact".into(),
@@ -382,8 +384,10 @@ fn backups_proven_to_hold_no_target_are_skipped() {
         .collect();
     let never = |_: &Envelope, _: &RecopyView<'_>| -> bool { panic!("not scanned") };
     let p = ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::from([later]),
         turns: BTreeMap::new(),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: Vec::new(),
         drop: &never,
@@ -403,8 +407,10 @@ fn backups_proven_to_hold_no_target_are_skipped() {
     // ID の最大より小さい対象も、記録の表と副索引で無いと確かめて飛ばす。
     let unknown = Id::from_bytes([0x01; 16]);
     let p = ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::from([unknown]),
         turns: BTreeMap::new(),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: vec![LookupProbe {
             kind: "fact".into(),
@@ -421,8 +427,10 @@ fn backups_proven_to_hold_no_target_are_skipped() {
     // 副索引に当たる記録があれば写し直す。
     let rule = drop_rule;
     let p = ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::new(),
         turns: BTreeMap::new(),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: vec![LookupProbe {
             kind: "fact".into(),
@@ -503,8 +511,10 @@ fn a_quarantined_copy_of_a_turn_is_dropped_even_without_the_turn() {
     evorag_store::testutil::raw_remove_record(&daily, "turn", ids.secret_turn);
     let never = |_: &Envelope, _: &RecopyView<'_>| false;
     let p = ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::new(),
         turns: BTreeMap::from([(ids.secret_turn, vec![secret_redaction().0])]),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: Vec::new(),
         drop: &never,
@@ -530,8 +540,10 @@ fn unreadable_records_naming_a_target_are_dropped() {
     evorag_store::testutil::raw_corrupt_record(&daily, "chunk", ids.other_chunk);
     let rule = drop_rule;
     let p = ForgetRecopy {
+        scan_from: None,
         remove: BTreeSet::new(),
         turns: BTreeMap::from([(ids.secret_turn, vec![secret_redaction().0])]),
+        drop_turns: BTreeSet::new(),
         marker: M.into(),
         candidates: Vec::new(),
         drop: &rule,
@@ -645,4 +657,90 @@ fn compact_pending_can_be_set_cleared_and_unknown_values_read_as_not_needed() {
     evorag_store::testutil::raw_set_meta(dir.path(), meta::COMPACT_PENDING, "yes");
     let store = open(dir.path(), c);
     assert!(!store.compact_pending().unwrap());
+}
+
+/// 指示の記録が正しくない伏せ字のターンは、写しから記録だけを除く (関係と副索引は残す)。そのターンを出典とする
+/// 派生の記録は、写しのターンが無いので古いものとして除く。
+/// verifies: 03 §7.3 (伏せ字が合わずに写しから除くターン)
+#[test]
+fn a_turn_with_a_broken_directive_is_dropped_as_a_record_only() {
+    let dir = TempDir::new("forget-recopy-drop-turn");
+    let c = clock();
+    let store = open(dir.path(), c.clone());
+    let ids = seed(&store);
+    let daily = store.daily_backup(None).unwrap().unwrap();
+    let file = daily.join(DB_FILE);
+    let rule = drop_rule;
+    let p = ForgetRecopy {
+        scan_from: None,
+        remove: BTreeSet::new(),
+        turns: BTreeMap::new(),
+        drop_turns: BTreeSet::from([ids.secret_turn]),
+        marker: M.into(),
+        candidates: Vec::new(),
+        drop: &rule,
+    };
+    assert_eq!(
+        store.forget_backups(None, &p, &|| false).unwrap().rewritten,
+        2
+    );
+    let records = rows(&file, RECORDS);
+    for (kind, id) in [
+        ("turn", ids.secret_turn),
+        ("chunk", ids.stale_chunk),
+        (KIND_QUARANTINE, ids.quarantined_turn),
+    ] {
+        assert!(!records.contains_key(&record_key(kind, id)), "{kind} {id}");
+    }
+    assert!(records.contains_key(&record_key("turn", ids.other_turn)));
+    // 応答と信号からそのターンへの関係・副索引は残る (restore はジャーナルからターンを戻す)。
+    let links = rows(&file, LINKS);
+    assert!(
+        links
+            .keys()
+            .any(|k| mentions(k, ids.reply) && mentions(k, ids.secret_turn))
+    );
+    let lookup = rows(&file, LOOKUP);
+    assert!(
+        lookup
+            .keys()
+            .any(|k| mentions(k, ids.signal) && mentions(k, ids.secret_turn))
+    );
+    for (_, v) in rows(&file, RECORDS) {
+        assert!(!v.windows(4).any(|w| w == b"4242"));
+    }
+}
+
+/// 副索引で引けない記録を除きうるとき (`scan_from`)、記録の ID の最大がその ID 以上の退避は飛ばさずに走査する。
+/// verifies: 03 §7.3 (飛ばす退避)
+#[test]
+fn backups_newer_than_the_directive_are_scanned() {
+    let dir = TempDir::new("forget-recopy-scan-from");
+    let c = clock();
+    let store = open(dir.path(), c.clone());
+    let ids = seed(&store);
+    store.daily_backup(None).unwrap().unwrap();
+    let scanned = std::cell::Cell::new(0usize);
+    let count = |_: &Envelope, _: &RecopyView<'_>| -> bool {
+        scanned.set(scanned.get() + 1);
+        false
+    };
+    let later = store.ids().next_id();
+    let plan = |from: Id| ForgetRecopy {
+        scan_from: Some(from),
+        remove: BTreeSet::new(),
+        turns: BTreeMap::new(),
+        drop_turns: BTreeSet::new(),
+        marker: M.into(),
+        candidates: Vec::new(),
+        drop: &count,
+    };
+    // 退避の記録がすべて指示より前なら飛ばす。
+    store.forget_backups(None, &plan(later), &|| false).unwrap();
+    assert_eq!(scanned.get(), 0);
+    // 指示より後の記録を持つ退避は走査する。
+    store
+        .forget_backups(None, &plan(ids.session), &|| false)
+        .unwrap();
+    assert!(scanned.get() > 0);
 }

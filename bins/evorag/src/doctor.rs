@@ -144,6 +144,10 @@ pub fn run(
                 .meta
                 .get(evorag_store::meta::PROMPT_LANGUAGE)
                 .cloned();
+            let key_ok = report
+                .meta
+                .get(evorag_store::meta::FORGET_KEY)
+                .is_some_and(|k| evorag_memory::ForgetKey::from_hex(k).is_some());
             if let Ok(Some(Some(f))) = evorag_store::inspect::with_view(data_root, |v| {
                 evorag_core::export_checks::forget_check(v, lang.as_deref())
             }) {
@@ -156,6 +160,9 @@ pub fn run(
                 }
                 if f.pending {
                     say(c, MessageKey::DoctorForgetPending, &[]);
+                }
+                if f.directives > 0 && !key_ok {
+                    say(c, MessageKey::DoctorForgetKeyMissing, &[]);
                 }
             }
         }

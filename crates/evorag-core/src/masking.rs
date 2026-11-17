@@ -66,8 +66,24 @@ impl Hide {
                 != crate::forgets::TurnCheck::Current
     }
 
-    /// `turns` の本文に置き換えを当てる (往復ごとに)。
+    /// 除くターン ([`Self::excluded`]) の本文を、伏せ字の印だけにする (会話の履歴と画面の表示。本文は使わずに、
+    /// そこに発言があったことだけを残す)。除いたら `true`。
+    pub(crate) fn withhold(&self, turn: &mut Turn) -> bool {
+        if !self.excluded(&turn.envelope) {
+            return false;
+        }
+        turn.body.text = self.redaction.to_owned();
+        true
+    }
+
+    /// `turns` の本文に置き換えを当てる (往復ごとに)。除くターンの本文は空にする (呼び手は、使う前に
+    /// [`Self::excluded`] で除く。念のため本文を出さない)。
     pub(crate) fn apply(&self, r: &ReadTxn<'_>, turns: &mut [Turn]) {
+        for t in turns.iter_mut() {
+            if self.excluded(&t.envelope) {
+                t.body.text.clear();
+            }
+        }
         if self.masker.is_empty() {
             return;
         }

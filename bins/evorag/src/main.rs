@@ -876,6 +876,10 @@ fn main() -> ExitCode {
         );
         app.notices.push(m);
     }
+    if report.forget.key_missing {
+        let m = app.catalog.key(MessageKey::CliForgetKeyMissing);
+        app.notices.push(m);
+    }
     if report.forget.journal_pending {
         let m = app.catalog.key(MessageKey::CliForgetJournalPending);
         app.notices.push(m);

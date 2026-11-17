@@ -87,11 +87,18 @@ pub struct ForgetRecopy<'a> {
     pub remove: BTreeSet<Id>,
     /// 伏せ字にするターンと、生きている DB から読んだそのターンのすべての忘れるの指示の伏せ字 (指示の ID の順)。
     pub turns: BTreeMap<Id, Vec<Redaction>>,
+    /// 伏せ字にするはずだが、生きている DB の指示の記録が形として正しくないターン。写しから記録 (と `blobs`・
+    /// `quarantine`) だけを除き、関係と副索引は残す (合わないターンと同じ)。[`RecopyView::turn`] は
+    /// [`TurnInCopy::Dropped`] を返すので、その派生の記録も古いものとして除ける。
+    pub drop_turns: BTreeSet<Id>,
     /// 伏せ字の印 (プロンプトの言語で選ぶ、04 §7.3)。
     pub marker: String,
     /// [`Self::drop`] が真を返しうる記録は、どれかの値の副索引を持つこと。退避を飛ばすかの判定に使う
     /// (例: 忘れた値の鍵の `vk` の副索引)。
     pub candidates: Vec<LookupProbe>,
+    /// 副索引で引けない記録 (訂正・ノート) を [`Self::drop`] が除きうるとき: 記録の ID の最大がこの ID 以上の
+    /// 退避は飛ばさない (対象を含まないことを確かめられないため。指示の後に作った記録がありうる)。
+    pub scan_from: Option<Id>,
     /// 写しの記録 (読めるもの。除く ID・伏せ字にするターン・`quarantine` を除く) ごとに呼ぶ。真なら除く。
     /// 印に当たる事実、`vks` に当たる訂正、伏せ字にしたターンを出典とし出典の改訂の番号が写しのターンと合わない
     /// 派生の記録などを、ここで判定する (03 §7.3)。
@@ -105,6 +112,8 @@ impl fmt::Debug for ForgetRecopy<'_> {
             .field("turns", &self.turns)
             .field("marker", &self.marker)
             .field("candidates", &self.candidates)
+            .field("drop_turns", &self.drop_turns)
+            .field("scan_from", &self.scan_from)
             .finish_non_exhaustive()
     }
 }
@@ -114,6 +123,7 @@ impl ForgetRecopy<'_> {
         self.remove
             .iter()
             .chain(self.turns.keys())
+            .chain(&self.drop_turns)
             .copied()
             .collect()
     }
@@ -166,7 +176,12 @@ pub fn forget_backups_until(
     stop: &dyn Fn() -> bool,
 ) -> Result<RecopyCount, StoreError> {
     let mut count = RecopyCount::default();
-    if plan.remove.is_empty() && plan.turns.is_empty() && plan.candidates.is_empty() {
+    if plan.remove.is_empty()
+        && plan.turns.is_empty()
+        && plan.drop_turns.is_empty()
+        && plan.candidates.is_empty()
+        && plan.scan_from.is_none()
+    {
         return Ok(count);
     }
     let mut failed = Vec::new();
@@ -214,6 +229,16 @@ fn recopy_one(file: &Path, plan: &ForgetRecopy<'_>) -> Result<bool, StoreError> 
 fn may_hold_targets(src: &Database, plan: &ForgetRecopy<'_>) -> Result<bool, StoreError> {
     let targets = plan.id_targets();
     let rtx = src.begin_read().map_err(db)?;
+    if let Some(from) = plan.scan_from {
+        let after = match max_record_id(&rtx)? {
+            MaxId::Known(max) => max >= from,
+            MaxId::Empty => false,
+            MaxId::Unknown => true,
+        };
+        if after {
+            return Ok(true);
+        }
+    }
     if let Some(min) = targets.first() {
         // 退避の記録の ID の最大より、対象の ID がすべて大きければ、どの対象も (その隔離・派生の記録も) 含まない。
         // 隔離・派生の記録の ID は元の記録より後に作るので、元の記録の ID が最大より大きければ、それらも無い。
@@ -369,6 +394,9 @@ impl Changes {
             };
             if plan.remove.contains(&id) {
                 out.drop.insert(id);
+            } else if plan.drop_turns.contains(&id) {
+                out.drop_record.insert(id);
+                turns.insert(id, TurnInCopy::Dropped);
             } else if let Some(steps) = plan.turns.get(&id) {
                 let state = match Envelope::decode(k, v) {
                     Ok(env) if env.id == id => out.redact(k, env, steps, &plan.marker),
@@ -428,6 +456,7 @@ impl Changes {
                 || out.drop_record.contains(&orig)
                 || plan.remove.contains(&orig)
                 || plan.turns.contains_key(&orig)
+                || plan.drop_turns.contains(&orig)
             {
                 out.drop_record.insert(qid);
             }
