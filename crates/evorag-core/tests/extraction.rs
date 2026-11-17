@@ -612,3 +612,387 @@ async fn a_non_chat_session_is_skipped() {
     assert!(facts.is_empty());
     assert_eq!(through, Some(u1));
 }
+
+const CORRECTS: &str = "大阪じゃなくて東京です";
+
+/// 検証の LLM の出力 (04 §6 の出力の型)。
+fn verify_reply(old: &str, new: &str, e: &str) -> String {
+    reply(&serde_json::json!({"target": "fact", "old": old, "new": new, "e": e}).to_string())
+}
+
+/// 記録した訂正の本体。
+fn corrections(root: &Path) -> Vec<evorag_memory::CorrectionBody> {
+    let store = open(root);
+    let r = store.read().unwrap();
+    let mut out = Vec::new();
+    r.for_each(evorag_memory::KIND_CORRECTION, |x| {
+        if let Read::Ok(e) = x {
+            out.push(e.body_as().unwrap());
+        }
+        true
+    })
+    .unwrap();
+    out
+}
+
+/// 訂正の語のある発話は、抽出と同じ回で候補として書き、抽出の後の手順で 1 件ずつ検証する。検証を通った訂正は
+/// 書き込みの入口で畳み、単値の属性の今の値を新しい値で置き換える (04 §6・§5.3)。検証の要求は抽出と同じ設定
+/// (裏のスロット・temperature 0・固定の seed・型縛り) で、候補の発話と直前の応答を渡す。作り直した Core は検証
+/// し直さない。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_verified_correction_replaces_the_live_value() {
+    let dir = TempDir::new("extraction-correction");
+    prepare(dir.path(), true);
+    let llm = chat(&[
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(NO_FACTS),
+        verify_reply("大阪", "東京", CORRECTS),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    let u1 = say(&core, &mut rx, LIVES).await;
+    until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    let u2 = say(&core, &mut rx, CORRECTS).await;
+    let ev = until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    assert_eq!(
+        ev.last(),
+        Some(&Event::FactsChanged {
+            added: 1,
+            replaced: 1,
+            contested: 0
+        })
+    );
+    settle(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 5);
+    let v = &reqs[4];
+    assert_eq!(v.messages[0].content, evorag_memory::verify_system("ja"));
+    assert_eq!(
+        v.messages[1].content,
+        evorag_memory::verify_input("ja", Some(REPLY), CORRECTS)
+    );
+    assert_eq!(v.id_slot, Some(1), "the background slot");
+    assert_eq!(v.generation.temperature, 0.0);
+    assert_eq!(v.generation.seed, Some(1));
+    assert_eq!(
+        v.extra["response_format"]["json_schema"]["schema"],
+        evorag_memory::verify_schema()
+    );
+
+    let (facts, through) = stored(dir.path());
+    assert_eq!(through, Some(u2));
+    assert_eq!(facts.len(), 2);
+    let old = facts
+        .iter()
+        .find(|f| f.value.as_deref() == Some("大阪"))
+        .unwrap();
+    let new = facts
+        .iter()
+        .find(|f| f.value.as_deref() == Some("東京"))
+        .unwrap();
+    assert_eq!(old.state, "superseded");
+    assert_eq!(new.state, "live");
+    assert_eq!(new.attribute, "residence");
+    assert_eq!(new.sources.len(), 1);
+    assert_eq!(new.sources[0].turn, u2);
+    let span = new.sources[0].start.unwrap() as usize..new.sources[0].end.unwrap() as usize;
+    assert_eq!(
+        &CORRECTS[span], "東京",
+        "the new value's span is the source"
+    );
+    assert_eq!(old.sources[0].turn, u1);
+    // 訂正の発話の古い値の範囲も、置き換えた事実の出典になる (04 §5.3 の「終えた発言の出典」)。
+    assert_eq!(old.sources.len(), 2);
+    let ended = &old.sources[1];
+    assert_eq!(ended.turn, u2);
+    assert_eq!(
+        &CORRECTS[ended.start.unwrap() as usize..ended.end.unwrap() as usize],
+        "大阪"
+    );
+
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    let c = &cs[0];
+    assert_eq!(c.stage, "verified");
+    assert!(c.checked);
+    assert_eq!(c.rejected, None);
+    assert_eq!(c.turn, u2);
+    assert!(
+        c.previous.is_some_and(|p| p > u1 && p < u2),
+        "the answer to u1"
+    );
+    assert_eq!(c.pattern, "{old}じゃなくて{new}");
+    assert_eq!(c.dir_old.as_deref(), Some("大阪"));
+    assert_eq!(c.dir_new, "東京");
+    assert_eq!(
+        (c.target.as_deref(), c.old.as_deref(), c.new.as_deref()),
+        (Some("fact"), Some("大阪"), Some("東京"))
+    );
+
+    // 作り直しても、検証した候補を検証し直さない。
+    let idle = chat(&[]);
+    let (core, _rx) = start(dir.path(), &idle, 9).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert!(idle.requests().is_empty());
+}
+
+/// 検証の関門で落ちた訂正は事実を変えず、候補のまま理由を残して、検証し直さない。セッションを消すと、訂正の記録も
+/// 消える (03 §4.2 の規則 12)。
+///
+/// verifies: AC-FR-306-1 (検証を通らない訂正は事実を変えない)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_correction_leaves_the_facts_alone() {
+    let dir = TempDir::new("extraction-correction-rejected");
+    prepare(dir.path(), true);
+    let llm = chat(&[
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(NO_FACTS),
+        // 言い換えた新しい値は発話に無い。
+        verify_reply("大阪", "東京都", CORRECTS),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    let u2 = say(&core, &mut rx, CORRECTS).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0, "the candidate was verified once");
+
+    let (facts, _) = stored(dir.path());
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].value.as_deref(), Some("大阪"));
+    assert_eq!(facts[0].state, "live");
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].stage, "candidate");
+    assert!(cs[0].checked);
+    assert_eq!(cs[0].rejected.as_deref(), Some("new_not_in_utterance"));
+    assert_eq!(cs[0].new, None);
+
+    let session = {
+        let store = open(dir.path());
+        let r = store.read().unwrap();
+        let Some(Read::Ok(turn)) = r.get(KIND_TURN, u2).unwrap() else {
+            panic!("the utterance")
+        };
+        turn.body_as::<TurnBody>().unwrap().session
+    };
+    let idle = chat(&[]);
+    let (core, mut rx) = start(dir.path(), &idle, 9).await;
+    settle(&core).await;
+    assert!(idle.requests().is_empty(), "not verified again");
+    core.command(Command::OpenSession { id: session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert!(
+        corrections(dir.path()).is_empty(),
+        "deleted with the session"
+    );
+}
+
+/// 型に合わない検証の答えは 1 回だけやり直し、それでも合わなければ候補を飛ばして (`checked` にして理由を残し)、
+/// 検証し直さない (04 §6 の「型が合わない・失敗したときの扱いは抽出と同じ」)。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invalid_verification_is_retried_once_then_skipped() {
+    let dir = TempDir::new("extraction-correction-invalid");
+    prepare(dir.path(), true);
+    let llm = chat(&[
+        reply(REPLY),
+        reply(NO_FACTS),
+        reply("訂正です"),
+        reply(r#"{"target": "both"}"#),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, CORRECTS).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+    let reqs = llm.requests();
+    assert_eq!(reqs[2].messages, reqs[3].messages, "the same request again");
+    assert_eq!(
+        reqs[2].messages[1].content,
+        evorag_memory::verify_input("ja", None, CORRECTS),
+        "no answer before the first utterance"
+    );
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].previous, None);
+    assert_eq!(cs[0].rejected.as_deref(), Some("invalid_output"));
+    assert!(stored(dir.path()).0.is_empty());
+
+    let idle = chat(&[]);
+    let (core, _rx) = start(dir.path(), &idle, 9).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert!(idle.requests().is_empty(), "not verified again");
+}
+
+/// 遅れて届く答え (要求が出ている間に、利用者の操作や削除を挟むため)。
+fn slow_reply(text: &str) -> String {
+    format!(
+        r#"{{"events": [{{"wait_ms": 1500}}, {{"delta": {}}}, {{"done": {{}}}}]}}"#,
+        serde_json::to_string(text).unwrap()
+    )
+}
+
+/// 要求が `n` 件出るまで待つ (出たことを知らせる出来事が無いので、長めの上限で見る)。
+async fn until_requests(llm: &ReplayClient, n: usize) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while llm.requests().len() < n && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(llm.requests().len(), n, "the request is out");
+}
+
+/// 抽出の呼び出しの間にセッションを消すと、読んだ発話の訂正の候補は書かない (書く前にロックの下でターンと改訂の
+/// 番号を確かめる、04 §6 の「候補を見つける時機」)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_deleted_during_extraction_leaves_no_correction() {
+    let dir = TempDir::new("extraction-correction-deleted");
+    prepare(dir.path(), true);
+    let llm = chat(&[reply(REPLY), slow_reply(NO_FACTS)]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    core.hold(true);
+    ask(&core, &mut rx, CORRECTS).await;
+    core.hold(false);
+    until_requests(&llm, 2).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    settle(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.requests().len(), 2, "nothing to verify");
+    assert!(corrections(dir.path()).is_empty());
+}
+
+/// 検証の呼び出しの間に候補の発話の改訂の番号が変わったら (伏せ字など)、結果の代わりに `stale_source` を書き、
+/// 事実を変えない (04 §6 の「検証の時機」)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revision_change_during_verification_is_recorded_as_stale() {
+    let dir = TempDir::new("extraction-correction-stale");
+    prepare(dir.path(), true);
+    let ok = serde_json::json!({"target": "fact", "old": "大阪", "new": "東京", "e": CORRECTS})
+        .to_string();
+    let llm = chat(&[
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(NO_FACTS),
+        slow_reply(&ok),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    core.hold(true);
+    let u2 = ask(&core, &mut rx, CORRECTS).await;
+    core.hold(false);
+    until_requests(&llm, 5).await;
+    assert!(core.bump_turn_revision(u2).await);
+    settle(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].stage, "candidate");
+    assert!(cs[0].checked);
+    assert_eq!(cs[0].rejected.as_deref(), Some("stale_source"));
+    let (facts, _) = stored(dir.path());
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].value.as_deref(), Some("大阪"));
+    assert_eq!(facts[0].state, "live");
+}
+
+/// 検証の締切切れと 5xx は次の機会に送り直し、同じ候補で 3 回続いたら `failed` として飛ばす (04 §5.2.1)。
+#[tokio::test(flavor = "multi_thread")]
+async fn three_verification_failures_in_a_row_skip_the_candidate() {
+    let dir = TempDir::new("extraction-correction-5xx");
+    prepare(dir.path(), true);
+    let llm = chat(&[
+        reply(REPLY),
+        reply(NO_FACTS),
+        http_error(503),
+        server_error(),
+        http_error(500),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, CORRECTS).await;
+    assert_eq!(llm.requests().len(), 3);
+    retry(&core).await;
+    assert_eq!(
+        llm.requests().len(),
+        4,
+        "sent again after the first failure"
+    );
+    retry(&core).await;
+    assert_eq!(
+        llm.requests().len(),
+        5,
+        "sent again after the second failure"
+    );
+    retry(&core).await;
+    core.shutdown().await;
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 5, "skipped after the third failure");
+    for r in &reqs[3..] {
+        assert_eq!(r.messages, reqs[2].messages, "the same candidate again");
+    }
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    assert!(cs[0].checked);
+    assert_eq!(cs[0].rejected.as_deref(), Some("failed"));
+}
+
+/// サーバに繋がらないときは数えず、候補を検証していないまま待つ。戻れば検証して、事実を置き換える。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_server_leaves_the_candidate_unchecked() {
+    let dir = TempDir::new("extraction-correction-connect");
+    prepare(dir.path(), true);
+    let llm = chat(&[
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(NO_FACTS),
+        connect_error(),
+        connect_error(),
+        connect_error(),
+        connect_error(),
+        verify_reply("大阪", "東京", CORRECTS),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    say(&core, &mut rx, CORRECTS).await;
+    assert_eq!(llm.requests().len(), 5);
+    for n in 6..=8 {
+        retry(&core).await;
+        assert_eq!(llm.requests().len(), n, "sent again while unreachable");
+    }
+    // 4 回続いても飛ばさない (繋がらない失敗は数えない)。
+    retry(&core).await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+    let cs = corrections(dir.path());
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].stage, "verified");
+    assert_eq!(cs[0].rejected, None);
+    let (facts, _) = stored(dir.path());
+    let live: Vec<_> = facts.iter().filter(|f| f.state == "live").collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].value.as_deref(), Some("東京"));
+}

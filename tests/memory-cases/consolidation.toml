@@ -356,7 +356,7 @@ turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "大阪�
 correction = { turn = "a3", old = "大阪", new = "東京" }
 [[case.step]]
 expect = { facts = [
-  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1", "a3"] },
   { s = "self", a = "residence", v = "東京", state = "Live", sources = ["a3"] },
 ] }
 
@@ -397,7 +397,7 @@ turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "ラー�
 correction = { turn = "a3", old = "ラーメン", new = "うどん" }
 [[case.step]]
 expect = { facts = [
-  { s = "self", a = "likes", v = "ラーメン", state = "Superseded", by = "うどん", sources = ["a1"] },
+  { s = "self", a = "likes", v = "ラーメン", state = "Superseded", by = "うどん", sources = ["a1", "a3"] },
   { s = "self", a = "likes", v = "寿司", state = "Live", sources = ["a1"] },
   { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["a3"] },
 ] }

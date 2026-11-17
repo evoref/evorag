@@ -244,6 +244,37 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
             .unwrap();
         h.submit_wait(evorag_store::WriteRequest::conversation(ops))
             .unwrap();
+        // 訂正の記録 (04 §6、v0.3) も古い版は知らない。消すセッションの発話の候補と、残るセッションの検証済みの
+        // 候補を置く。
+        let pattern = evorag_memory::PatternMatch {
+            pattern: "{old}じゃなくて{new}".into(),
+            dir_old: Some("見本".into()),
+            dir_new: MARK.into(),
+        };
+        let kept_pattern = evorag_memory::PatternMatch {
+            dir_new: "残る値".into(),
+            ..pattern.clone()
+        };
+        let kept =
+            evorag_memory::CorrectionBody::candidate(b.reply_to.unwrap(), 0, None, &kept_pattern)
+                .checked(&evorag_memory::Verdict::Rejected(
+                    evorag_memory::Rejection::Direction,
+                ));
+        for body in [
+            evorag_memory::CorrectionBody::candidate(a.reply_to.unwrap(), 0, None, &pattern),
+            kept,
+        ] {
+            let ops = evorag_memory::candidate_ops(
+                &store.read().unwrap(),
+                &**store.ids(),
+                Timestamp::from_millis(T0 + DAY),
+                &body,
+            )
+            .unwrap()
+            .expect("the turn is there");
+            h.submit_wait(evorag_store::WriteRequest::background(ops))
+                .unwrap();
+        }
         store
             .daily_backup(None)
             .unwrap()
@@ -317,6 +348,20 @@ async fn records_left_by_an_older_version_are_cleaned_up() {
     })
     .unwrap();
     assert_eq!(feedback, 0, "the feedback on the deleted session is gone");
+    let mut corrections = Vec::new();
+    r.for_each(evorag_memory::KIND_CORRECTION, |x| {
+        if let Read::Ok(e) = x {
+            corrections.push(e.body_as::<evorag_memory::CorrectionBody>().unwrap());
+        }
+        true
+    })
+    .unwrap();
+    assert_eq!(
+        corrections.len(),
+        1,
+        "the correction on the deleted session is gone; one whose source turn remains is kept"
+    );
+    assert_eq!(Some(corrections[0].turn), b.reply_to);
     let mut targets: std::collections::HashSet<_> = notes.iter().map(|(id, _)| *id).collect();
     let mut added_chunks = Vec::new();
     r.for_each(evorag_memory::KIND_CHUNK, |x| {

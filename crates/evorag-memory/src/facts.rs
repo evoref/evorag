@@ -18,7 +18,7 @@ use crate::fold::{
     Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report,
     Scope, Source, Tense, fold,
 };
-use crate::gates::{Safety, check_subject, check_value};
+use crate::gates::{Safety, check_subject, check_text, check_value};
 use crate::kinds::KIND_TURN;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
@@ -626,7 +626,7 @@ pub struct FactCtx<'a> {
 impl FactCtx<'_> {
     /// 書き込みの入口の検査 (04 §5.2.1 の「書き込みの入口での検査」): 出典の改訂の番号が今のターンの改訂の
     /// 番号と合わない (ターンが無い・読めないものを含む) 候補と訂正を捨て、候補の値に関門 6・7 を、主語に関門 5
-    /// (根拠を見ない部分) と関門 6 を当て直す。一覧に無い属性の候補は、畳みが数えて捨てるので、ここでは残す。
+    /// (根拠を見ない部分) と関門 6 を、検証済みの訂正の新しい値に関門 6 を当て直す。一覧に無い属性の候補は、畳みが数えて捨てるので、ここでは残す。
     fn screen(
         &self,
         tx: &ReadTxn<'_>,
@@ -670,6 +670,13 @@ impl FactCtx<'_> {
                     continue;
                 }
             }
+            // 検証済みの訂正の新しい値には関門 6 を当てる (関門 7 は当てる属性が決まってから畳みが当てる)。
+            if let Event::Correction(c) = &e
+                && check_text(self.safety, c.new_value()).is_err()
+            {
+                report.value_rejected += 1;
+                continue;
+            }
             out.push(e);
         }
         Ok(out)
@@ -698,7 +705,7 @@ impl FactCtx<'_> {
         let events = self.screen(tx, events, &mut screened)?;
         let mut report = self.fold(set, dirs, events);
         report.stale_source = screened.stale_source;
-        report.value_rejected = screened.value_rejected;
+        report.value_rejected += screened.value_rejected;
         report.subject_rejected = screened.subject_rejected;
         Ok(report)
     }

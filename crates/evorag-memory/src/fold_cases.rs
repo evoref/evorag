@@ -430,14 +430,21 @@ impl Runner {
             "correction" => {
                 let (turn, text) = self.turns[s(body, "turn").expect("turn")].clone();
                 let new = s(body, "new").expect("new");
-                let start = text.find(new).expect("new in the turn");
-                let c = VerifiedCorrection::assume_verified(
+                let old = s(body, "old").expect("old");
+                let span = |v: &str| {
+                    let start = text.find(v).expect("the value in the turn");
                     Source {
                         turn,
                         start: u32::try_from(start).expect("short"),
-                        end: u32::try_from(start + new.len()).expect("short"),
+                        end: u32::try_from(start + v.len()).expect("short"),
                         rev: 0,
-                    },
+                    }
+                };
+                let c = VerifiedCorrection::assume_verified(
+                    span(new),
+                    Some(span(old)),
+                    crate::correction::Target::Fact,
+                    s(body, "old").expect("old").to_owned(),
                     value_key(&self.key, s(body, "old").expect("old")),
                     new.to_owned(),
                     value_key(&self.key, new),

@@ -414,6 +414,8 @@ pub fn turn_rev(turn: &Envelope) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserUtterance {
     pub turn: Id,
+    /// 発話のセッション (訂正の候補の直前の応答を引くのに使う、04 §6)。
+    pub session: Id,
     pub rev: u32,
     /// セッションのモード (セッションを読めなければ空。前のふるいで飛ばす)。
     pub mode: String,
@@ -464,6 +466,7 @@ pub fn user_utterances_after(
         };
         out.push(UserUtterance {
             turn,
+            session: t.session,
             rev: t.rev,
             mode,
             text: t.text,

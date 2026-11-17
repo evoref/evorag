@@ -187,6 +187,15 @@ pub fn kinds() -> Vec<KindSpec> {
             journaled: false,
             derive: Some(crate::facts::derive_fact),
         },
+        // 訂正の候補と検証済みの訂正は、字句の規則と LLM で作る派生の記録 (04 §6)。ジャーナルに書かない。関係は
+        // 本体 (`turn`) から作り直せる。
+        KindSpec {
+            name: crate::correction::KIND_CORRECTION,
+            current_v: crate::correction::CORRECTION_V,
+            create_when_newer_present: false,
+            journaled: false,
+            derive: Some(crate::correction::derive_correction),
+        },
         // 事実への指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
         KindSpec {
             name: crate::facts::KIND_FACT_DIRECTIVE,

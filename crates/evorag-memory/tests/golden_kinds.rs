@@ -344,3 +344,32 @@ fn fact_directive_v1() {
         },
     );
 }
+
+#[test]
+fn correction_v1() {
+    check(
+        KIND_CORRECTION,
+        id("019a6a2b-0000-7000-8000-000000000023"),
+        CorrectionBody {
+            stage: "verified".into(),
+            turn: id("019a6a2b-0000-7000-8000-000000000002"),
+            rev: 0,
+            previous: Some(id("019a6a2b-0000-7000-8000-000000000003")),
+            pattern: "{old}じゃなくて{new}".into(),
+            dir_old: Some("見本の村".into()),
+            dir_new: "見本の町".into(),
+            checked: true,
+            rejected: None,
+            target: Some("fact".into()),
+            old: Some("見本の村".into()),
+            new: Some("見本の町".into()),
+            old_vk: Some("ab".repeat(32)),
+            new_vk: Some("cd".repeat(32)),
+            norm: Some(1),
+            start: Some(21),
+            end: Some(33),
+            old_start: Some(0),
+            old_end: Some(12),
+        },
+    );
+}

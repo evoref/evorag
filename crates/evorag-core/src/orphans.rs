@@ -1,6 +1,6 @@
 //! 出典の無い派生の記録の突き合わせ (03 §4.2 の規則 12、04 §7)。
 //!
-//! 古い版 (v0.1.2 など) は、新しい版の種類 (チャンク・ノート・埋め込み・想起への操作) を知らないので、
+//! 古い版 (v0.1.2 など) は、新しい版の種類 (チャンク・ノート・埋め込み・想起への操作・訂正) を知らないので、
 //! セッションを消しても、それらを消さない。起動時に、出典の無くなったものを DB と索引から消し、退避からも
 //! 除く job (03 §7.3) を同じ依頼で書く。出典の無いチャンクは `sync_chunks` が先に消す (その ID を受け取る)。
 
@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use evorag_memory::{
-    KIND_CHUNK, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN, NoteBody,
-    RecallFeedbackBody,
+    KIND_CHUNK, KIND_CORRECTION, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN,
+    NoteBody, RecallFeedbackBody,
 };
 use evorag_store::{Read, Store, WriteOp};
 use evorag_types::Id;
@@ -21,6 +21,7 @@ struct Plan {
     notes: Vec<Id>,
     embeddings: Vec<Id>,
     feedback: Vec<Id>,
+    corrections: Vec<Id>,
 }
 
 fn ids_of(r: &evorag_store::ReadTxn<'_>, kind: &str) -> Option<HashSet<Id>> {
@@ -71,6 +72,18 @@ fn plan(store: &Store) -> Option<Plan> {
         true
     })
     .ok()?;
+    // 訂正は、出典のターン (候補の発話と直前の応答) がすべて無くなったら消す (04 §5.3 の「出典の無い事実の掃除」)。
+    r.for_each(KIND_CORRECTION, |x| {
+        if let Read::Ok(e) = x
+            && let Some((turn, previous)) = evorag_memory::correction_sources(&e)
+            && !turns.contains(&turn)
+            && previous.is_none_or(|p| !turns.contains(&p))
+        {
+            p.corrections.push(e.id);
+        }
+        true
+    })
+    .ok()?;
     Some(p)
 }
 
@@ -85,6 +98,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         && p.notes.is_empty()
         && p.embeddings.is_empty()
         && p.feedback.is_empty()
+        && p.corrections.is_empty()
     {
         return;
     }
@@ -100,12 +114,25 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         });
         ops.push(WriteOp::DeleteLinksOf(*n));
     }
+    for c in &p.corrections {
+        ops.push(WriteOp::Delete {
+            kind: KIND_CORRECTION.into(),
+            id: *c,
+        });
+        ops.push(WriteOp::DeleteLinksOf(*c));
+    }
     for f in &p.feedback {
         // 想起への操作はジャーナルにも書く種類なので、消したこともジャーナルに残る。
         ops.extend(w.delete_feedback(*f));
     }
     let mut purge: Vec<Id> = gone_chunks.clone();
-    purge.extend(p.notes.iter().chain(&p.embeddings).chain(&p.feedback));
+    purge.extend(
+        p.notes
+            .iter()
+            .chain(&p.embeddings)
+            .chain(&p.feedback)
+            .chain(&p.corrections),
+    );
     let Ok((_, job)) = evorag_memory::purge_job(&w, purge) else {
         return;
     };
@@ -115,6 +142,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         notes = p.notes.len(),
         embeddings = p.embeddings.len(),
         feedback = p.feedback.len(),
+        corrections = p.corrections.len(),
         "orphaned derived records removed"
     );
     if crate::write(inner, ops).await.is_err() {
