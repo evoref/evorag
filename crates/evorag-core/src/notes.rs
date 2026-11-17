@@ -235,9 +235,11 @@ async fn save(
     gone: Vec<Id>,
     made: Option<(Id, NoteBody)>,
 ) -> bool {
+    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した保存は終わっている)。
+    let lock = inner.index_lock.clone().lock_owned().await;
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        let _lock = worker.index_lock.lock().await;
+        let _lock = lock;
         if crate::write_derived(&worker, ops).await.is_err() {
             return false;
         }

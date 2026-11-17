@@ -256,7 +256,9 @@ struct Inner {
     vectors_opened: Mutex<Option<String>>,
     /// チャンクと索引を変える処理の鍵 (起動時の突き合わせ、チャンクの作り直し、削除、ベクトルの索引を
     /// 開く、埋め込みの保存。互いの間に入り込まないように、embedding.rs の冒頭)。
-    index_lock: tokio::sync::Mutex<()>,
+    /// 落とされない保存の task には、spawn の前に取った鍵 (`lock_owned`) を渡す (終了のときに、この鍵を
+    /// 取れたら、出した保存は終わっている)。
+    index_lock: Arc<tokio::sync::Mutex<()>>,
     /// 問いの埋め込みのキャッシュ (05 §3.1 の 4)。
     query_cache: Arc<recall::QueryCache>,
     /// リランクの結果のキャッシュ (05 §4.5)。
@@ -270,7 +272,8 @@ struct Inner {
     extraction: Mutex<extraction::State>,
     /// 事実を書く経路のロック (04 §5.2.1 の「書き込みの直列化」)。記録を読む前に取り、書き手が書き終えるまで
     /// 放さない。統合のほか、事実への指示・出典の無い事実の掃除・忘れる・`rebuild --facts` も取る。
-    facts_lock: tokio::sync::Mutex<()>,
+    /// 落とされない保存の task には、spawn の前に取った鍵 (`lock_owned`) を渡す。
+    facts_lock: Arc<tokio::sync::Mutex<()>>,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -572,14 +575,14 @@ impl Core {
             calib_progress: Mutex::new(None),
             vectors: Mutex::new(None),
             vectors_opened: Mutex::new(None),
-            index_lock: tokio::sync::Mutex::new(()),
+            index_lock: Arc::new(tokio::sync::Mutex::new(())),
             embed_skip: Mutex::new(std::collections::HashSet::new()),
             query_cache: Arc::new(recall::QueryCache::default()),
             rerank_cache: Arc::new(recall::RerankCache::default()),
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
             extraction: Mutex::new(extraction::State::default()),
-            facts_lock: tokio::sync::Mutex::new(()),
+            facts_lock: Arc::new(tokio::sync::Mutex::new(())),
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
@@ -847,6 +850,18 @@ impl Core {
     pub fn turn_body(&self, turn: Id) -> Option<evorag_memory::TurnBody> {
         read_env(&self.inner, evorag_memory::KIND_TURN, turn)
             .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
+    }
+
+    /// 試験のため: 待たせている裏の処理の手順 (終えたのにまだ要る手順、sleep.rs の `BACKOFF`) を、待たずに
+    /// 次の見直しで試し直させる。
+    #[doc(hidden)]
+    pub fn retry_background_now(&self) {
+        self.inner
+            .backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.inner.activity.kick();
     }
 
     /// 試験のため: 裏の処理の要る手順が無くなるまで待つ (10 秒で終わらなければ panic する)。
@@ -1686,6 +1701,9 @@ async fn delete(inner: &Arc<Inner>) {
     // 関係を読んでから索引から除くまでを、チャンクと索引の鍵の下で行う (保存中の埋め込みや、作り直し中の
     // チャンクが、消した会話に残らないように)。
     let _lock = inner.index_lock.lock().await;
+    // 事実を書く経路のロックも取る (統合が出典の改訂の番号を照合してから書き終えるまでの間に、出典のターンを
+    // 消さないように、04 §4)。鍵の順は index_lock → facts_lock (逆の順で取る経路は無い)。
+    let facts_guard = inner.facts_lock.lock().await;
     let ops = inner.store.read().ok().and_then(|rtx| {
         let s = evorag_memory::load_session(&rtx, sid).ok()?;
         evorag_memory::delete_session(&rtx, &s.envelope).ok()
@@ -1709,6 +1727,7 @@ async fn delete(inner: &Arc<Inner>) {
         );
         return;
     }
+    drop(facts_guard);
     // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。
     let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
     if let Some(ix) = inner.index.clone() {

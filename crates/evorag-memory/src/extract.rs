@@ -4,7 +4,8 @@
 //!   バイト列まで毎回同じにする (04 §4 のプロンプトのキャッシュ)。束の発話は利用者のメッセージに
 //!   `[番号] 本文` で並べる。
 //! - 出力の型: JSON Schema (`t` は束の番号、`a` は属性の名前の列挙) と、その型での読み取り。
-//! - 束ね方: `/tokenize` の数で 1 回 800 トークンまでに詰め、1,600 トークンを超える発話は送らない。
+//! - 束ね方: `/tokenize` の数で、要求の全体を 2,048 トークンまでにする発話の予算に詰める。予算を超える
+//!   1 つの発話は送らない。
 //! - 進み具合: `job` (手順 `extract_facts`) に、処理を終えた最後の発話のターンの ID を持つ。
 
 use evorag_store::{BodyError, Envelope, Read, ReadTxn, WriteOp};
@@ -22,10 +23,41 @@ use crate::rules::Attributes;
 pub const JOB_EXTRACT_FACTS: &str = "extract_facts";
 /// 抽出の手順の版 (プロンプトと出力の型)。job に記録する (04 §4 の「冪等」)。
 pub const EXTRACT_VERSION: u32 = 1;
-/// 1 回の呼び出しに渡す発話のトークンの上限 (暫定、04 §5.2.1)。
-pub const BATCH_TOKENS: usize = 800;
-/// 1 つの発話のトークンの上限。超える発話は送らずに数える (要求を 2,048 トークンまでにする、04 §4)。
-pub const MAX_UTTERANCE_TOKENS: usize = 1_600;
+/// 裏の処理の 1 回の要求のプロンプトの上限 (トークン、暫定、04 §4)。
+pub const REQUEST_TOKENS: usize = 2_048;
+/// 発話の予算から引く余白 (トークン、04 §5.2.1)。束の番号・区切り・チャットのテンプレートのぶん。
+pub const BUDGET_MARGIN: usize = 64;
+/// 抽出の呼び出しの生成の上限 (トークン、04 §5.2.1)。
+pub const EXTRACT_MAX_TOKENS: u32 = 1_024;
+
+/// トークンの数え方 (06 §8)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counting {
+    /// `/tokenize` で数えた。
+    Exact,
+    /// `/tokenize` が使えず、文字数から見積もった (1 つでも見積もりなら、こちら)。
+    Estimated,
+}
+
+/// 1 回の要求に渡す発話の予算 (04 §5.2.1 の「束ね方」): 2,048 − システムのメッセージのトークン数 − 余白 (64)。
+/// 見積もりで数えたときは 2 割減らす (06 §8)。システムのメッセージだけで上限に届くなら 0。
+#[must_use]
+pub fn utterance_budget(system_tokens: usize, counting: Counting) -> usize {
+    let budget = REQUEST_TOKENS
+        .saturating_sub(system_tokens)
+        .saturating_sub(BUDGET_MARGIN);
+    match counting {
+        Counting::Exact => budget,
+        Counting::Estimated => budget * 4 / 5,
+    }
+}
+
+/// 抽出の要求 (プロンプトの上限と生成の上限) が、スロットの文脈の長さ `n_ctx` に収まるか (04 §5.2.1)。
+/// 収まらない構成では抽出しない。
+#[must_use]
+pub fn extraction_fits(n_ctx: usize) -> bool {
+    REQUEST_TOKENS + EXTRACT_MAX_TOKENS as usize <= n_ctx
+}
 
 /// 抽出のシステムのメッセージ (04 §5.2.1 の「プロンプト」)。`language` はプロンプトの言語 (`ja`・`en`)。
 /// 知らない言語は `en` の文言にする。同じ言語と一覧なら、バイト列まで同じ文字列を返す。
@@ -233,23 +265,24 @@ pub struct Batch {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Packing {
     pub batches: Vec<Batch>,
-    /// 1 つで `MAX_UTTERANCE_TOKENS` を超えたので送らない発話の位置。
+    /// 1 つで予算を超えたので送らない発話の位置。
     pub too_long: Vec<usize>,
 }
 
 /// 発話を順に束に詰める。`tokens` は発話ごとのトークンの数で、`None` は前のふるいで送らない発話。
+/// `budget` は 1 回の要求に渡す発話の予算 ([`utterance_budget`])。
 ///
-/// 束の発話のトークンの和は `BATCH_TOKENS` までにする。ただし 1 つで `BATCH_TOKENS` を超え
-/// `MAX_UTTERANCE_TOKENS` 以下の発話は、それだけで 1 つの束にする。
-pub fn pack(tokens: &[Option<usize>]) -> Packing {
+/// 束の発話のトークンの和は `budget` までにする。1 つで `budget` を超える発話は送らない (`too_long`)。
+#[must_use]
+pub fn pack(tokens: &[Option<usize>], budget: usize) -> Packing {
     let mut out = Packing::default();
     let mut send: Vec<usize> = Vec::new();
     let mut sum = 0usize;
     for (i, t) in tokens.iter().enumerate() {
         match *t {
-            Some(n) if n > MAX_UTTERANCE_TOKENS => out.too_long.push(i),
+            Some(n) if n > budget => out.too_long.push(i),
             Some(n) => {
-                if !send.is_empty() && sum + n > BATCH_TOKENS {
+                if !send.is_empty() && sum + n > budget {
                     out.batches.push(Batch {
                         send: std::mem::take(&mut send),
                         through: i - 1,
@@ -389,6 +422,7 @@ pub struct UserUtterance {
 }
 
 /// `after` より後の利用者の発話を、ターンの ID の順に読む (セッションをまたいで 1 本の列にする、04 §5.2.1)。
+/// ターンは `after` の次から読み、セッションは発話のあるものだけを引く。
 ///
 /// # Errors
 /// 記録を読めないとき。
@@ -396,36 +430,45 @@ pub fn user_utterances_after(
     tx: &ReadTxn<'_>,
     after: Option<Id>,
 ) -> Result<Vec<UserUtterance>, MemoryError> {
-    let mut modes: std::collections::HashMap<Id, String> = std::collections::HashMap::new();
-    tx.for_each(KIND_SESSION, |r| {
-        #[derive(Deserialize)]
-        struct Mode {
-            mode: String,
-        }
+    #[derive(Deserialize)]
+    struct Mode {
+        mode: String,
+    }
+    let mut turns = Vec::new();
+    let mut visit = |r: Read| {
         if let Read::Ok(e) = r
-            && let Ok(m) = e.body_as::<Mode>()
-        {
-            modes.insert(e.id, m.mode);
-        }
-        true
-    })?;
-    let mut out = Vec::new();
-    tx.for_each(KIND_TURN, |r| {
-        if let Read::Ok(e) = r
-            && after.is_none_or(|a| e.id > a)
             && let Ok(t) = e.body_as::<TurnFields>()
             && t.role == "user"
         {
-            out.push(UserUtterance {
-                turn: e.id,
-                rev: t.rev,
-                mode: modes.get(&t.session).cloned().unwrap_or_default(),
-                text: t.text,
-            });
+            turns.push((e.id, t));
         }
         true
-    })?;
-    out.sort_by_key(|u| u.turn);
+    };
+    match after {
+        Some(a) => tx.for_each_after(KIND_TURN, a, &mut visit)?,
+        None => tx.for_each(KIND_TURN, &mut visit)?,
+    }
+    let mut modes: std::collections::HashMap<Id, String> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(turns.len());
+    for (turn, t) in turns {
+        let mode = match modes.get(&t.session) {
+            Some(m) => m.clone(),
+            None => {
+                let m = match tx.get(KIND_SESSION, t.session)? {
+                    Some(Read::Ok(e)) => e.body_as::<Mode>().map(|m| m.mode).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                modes.insert(t.session, m.clone());
+                m
+            }
+        };
+        out.push(UserUtterance {
+            turn,
+            rev: t.rev,
+            mode,
+            text: t.text,
+        });
+    }
     Ok(out)
 }
 
@@ -549,18 +592,21 @@ mod tests {
     }
 
     #[test]
-    fn packing_fills_batches_up_to_the_limit_and_skips_long_utterances() {
-        // 300 + 400 は入り、次の 200 で 800 を超えるので新しい束。
-        let p = pack(&[
-            Some(300),
-            Some(400),
-            None,
-            Some(200),
-            Some(1_700),
-            Some(900),
-            None,
-        ]);
-        assert_eq!(p.too_long, [4]);
+    fn packing_fills_batches_up_to_the_budget_and_skips_long_utterances() {
+        // 300 + 400 は入り、次の 200 で 800 を超えるので新しい束。予算を超える 1 つの発話は送らない。
+        let p = pack(
+            &[
+                Some(300),
+                Some(400),
+                None,
+                Some(200),
+                Some(1_700),
+                Some(900),
+                None,
+            ],
+            800,
+        );
+        assert_eq!(p.too_long, [4, 5]);
         assert_eq!(
             p.batches,
             [
@@ -570,22 +616,18 @@ mod tests {
                 },
                 Batch {
                     send: vec![3],
-                    through: 4
-                },
-                Batch {
-                    send: vec![5],
                     through: 6
                 },
             ]
         );
-        // ちょうど 800 は 1 つの束。1,600 ちょうどは送る。
-        let p = pack(&[Some(400), Some(400), Some(1_600)]);
+        // ちょうど予算までは 1 つの束。予算ちょうどの 1 つの発話は送る。
+        let p = pack(&[Some(400), Some(400), Some(800)], 800);
         assert_eq!(p.batches.len(), 2);
         assert_eq!(p.batches[0].send, [0, 1]);
         assert_eq!(p.batches[1].send, [2]);
         assert!(p.too_long.is_empty());
         // 送る発話が無くても、進み具合を進める区切りは作る。
-        let p = pack(&[None, Some(2_000)]);
+        let p = pack(&[None, Some(2_000)], 800);
         assert_eq!(
             p.batches,
             [Batch {
@@ -593,7 +635,55 @@ mod tests {
                 through: 1
             }]
         );
-        assert_eq!(pack(&[]), Packing::default());
+        assert_eq!(pack(&[], 800), Packing::default());
+    }
+
+    /// 予算は 2,048 からシステムのメッセージと余白を引いたもの。見積もりなら 2 割減らす。システムのメッセージの
+    /// 隣に入らない発話は、送らずに数える。
+    #[test]
+    fn the_budget_leaves_room_for_the_system_message() {
+        assert_eq!(utterance_budget(1_000, Counting::Exact), 984);
+        assert_eq!(utterance_budget(1_000, Counting::Estimated), 787);
+        assert_eq!(utterance_budget(1_984, Counting::Exact), 0);
+        assert_eq!(utterance_budget(5_000, Counting::Exact), 0);
+
+        // システムのメッセージが 1,500 トークンなら、発話の予算は 484。
+        let budget = utterance_budget(1_500, Counting::Exact);
+        assert_eq!(budget, 484);
+        let p = pack(&[Some(400), Some(500), Some(484)], budget);
+        assert_eq!(
+            p.too_long,
+            [1],
+            "500 does not fit next to the system message"
+        );
+        assert_eq!(
+            p.batches,
+            [
+                Batch {
+                    send: vec![0],
+                    through: 1
+                },
+                Batch {
+                    send: vec![2],
+                    through: 2
+                },
+            ]
+        );
+        // 見積もりなら予算は 387 で、400 も入らない。
+        let p = pack(
+            &[Some(400), Some(380)],
+            utterance_budget(1_500, Counting::Estimated),
+        );
+        assert_eq!(p.too_long, [0]);
+        assert_eq!(p.batches[0].send, [1]);
+    }
+
+    #[test]
+    fn the_request_must_fit_the_slot_context() {
+        let need = REQUEST_TOKENS + EXTRACT_MAX_TOKENS as usize;
+        assert!(extraction_fits(need));
+        assert!(!extraction_fits(need - 1));
+        assert!(extraction_fits(8_192));
     }
 
     /// 進み具合を書いて読み直すと同じ。job を更新しても ID と作成時刻は変わらず、知らない項目も残る。
@@ -629,9 +719,26 @@ mod tests {
         handle
             .submit_wait(WriteRequest::background(vec![op]))
             .expect("write");
+        assert_eq!(load().through, Some(a));
+        // 後の版が足した項目 (この版の知らない項目) を job の本体に入れておく。
+        #[derive(Serialize, Deserialize)]
+        struct Later {
+            task: String,
+            ids: Vec<Id>,
+            later: Option<String>,
+        }
+        let mut job = load().job.expect("job");
+        job.set_body(&Later {
+            task: JOB_EXTRACT_FACTS.into(),
+            ids: vec![a],
+            later: Some("kept".into()),
+        })
+        .expect("body");
+        handle
+            .submit_wait(WriteRequest::background(vec![WriteOp::Put(job.clone())]))
+            .expect("write");
         let first = load();
         assert_eq!(first.through, Some(a));
-        let job = first.job.clone().expect("job");
         let op = first
             .advance(b, "mk", &ids, Timestamp::from_millis(t0.as_millis() + 5))
             .expect("op");
@@ -645,6 +752,13 @@ mod tests {
         let body: ExtractJobBody = again.body_as().expect("body");
         assert_eq!(body.version, Some(EXTRACT_VERSION));
         assert_eq!(body.model_key.as_deref(), Some("mk"));
+        assert_eq!(body.ids, [b]);
+        let later: Later = again.body_as().expect("body");
+        assert_eq!(
+            later.later.as_deref(),
+            Some("kept"),
+            "an unknown field is kept"
+        );
         handle.shutdown();
         thread.join().expect("writer");
     }
@@ -658,12 +772,12 @@ mod tests {
                 n => Some(n * 150),
             })
             .collect();
-        let p = pack(&tokens);
+        let p = pack(&tokens, 800);
         let mut next = 0;
         for b in &p.batches {
             assert!(b.send.iter().all(|&i| (next..=b.through).contains(&i)));
             let sum: usize = b.send.iter().map(|&i| tokens[i].expect("sent")).sum();
-            assert!(sum <= BATCH_TOKENS || b.send.len() == 1, "{b:?}");
+            assert!(sum <= 800, "{b:?}");
             next = b.through + 1;
         }
         assert_eq!(next, tokens.len());

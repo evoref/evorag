@@ -22,10 +22,10 @@ mod value_key;
 mod write;
 
 pub use extract::{
-    BATCH_TOKENS, Batch, EXTRACT_VERSION, ExtractJobBody, ExtractProgress, ExtractionOutput,
-    JOB_EXTRACT_FACTS, MAX_UTTERANCE_TOKENS, Packing, UserUtterance, extraction_input,
-    extraction_schema, extraction_system, load_extract_progress, pack, parse_extraction, turn_rev,
-    user_utterances_after,
+    BUDGET_MARGIN, Batch, Counting, EXTRACT_MAX_TOKENS, EXTRACT_VERSION, ExtractJobBody,
+    ExtractProgress, ExtractionOutput, JOB_EXTRACT_FACTS, Packing, REQUEST_TOKENS, UserUtterance,
+    extraction_fits, extraction_input, extraction_schema, extraction_system, load_extract_progress,
+    pack, parse_extraction, turn_rev, user_utterances_after, utterance_budget,
 };
 pub use facts::{
     FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,

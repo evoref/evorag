@@ -4,6 +4,7 @@
 //! (02 §5) は、この上に載せる。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1022,19 +1023,34 @@ macro_rules! record_reads {
         }
 
         /// 1 つの種類の記録を ID の順に読む。`f` が `false` を返したら止める。
-        pub fn for_each(
+        pub fn for_each(&self, kind: &str, f: impl FnMut(Read) -> bool) -> Result<(), StoreError> {
+            self.for_each_from(kind, Bound::Included(kind_prefix(kind)), f)
+        }
+
+        /// 1 つの種類の記録のうち、ID が `after` より後のものを ID の順に読む。`f` が `false` を返したら
+        /// 止める。表を `after` の次のキーから引くので、前の記録は読まない。
+        pub fn for_each_after(
             &self,
             kind: &str,
+            after: Id,
+            f: impl FnMut(Read) -> bool,
+        ) -> Result<(), StoreError> {
+            self.for_each_from(kind, Bound::Excluded(record_key(kind, after)), f)
+        }
+
+        /// `start` から、1 つの種類の記録の終わりまでを ID の順に読む。
+        fn for_each_from(
+            &self,
+            kind: &str,
+            start: Bound<Vec<u8>>,
             mut f: impl FnMut(Read) -> bool,
         ) -> Result<(), StoreError> {
             let table = self.tx.open_table(RECORDS).map_err(db)?;
-            let start = kind_prefix(kind);
-            let end = key::prefix_end(&start);
-            let range = match &end {
-                Some(e) => table.range::<&[u8]>(start.as_slice()..e.as_slice()),
-                None => table.range::<&[u8]>(start.as_slice()..),
-            }
-            .map_err(db)?;
+            let end = key::prefix_end(&kind_prefix(kind));
+            let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+            let range = table
+                .range::<&[u8]>((start.as_ref().map(Vec::as_slice), end))
+                .map_err(db)?;
             for item in range {
                 let (k, v) = item.map_err(db)?;
                 let Some((_, id)) = split_record_key(k.value()) else {
