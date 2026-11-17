@@ -5,11 +5,8 @@
 //! - 無く、事実への指示の記録も無ければ、OS の乱数で作り、会話と同じ優先度で一度だけ書く。
 //! - 食い違い・形の不正・「指示があるのに鍵が無い」ときは、作らずに事実の機能を止める (フェイルクローズ)。
 
-use evorag_memory::ForgetKey;
+use evorag_memory::{ForgetKey, KIND_FACT_DIRECTIVE};
 use evorag_store::{Read, Store, WriteOp, WriteRequest, WriterHandle, meta};
-
-/// 事実への指示の種類の名前 (04 §7.5)。`evorag_memory` の記録の種類と同じ名前。
-const KIND_FACT_DIRECTIVE: &str = "fact_directive";
 
 /// 鍵が使えない理由 (03 §3.1.1 のフェイルクローズ)。事実の抽出・統合・事実の表を止める。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
