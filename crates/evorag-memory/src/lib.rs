@@ -5,13 +5,21 @@
 //! 書き込みは、書き手 (`evorag_store::Writer`) に送る操作の列 (`WriteOp`) として組み立てる。
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
+mod fold;
+#[cfg(test)]
+mod fold_cases;
 mod kinds;
+mod lexical;
 mod note;
 mod read;
 mod rules;
 mod value_key;
 mod write;
 
+pub use fold::{
+    Candidate, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv,
+    Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private, table_order,
+};
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
     DEGRADED_NO_THRESHOLD, DEGRADED_RERANK_DEADLINE, DEGRADED_RERANK_ERROR, DEGRADED_RERANK_SLOW,
@@ -26,6 +34,7 @@ pub use kinds::{
     SessionBody, SessionState, SettingBody, SignalBody, SignalKind, TARGET_CONVERSATION,
     ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, kinds,
 };
+pub use lexical::{Signals, evidence_language, signals};
 pub use note::{
     NOTE_ANSWER_CHARS, NOTE_KEY_CHARS, NOTE_KEYS, NOTE_RULES, NOTE_USER_CHARS, NoteExchange,
     SEGMENT_CHARS, SEGMENT_EXCHANGES, SEGMENT_QUIET_MS, Segment, sanitize_keys, segments,
