@@ -384,7 +384,9 @@ fn correction_cases_are_well_formed() {
     let mut seen = BTreeSet::new();
     let reasons = [
         "verified",
+        "not_correction",
         "new_not_in_utterance",
+        "quoted",
         "old_not_found",
         "direction",
     ];
@@ -419,6 +421,10 @@ fn correction_cases_are_well_formed() {
         req(llm, "old", &id);
         req(llm, "new", &id);
         req(llm, "e", &id);
+        if let Some(r) = case.get("replaces") {
+            assert!(r.as_bool().is_some(), "{id}: replaces must be a bool");
+            assert!(case.get("live").is_some(), "{id}: replaces without live");
+        }
     }
     assert!(seen.len() >= 10);
 }
