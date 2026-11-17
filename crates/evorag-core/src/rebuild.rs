@@ -20,7 +20,7 @@ use evorag_memory::{KIND_CHUNK, KIND_EMBEDDING, KIND_MODEL_PROBE, KIND_NOTE, Wri
 use evorag_store::{OpenError, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer};
 use evorag_types::{Clock, IdGen};
 
-pub use facts::{FactsRebuilt, FactsSource, FactsUnavailable, LOST_REASONS};
+pub use facts::{ExtractionStop, FactsRebuilt, FactsSource, FactsUnavailable, LOST_REASONS};
 
 /// 作り直しの設定。
 pub struct RebuildOptions {
@@ -66,9 +66,13 @@ pub enum RebuildError {
     /// `--index` と `--facts` を一緒に指定した。
     #[error("--index and --facts cannot be used together")]
     IndexWithFacts,
-    /// llama-server に繋がらない (事実は変えていない)。
+    /// 確かめの段階で llama-server に繋がらない (退避も作らず、事実は変えていない)。
     #[error("llama-server is unreachable: {0}")]
     LlmUnreachable(LlmError),
+    /// 抽出の途中で llama-server が失敗した (繋がらない・4xx・締切切れか 5xx が続いた)。何も書かずに止めた
+    /// (事実は前のまま。退避は作ってある)。
+    #[error("{0}")]
+    Extraction(ExtractionStop),
     /// 応答のモデルが、データ根に記録したモデルと違う (06 §3.1。事実は変えていない)。
     #[error(
         "the chat model differs from the recorded one (recorded: {recorded}, connected: {connected})"
@@ -77,6 +81,13 @@ pub enum RebuildError {
     /// 事実を作り直せない (事実は変えていない)。
     #[error("facts cannot be rebuilt: {0}")]
     FactsUnavailable(FactsUnavailable),
+    /// 事実を入れ替えた後の、派生データの作り直しに失敗した (事実はもう新しい。入れ替える前のデータは `backup`)。
+    #[error("facts were replaced, but rebuilding the derived data failed: {source}")]
+    AfterFacts {
+        facts: FactsRebuilt,
+        backup: PathBuf,
+        source: Box<RebuildError>,
+    },
 }
 
 impl From<FactsUnavailable> for RebuildError {
@@ -93,7 +104,11 @@ const OPS_PER_WRITE: usize = 2_000;
 /// 作り直す。データ根を開けない (ほかの evorag が使っている) ときは `Open` のエラー。
 ///
 /// `--facts` では、退避の前に llama-server と応答のモデルと値の鍵を確かめ、抽出をすべて終えてから事実を
-/// 1 つの書き込みで入れ替える。途中で止めたとき (繋がらない・確かめに外れた) は、事実も派生データも変えない。
+/// 1 つの書き込みで入れ替える。途中で止めたとき (確かめに外れた・llama-server が失敗した) は、事実も派生データも
+/// 変えない。
+///
+/// CLI (`evorag rebuild`) の専用。DB を開く・退避する・索引を作るなどの同期の I/O を、そのまま async の中で
+/// 行う (ほかの task と同じ実行器で並べて使わない。CLI は 1 つの `block_on` で呼ぶ)。
 ///
 /// # Errors
 /// データ根を開けない・読むだけで開いた・退避や書き込みや索引に失敗した・事実を作り直せないとき。
@@ -135,7 +150,15 @@ pub async fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
             }
             _ => None,
         };
-        let (removed, docs) = rebuild(&store, &handle, &o)?;
+        let (removed, docs) = rebuild(&store, &handle, &o).map_err(|e| match &facts {
+            // 事実はもう入れ替えたので、そのことと退避の場所を示す。
+            Some(f) => RebuildError::AfterFacts {
+                facts: f.clone(),
+                backup: backup.clone(),
+                source: Box::new(e),
+            },
+            None => e,
+        })?;
         Ok::<_, RebuildError>((removed, docs, facts))
     }
     .await;

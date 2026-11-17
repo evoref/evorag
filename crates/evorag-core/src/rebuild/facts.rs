@@ -27,7 +27,7 @@ use evorag_memory::{
     load_extract_progress, load_probe, pack, parse_extraction, prefilter, redaction_marker,
     replay_forgets, user_utterances_after, utterance_budget,
 };
-use evorag_store::{Durability, Priority, Store, WriteOp, WriteRequest, WriterHandle, meta};
+use evorag_store::{Durability, Priority, Read, Store, WriteOp, WriteRequest, WriterHandle, meta};
 use evorag_types::{Clock, Id, IdGen};
 use serde_json::json;
 
@@ -63,12 +63,15 @@ pub enum FactsUnavailable {
     ContextTooSmall { n_ctx: u32 },
     /// 忘れるの当て直し (04 §7.2) が済んでいない。
     ForgetPending,
+    /// 新しい版の evorag が書いた (新しい `v` の) 事実がある。事実は、新しい `v` の記録があると今の `v` で作らない
+    /// (03 §4.2 の規則 6) ので、作り直せない。
+    NewerFacts { count: usize },
 }
 
 impl std::fmt::Display for FactsUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Key(p) => write!(f, "memory.forget_key is not usable ({p:?})"),
+            Self::Key(p) => write!(f, "memory.forget_key is not usable: {}", key_problem(*p)),
             Self::NotProbed => f.write_str("the connected model has not been probed"),
             Self::ProbeFailed => f.write_str(
                 "the connected model failed the structured output or thinking-off probe",
@@ -80,6 +83,43 @@ impl std::fmt::Display for FactsUnavailable {
                 )
             }
             Self::ForgetPending => f.write_str("a forget has not been replayed yet"),
+            Self::NewerFacts { count } => {
+                write!(f, "{count} facts were written by a newer evorag")
+            }
+        }
+    }
+}
+
+/// 値の鍵が使えない理由の説明 (ログとエラーの表示用。利用者への文言は CLI が文言キーで出す)。
+fn key_problem(p: FactsKeyProblem) -> &'static str {
+    match p {
+        FactsKeyProblem::Conflict => "the journal and the database disagree",
+        FactsKeyProblem::MissingWithDirectives => "it is missing although directives exist",
+        FactsKeyProblem::Malformed => "the recorded key is malformed",
+        FactsKeyProblem::ReadOnly => "the data root is read-only",
+    }
+}
+
+/// 抽出を止めた理由 (llama-server の失敗。何も書かずに止める、03 §10)。
+#[derive(Debug)]
+pub enum ExtractionStop {
+    /// サーバに繋がらない。
+    Unreachable(LlmError),
+    /// 要求を断られた (4xx)。
+    Rejected(LlmError),
+    /// 締切切れか 5xx が、同じ束で `attempts` 回続いた。`detail` は最後の失敗。
+    Failed { attempts: u32, detail: String },
+}
+
+impl std::fmt::Display for ExtractionStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(e) => write!(f, "llama-server is unreachable: {e}"),
+            Self::Rejected(e) => write!(f, "llama-server rejected the extraction request: {e}"),
+            Self::Failed { attempts, detail } => write!(
+                f,
+                "the extraction request failed {attempts} times in a row: {detail}"
+            ),
         }
     }
 }
@@ -89,8 +129,8 @@ impl std::fmt::Display for FactsUnavailable {
 pub struct FactsRebuilt {
     /// 処理した利用者の発話 (チャットのセッションの外のものを含む)。
     pub utterances: usize,
-    /// 送らずに飛ばした発話 (理由ごと。前のふるいの理由、`too_long`、`invalid_output`、`truncated`、`rejected`、
-    /// `failed`、`forget_mismatch`)。
+    /// 送らずに飛ばした発話 (理由ごと。前のふるいの理由 (`mode`・`empty`・`greeting`・`short`)、`too_long`、
+    /// `forget_mismatch`、抽出できなかった `truncated`・`invalid_output`)。
     pub skipped: BTreeMap<&'static str, usize>,
     /// 送った要求 (やり直しと、分けて送り直したものを含む)。
     pub requests: usize,
@@ -107,7 +147,8 @@ pub struct FactsRebuilt {
 }
 
 /// 抽出できずに飛ばした理由 (作り直しが部分的になった理由。前のふるいで送らなかった発話は含まない)。
-pub const LOST_REASONS: [&str; 4] = ["truncated", "invalid_output", "rejected", "failed"];
+/// 4xx と、締切切れか 5xx が続いたときは、飛ばさずに作り直しを止める ([`ExtractionStop`])。
+pub const LOST_REASONS: [&str; 2] = ["truncated", "invalid_output"];
 
 impl FactsRebuilt {
     /// 飛ばした発話の合計。
@@ -122,8 +163,8 @@ impl FactsRebuilt {
         self.skipped.get(reason).copied().unwrap_or(0)
     }
 
-    /// 抽出できずに飛ばした発話 ([`LOST_REASONS`]。出力が上限で切れた・型に合わない・4xx・締切切れと 5xx が
-    /// 続いた)。0 でなければ、作り直しは部分的で、これらの発話の事実は作られていない。
+    /// 抽出できずに飛ばした発話 ([`LOST_REASONS`]。出力が上限で切れた・型に合わない)。0 でなければ、作り直しは
+    /// 部分的で、これらの発話の事実は作られていない。
     #[must_use]
     pub fn lost(&self) -> usize {
         LOST_REASONS.iter().map(|r| self.skipped_for(r)).sum()
@@ -133,6 +174,12 @@ impl FactsRebuilt {
     #[must_use]
     pub fn not_sent(&self) -> usize {
         self.skipped_total() - self.lost()
+    }
+
+    /// 前のふるいで送らなかった発話 (チャットでない・空・挨拶・短い)。
+    #[must_use]
+    pub fn filtered(&self) -> usize {
+        self.not_sent() - self.skipped_for("too_long") - self.skipped_for("forget_mismatch")
     }
 
     fn skip(&mut self, reason: &'static str, n: usize) {
@@ -182,6 +229,10 @@ pub(super) async fn check(
                 connected: evorag_llm::file_name(&server.model_path).to_owned(),
             });
         }
+        let newer = newer_facts(&tx).map_err(|e| read(&e))?;
+        if newer > 0 {
+            return Err(FactsUnavailable::NewerFacts { count: newer }.into());
+        }
         match load_probe(&tx, ROLE_CHAT, &server.model_key, &server.build_info)
             .map_err(|e| read(&e))?
         {
@@ -229,6 +280,25 @@ pub(super) async fn check(
     })
 }
 
+/// 新しい `v` の事実の数。新しい版の記録があると、今の版は事実を作れない (03 §4.2 の規則 6。種類 `fact` は
+/// `create_when_newer_present = false`)。入れ替えの書き込みで断られる前に、何も書かずに止めるために数える。
+fn newer_facts(tx: &evorag_store::ReadTxn<'_>) -> Result<usize, evorag_store::StoreError> {
+    let current = evorag_memory::kinds()
+        .iter()
+        .find(|k| k.name == KIND_FACT)
+        .map_or(u32::MAX, |k| k.current_v);
+    let mut n = 0;
+    tx.for_each(KIND_FACT, |r| {
+        match r {
+            Read::Ok(e) if e.v > current => n += 1,
+            Read::Newer { .. } => n += 1,
+            _ => {}
+        }
+        true
+    })?;
+    Ok(n)
+}
+
 /// 処理する利用者の発話 1 つと、前のふるいの結果。
 struct Item {
     turn: Id,
@@ -254,9 +324,9 @@ enum Reply {
     /// 型に合わない答えが 2 回続いた。
     Invalid,
     /// 4xx。
-    Rejected,
-    /// 締切切れ・5xx・逐次表示の途中の失敗。
-    Transient,
+    Rejected(LlmError),
+    /// 締切切れ・5xx・逐次表示の途中の失敗 (元の失敗の説明)。
+    Transient(String),
     /// サーバに繋がらない。
     Unreachable(LlmError),
 }
@@ -316,8 +386,8 @@ impl Extractor<'_> {
                     tracing::warn!(error = %e, "fact extraction request failed (rebuild)");
                     return match (Failure::of(&e), e) {
                         (Failure::Unreachable, ChatError::Llm(e)) => Reply::Unreachable(e),
-                        (Failure::Rejected, _) => Reply::Rejected,
-                        _ => Reply::Transient,
+                        (Failure::Rejected, ChatError::Llm(e)) => Reply::Rejected(e),
+                        (_, e) => Reply::Transient(e.to_string()),
                     };
                 }
             };
@@ -364,10 +434,10 @@ impl Extractor<'_> {
         events
     }
 
-    /// 1 つの束を処理する。切れたら半分に分けて送り直し、型が合わない・切れた 1 つの発話・4xx の部分は飛ばす。
-    /// 締切切れと 5xx は待って送り直し、同じ部分で `FAILURE_LIMIT` 回続いたら飛ばす (04 §5.2.1)。繋がらなければ
-    /// 止める (`Err`)。
-    async fn batch(&mut self, sent: &[&Item]) -> Result<Vec<FactEvent>, LlmError> {
+    /// 1 つの束を処理する。切れたら半分に分けて送り直し、型が合わない・切れた 1 つの発話の部分は飛ばして数える。
+    /// 締切切れと 5xx は待って送り直し、同じ部分で `FAILURE_LIMIT` 回続いたら止める。4xx と繋がらないときも
+    /// 止める (`Err`。作り直しは何も書かない、03 §10)。
+    async fn batch(&mut self, sent: &[&Item]) -> Result<Vec<FactEvent>, ExtractionStop> {
         let mut events = Vec::new();
         let mut queue: VecDeque<&[&Item]> = VecDeque::from([sent]);
         while let Some(part) = queue.pop_front() {
@@ -383,21 +453,19 @@ impl Extractor<'_> {
                     }
                     Reply::Truncated => self.out.skip("truncated", part.len()),
                     Reply::Invalid => self.out.skip("invalid_output", part.len()),
-                    Reply::Rejected => self.out.skip("rejected", part.len()),
-                    Reply::Transient => {
+                    Reply::Rejected(e) => return Err(ExtractionStop::Rejected(e)),
+                    Reply::Transient(detail) => {
                         failures += 1;
                         if failures < FAILURE_LIMIT {
                             tokio::time::sleep(RETRY_DELAY * failures).await;
                             continue;
                         }
-                        tracing::warn!(
-                            utterances = part.len(),
-                            failures,
-                            "fact extraction kept failing for this batch; it is skipped (rebuild)"
-                        );
-                        self.out.skip("failed", part.len());
+                        return Err(ExtractionStop::Failed {
+                            attempts: failures,
+                            detail,
+                        });
                     }
-                    Reply::Unreachable(e) => return Err(e),
+                    Reply::Unreachable(e) => return Err(ExtractionStop::Unreachable(e)),
                 }
                 break;
             }
@@ -423,7 +491,7 @@ pub(super) struct Extracted {
     through: Option<Id>,
 }
 
-/// すべての発話から候補を抽出する (何も書かない)。繋がらなくなったら `LlmUnreachable` で止める。
+/// すべての発話から候補を抽出する (何も書かない)。llama-server が失敗したら `Extraction` で止める。
 pub(super) async fn extract(
     store: &Store,
     src: &FactsSource,
@@ -506,11 +574,7 @@ pub(super) async fn extract(
         if sent.is_empty() {
             continue;
         }
-        events.extend(
-            ex.batch(&sent)
-                .await
-                .map_err(RebuildError::LlmUnreachable)?,
-        );
+        events.extend(ex.batch(&sent).await.map_err(RebuildError::Extraction)?);
     }
     let gate = std::mem::take(&mut ex.gate_rejected);
     tracing::info!(
@@ -538,6 +602,7 @@ pub(super) fn swap(
     (clock, ids): (&dyn Clock, &dyn IdGen),
     out: &mut FactsRebuilt,
 ) -> Result<(), RebuildError> {
+    let read = |e: &dyn std::fmt::Display| RebuildError::Read(e.to_string());
     let fail = |e: &dyn std::fmt::Display| RebuildError::Write(e.to_string());
     let now = clock.now();
     let model_key = checked.server.model_key.as_str();
@@ -549,15 +614,15 @@ pub(super) fn swap(
         ids,
         now,
     };
-    let tx = store.read().map_err(|e| fail(&e))?;
-    let before = evorag_memory::load_facts(&tx).map_err(|e| fail(&e))?;
+    let tx = store.read().map_err(|e| read(&e))?;
+    let before = evorag_memory::load_facts(&tx).map_err(|e| read(&e))?;
     out.kept_unknown = before.unknown;
     // 残っている検証済みの訂正を、候補と一緒に入力の順で当て直す (検証し直さない、04 §7.5)。
-    let corrections = load_corrections(&tx).map_err(|e| fail(&e))?.verified;
+    let corrections = load_corrections(&tx).map_err(|e| read(&e))?.verified;
     out.corrections = corrections.len();
     let mut events = extracted.events;
     events.extend(corrections.into_iter().map(FactEvent::Correction));
-    let (mut ops, report) = evorag_memory::rebuild(&tx, &ctx, events).map_err(|e| fail(&e))?;
+    let (mut ops, report) = evorag_memory::rebuild(&tx, &ctx, events).map_err(|e| read(&e))?;
     out.blocked += report.blocked;
     out.removed = evorag_memory::deleted_ids(&ops).len();
     out.facts = ops
@@ -566,7 +631,7 @@ pub(super) fn swap(
         .count();
     // 進み具合を最後の発話まで進める (戻さない)。次の起動の抽出は、それより後の発話だけを処理する。
     if let Some(through) = extracted.through {
-        let progress = load_extract_progress(&tx).map_err(|e| fail(&e))?;
+        let progress = load_extract_progress(&tx).map_err(|e| read(&e))?;
         if progress.through.is_none_or(|t| t < through) {
             ops.push(
                 progress

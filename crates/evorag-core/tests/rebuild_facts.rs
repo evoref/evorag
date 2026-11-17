@@ -7,14 +7,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use evorag_core::rebind::DataRootModels;
-use evorag_core::rebuild::{FactsSource, FactsUnavailable, RebuildError, RebuildOptions};
+use evorag_core::rebuild::{
+    ExtractionStop, FactsSource, FactsUnavailable, RebuildError, RebuildOptions,
+};
 use evorag_core::{Core, CoreConfig, PromptLanguage};
 use evorag_llm::Generation;
 use evorag_llm::replay::ReplayClient;
 use evorag_memory::{
-    CorrectionBody, DirectiveKind, FactBody, FactCtx, ForgetEnv, ForgetKey, ForgetOptions,
-    KIND_CORRECTION, KIND_FACT, KIND_SESSION, ModelProbeBody, NORM_V1, Safety, Scope, Writes,
-    add_directive, attributes, load_facts, plan_forget, row_key, value_key,
+    CorrectionBody, DirectiveKind, FactBody, FactCtx, FactDirectiveBody, ForgetEnv, ForgetKey,
+    ForgetOptions, KIND_CORRECTION, KIND_FACT, KIND_FACT_DIRECTIVE, KIND_SESSION, KIND_TURN,
+    ModelOrigin, ModelProbeBody, NORM_V1, ROLE_CHAT, Safety, Scope, Writes, add_directive,
+    attributes, block_mark, load_bindings, load_facts, plan_forget, row_key, value_key,
 };
 use evorag_store::testutil::TempDir;
 use evorag_store::{
@@ -49,10 +52,15 @@ fn answer(cands: &[String]) -> String {
 
 /// 応答の llama-server (スロット 2 つ)。`chats` は順に使う答え。`health` が偽なら繋がらない。
 fn server(chats: &[String], health: bool) -> ReplayClient {
+    server_with(chats, health, 8192)
+}
+
+/// スロットの文脈の長さ `n_ctx` を選べる [`server`]。
+fn server_with(chats: &[String], health: bool, n_ctx: u32) -> ReplayClient {
     ReplayClient::from_json(&format!(
         r#"{{
           "props": {{"build_info": "b1-test", "model_path": "/m/chat.gguf", "total_slots": 2,
-                     "default_generation_settings": {{"n_ctx": 8192}}}},
+                     "default_generation_settings": {{"n_ctx": {n_ctx}}}}},
           "models": {{"data": [{{"id": "test", "meta": {{"n_params": 1, "size": 2, "n_vocab": 3}}}}]}},
           "health": {health},
           "chats": [{}],
@@ -144,13 +152,15 @@ struct Row {
     sources: Vec<(Id, u32, Option<u32>, Option<u32>)>,
 }
 
-/// 記録した事実 (封筒と本体)。
+/// 記録した事実 (封筒と本体。今の版 (`v` = 1) のものだけ)。
 fn fact_records(root: &Path) -> Vec<(Envelope, FactBody)> {
     let store = open(root, 1);
     let r = store.read().unwrap();
     let mut out = Vec::new();
     r.for_each(KIND_FACT, |x| {
-        if let Read::Ok(e) = x {
+        if let Read::Ok(e) = x
+            && e.v == 1
+        {
             let b = e.body_as().unwrap();
             out.push((e, b));
         }
@@ -328,7 +338,12 @@ impl Db {
     }
 
     /// 伏せ字にしないで忘れる (04 §7.1)。
-    fn forget(&self, attribute: &str, value: &str) {
+    fn forget(&self, attribute: &str, value: &str) -> Id {
+        self.forget_with(attribute, value, false)
+    }
+
+    /// 忘れる。`redact` なら出典の発話を伏せ字にする。忘れるの指示の ID を返す。
+    fn forget_with(&self, attribute: &str, value: &str, redact: bool) -> Id {
         let key = Self::key();
         let vk = value_key(&key, value);
         let env = ForgetEnv {
@@ -352,7 +367,7 @@ impl Db {
                 &env,
                 &row_key(fact).unwrap(),
                 ForgetOptions {
-                    redact: false,
+                    redact,
                     ..ForgetOptions::default()
                 },
             )
@@ -360,6 +375,50 @@ impl Db {
             .expect("a plan")
         };
         self.submit(plan.ops);
+        plan.directive
+    }
+
+    /// 忘れるの指示 `target` の印を解く (04 §7.5)。
+    fn unblock(&self, attribute: &str, target: Id) {
+        let key = Self::key();
+        let safety = Safety::bundled();
+        let ctx = FactCtx {
+            key: &key,
+            attributes: attributes(),
+            safety: &safety,
+            ids: &*self.ids,
+            now: self.clock.now(),
+        };
+        let (_, ops) = {
+            let tx = self.store.read().unwrap();
+            add_directive(
+                &tx,
+                &ctx,
+                DirectiveKind::Unblock { target },
+                "self",
+                attribute,
+                None,
+            )
+            .unwrap()
+        };
+        self.submit(ops);
+    }
+
+    /// 記録を本体のまま書く (関係と副索引は書かない)。
+    fn put(&self, kind: &str, v: u32, body: &impl serde::Serialize) -> Id {
+        let id = self.ids.next_id();
+        let mut env = Envelope::new(id, kind, v, self.clock.now(), "");
+        env.set_body(body).unwrap();
+        self.submit(vec![WriteOp::Put(env)]);
+        id
+    }
+
+    /// 記録を読む。
+    fn get(&self, kind: &str, id: Id) -> Envelope {
+        match self.store.read().unwrap().get(kind, id).unwrap() {
+            Some(Read::Ok(e)) => e,
+            other => panic!("{other:?}"),
+        }
     }
 
     /// 検証済みの訂正の記録 (「{old}じゃなくて{new}」の型) を書く。
@@ -779,7 +838,13 @@ async fn an_unreachable_server_leaves_the_old_facts_intact() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, RebuildError::LlmUnreachable(_)), "{err:?}");
+    assert!(
+        matches!(
+            err,
+            RebuildError::Extraction(ExtractionStop::Unreachable(_))
+        ),
+        "{err:?}"
+    );
     let kept: Vec<Id> = fact_records(dir.path()).iter().map(|(e, _)| e.id).collect();
     assert_eq!(kept, ids, "the old facts are kept as they were");
     assert_eq!(through(dir.path()), Some(t4));
@@ -810,23 +875,380 @@ async fn skipped_batches_are_reported_as_a_partial_rebuild() {
     let f = r.facts.unwrap();
     assert_eq!(f.skipped_for("invalid_output"), 1, "{f:?}");
     assert_eq!((f.lost(), f.not_sent(), f.facts), (1, 1, 0), "{f:?}");
+}
 
-    // 4xx は送り直さずに飛ばす。
+/// 抽出の途中の締切切れか 5xx が `FAILURE_LIMIT` 回続いたとき、または 4xx のときは、何も書かずに止める (前の事実と
+/// 進み具合を残す、03 §10)。
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_failures_and_4xx_stop_without_writing() {
+    let dir = TempDir::new("rebuild-facts-stop");
     prepare(dir.path());
-    let r = rebuild(
-        dir.path(),
-        &server(
-            &[r#"{"http_error": {"status": 400, "body": "x"}}"#.to_owned()],
-            true,
+    let t4 = {
+        let db = Db::open(dir.path(), 5);
+        db.set_key();
+        let s = db.session();
+        db.say(s, OSAKA);
+        db.say(s, SHRIMP);
+        db.say(s, HIKING);
+        db.say(s, MOVED)
+    };
+    rebuild(dir.path(), &server(&[four()], true), 1)
+        .await
+        .unwrap();
+    let ids: Vec<Id> = fact_records(dir.path()).iter().map(|(e, _)| e.id).collect();
+    assert_eq!(ids.len(), 3);
+
+    let e503 = r#"{"http_error": {"status": 503, "body": "busy"}}"#.to_owned();
+    prepare(dir.path());
+    let llm = server(&[e503.clone(), e503.clone(), e503], true);
+    let err = rebuild(dir.path(), &llm, 2).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RebuildError::Extraction(ExtractionStop::Failed { attempts: 3, .. })
         ),
-        2,
+        "{err:?}"
+    );
+    assert_eq!(llm.requests().len(), 3, "the same batch was sent 3 times");
+    let kept: Vec<Id> = fact_records(dir.path()).iter().map(|(e, _)| e.id).collect();
+    assert_eq!(kept, ids, "the old facts are kept");
+    assert_eq!(through(dir.path()), Some(t4));
+
+    let llm = server(
+        &[r#"{"http_error": {"status": 400, "body": "bad"}}"#.to_owned()],
+        true,
+    );
+    let err = rebuild(dir.path(), &llm, 3).await.unwrap_err();
+    assert!(
+        matches!(err, RebuildError::Extraction(ExtractionStop::Rejected(_))),
+        "{err:?}"
+    );
+    assert_eq!(llm.requests().len(), 1, "a 4xx is not retried");
+    let kept: Vec<Id> = fact_records(dir.path()).iter().map(|(e, _)| e.id).collect();
+    assert_eq!(kept, ids, "the old facts are kept");
+}
+
+/// 確かめに外れたら (忘れるの当て直しが済んでいない・記録したモデルと違う・文脈が足りない)、退避を作らずに止める。
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_checks_stop_before_the_backup() {
+    let fixture = |name: &str| {
+        let dir = TempDir::new(name);
+        prepare(dir.path());
+        {
+            let db = Db::open(dir.path(), 5);
+            db.set_key();
+            let s = db.session();
+            db.say(s, OSAKA);
+            db.say(s, SHRIMP);
+            db.say(s, HIKING);
+            db.say(s, MOVED);
+        }
+        dir
+    };
+
+    // 忘れるの指示だけがあり、印に当たる事実がまだ取り消されていない (当て直しが要る)。
+    let dir = fixture("rebuild-facts-forget-pending");
+    rebuild(dir.path(), &server(&[four()], true), 1)
+        .await
+        .unwrap();
+    prepare(dir.path());
+    {
+        let db = Db::open(dir.path(), 6);
+        let key = Db::key();
+        let vk = value_key(&key, "大阪");
+        db.put(
+            KIND_FACT_DIRECTIVE,
+            1,
+            &FactDirectiveBody {
+                op: "forget".into(),
+                subject: "self".into(),
+                attribute: "residence".into(),
+                vk: Some(vk.to_hex()),
+                norm: Some(NORM_V1),
+                fact: None,
+                target: None,
+                scope: None,
+                marks: vec![block_mark(&key, "self", "residence", &vk).to_hex()],
+                vks: vec![vk.to_hex()],
+                turns: Vec::new(),
+                redactions: Vec::new(),
+                hidden: Vec::new(),
+                history: false,
+                redact: false,
+                origin: "user".into(),
+            },
+        );
+    }
+    let backups = pre_op_backups(dir.path());
+    let err = rebuild(dir.path(), &server(&[four()], true), 2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RebuildError::FactsUnavailable(FactsUnavailable::ForgetPending)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(pre_op_backups(dir.path()), backups);
+
+    // 記録したモデルと違う。
+    let dir = fixture("rebuild-facts-model-mismatch");
+    {
+        let db = Db::open(dir.path(), 6);
+        let bindings = load_bindings(&db.store.read().unwrap()).unwrap();
+        let ops = db
+            .writes()
+            .bind_model(
+                &bindings,
+                ROLE_CHAT,
+                ModelOrigin {
+                    model_key: "other".into(),
+                    file_name: "other.gguf".into(),
+                    model_name: "other".into(),
+                    n_params: Some(9),
+                    size: Some(9),
+                    n_vocab: Some(9),
+                    build_info: "b1-test".into(),
+                },
+            )
+            .unwrap();
+        db.submit(ops);
+    }
+    let err = rebuild(dir.path(), &server(&[four()], true), 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, RebuildError::ModelMismatch { recorded, connected }
+            if recorded == "other.gguf" && connected == "chat.gguf"),
+        "{err:?}"
+    );
+    assert_eq!(pre_op_backups(dir.path()), 0);
+
+    // スロットの文脈が抽出に足りない。
+    let dir = fixture("rebuild-facts-small-ctx");
+    let err = rebuild(dir.path(), &server_with(&[four()], true, 1024), 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RebuildError::FactsUnavailable(FactsUnavailable::ContextTooSmall { n_ctx: 1024 })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(pre_op_backups(dir.path()), 0);
+}
+
+/// 出力が上限で切れたら、束を半分に分けて送り直す (04 §5.2.1)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_answer_is_split_and_sent_again() {
+    let dir = TempDir::new("rebuild-facts-truncated");
+    prepare(dir.path());
+    {
+        let db = Db::open(dir.path(), 5);
+        db.set_key();
+        let s = db.session();
+        db.say(s, LIVES);
+        db.say(s, PET);
+    }
+    let cut = r#"{"events": [{"delta": "{\"c\": ["}, {"done": {"finish_reason": "length"}}]}"#;
+    let llm = server(
+        &[
+            cut.to_owned(),
+            answer(&[cand(1, "residence", "大阪", LIVES)]),
+            answer(&[cand(1, "pet", "猫", PET)]),
+        ],
+        true,
+    );
+    let r = rebuild(dir.path(), &llm, 1).await.unwrap();
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 3);
+    assert_eq!(
+        reqs[0].messages[1].content,
+        evorag_memory::extraction_input([LIVES, PET])
+    );
+    assert_eq!(
+        reqs[1].messages[1].content,
+        evorag_memory::extraction_input([LIVES])
+    );
+    assert_eq!(
+        reqs[2].messages[1].content,
+        evorag_memory::extraction_input([PET])
+    );
+    let f = r.facts.unwrap();
+    assert_eq!((f.facts, f.lost()), (2, 0), "{f:?}");
+}
+
+/// 新しい版 (`v`) の事実があれば、今の版は事実を作れない (03 §4.2 の規則 6) ので、退避の前に止め、新しい版の事実も
+/// 前の事実も残す。
+#[tokio::test(flavor = "multi_thread")]
+async fn newer_version_facts_stop_the_rebuild_and_are_kept() {
+    let dir = TempDir::new("rebuild-facts-newer");
+    prepare(dir.path());
+    let t = {
+        let db = Db::open(dir.path(), 5);
+        db.set_key();
+        let s = db.session();
+        db.say(s, LIVES)
+    };
+    rebuild(
+        dir.path(),
+        &server(&[answer(&[cand(1, "residence", "大阪", LIVES)])], true),
+        1,
     )
     .await
     .unwrap();
-    let f = r.facts.unwrap();
-    assert_eq!(
-        (f.skipped_for("rejected"), f.lost(), f.requests),
-        (1, 1, 1),
-        "{f:?}"
+    let before = fact_records(dir.path());
+    // 新しい版の evorag が書いた事実 (事実の `v` を 2 とする種類の一覧で書く)。
+    let newer = {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_658_000_000)));
+        let ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 9));
+        let mut kinds = evorag_memory::kinds();
+        for k in &mut kinds {
+            if k.name == KIND_FACT {
+                k.current_v = 2;
+            }
+        }
+        let (store, _) = Store::open(OpenOptions {
+            data_root: dir.path().to_path_buf(),
+            evorag_version: "0.0.6".into(),
+            kinds,
+            clock: clock.clone(),
+            ids: ids.clone(),
+            config_file: None,
+        })
+        .unwrap();
+        let store = Arc::new(store);
+        let (writer, handle) = Writer::new(store.clone()).unwrap();
+        let thread = std::thread::spawn(move || writer.run());
+        let id = ids.next_id();
+        let mut env = Envelope::new(id, KIND_FACT, 2, clock.now(), "9.0.0");
+        env.set_body(&serde_json::json!({
+            "subject": "self", "attribute": "pet", "value": "猫", "state": "live",
+            "sources": [{"turn": t, "rev": 0, "start": 0, "end": 3}], "future": true
+        }))
+        .unwrap();
+        handle
+            .submit_wait(WriteRequest::conversation(vec![WriteOp::Put(env)]))
+            .unwrap();
+        handle.shutdown();
+        thread.join().unwrap();
+        id
+    };
+    prepare(dir.path());
+    let backups = pre_op_backups(dir.path());
+    let err = rebuild(
+        dir.path(),
+        &server(&[answer(&[cand(1, "residence", "大阪", LIVES)])], true),
+        2,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RebuildError::FactsUnavailable(FactsUnavailable::NewerFacts { count: 1 })
+        ),
+        "{err:?}"
     );
+    assert_eq!(pre_op_backups(dir.path()), backups, "no backup");
+    let store = open(dir.path(), 1);
+    let r = store.read().unwrap();
+    assert!(
+        matches!(r.get(KIND_FACT, newer).unwrap(), Some(Read::Ok(e)) if e.v == 2),
+        "the newer fact is kept"
+    );
+    drop(r);
+    drop(store);
+    let after = fact_records(dir.path());
+    assert_eq!(
+        after.iter().map(|(e, _)| e.id).collect::<Vec<_>>(),
+        before.iter().map(|(e, _)| e.id).collect::<Vec<_>>(),
+        "the old facts are kept"
+    );
+}
+
+/// 忘れるの当て直しで本文が記録と合わないターンは、抽出に送らない (04 §7.2)。
+#[tokio::test(flavor = "multi_thread")]
+async fn turns_that_do_not_match_a_forget_are_not_sent() {
+    let dir = TempDir::new("rebuild-facts-mismatch");
+    prepare(dir.path());
+    let t2 = {
+        let db = Db::open(dir.path(), 5);
+        db.set_key();
+        let s = db.session();
+        db.say(s, LIVES);
+        db.say(s, PET)
+    };
+    rebuild(
+        dir.path(),
+        &server(
+            &[answer(&[
+                cand(1, "residence", "大阪", LIVES),
+                cand(2, "pet", "猫", PET),
+            ])],
+            true,
+        ),
+        1,
+    )
+    .await
+    .unwrap();
+    {
+        let db = Db::open(dir.path(), 6);
+        db.forget_with("pet", "猫", true);
+        // 伏せ字にした本文を、記録と合わない本文に書き換える (外から壊れた・古い版が書き戻したなど)。
+        let mut e = db.get(KIND_TURN, t2);
+        let mut body: evorag_memory::TurnBody = e.body_as().unwrap();
+        body.text = "犬を飼っています".into();
+        e.set_body(&body).unwrap();
+        db.submit(vec![WriteOp::Put(e)]);
+    }
+    prepare(dir.path());
+    let llm = server(&[answer(&[cand(1, "residence", "大阪", LIVES)])], true);
+    let r = rebuild(dir.path(), &llm, 2).await.unwrap();
+    let f = r.facts.unwrap();
+    assert_eq!(f.skipped_for("forget_mismatch"), 1, "{f:?}");
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        reqs[0].messages[1].content,
+        evorag_memory::extraction_input([LIVES]),
+        "the mismatched turn is not sent"
+    );
+}
+
+/// 印を解いた (`unblock`) 忘れるの値は、作り直すと再び覚える (04 §7.5・§7.6)。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unblocked_value_comes_back() {
+    let dir = TempDir::new("rebuild-facts-unblock");
+    prepare(dir.path());
+    {
+        let db = Db::open(dir.path(), 5);
+        db.set_key();
+        let s = db.session();
+        db.say(s, OSAKA);
+        db.say(s, SHRIMP);
+        db.say(s, HIKING);
+        db.say(s, MOVED);
+    }
+    rebuild(dir.path(), &server(&[four()], true), 1)
+        .await
+        .unwrap();
+    {
+        let db = Db::open(dir.path(), 6);
+        let forget = db.forget("hobby", "登山");
+        db.unblock("hobby", forget);
+    }
+    prepare(dir.path());
+    let r = rebuild(dir.path(), &server(&[four()], true), 2)
+        .await
+        .unwrap();
+    assert_eq!(r.facts.unwrap().blocked, 0);
+    let hobby: Vec<(Option<String>, String)> = rows(dir.path())
+        .into_iter()
+        .filter(|r| r.attribute == "hobby")
+        .map(|r| (r.value, r.state))
+        .collect();
+    assert_eq!(hobby, [(Some("登山".into()), "live".into())]);
 }

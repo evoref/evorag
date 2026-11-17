@@ -111,11 +111,83 @@ enum RebuildScope {
     Index,
     /// 派生データの全体。
     Derived,
-    /// 事実も抽出し直す (`--facts`)。llama-server の接続先 (案内に示す) と使い方を持つ。
+    /// 事実も抽出し直す (`--facts`)。llama-server の接続先と API キーの環境変数 (案内に示す) と使い方を持つ。
     Facts {
         url: String,
+        api_key_env: Option<String>,
         source: evorag_core::rebuild::FactsSource,
     },
+}
+
+/// llama-server の失敗のうち、起動と作り直しで同じ案内にするもの (API キーの誤り・ルーターモード、06 §2)。
+/// 当たらなければ `None` (呼ぶ側が、それぞれの「繋がらない」の案内を出す)。
+fn llm_setup_failure(
+    catalog: &Catalog,
+    url: &str,
+    api_key_env: Option<&str>,
+    e: &evorag_llm::LlmError,
+) -> Option<ExitCode> {
+    use evorag_llm::LlmError;
+    Some(match e {
+        LlmError::Http { status, .. } if *status == 401 || *status == 403 => {
+            // llama-server は動いているが、API キーが違う・設定されていない。
+            let env = api_key_env.unwrap_or("(未設定)");
+            fail(
+                catalog,
+                3,
+                MessageKey::CliLlmUnauthorized,
+                &[("url", url), ("status", &status.to_string()), ("env", env)],
+            )
+        }
+        // ルーターモードの llama-server に、名前を付けずに繋いだ。
+        LlmError::RouterNeedsModel { models } => fail(
+            catalog,
+            4,
+            MessageKey::CliRouterNeedsModel,
+            &[("url", url), ("models", &models.join(", "))],
+        ),
+        LlmError::RouterModel { model, detail } => fail(
+            catalog,
+            3,
+            MessageKey::CliRouterModel,
+            &[("url", url), ("model", model), ("detail", detail)],
+        ),
+        _ => return None,
+    })
+}
+
+/// 事実を作り直せない理由の文言 (07 §5。値の鍵の理由は、理由ごとの文言を `detail` に入れる)。
+fn facts_unavailable(
+    catalog: &Catalog,
+    why: evorag_core::rebuild::FactsUnavailable,
+) -> (MessageKey, Vec<(&'static str, String)>) {
+    use evorag_core::forget_key::FactsKeyProblem;
+    use evorag_core::rebuild::FactsUnavailable;
+    match why {
+        FactsUnavailable::NotProbed => (MessageKey::CliRebuildFactsNoProbe, Vec::new()),
+        FactsUnavailable::ProbeFailed => (MessageKey::CliRebuildFactsProbeFailed, Vec::new()),
+        FactsUnavailable::ContextTooSmall { n_ctx } => (
+            MessageKey::CliRebuildFactsContextTooSmall,
+            vec![("n_ctx", n_ctx.to_string())],
+        ),
+        FactsUnavailable::Key(problem) => {
+            let cause = match problem {
+                FactsKeyProblem::Conflict => MessageKey::CliFactsKeyConflict,
+                FactsKeyProblem::MissingWithDirectives => MessageKey::CliFactsKeyMissing,
+                FactsKeyProblem::Malformed => MessageKey::CliFactsKeyMalformed,
+                FactsKeyProblem::ReadOnly => MessageKey::CliFactsKeyReadOnly,
+            };
+            (
+                MessageKey::CliRebuildFactsKeyUnusable,
+                vec![("detail", catalog.key(cause))],
+            )
+        }
+        FactsUnavailable::ForgetPending => (MessageKey::CliRebuildFactsForgetPending, Vec::new()),
+        FactsUnavailable::NewerFacts { count } => (
+            MessageKey::CliRebuildFactsNewer,
+            vec![("count", count.to_string())],
+        ),
+    }
 }
 
 /// `evorag rebuild [--index] [--facts]` (03 §10、FR-212)。
@@ -127,16 +199,31 @@ fn rebuild(
     rt: &tokio::runtime::Runtime,
     clock: Arc<dyn evorag_types::Clock>,
 ) -> ExitCode {
-    use evorag_core::rebuild::{FactsUnavailable, RebuildError};
+    use evorag_core::rebuild::{ExtractionStop, RebuildError};
 
     let ids = Arc::new(UuidV7Gen::new(clock.clone()));
     let index_only = matches!(scope, RebuildScope::Index);
-    let (url, facts) = match scope {
-        RebuildScope::Facts { url, source } => {
+    let (url, api_key_env, facts) = match scope {
+        RebuildScope::Facts {
+            url,
+            api_key_env,
+            source,
+        } => {
             eprintln!("{}", catalog.key(MessageKey::CliRebuildingFacts));
-            (url, Some(source))
+            (url, api_key_env, Some(source))
         }
-        RebuildScope::Index | RebuildScope::Derived => (String::new(), None),
+        RebuildScope::Index | RebuildScope::Derived => (String::new(), None, None),
+    };
+    // 繋がらない・断られたときの案内 (API キーとルーターモードは起動と同じ案内にする)。
+    let llm_failed = |key: MessageKey, e: &evorag_llm::LlmError| {
+        llm_setup_failure(catalog, &url, api_key_env.as_deref(), e).unwrap_or_else(|| {
+            fail(
+                catalog,
+                3,
+                key,
+                &[("url", &url), ("detail", &e.to_string())],
+            )
+        })
     };
     match rt.block_on(evorag_core::rebuild::run(
         evorag_core::rebuild::RebuildOptions {
@@ -163,6 +250,9 @@ fn rebuild(
                         ("facts", &f.facts.to_string()),
                         ("old", &f.removed.to_string()),
                         ("skipped", &f.not_sent().to_string()),
+                        ("filtered", &f.filtered().to_string()),
+                        ("too_long", &f.skipped_for("too_long").to_string()),
+                        ("mismatch", &f.skipped_for("forget_mismatch").to_string()),
                         ("corrections", &f.corrections.to_string()),
                     ],
                 )
@@ -191,8 +281,6 @@ fn rebuild(
                         ("lost", &f.lost().to_string()),
                         ("truncated", &n("truncated")),
                         ("invalid", &n("invalid_output")),
-                        ("rejected", &n("rejected")),
-                        ("failed", &n("failed")),
                     ],
                 );
                 eprintln!("{}", m.replace("\\n", "\n"));
@@ -202,12 +290,33 @@ fn rebuild(
         Err(RebuildError::Open(OpenError::Lock(LockError::InUse { pid }))) => {
             data_root_in_use(catalog, data_root, pid)
         }
-        // 事実の作り直しを、何も書かずに止めた (07 §5 の終了コード: 3 は繋がらない、6 はモデルの違い)。
-        Err(RebuildError::LlmUnreachable(e)) => fail(
+        // 事実の作り直しを、何も書かずに止めた (07 §5 の終了コード: 3 は llama-server、4 はルーターの設定、6 は
+        // モデルの違い)。
+        Err(
+            RebuildError::LlmUnreachable(e)
+            | RebuildError::Extraction(ExtractionStop::Unreachable(e)),
+        ) => llm_failed(MessageKey::CliRebuildFactsUnreachable, &e),
+        Err(RebuildError::Extraction(ExtractionStop::Rejected(e))) => {
+            llm_failed(MessageKey::CliRebuildFactsRejected, &e)
+        }
+        Err(RebuildError::Extraction(ExtractionStop::Failed { attempts, detail })) => fail(
             catalog,
             3,
-            MessageKey::CliRebuildFactsUnreachable,
-            &[("url", &url), ("detail", &e.to_string())],
+            MessageKey::CliRebuildFactsFailed,
+            &[
+                ("url", &url),
+                ("attempts", &attempts.to_string()),
+                ("detail", &detail),
+            ],
+        ),
+        Err(RebuildError::AfterFacts { backup, source, .. }) => fail(
+            catalog,
+            1,
+            MessageKey::CliRebuildFailedAfterFacts,
+            &[
+                ("backup", &backup.display().to_string()),
+                ("detail", &source.to_string()),
+            ],
         ),
         Err(RebuildError::ModelMismatch {
             recorded,
@@ -219,28 +328,14 @@ fn rebuild(
             &[("recorded", &recorded), ("connected", &connected)],
         ),
         Err(RebuildError::FactsUnavailable(why)) => {
-            let n_ctx;
-            let detail;
-            let (key, args): (MessageKey, &[(&str, &str)]) = match why {
-                FactsUnavailable::NotProbed => (MessageKey::CliRebuildFactsNoProbe, &[]),
-                FactsUnavailable::ProbeFailed => (MessageKey::CliRebuildFactsProbeFailed, &[]),
-                FactsUnavailable::ContextTooSmall { n_ctx: n } => {
-                    n_ctx = n.to_string();
-                    (
-                        MessageKey::CliRebuildFactsContextTooSmall,
-                        &[("n_ctx", &n_ctx)],
-                    )
-                }
-                FactsUnavailable::Key(problem) => {
-                    detail = format!("{problem:?}");
-                    (
-                        MessageKey::CliRebuildFactsKeyUnusable,
-                        &[("detail", &detail)],
-                    )
-                }
-                FactsUnavailable::ForgetPending => (MessageKey::CliRebuildFactsForgetPending, &[]),
+            // 新しい版のデータは、データ根が使えないときと同じ終了コード 2 (07 §5)。
+            let code = match why {
+                evorag_core::rebuild::FactsUnavailable::NewerFacts { .. } => 2,
+                _ => 1,
             };
-            fail(catalog, 1, key, args)
+            let (key, args) = facts_unavailable(catalog, why);
+            let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            fail(catalog, code, key, &args)
         }
         Err(e) => fail(
             catalog,
@@ -463,6 +558,7 @@ fn main() -> ExitCode {
         let scope = if *facts {
             RebuildScope::Facts {
                 url: url.clone(),
+                api_key_env: cfg.llm.chat.api_key_env.clone(),
                 source: evorag_core::rebuild::FactsSource {
                     llm: llm.clone(),
                     aux_request_extra: aux_request_extra.clone(),
@@ -628,52 +724,18 @@ fn main() -> ExitCode {
     }
     let (core, events, report) = match started {
         Ok(v) => v,
-        Err(StartError::LlmUnreachable(evorag_llm::LlmError::Http { status, .. }))
-            if status == 401 || status == 403 =>
-        {
-            // llama-server は動いているが、API キーが違う・設定されていない。
-            let env = cfg
-                .llm
-                .chat
-                .api_key_env
-                .clone()
-                .unwrap_or_else(|| "(未設定)".to_owned());
-            return fail(
-                &catalog,
-                3,
-                MessageKey::CliLlmUnauthorized,
-                &[
-                    ("url", &url),
-                    ("status", &status.to_string()),
-                    ("env", &env),
-                ],
-            );
-        }
-        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterNeedsModel { models })) => {
-            // ルーターモードの llama-server に、名前を付けずに繋いだ (06 §2)。
-            return fail(
-                &catalog,
-                4,
-                MessageKey::CliRouterNeedsModel,
-                &[("url", &url), ("models", &models.join(", "))],
-            );
-        }
-        Err(StartError::LlmUnreachable(evorag_llm::LlmError::RouterModel { model, detail })) => {
-            return fail(
-                &catalog,
-                3,
-                MessageKey::CliRouterModel,
-                &[("url", &url), ("model", &model), ("detail", &detail)],
-            );
-        }
         Err(StartError::LlmUnreachable(e)) => {
-            // TUI を開かずに案内を出して終わる (AC-FR-503-1)。
-            return fail(
-                &catalog,
-                3,
-                MessageKey::CliLlmUnreachable,
-                &[("url", &url), ("detail", &e.to_string())],
-            );
+            // API キーの誤りとルーターモードは、それぞれの案内にする。ほかは、TUI を開かずに案内を出して終わる
+            // (AC-FR-503-1)。
+            return llm_setup_failure(&catalog, &url, cfg.llm.chat.api_key_env.as_deref(), &e)
+                .unwrap_or_else(|| {
+                    fail(
+                        &catalog,
+                        3,
+                        MessageKey::CliLlmUnreachable,
+                        &[("url", &url), ("detail", &e.to_string())],
+                    )
+                });
         }
         Err(StartError::ModelMismatch {
             recorded,
