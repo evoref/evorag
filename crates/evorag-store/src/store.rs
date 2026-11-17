@@ -429,7 +429,13 @@ fn open_db(root: &Path) -> Result<Database, OpenError> {
             Database::open(&main).map_err(map_db_error)
         }
         Ok(_) => {
-            // 作った直後 (中身を書く前) に止まった空のファイル。
+            // 作った直後 (中身を書く前) に止まった空のファイル。移行や compact の跡が残っていれば、空の DB を
+            // 作らずに止める (原子的でない rename の途中で空になった本体かもしれず、跡が元の記録を持つため)。
+            if let Some(left) = migrate::leftover(root) {
+                return Err(OpenError::Unreadable(format!(
+                    "{DB_FILE} is empty but {left} remains; not creating a new database"
+                )));
+            }
             fsutil::prepare_private_file(&main)?;
             Database::create(&main).map_err(map_db_error)
         }
@@ -558,10 +564,14 @@ impl Store {
         fsutil::create_private_dir(&opts.data_root)?;
         let lock = DataRootLock::acquire(&opts.data_root)?;
         migrate::recover(&opts.data_root)?;
-        crate::compact::recover(&opts.data_root);
+        crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;
         let mut database = match open_db(&opts.data_root) {
-            // 開けない DB のファイルは broken/ へ移し (消さない)、戻すかを尋ねる (03 §8、FR-205)。
-            Err(OpenError::Unreadable(reason)) if opts.data_root.join(DB_FILE).is_file() => {
+            // 開けない DB のファイルは broken/ へ移し (消さない)、戻すかを尋ねる (03 §8、FR-205)。移行や compact の
+            // 跡が残っているときは移さない (跡の側に元の記録がありうるので、退避から戻させない)。
+            Err(OpenError::Unreadable(reason))
+                if opts.data_root.join(DB_FILE).is_file()
+                    && migrate::leftover(&opts.data_root).is_none() =>
+            {
                 let moved_to =
                     crate::restore::move_broken(&opts.data_root, opts.clock.now().as_millis())?;
                 return Err(OpenError::Broken { moved_to, reason });
@@ -915,7 +925,7 @@ impl Store {
                         if spec.is_some_and(|s| s.lowers_monotonic(&old, env)) {
                             return Ok(false);
                         }
-                        freed = spec.is_some_and(|s| s.lowers_monotonic(env, &old));
+                        freed = self.raises_monotonic(&old, env);
                         self.undo_derived(tx, &old)?;
                     }
                     Some(Read::Newer { .. } | Read::Corrupt { .. }) => return Ok(false),
@@ -1091,6 +1101,19 @@ impl Store {
     /// その種類をジャーナルにも書くか。
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
+    }
+
+    /// その種類が単調に増える項目 (ターンの改訂の番号) を宣言しているか。
+    pub(crate) fn has_monotonic(&self, kind: &str) -> bool {
+        self.kinds.get(kind).is_some_and(|k| k.monotonic.is_some())
+    }
+
+    /// `old` を `new` で書き換えると、宣言した単調に増える項目が上がるか (伏せ字で書き換えた。前の本文がファイルの
+    /// 空きに残りうるので、次の起動で compact する、03 §3.1.1)。
+    pub(crate) fn raises_monotonic(&self, old: &Envelope, new: &Envelope) -> bool {
+        self.kinds
+            .get(new.kind.as_str())
+            .is_some_and(|s| s.lowers_monotonic(new, old))
     }
 
     /// ジャーナルに集めた、その ID の `put` の行の単調に増える項目の値の範囲 (開くときに集め、このプロセスの

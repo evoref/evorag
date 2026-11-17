@@ -1,22 +1,26 @@
 //! 消した記録の跡を DB のファイルから除く compact (03 §8) と、その要否の印 (`meta` の `compact.pending`、
 //! 03 §3.1.1)。
 //!
-//! - 印は、削除・忘れる・忘れるの当て直し・開くときのジャーナルの削除の行・規則 12 の突き合わせで記録を消した・
-//!   書き換えたコミットで立てる。書き換えてよいキーで、ジャーナルには書かない。
-//! - 書き込みで開いた後、忘れるの当て直しの後に、コアが [`Store::compact_if_pending`] を呼ぶ (照会と命令を
-//!   受け付ける前)。空きが足りなければ compact せずに印を残し、次の起動でやり直す。
-//! - compact は、redb の `Database::compact` ではなく、新しいファイルへの論理的な写しと rename で行う
-//!   (03 §8 の「compact で足りないとき」と §12.2 の手順)。redb の compact は解放したページを 0 で埋めると
-//!   約束せず、ファイルの末尾の解放した領域しか切り詰めないので、消した記録のバイト列が残っていないことを
-//!   確かめられない。新しいファイルには生きている行だけを書くので、消した記録のバイト列は入らない。
-//! - 写しは同じフォルダの `evorag.redb.compacting` に書き、行ごとに突き合わせてから、元のファイルの上に
-//!   rename で置き換える (1 回の置き換えなので、強制終了しても、元か写しのどちらかが `evorag.redb` にある)。
-//!   印は写しに入れないので、置き換えた時点で消えている。開くときに残っている写しは捨てる ([`recover`])。
+//! - 印は、ジャーナルに書く種類の記録を消した・伏せ字で書き換えたコミットで立てる (利用者の操作・開くときの削除・
+//!   取り込み・忘れるの当て直し・規則 12 の突き合わせ)。作り直せる派生の記録だけの削除では立てない。書き換えて
+//!   よいキーで、ジャーナルには書かない。
+//! - 起動の順は、ジャーナルの取り込み → 開くときの削除 (どちらも [`Store::open`] の中) →
+//!   [`Store::compact_if_pending`] → 書き手を作る → 忘れるの当て直し → 照会と命令の受け付け。空きが足りなければ
+//!   compact せずに印を残し、次の起動でやり直す。
+//! - compact は、redb の `Database::compact` ではなく、つねに新しいファイルへの論理的な写しと rename で行う
+//!   (03 §8、§12.2 の手順)。redb の compact は解放したページを 0 で埋めると約束せず、ファイルの末尾の解放した
+//!   領域しか切り詰めないので、消した記録のバイト列が残っていないことを確かめられない。新しいファイルには
+//!   生きている行だけを書くので、消した記録のバイト列は入らない。
+//! - 写しは同じフォルダの `evorag.redb.compacting` に書き、閉じて開き直し、redb の整合の検査と行ごとの突き合わせを
+//!   してから、元のファイルの上に rename で置き換える。印は写しに入れないので、置き換えた時点で消えている。
+//! - rename が原子的でないファイルシステム (FAT・exFAT・SMB) では、置き換えの途中で `evorag.redb` が無い・空に
+//!   なりうる。そのため写しは、`evorag.redb` が完全 ([`holds_data`]) と確かめたときだけ消し、そうでなければ
+//!   残して開くときに戻す ([`recover`])。
 
 use std::path::Path;
 
 use redb::backends::InMemoryBackend;
-use redb::{Database, ReadableDatabase, ReadableTable, TableHandle};
+use redb::{Database, MultimapTableHandle, ReadableDatabase, ReadableTable, TableHandle};
 
 use crate::fsutil;
 use crate::meta;
@@ -44,18 +48,23 @@ pub enum Compaction {
     Done { before: u64, after: u64 },
     /// 空きが足りないので compact しなかった。印は残り、次の起動でやり直す。
     LowSpace { free: u64, need: u64 },
-    /// 写しか置き換えに失敗した。元のファイルのまま動き、印は残る (次の起動でやり直す)。
+    /// compact しなかった (知らない表がある)、または写しか置き換えに失敗した。元のファイルのまま動き、印は残る
+    /// (次の起動でやり直す)。
     Failed { reason: String },
 }
 
-/// 試験のための止める点 (09 §3.5)。
+/// 試験のための止める点と失敗 (09 §3.5)。
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactStop {
     /// 止めない。
     Never,
-    /// 写しを書いて突き合わせた後、置き換える前に止まる (強制終了で写しが残った状態)。
+    /// 写しを書いて確かめた後、置き換える前に止まる (強制終了で写しが残った状態)。
     BeforeSwap,
+    /// 置き換えの rename が失敗し、元のファイルはそのまま残る。
+    SwapFails,
+    /// 置き換えの rename が、元のファイルを消した後で失敗する (原子的でないファイルシステム)。
+    SwapFailsAfterRemovingMain,
 }
 
 impl Store {
@@ -69,17 +78,18 @@ impl Store {
 
     /// `compact.pending` が立っていれば compact する (03 §8)。結果は `report.compaction` に書く。
     ///
-    /// 起動の順は、ジャーナルの取り込み → 開くときの削除 (どちらも [`Store::open`] の中) → 忘れるの当て直し →
-    /// この compact → 照会と命令の受け付け。書き手 (`Writer`) を作る前に呼ぶ (DB のファイルを置き換えるので、
-    /// ほかに DB を使っているものがあってはならない。そのため `self` を受け取って返す)。
+    /// [`Store::open`] (ジャーナルの取り込みと開くときの削除) の後、書き手 (`Writer`) を作る前に呼ぶ (DB の
+    /// ファイルを置き換えるので、ほかに DB を使っているものがあってはならない。そのため `self` を受け取って返す)。
     ///
-    /// `free_bytes` はデータ根のある場所の空き (分からなければ `None`)。DB のファイルの大きさに予備の分を
+    /// `free_bytes` はデータ根のある場所の空き (分からなければ `None`)。DB のファイルの大きさに予備の 16 MiB を
     /// 足した空きが無ければ compact せずに [`Compaction::LowSpace`] を返す。空きが分からないときは試す
-    /// (写しに失敗しても元のファイルは変わらない)。
+    /// (写しに失敗しても元のファイルは変わらない)。DB に知らない表があれば、写すと失うので compact しない
+    /// ([`Compaction::Failed`]、03 §4.2 の規則 6)。
     ///
     /// # Errors
-    /// 置き換えの後に DB のファイルを開き直せないとき ([`OpenError`])。そのときストアは閉じる。写しや置き換え
-    /// の失敗は誤りにせず、元のファイルのまま [`Compaction::Failed`] を返す。
+    /// 置き換えの後に DB のファイルを開き直せないとき、または置き換えに失敗して `evorag.redb` が完全と確かめられ
+    /// ないとき ([`OpenError`]。写しは残し、次に開くときに戻す)。そのときストアは閉じる。写しの失敗と、元の
+    /// ファイルが残っている置き換えの失敗は誤りにせず、元のファイルのまま [`Compaction::Failed`] を返す。
     pub fn compact_if_pending(
         self,
         report: &mut OpenReport,
@@ -88,7 +98,7 @@ impl Store {
         self.compact_with(report, free_bytes, CompactStop::Never)
     }
 
-    /// [`Self::compact_if_pending`] に、試験のための止める点を足したもの。
+    /// [`Self::compact_if_pending`] に、試験のための止める点と失敗を足したもの。
     #[doc(hidden)]
     pub fn compact_with(
         mut self,
@@ -138,29 +148,61 @@ impl Store {
             return Ok(self);
         }
         // 元のファイルを閉じてから置き換える (Windows では開いているファイルの上に置き換えられない)。
-        drop(std::mem::replace(&mut self.db, placeholder));
-        let swapped = fsutil::rename_replace(&tmp, &main);
-        match &swapped {
+        let _ = std::mem::replace(&mut self.db, placeholder).close();
+        let swapped = match stop {
+            CompactStop::SwapFails => Err(std::io::Error::other("injected swap failure")),
+            CompactStop::SwapFailsAfterRemovingMain => {
+                std::fs::remove_file(&main)?;
+                Err(std::io::Error::other("injected swap failure"))
+            }
+            CompactStop::Never | CompactStop::BeforeSwap => fsutil::rename_replace(&tmp, &main),
+        };
+        report.compaction = match swapped {
             Ok(()) => {
                 let _ = fsutil::sync_dir(self.data_root());
+                let _ = fsutil::prepare_private_file(&main);
+                self.db = reopen(&main)?;
+                Compaction::Done {
+                    before,
+                    after: std::fs::metadata(&main).map_or(0, |m| m.len()),
+                }
             }
-            Err(_) => {
+            // 元のファイルが完全に残っているときだけ写しを捨てて元のまま動く。
+            Err(e) if holds_data(&main) => {
                 let _ = std::fs::remove_file(&tmp);
+                self.db = reopen(&main)?;
+                Compaction::Failed {
+                    reason: format!("could not replace {DB_FILE}: {e}"),
+                }
             }
-        }
-        let _ = fsutil::prepare_private_file(&main);
-        self.db = Database::open(&main).map_err(map_db_error)?;
-        report.compaction = match swapped {
-            Ok(()) => Compaction::Done {
-                before,
-                after: std::fs::metadata(&main).map_or(0, |m| m.len()),
-            },
-            Err(e) => Compaction::Failed {
-                reason: format!("could not replace {DB_FILE}: {e}"),
-            },
+            // 原子的でない rename の途中で止まった。写しを残し、次に開くときに戻す (空の DB を作らない)。
+            Err(e) => {
+                return Err(OpenError::Unreadable(format!(
+                    "could not replace {DB_FILE} ({e}) and it is no longer complete; \
+                     {COMPACTING_FILE} is kept and is put back at the next start"
+                )));
+            }
         };
         Ok(self)
     }
+}
+
+/// 置き換えた・残ったファイルを開き直す。ほかのプログラムが一時的に掴んでいるときは試し直す。
+fn reopen(main: &Path) -> Result<Database, OpenError> {
+    let mut other = None;
+    let opened = fsutil::retry_transient(|| {
+        Database::open(main).map_err(|e| match e {
+            redb::DatabaseError::Storage(redb::StorageError::Io(io)) => io,
+            e => {
+                let io = std::io::Error::other(e.to_string());
+                other = Some(e);
+                io
+            }
+        })
+    });
+    opened.map_err(|io| {
+        map_db_error(other.unwrap_or(redb::DatabaseError::Storage(redb::StorageError::Io(io))))
+    })
 }
 
 impl WriteTxn<'_> {
@@ -195,15 +237,36 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-/// `src` の生きている行を、すべての表について `path` の新しいファイルへ写し、書き切ってから行ごとに突き合わせる
-/// (03 §12.2 の「件数とチェックサムを突き合わせて」。写しは行のバイト列が同じなので、すべての行を比べる)。
+/// `src` の生きている行を、すべての表について `path` の新しいファイルへ写す。写しを書き切って閉じ、開き直して
+/// redb の整合の検査をしてから、元の同じ時点の写し (読み取りのトランザクション) と行ごとに突き合わせる (03 §12.2 の
+/// 「件数とチェックサムを突き合わせて」。写しは行のバイト列が同じなので、すべての行を比べる)。
+///
+/// 知らない表 (新しい版が足した表、multimap の表) があれば写さずに断る (写すと失うため、03 §4.2 の規則 6)。
 fn copy_verified(src: &Database, path: &Path) -> Result<(), String> {
+    let rtx = src.begin_read().map_err(err)?;
+    let known: Vec<&str> = TABLES.iter().map(|t| t.name()).collect();
+    let unknown: Vec<String> = rtx
+        .list_tables()
+        .map_err(err)?
+        .map(|t| t.name().to_owned())
+        .filter(|n| !known.contains(&n.as_str()))
+        .chain(
+            rtx.list_multimap_tables()
+                .map_err(err)?
+                .map(|t| t.name().to_owned()),
+        )
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "unknown tables are not compacted: {}",
+            unknown.join(", ")
+        ));
+    }
     if path.exists() {
         std::fs::remove_file(path).map_err(err)?;
     }
     fsutil::prepare_private_file(path).map_err(err)?;
     let dst = Database::create(path).map_err(err)?;
-    let rtx = src.begin_read().map_err(err)?;
     let mut wtx = dst.begin_write().map_err(err)?;
     wtx.set_durability(redb::Durability::Immediate)
         .map_err(err)?;
@@ -222,7 +285,14 @@ fn copy_verified(src: &Database, path: &Path) -> Result<(), String> {
         }
     }
     wtx.commit().map_err(err)?;
-    verify(&rtx, &dst)
+    dst.close().map_err(err)?;
+    // ディスクにあるものを確かめる (書いた手元の状態ではなく)。
+    let mut on_disk = Database::open(path).map_err(err)?;
+    if !on_disk.check_integrity().map_err(err)? {
+        return Err("the compacted copy failed the integrity check".into());
+    }
+    verify(&rtx, &on_disk)?;
+    on_disk.close().map_err(err)
 }
 
 /// 写しが、元の生きている行 (写さない行を除く) とキーも値も同じで、行の数も同じことを確かめる。
@@ -258,17 +328,52 @@ fn verify(src: &redb::ReadTransaction, dst: &Database) -> Result<(), String> {
     Ok(())
 }
 
-/// 前の compact が置き換えの前に止まった跡 (写し) を捨てる。データ根を開く前 (ロックを取った後) に呼ぶ。
+/// redb のファイルとして開け、`meta` の `data_root.id` を読める (中身のある完全な DB) か。
+pub(crate) fn holds_data(path: &Path) -> bool {
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+        return false;
+    }
+    let Ok(database) = Database::open(path) else {
+        return false;
+    };
+    database
+        .begin_read()
+        .ok()
+        .and_then(|rtx| {
+            let t = rtx.open_table(META).ok()?;
+            let v = t.get(meta::DATA_ROOT_ID.as_bytes()).ok()??;
+            Some(!v.value().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// 前の compact が残した写しを片付ける。データ根を開く前 (ロックを取った後) に呼ぶ。
 ///
-/// 写しを捨てるのは、`evorag.redb` があるときだけにする (置き換えは 1 回の rename なので、`evorag.redb` が
-/// あれば、写しは置き換えに使われなかったもの)。写しには、その後に消した記録が入っているかもしれないので残さない。
-/// 消せなくても開くのは止めない (次の compact が写しを書く前に消し直す)。
-pub(crate) fn recover(root: &Path) {
+/// - `evorag.redb` が完全なら ([`holds_data`])、写しは置き換えに使われなかったものなので捨てる (その後に消した
+///   記録が入っているかもしれないので残さない)。消せなくても開くのは止めない (次の compact が消し直す)。
+/// - `evorag.redb` が無い・空・開けないときに、写しが完全なら、写しを `evorag.redb` に戻す (原子的でない rename の
+///   途中で止まった)。空でない開けない `evorag.redb` は、消さずに `broken/` へ移してから戻す。
+/// - どちらも完全でなければ何もしない (`evorag.redb` が無ければ、開くときに新しい DB を作らずに止まる)。
+///
+/// # Errors
+/// 写しを戻せないとき。
+pub(crate) fn recover(root: &Path, now_ms: i64) -> std::io::Result<()> {
     let tmp = root.join(COMPACTING_FILE);
-    if tmp.exists() && root.join(DB_FILE).is_file() {
-        let removed = fsutil::retry_transient(|| std::fs::remove_file(&tmp));
-        if removed.is_ok() {
+    if !tmp.exists() {
+        return Ok(());
+    }
+    let main = root.join(DB_FILE);
+    if holds_data(&main) {
+        if fsutil::retry_transient(|| std::fs::remove_file(&tmp)).is_ok() {
             let _ = fsutil::sync_dir(root);
         }
+        return Ok(());
     }
+    if !holds_data(&tmp) {
+        return Ok(());
+    }
+    if std::fs::metadata(&main).is_ok_and(|m| m.len() > 0) {
+        crate::restore::move_broken(root, now_ms)?;
+    }
+    fsutil::rename_durable(&tmp, &main)
 }

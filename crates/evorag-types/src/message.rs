@@ -365,8 +365,6 @@ message_keys! {
     CliSetupNotWritten => "cli.setup_not_written",
     /// 引数: `newer`、`corrupt`。
     CliExportSkipped => "cli.export_skipped",
-    /// 引数: `count`。
-    CliExportPending => "cli.export_pending",
     /// 引数: `path`。
     CliExportNotEmpty => "cli.export_not_empty",
     /// 取り込んでいないジャーナルの行があるので書き出さない (03 §11)。引数: `count`。

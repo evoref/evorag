@@ -94,8 +94,9 @@ pub enum WriteOp {
     /// 依頼に入れる。
     ClearPendingDeletes,
     /// 次の起動で compact が要ることを書く (`meta` の `compact.pending`、03 §3.1.1)。記録を消した・書き換えた
-    /// 依頼 (忘れるの伏せ字、忘れるの当て直し、規則 12 の突き合わせ) に入れる。ジャーナルに書く種類の記録を
-    /// `Delete` で消した依頼には、書き手が自動で足す。印は compact ([`Store::compact_if_pending`]) が消す。
+    /// 依頼 (規則 12 の突き合わせなど) に入れる。ジャーナルに書く種類の記録を `Delete` で消した依頼と、`Put`・
+    /// `Patch` で単調に増える項目 (ターンの改訂の番号) を上げた依頼 (伏せ字) には、書き手が自動で足す。印は
+    /// compact ([`Store::compact_if_pending`]) が消す。
     SetCompactPending,
     /// コミットの後に、ジャーナルから ID ごとの `put` の行を除く書き直し (03 §6 の「削除と忘れる」)。DB には何も
     /// 書かない。忘れるでは、指示の `put` と伏せ字にしたターンの `Patch` と同じ依頼に入れる (伏せ字の後の行を
@@ -535,6 +536,10 @@ pub(crate) fn apply_op(
             store.undo_derived(tx, &old)?;
             tx.put(&mut env)?;
             store.redo_derived(tx, &env)?;
+            // 伏せ字で改訂の番号を上げた (忘れる): 前の本文の跡を次の起動で compact して除く (03 §3.1.1)。
+            if store.raises_monotonic(&old, &env) {
+                tx.set_compact_pending()?;
+            }
             out.put.push(env.id);
             return Ok(Some(env));
         }
@@ -554,7 +559,16 @@ pub(crate) fn apply_op(
         }
         WriteOp::Put(env) => {
             let mut env = env.clone();
+            // 改訂の番号を上げる書き換え (伏せ字) は、前の本文の跡を次の起動で compact して除く (03 §3.1.1)。
+            let raised = tx.store.has_monotonic(&env.kind)
+                && matches!(
+                    tx.get(&env.kind, env.id)?,
+                    Some(Read::Ok(old)) if tx.store.raises_monotonic(&old, &env)
+                );
             tx.put(&mut env)?;
+            if raised {
+                tx.set_compact_pending()?;
+            }
             out.put.push(env.id);
         }
         WriteOp::Delete { kind, id } => {
