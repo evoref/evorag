@@ -565,3 +565,24 @@ fn version_shows_the_build_and_how_it_was_installed() {
         assert!(text.contains(label), "{label} in {text}");
     }
 }
+
+/// 03 §10: `evorag rebuild --facts` は、llama-server に繋がらなければ、退避も作らずに終了コード 3 で止める
+/// (事実と派生データは変えない)。`--index` とは一緒に使えない。
+#[test]
+fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
+    let dir = TempDir::new("cli-rebuild-facts");
+    make_data_root_with_backup(&dir.path().join("data"));
+    let url = closed_port();
+    let config = format!("[llm.chat]\nurl = \"{url}\"\n");
+    let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--facts"], "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("前のまま変えていません"), "{err}");
+    assert!(err.contains("evorag rebuild --facts"), "{err}");
+    let pre = dir.path().join("data").join("backups").join("pre-op");
+    assert!(!pre.exists(), "no backup is made before the checks pass");
+
+    let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--index", "--facts"], "");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!pre.exists());
+}

@@ -260,6 +260,20 @@ restored = "退避 {from} から戻しました。その後の会話はジャー
 rebuilt = "派生データを作り直しました (退避: {backup}、消した派生の記録 {removed} 件、語彙の索引の項目 {docs} 件)。ノート・埋め込み・モデルの点検は、次に evorag を開いたときに裏の処理で作ります。"
 rebuilt_index = "索引を作り直しました (退避: {backup}、語彙の索引の項目 {docs} 件)。ベクトルの索引は、次に evorag を開いたときに埋め込みの記録から作り直します。"
 rebuild_failed = "作り直せませんでした: {detail}"
+rebuilding_facts = "事実を会話から抽出し直しています。llama-server を使うので、時間がかかることがあります。"
+rebuilt_facts = "事実を作り直しました (退避: {backup}、発話 {utterances} 件から事実 {facts} 件、前の事実 {old} 件を消しました。当て直した検証済みの訂正 {corrections} 件、送らなかった発話 {skipped} 件 (短い・挨拶など {filtered} 件、長すぎる {too_long} 件、本文が記録と合わない {mismatch} 件))。事実への指示 (忘れる・private・採る・戻す) は当て直しました。続けて、派生データも作り直しました (消した派生の記録 {removed} 件、語彙の索引の項目 {docs} 件)。ノート・埋め込み・モデルの点検は、次に evorag を開いたときに裏の処理で作ります。"
+rebuilt_facts_partial = "注意: 抽出できずに飛ばした発話が {lost} 件あり、作り直しは部分的です (出力が上限で切れた {truncated} 件、出力が型に合わない {invalid} 件)。\nこれらの発話からは事実を作っていません。llama-server の状態とログを確かめてから、もう一度 evorag rebuild --facts を実行すると取り直せます。"
+rebuild_facts_unreachable = "llama-server ({url}) に接続できないので、事実を作り直せませんでした: {detail}\n事実と派生データは前のまま変えていません。llama-server を起動してから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_facts_model_mismatch = "応答のモデルが、このデータ根に記録したモデルと違うので、事実を作り直しませんでした (記録: {recorded}、今: {connected})。\n事実と派生データは前のまま変えていません。記録したモデルで llama-server を起動し直すか、evorag setup で切り替えてから実行してください。"
+rebuild_facts_no_probe = "接続しているモデルの点検の結果が無いので、事実を作り直せませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動してモデルの点検を済ませてから、もう一度実行してください。"
+rebuild_facts_probe_failed = "接続しているモデルは、点検で型縛りの出力か思考を切ることが通らなかったので、事実を抽出できません。\n事実と派生データは前のまま変えていません。"
+rebuild_facts_context_too_small = "llama-server のスロットの文脈 ({n_ctx} トークン) が、事実の抽出には足りません。\n事実と派生データは前のまま変えていません。"
+rebuild_facts_key_unusable = "値の鍵 (memory.forget_key) を使えないので、事実を作り直せませんでした ({detail})。\n事実と派生データは前のまま変えていません。evorag doctor で状態を確かめてください。"
+rebuild_facts_forget_pending = "忘れるの当て直しが済んでいないので、事実を作り直しませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動して終了してから、もう一度実行してください。"
+rebuild_facts_newer = "このデータ根には、新しい版の evorag が書いた事実が {count} 件あるので、事実を作り直しませんでした (新しい版の記録を消さずに残すため)。\n事実と派生データは前のまま変えていません。作り直すときは、新しい版の evorag で実行してください。"
+rebuild_facts_rejected = "llama-server ({url}) が事実の抽出の要求を断ったので、作り直しを止めました: {detail}\n事実と派生データは前のまま変えていません。llama-server のログと設定 (文脈の長さ・型縛りの出力) を確かめてから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_facts_failed = "llama-server ({url}) への事実の抽出の要求が {attempts} 回続けて失敗した (締切切れか 5xx) ので、作り直しを止めました: {detail}\n事実と派生データは前のまま変えていません。llama-server の状態を確かめてから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_failed_after_facts = "事実は作り直して入れ替えましたが、続く派生データ (チャンク・索引など) の作り直しに失敗しました: {detail}\n入れ替える前のデータは退避 {backup} にあります。evorag rebuild (--facts なし) をもう一度実行すると、派生データを作り直せます。事実を前に戻したいときは evorag restore {backup} で戻せます。"
 restored_from_journal = "退避が無いので、ジャーナルだけから会話を作り直します。"
 exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました。設定は API キーを除いて config.toml に写しました。"
 export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
@@ -286,6 +300,12 @@ setup_ask_overwrite = "設定ファイル {path} を書き換えますか? 元�
 setup_written = "設定を {path} に書きました。evorag で会話を始められます。"
 setup_unchanged = "設定 {path} は今のままで使えます。"
 setup_not_written = "設定 {path} は書き換えませんでした。"
+
+[cli.facts_key]
+conflict = "ジャーナルの鍵が DB の鍵と違うか、2 つ以上あります"
+missing = "事実への指示があるのに、鍵が DB にもジャーナルにもありません"
+malformed = "記録した鍵の形が正しくありません"
+read_only = "データ根を読むだけで開いたので、鍵を作れません"
 
 [cli.setup]
 tui_running = "evorag が動いています (このデータ根を使っています)。設定ファイルだけを書けます。モデルの記録を書き換えるには、evorag を閉じてから evorag setup を実行し直してください。"

@@ -339,6 +339,37 @@ message_keys! {
     CliRebuiltIndex => "cli.rebuilt_index",
     /// 引数: `detail`。
     CliRebuildFailed => "cli.rebuild_failed",
+    /// `rebuild --facts` で抽出を始める。
+    CliRebuildingFacts => "cli.rebuilding_facts",
+    /// 引数: `backup`・`removed`・`docs`・`utterances`・`facts`・`old`・`skipped`・`filtered`・`too_long`・`mismatch`・
+    /// `corrections`。
+    CliRebuiltFacts => "cli.rebuilt_facts",
+    /// 抽出できずに飛ばした発話がある (作り直しが部分的)。引数: `lost`・`truncated`・`invalid`。
+    CliRebuiltFactsPartial => "cli.rebuilt_facts_partial",
+    /// 引数: `url`・`detail`。
+    CliRebuildFactsUnreachable => "cli.rebuild_facts_unreachable",
+    /// 引数: `recorded`・`connected`。
+    CliRebuildFactsModelMismatch => "cli.rebuild_facts_model_mismatch",
+    CliRebuildFactsNoProbe => "cli.rebuild_facts_no_probe",
+    CliRebuildFactsProbeFailed => "cli.rebuild_facts_probe_failed",
+    /// 引数: `n_ctx`。
+    CliRebuildFactsContextTooSmall => "cli.rebuild_facts_context_too_small",
+    /// 引数: `detail`。
+    CliRebuildFactsKeyUnusable => "cli.rebuild_facts_key_unusable",
+    CliRebuildFactsForgetPending => "cli.rebuild_facts_forget_pending",
+    /// 新しい版の evorag が書いた事実がある。引数: `count`。
+    CliRebuildFactsNewer => "cli.rebuild_facts_newer",
+    /// 抽出の要求を断られた (4xx)。引数: `url`・`detail`。
+    CliRebuildFactsRejected => "cli.rebuild_facts_rejected",
+    /// 締切切れか 5xx が続いた。引数: `url`・`attempts`・`detail`。
+    CliRebuildFactsFailed => "cli.rebuild_facts_failed",
+    /// 事実を入れ替えた後の派生データの作り直しに失敗した。引数: `backup`・`detail`。
+    CliRebuildFailedAfterFacts => "cli.rebuild_failed_after_facts",
+    /// 値の鍵が使えない理由 (`cli.rebuild_facts_key_unusable` の `detail` に入れる)。
+    CliFactsKeyConflict => "cli.facts_key.conflict",
+    CliFactsKeyMissing => "cli.facts_key.missing",
+    CliFactsKeyMalformed => "cli.facts_key.malformed",
+    CliFactsKeyReadOnly => "cli.facts_key.read_only",
     CliRestoredFromJournal => "cli.restored_from_journal",
     /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
     CliLlmUnauthorized => "cli.llm_unauthorized",

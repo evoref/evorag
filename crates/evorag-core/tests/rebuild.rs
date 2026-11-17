@@ -221,16 +221,18 @@ async fn ask(dir: &TempDir, sid: Id, round: u64) -> TurnBody {
     turn_body(dir.path(), answer.id)
 }
 
-fn rebuild(dir: &TempDir, index_only: bool) -> evorag_core::rebuild::RebuildReport {
+async fn rebuild(dir: &TempDir, index_only: bool) -> evorag_core::rebuild::RebuildReport {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_660_000_000)));
     evorag_core::rebuild::run(evorag_core::rebuild::RebuildOptions {
         data_root: dir.path().to_path_buf(),
         evorag_version: "0.0.6".into(),
         config_file: None,
         index_only,
+        facts: None,
         clock: clock.clone(),
         ids: Arc::new(UuidV7Gen::with_seed(clock, 11)),
     })
+    .await
     .unwrap()
 }
 
@@ -276,7 +278,7 @@ async fn rebuild_keeps_the_originals_and_recalls_the_same() {
         let kept = originals(dir.path());
         assert!(kept.iter().all(|n| *n > 0), "{kept:?}");
         let chunks = count(dir.path(), evorag_memory::KIND_CHUNK);
-        let r = rebuild(&dir, index_only);
+        let r = rebuild(&dir, index_only).await;
         assert!(r.backup.join("evorag.redb").is_file(), "{:?}", r.backup);
         assert!(r.docs > 0);
         if index_only {
