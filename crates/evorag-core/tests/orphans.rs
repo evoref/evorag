@@ -694,7 +694,7 @@ async fn deletes_replayed_after_a_restore_are_purged_from_the_backups() {
         61,
     );
     assert!(
-        store.pending_deletes().unwrap().is_empty(),
+        store.pending_deletes().unwrap().ids.is_empty(),
         "the store-side mark is cleared with the job"
     );
 }

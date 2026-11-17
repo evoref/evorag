@@ -479,11 +479,16 @@ impl Core {
         // 開くときにジャーナルから当てた削除 (restore・取り込みの当て直し、03 §6) の ID は、ストアが同じ
         // トランザクションで残している。起動時の整理 (`run_cleanup_jobs`) が整理の job にして、索引と退避からも
         // 除く (04 §7.2 の「当て直し」)。派生の記録は、起動時の突き合わせ (規則 12) が消して、同じく job に書く。
-        if !open_report.journal_deletes_kept.is_empty() {
-            tracing::warn!(
-                n = open_report.journal_deletes_kept.len(),
-                "records with a journal delete line are still linked from other records; kept"
-            );
+        // 当て直した削除でセッションを失ったターン (古い版が、消したセッションに書き足したもの) は、消さずに残す
+        // (03 §6)。数えて知らせる。
+        if !open_report.journal_deletes.is_empty()
+            && let Ok(n) = store
+                .read()
+                .map_err(|e| e.to_string())
+                .and_then(|r| evorag_memory::turns_without_session(&r).map_err(|e| e.to_string()))
+            && n > 0
+        {
+            tracing::warn!(n, "turns whose session was deleted are kept");
         }
 
         // プロンプトの言語: 記録があればそれを使い、無ければ設定の値を記録する (07 §6.1)。
@@ -1854,11 +1859,11 @@ async fn delete(inner: &Arc<Inner>) {
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
     emit(inner, Event::SessionDeleted { id: sid });
-    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した整理は終わっている)。
-    let guard = inner.cleanup_lock.clone().lock_owned().await;
+    // 整理の鍵は task の中で取る (長い整理の後ろで、次の命令を待たせない)。終了の処理は、この task を
+    // `background` で待つ。
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        let _guard = guard;
+        let _guard = worker.cleanup_lock.lock().await;
         let job = evorag_memory::CleanupJob {
             job,
             ids,
@@ -1947,10 +1952,23 @@ pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
 /// 次の起動で試し直す (起動は止めない)。
 async fn adopt_pending_deletes(inner: &Arc<Inner>) {
     let ids = match inner.store.pending_deletes() {
-        Ok(ids) if !ids.is_empty() => ids,
-        Ok(_) => return,
+        Ok(p) => {
+            if p.unreadable > 0 {
+                tracing::warn!(
+                    n = p.unreadable,
+                    "some deletes replayed at open could not be read"
+                );
+            }
+            if p.ids.is_empty() {
+                return;
+            }
+            p.ids
+        }
         Err(e) => {
             tracing::warn!(error = %e, "deletes replayed at open could not be read");
+            inner
+                .cleanup_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
     };

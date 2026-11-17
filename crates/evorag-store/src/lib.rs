@@ -30,8 +30,8 @@ pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};
 pub use store::{
     Census, DB_FILE, DeriveFn, Durability, FORMAT_MIN, FORMAT_VERSION, KIND_QUARANTINE, KindCount,
-    KindSpec, OpenError, OpenOptions, OpenReport, RESERVE_FILE, Read, ReadOnlyReason, ReadTxn,
-    Store, StoreError, WriteToken, WriteTxn,
+    KindSpec, OpenError, OpenOptions, OpenReport, PendingDeletes, RESERVE_FILE, Read,
+    ReadOnlyReason, ReadTxn, Store, StoreError, WriteToken, WriteTxn,
 };
 pub use writer::{
     Priority, Reply, WriteError, WriteOp, WriteOutcome, WriteRequest, Writer, WriterHandle,

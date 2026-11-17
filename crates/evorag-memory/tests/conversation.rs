@@ -680,3 +680,30 @@ fn the_session_lookup_follows_the_reread_session_and_goes_with_it() {
     env.write(ops);
     assert!(session_lookups(&env).is_empty());
 }
+
+/// セッションだけが消えて残ったターン (開くときに当て直した削除の後、古い版が書き足していたもの) を数える。
+/// verifies: 03 §6
+#[test]
+fn turns_left_without_their_session_are_counted() {
+    let dir = TempDir::new("conv-orphan-turns");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("架空の題").unwrap();
+    env.write(ops);
+    let (_, ops) = env
+        .writes()
+        .user_turn(&env.session(sid), "架空の発話")
+        .unwrap();
+    env.write(ops);
+    assert_eq!(
+        turns_without_session(&env.store.read().unwrap()).unwrap(),
+        0
+    );
+    env.write(vec![evorag_store::WriteOp::Delete {
+        kind: KIND_SESSION.into(),
+        id: sid,
+    }]);
+    assert_eq!(
+        turns_without_session(&env.store.read().unwrap()).unwrap(),
+        1
+    );
+}

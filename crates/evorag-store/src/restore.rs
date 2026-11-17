@@ -109,15 +109,23 @@ pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
     out
 }
 
-/// 退避のフォルダに残った作りかけのファイル (`*.partial`、整理の `*.purging`) か。
+/// 退避のフォルダに残った作りかけのファイルか。
+///
+/// 名前は、退避を作る処理が使う一時の名前と同じにする: 写しの一時名 (`evorag.partial`、
+/// `backup::logical_copy_excluding` と週次の写し) と、整理の一時名 (`evorag.redb.purging` と、その写しの一時名
+/// `evorag.redb.partial`)。ほかの名前には触れない。
 fn is_leftover(name: &str) -> bool {
-    name != DB_FILE
-        && Path::new(name)
-            .extension()
-            .is_some_and(|e| e == "partial" || e == "purging")
+    let purging = format!("{DB_FILE}.purging");
+    [
+        Path::new(DB_FILE).with_extension("partial"),
+        Path::new(&purging).with_extension("partial"),
+        PathBuf::from(&purging),
+    ]
+    .iter()
+    .any(|p| p.as_os_str() == name)
 }
 
-/// 強制終了で残った作りかけの退避を消す (03 §7.3、04 §7.7 の 5)。作りかけのファイル (`*.partial`・`*.purging`)
+/// 強制終了で残った作りかけの退避を消す (03 §7.3、04 §7.7 の 5)。作りかけのファイル (下の `is_leftover` の名前)
 /// と、作りかけで止まった退避のフォルダ (DB の写しが無く、作りかけのファイルだけを持つもの) は、世代の数え方にも
 /// 整理にも入らないまま、消した記録の本文を持ち続けうるため。利用者が置いたほかのファイルとフォルダには触れない
 /// (中へ再帰しない)。移行と作り直しの前の退避は、データ根の `backups/pre-op/` だけを見る (そこにしか作らない)。

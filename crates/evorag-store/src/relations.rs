@@ -162,28 +162,6 @@ macro_rules! relation_reads {
             self.scan_links(to, &reverse(rel))
         }
 
-        /// `to` へ入る関係の相手 (関係の種類を問わない。重なりあり)。
-        pub fn incoming_links(&self, to: Id) -> Result<Vec<Id>, StoreError> {
-            let table = self.tx.open_table(LINKS).map_err(db)?;
-            let start = id_prefix(to);
-            let end = key::prefix_end(&start).expect("an id prefix is never all 0xFF");
-            let mut out = Vec::new();
-            for item in table
-                .range::<&[u8]>(start.as_slice()..end.as_slice())
-                .map_err(db)?
-            {
-                let (k, _) = item.map_err(db)?;
-                if let Ok(parts) = key::decode(k.value())
-                    && let [OwnedPart::Id(_), OwnedPart::Str(rel), OwnedPart::Id(from)] =
-                        parts.as_slice()
-                    && rel.starts_with(REVERSE)
-                {
-                    out.push(*from);
-                }
-            }
-            Ok(out)
-        }
-
         fn scan_links(&self, a: Id, rel: &str) -> Result<Vec<(Id, Vec<u8>)>, StoreError> {
             let table = self.tx.open_table(LINKS).map_err(db)?;
             let start = link_prefix(a, rel);
