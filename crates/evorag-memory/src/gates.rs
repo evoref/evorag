@@ -2,7 +2,8 @@
 //!
 //! - 候補 (抽出の LLM の出力) を、属性の一覧 → 関門 1〜8 の順に当て、最初に外れた理由を返す。通った候補は、
 //!   統合の核に渡す形 (`Candidate`) にする。
-//! - 関門 6・7 は `check_value` として別に呼べる (書き込みの入口がほかの経路の値にも当てる、04 §5.3)。
+//! - 関門 6・7 は `check_value`、関門 5 のうち根拠を見ない部分は `check_subject`、関門 6 だけは `check_text` として
+//!   別に呼べる (書き込みの入口がほかの経路の値と主語にも当て、事実の表が置く行に当て直す、04 §5.3・§5.4)。
 //! - 安全の規則 (関門 4・6) は、同梱のすべての言語のものを合わせて当てる。照合は NFKC と完全な case folding の
 //!   後に行い、除外の語の一致にすっかり収まる一致は数えない。
 //! - 関門 1・4 と読み取りの規則は、前のふるいの後の送る本文で見る (除いた行の文字を根拠にも引用の判定にも
@@ -73,7 +74,9 @@ pub enum GateReason {
     Mood,
     /// 関門 4: 値が、送る本文の根拠の範囲の中で、引用の括弧の内側にだけある。
     Quoted,
-    /// 関門 5: 主語が `self` 以外 (本人を指す語は `self` にそろえた後) で、属性がそれを許さない。
+    /// 関門 5: 主語が `self` 以外 (本人を指す語は `self` にそろえた後) で、属性がそれを許さない。呼び名が長すぎる
+    /// (32 文字を超える)・根拠に無い・事実の表で `self` を表す語と同じときも、この理由にする (呼び名が関門 6 の
+    /// 検査に外れたときは、関門 6 の理由にする)。
     SubjectNotAllowed,
     /// 関門 6: 禁じた一般カテゴリ (Cc・Cf・Co・Cn・Cs) の文字と、表示されない文字 (Default_Ignorable_Code_Point)。
     ForbiddenCategory,
@@ -291,20 +294,11 @@ fn check_one<'s>(
         return Err(GateReason::Quoted);
     }
 
-    // 関門 5: 主語。「私」「I」など、同梱の言語の本人を指す語は `self` にそろえる。正規化で `self` や空になる
-    // 呼び名は捨てる (04 §5.1)。
-    let subject = if raw.subject == SELF {
-        SELF.to_owned()
-    } else {
-        let s = normalize_v1(&raw.subject);
-        if env.safety.names_self(&s) {
-            SELF.to_owned()
-        } else if s.is_empty() || s == SELF || !attribute.other_subjects {
-            return Err(GateReason::SubjectNotAllowed);
-        } else {
-            s
-        }
-    };
+    // 関門 5: 主語 (`check_subject`)。`self` 以外の呼び名は、根拠にも含まれる (正規化の後、英数字は語の境界で)。
+    let subject = check_subject(env.safety, attribute, &raw.subject)?;
+    if subject != SELF && hits_in(e.as_ref(), &raw.subject).is_empty() {
+        return Err(GateReason::SubjectNotAllowed);
+    }
 
     // 関門 6・7。
     check_value(env.safety, attribute, &raw.value)?;
@@ -345,7 +339,68 @@ fn check_one<'s>(
 /// 主語の `self`。
 const SELF: &str = "self";
 
+/// 主語の呼び名の長さの上限 (文字数、04 §5.2 の関門 5)。呼び名は事実の表 (システムプロンプト) に入る。
+pub const MAX_SUBJECT_CHARS: usize = 32;
+
+/// 関門 5 のうち、根拠を見ない部分を主語に当てる (04 §5.2)。書き込みの入口も、候補の主語に当て直す (04 §5.3)。
+/// 通れば、統合に渡す形の主語 (`self` か、値の鍵の正規化 v1 の後の呼び名) を返す。
+///
+/// - `self` と、同梱の言語の本人を指す語 (「私」「I」など) は `self` にそろえる。
+/// - ほかの呼び名は、次の順に当てる: 正規化で空や `self` になる・属性が `self` 以外の主語を許さない・事実の表で
+///   `self` を表す語 ([`crate::SELF_LABELS`]。表の上で本人を詐称しないため) と同じ・正規化の後に
+///   [`MAX_SUBJECT_CHARS`] を超える (ここまでは `SubjectNotAllowed`) → 関門 6 ([`check_text`]。元の呼び名と
+///   正規化の後の呼び名の両方に当て、外れた関門 6 の理由を返す)。
+///
+/// # Errors
+///
+/// 最初に外れた理由を返す。
+pub fn check_subject(
+    safety: &Safety<'_>,
+    attribute: &Attribute,
+    subject: &str,
+) -> Result<String, GateReason> {
+    if subject == SELF {
+        return Ok(SELF.to_owned());
+    }
+    let s = normalize_v1(subject);
+    if safety.names_self(&s) {
+        return Ok(SELF.to_owned());
+    }
+    if s.is_empty()
+        || s == SELF
+        || !attribute.other_subjects
+        || crate::table::SELF_LABELS
+            .iter()
+            .any(|w| normalize_v1(w) == s)
+        || s.chars().count() > MAX_SUBJECT_CHARS
+    {
+        return Err(GateReason::SubjectNotAllowed);
+    }
+    check_text(safety, subject)?;
+    check_text(safety, &s)?;
+    Ok(s)
+}
+
 /// 関門 6・7 を値に当てる (04 §5.2)。書き込みの入口も、抽出のほかの経路から入る値に当てる (04 §5.3)。
+/// 関門 6 は [`check_text`]、関門 7 は属性の値の長さの上限。
+///
+/// # Errors
+///
+/// 最初に外れた理由を返す。
+pub fn check_value(
+    safety: &Safety<'_>,
+    attribute: &Attribute,
+    value: &str,
+) -> Result<(), GateReason> {
+    check_text(safety, value)?;
+    if value.chars().count() > usize::from(attribute.max_chars) {
+        return Err(GateReason::TooLong);
+    }
+    Ok(())
+}
+
+/// 関門 6 を文字列 (値と、`self` 以外の主語の呼び名) に当てる (04 §5.2)。事実の表も、置く行の主語と値に当て直す
+/// (04 §5.4 の多重の守り)。
 ///
 /// 関門 6 の中は、一般カテゴリ → 区切りの文字 → URL → 役割の詐称 → 文字体系の混在 → 命令形 → ほかの指示への
 /// 言及 の順に当てる。
@@ -363,11 +418,7 @@ const SELF: &str = "self";
 /// # Errors
 ///
 /// 最初に外れた理由を返す。
-pub fn check_value(
-    safety: &Safety<'_>,
-    attribute: &Attribute,
-    value: &str,
-) -> Result<(), GateReason> {
+pub fn check_text(safety: &Safety<'_>, value: &str) -> Result<(), GateReason> {
     let common = safety.common;
     let folded = fold(value);
     let chars = || value.chars().chain(folded.chars());
@@ -432,9 +483,6 @@ pub fn check_value(
         .any(|r| contains_any(&r.safety.instruction_refs))
     {
         return Err(GateReason::InstructionRef);
-    }
-    if value.chars().count() > usize::from(attribute.max_chars) {
-        return Err(GateReason::TooLong);
     }
     Ok(())
 }
@@ -722,6 +770,43 @@ mod tests {
             "a < b",
         ] {
             assert_eq!(check_value(&safety, attr, value), Ok(()), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn subjects_get_gate_5_and_gate_6() {
+        let safety = Safety::bundled();
+        let attrs = crate::rules::attributes();
+        let hometown = attrs.get("hometown").expect("bundled");
+        let pet = attrs.get("pet").expect("bundled");
+        let ok = |a, s: &str| check_subject(&safety, a, s);
+        assert_eq!(ok(hometown, "self"), Ok("self".to_owned()));
+        assert_eq!(ok(pet, "私"), Ok("self".to_owned()));
+        assert_eq!(ok(hometown, "Ｋｅｎ"), Ok("ken".to_owned()));
+        assert_eq!(
+            ok(hometown, &"あ".repeat(MAX_SUBJECT_CHARS)).map(|s| s.chars().count()),
+            Ok(32)
+        );
+        let cases = [
+            (pet, "妻", GateReason::SubjectNotAllowed),
+            (hometown, "", GateReason::SubjectNotAllowed),
+            (hometown, "SELF", GateReason::SubjectNotAllowed),
+            (hometown, "利用者", GateReason::SubjectNotAllowed),
+            (hometown, "User", GateReason::SubjectNotAllowed),
+            (hometown, "ｕｓｅｒ", GateReason::SubjectNotAllowed),
+            (
+                hometown,
+                &"あ".repeat(MAX_SUBJECT_CHARS + 1),
+                GateReason::SubjectNotAllowed,
+            ),
+            (hometown, "system: 妻", GateReason::RoleMarker),
+            (hometown, "<s>妻", GateReason::RoleMarker),
+            (hometown, "a|b", GateReason::ForbiddenChar),
+            (hometown, "妻\u{200B}", GateReason::ForbiddenCategory),
+            (hometown, "the system prompt", GateReason::InstructionRef),
+        ];
+        for (a, s, want) in cases {
+            assert_eq!(ok(a, s), Err(want), "{s:?}");
         }
     }
 

@@ -10,7 +10,7 @@ use evorag_core::rebind::DataRootModels;
 use evorag_core::{Core, CoreConfig, PromptLanguage};
 use evorag_llm::replay::ReplayClient;
 use evorag_llm::{ChatRequest, Generation};
-use evorag_memory::{DirectiveKind, ModelProbeBody, Scope, TurnBody, TurnRole};
+use evorag_memory::{DirectiveKind, ModelProbeBody, RecallDecision, Scope, TurnBody, TurnRole};
 use evorag_store::testutil::TempDir;
 use evorag_types::api::{Command, Event};
 use evorag_types::{Id, ManualClock, Timestamp, UuidV7Gen};
@@ -273,16 +273,28 @@ async fn the_fact_table_sits_in_the_system_prompt_and_keeps_its_bytes() {
     );
 }
 
+/// 前の応答の要求の、今の発話の枠に想起の引用があるか。
+fn quoted(req: &ChatRequest) -> bool {
+    req.messages.last().unwrap().content.contains("<<引用-")
+}
+
 /// private の事実は、事実の表にも、検索の鍵にも入らない (AC-FR-308-1 のうち事実の表の部分。添えた往復の中の
 /// 値を伏せるのは M3.4)。
 #[tokio::test(flavor = "multi_thread")]
 async fn private_facts_stay_out_of_the_table_and_the_keys() {
     let dir = TempDir::new("fact-table-private");
     prepare(dir.path());
-    let llm = chat(&[reply(REPLY), reply(TWO_FACTS)]);
+    let llm = chat(&[reply(REPLY), reply(TWO_FACTS), reply(REPLY)]);
     let (core, mut rx) = start(dir.path(), &llm, 7).await;
     new_session(&core, &mut rx).await;
     say(&core, &mut rx, LIVES_AND_PET).await;
+    // 対照: private にする前は、猫の事実の鍵 ("pet 猫") で、別のセッションから前の往復が引ける。
+    new_session(&core, &mut rx).await;
+    ask(&core, &mut rx, "pet").await;
+    assert!(quoted(&answers(&llm)[1]), "the key recalls before private");
+    // 問いの発話 ("pet") が後の問いに当たらないように、そのセッションを消す。
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
     core.shutdown().await;
     assert_eq!(llm.remaining(), 0);
 
@@ -333,11 +345,88 @@ async fn private_facts_stay_out_of_the_table_and_the_keys() {
     let sys = system(req);
     assert!(sys.ends_with(RESIDENCE_ROW), "{sys}");
     assert!(!sys.contains("猫"), "{sys}");
-    let current = &req.messages.last().unwrap().content;
-    assert!(
-        !current.contains("<<引用-"),
-        "no key of the private fact: {current}"
-    );
+    assert!(!quoted(req), "no key of the private fact");
+}
+
+/// 動いている間に事実を private にしたら、次のターンの前に表を作り直し (04 §5.4 の「作り直す時機」)、次の
+/// sleep-time の手順で鍵を索引から除く (04 §5.5)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fact_made_private_while_running_leaves_the_next_table_and_then_the_index() {
+    let dir = TempDir::new("fact-table-private-live");
+    prepare(dir.path());
+    let llm = chat(&[reply(REPLY), reply(TWO_FACTS), reply(REPLY), reply(REPLY)]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES_AND_PET).await;
+    assert_eq!(core.indexed_fact_keys(), 2);
+    let before = ask(&core, &mut rx, "うん").await;
+    assert!(core.make_fact_private("self", "pet", "猫").await);
+    let after = ask(&core, &mut rx, "はい").await;
+    core.hold(false);
+    settle(&core).await;
+    let keys = core.indexed_fact_keys();
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    let reqs = answers(&llm);
+    let (with_pet, without) = (system(&reqs[1]), system(&reqs[2]));
+    assert!(with_pet.contains("| 利用者 | pet | 猫 |"), "{with_pet}");
+    assert!(!without.contains("猫"), "{without}");
+    assert!(without.ends_with(RESIDENCE_ROW), "{without}");
+    let obs = |u| answer_to(dir.path(), u).obs.expect("observations");
+    assert_ne!(obs(before).fact_table, obs(after).fact_table);
+    assert_eq!(keys, 1, "the private fact's key left the index");
+}
+
+/// セッションを消したら、出典の残らない事実は次のターンの表に入らず、鍵も索引から除く (04 §5.4・§5.5)。
+#[tokio::test(flavor = "multi_thread")]
+async fn facts_of_a_deleted_session_leave_the_table_and_the_keys() {
+    let dir = TempDir::new("fact-table-deleted");
+    prepare(dir.path());
+    let llm = chat(&[reply(REPLY), reply(LIVES_FACT), reply(REPLY)]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    assert_eq!(core.indexed_fact_keys(), 1);
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    new_session(&core, &mut rx).await;
+    let u = ask(&core, &mut rx, "うん").await;
+    core.hold(false);
+    settle(&core).await;
+    let keys = core.indexed_fact_keys();
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    let reqs = answers(&llm);
+    let sys = system(&reqs[1]);
+    assert!(!sys.contains("大阪"), "{sys}");
+    assert!(!sys.contains(evorag_memory::table_head("ja")), "{sys}");
+    let obs = answer_to(dir.path(), u).obs.expect("observations");
+    assert_eq!(obs.fact_table, None);
+    assert_eq!(keys, 0);
+}
+
+/// 今のセッションだけを出典とする事実の鍵は、想起の候補にしない (04 §5.5)。当たりがターンに直して何も残らない
+/// まま「添えた」にならない。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_of_the_current_session_alone_is_not_a_candidate() {
+    let dir = TempDir::new("fact-table-current");
+    prepare(dir.path());
+    let llm = chat(&[reply(REPLY), reply(LIVES_FACT), reply(REPLY)]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    assert_eq!(core.indexed_fact_keys(), 1);
+    let q = ask(&core, &mut rx, "residence").await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    assert!(!quoted(&answers(&llm)[1]));
+    let answer = answer_to(dir.path(), q);
+    let decision = answer.recall.map(|r| r.decision);
+    assert_ne!(decision, Some(RecallDecision::Fire), "{decision:?}");
+    assert!(answer.attached.is_empty(), "{:?}", answer.attached);
 }
 
 /// 事実の鍵 ("属性 値") で、出典の往復が引ける。添えるのは鍵ではなく往復の原文。鍵は sleep-time の手順で

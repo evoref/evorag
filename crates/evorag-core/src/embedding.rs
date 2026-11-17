@@ -94,9 +94,7 @@ fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
     let Some(lex) = &inner.index else {
         return (Vec::new(), 0);
     };
-    let mut all = lex.snapshot().ids();
-    let fact_keys = crate::fact_table::keyed(inner);
-    all.retain(|id| !fact_keys.contains(id));
+    let all = lex.snapshot().ids_where(|d| !crate::recall::is_fact_key(d));
     let have: HashSet<Id> = match current(inner) {
         Some((k, ix)) if k == key => ix.snapshot().ids(),
         _ => HashSet::new(),

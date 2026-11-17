@@ -162,9 +162,21 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
             continue;
         }
         let attr = attr.unwrap_or_else(|| panic!("{id}: unknown attribute `{a}`"));
-        let other = req(c, "s", &id) != "self";
+        let subject = req(c, "s", &id);
+        let other = subject != "self";
         match expect {
-            "subject_not_allowed" => assert!(other && !attr.other_subjects, "{id}"),
+            // 属性が許さない・長すぎる・根拠に無い・事実の表で本人を表す語 (04 §5.2 の関門 5)。
+            "subject_not_allowed" => {
+                let folded = subject.to_lowercase();
+                assert!(
+                    other
+                        && (!attr.other_subjects
+                            || chars(subject) > evorag_memory::MAX_SUBJECT_CHARS
+                            || !req(c, "e", &id).to_lowercase().contains(&folded)
+                            || evorag_memory::SELF_LABELS.contains(&folded.as_str())),
+                    "{id}"
+                );
+            }
             "too_long" => assert!(chars(v) > usize::from(attr.max_chars), "{id}: not too long"),
             "accept" => {
                 assert!(!other || attr.other_subjects, "{id}: subject not allowed");

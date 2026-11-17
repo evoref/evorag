@@ -39,8 +39,8 @@ pub use fold::{
     table_order,
 };
 pub use gates::{
-    Accepted, EvidenceMatch, GateEnv, GateReason, RawCandidate, RawMood, Safety, Utterance,
-    check_candidate, check_candidates, check_value,
+    Accepted, EvidenceMatch, GateEnv, GateReason, MAX_SUBJECT_CHARS, RawCandidate, RawMood, Safety,
+    Utterance, check_candidate, check_candidates, check_subject, check_text, check_value,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,
@@ -74,8 +74,8 @@ pub use rules::{
     all_language_rules, attributes, common_rules, language_rules,
 };
 pub use table::{
-    FactKey, FactTable, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table, table_head,
-    table_rows, table_version,
+    FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
+    table_head, table_rows, table_version,
 };
 pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
 pub use write::{

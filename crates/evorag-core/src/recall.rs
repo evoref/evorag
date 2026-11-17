@@ -97,6 +97,49 @@ pub(crate) fn fact_doc(k: &FactKey) -> evorag_index::lex::DocInput {
     doc_input(k.fact, FACT_KEY_SESSION, &k.text)
 }
 
+/// 語彙の索引に今ある事実の鍵の項目 (事実の ID)。
+pub(crate) fn indexed_fact_keys(index: &LexIndex) -> HashSet<Id> {
+    index.snapshot().ids_where(is_fact_key)
+}
+
+/// 索引の項目が事実の鍵か。
+pub(crate) fn is_fact_key(d: &evorag_index::lex::Doc) -> bool {
+    d.session == FACT_KEY_SESSION
+}
+
+/// 今のセッション `current` のターンだけを出典とする事実 (残っている出典のターンが、今のセッションの外に
+/// 1 つも無いもの)。その鍵は想起の候補を集める段階で除く (今のセッションのターンを添えないのと同じ、04 §5.5、
+/// 05 §3.2)。事実は数百件の見込みなので、問いごとに読む。
+fn current_only_facts(store: &Store, current: Id) -> HashSet<Id> {
+    let Ok(rtx) = store.read() else {
+        return HashSet::new();
+    };
+    let Ok(loaded) = evorag_memory::load_facts(&rtx) else {
+        return HashSet::new();
+    };
+    let mut sessions: HashMap<Id, Option<Id>> = HashMap::new();
+    let mut session_of = |turn: Id| {
+        *sessions
+            .entry(turn)
+            .or_insert_with(|| match rtx.get(KIND_TURN, turn) {
+                Ok(Some(Read::Ok(e))) => e.body_as::<TurnBody>().ok().map(|b| b.session),
+                _ => None,
+            })
+    };
+    loaded
+        .set
+        .facts
+        .iter()
+        .filter_map(evorag_memory::fact_key)
+        .filter(|k| {
+            !k.turns
+                .iter()
+                .any(|t| session_of(*t).is_some_and(|s| s != current))
+        })
+        .map(|k| k.fact)
+        .collect()
+}
+
 /// 索引の当たり (チャンク・ノート・事実の鍵) が指すターン。ノートは、指す往復の発話のターンのすべて
 /// (04 §2)。事実の鍵は、今の状態で鍵を持つ事実の出典のターンのうち、今のセッション `current` に無いもの
 /// (新しい順、04 §5.5、05 §3.2)。
@@ -138,8 +181,6 @@ pub(crate) struct SyncPlan {
     pub create: Vec<ChunkBody>,
     /// 残すチャンク・ノートの鍵・事実の鍵の、索引の 1 件。
     pub keep: Vec<evorag_index::lex::DocInput>,
-    /// 索引に入れる事実の鍵 (事実の ID)。
-    pub fact_keys: HashSet<Id>,
     /// ターンの本文 (新しいチャンクの索引の 1 件を作るため)。
     pub texts: HashMap<Id, String>,
 }
@@ -177,8 +218,9 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
         }
         true
     });
-    let facts = evorag_memory::load_facts(&rtx)
-        .map(|l| evorag_memory::fact_keys(&l.set))
+    // 事実の鍵 (出典のターンの残っているもの。表と同じ判定、04 §5.4・§5.5)。
+    let facts = crate::fact_table::surviving_facts(&rtx)
+        .map(|set| evorag_memory::fact_keys(&set))
         .unwrap_or_default();
     drop(rtx);
     let mut plan = SyncPlan::default();
@@ -188,13 +230,7 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
             plan.keep.extend(note_docs(*id, n));
         }
     }
-    // 事実の鍵 (出典のターンの残っているもの、04 §5.5)。
-    for k in &facts {
-        if k.turns.iter().any(|t| turns.contains_key(t)) {
-            plan.keep.push(fact_doc(k));
-            plan.fact_keys.insert(k.fact);
-        }
-    }
+    plan.keep.extend(facts.iter().map(fact_doc));
     let mut covered: HashSet<Id> = HashSet::new();
     for (id, c) in chunks {
         match turns.get(&c.turn) {
@@ -646,11 +682,12 @@ pub(crate) async fn eval_exchanges(
         return Vec::new();
     };
     let snap = index.snapshot();
+    let current_only = current_only_facts(store, session);
     let r = recall(
         &snap,
         query,
         None,
-        &|d| d.session == session,
+        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
         &RecallConfig::default(),
     );
     let mut lists: Vec<Vec<Id>> = vec![
@@ -781,12 +818,14 @@ async fn select_for(
         return none(RecallDecision::Skip, obs);
     };
     let snap = index.snapshot();
-    // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。
+    // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。今のセッションだけを出典とする
+    // 事実の鍵も除く (04 §5.5)。
+    let current_only = current_only_facts(store, session);
     let mut r = recall(
         &snap,
         &query,
         previous.as_deref(),
-        &|d| d.session == session,
+        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
         &RecallConfig::default(),
     );
     if r.decision == Decision::Skip {
@@ -797,7 +836,8 @@ async fn select_for(
     r.hits = turn_hits(store, &r.hits, session);
     r.candidates = turn_hits(store, &r.candidates, session);
     let lexical = |obs: RecallObs| {
-        if r.decision == Decision::Abstain {
+        // ターンに直して何も残らない当たり (鍵の事実が読み直しで外れたなど) は、添えない。
+        if r.decision == Decision::Abstain || r.hits.is_empty() {
             none(RecallDecision::Abstain, obs)
         } else {
             Selection {

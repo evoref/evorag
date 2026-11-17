@@ -787,6 +787,22 @@ impl Core {
         }
     }
 
+    /// 試験のため: 事実を private にする (事実への指示を足し、次のターンの前に事実の表を作り直させる、
+    /// 04 §7.5・§5.4)。画面からの操作は M3.4 で足す。書けたら `true`。
+    #[doc(hidden)]
+    pub async fn make_fact_private(&self, subject: &str, attribute: &str, value: &str) -> bool {
+        fact_table::make_private(&self.inner, subject, attribute, value).await
+    }
+
+    /// 試験のため: 語彙の索引に今ある事実の検索の鍵の数 (04 §5.5)。
+    #[doc(hidden)]
+    pub fn indexed_fact_keys(&self) -> usize {
+        self.inner
+            .index
+            .as_deref()
+            .map_or(0, |ix| recall::indexed_fact_keys(ix).len())
+    }
+
     /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
     pub fn tokenize_calls(&self) -> usize {
         self.inner.tokens.calls()
@@ -2107,7 +2123,6 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
         return Vec::new();
     };
     let gone = plan.delete.clone();
-    let fact_keys = plan.fact_keys;
     let mut docs = plan.keep;
     let deleted = plan.delete.len();
     let created = plan.create.len();
@@ -2141,18 +2156,19 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
     })
     .await;
     match result {
-        Ok(Ok(n)) => {
-            fact_table::set_keyed(inner, fact_keys);
-            tracing::info!(
-                docs = n,
-                created,
-                deleted,
-                rebuilt = rebuild,
-                ms = started.elapsed().as_millis() as u64,
-                "lexical index synced"
-            );
+        Ok(Ok(n)) => tracing::info!(
+            docs = n,
+            created,
+            deleted,
+            rebuilt = rebuild,
+            ms = started.elapsed().as_millis() as u64,
+            "lexical index synced"
+        ),
+        _ => {
+            tracing::warn!("lexical index sync failed");
+            // 事実の鍵は、sleep-time の手順で索引の中身から合わせ直す (04 §5.5)。
+            fact_table::touch(inner);
         }
-        _ => tracing::warn!("lexical index sync failed"),
     }
     gone
 }
