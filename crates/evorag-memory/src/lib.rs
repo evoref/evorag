@@ -5,6 +5,7 @@
 //! 書き込みは、書き手 (`evorag_store::Writer`) に送る操作の列 (`WriteOp`) として組み立てる。
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
+mod facts;
 mod fold;
 #[cfg(test)]
 mod fold_cases;
@@ -16,6 +17,11 @@ mod rules;
 mod value_key;
 mod write;
 
+pub use facts::{
+    FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
+    REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, add_directive, consolidate, diff_ops,
+    load_directives, load_facts, rebuild,
+};
 pub use fold::{
     Candidate, Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState,
     FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private,
