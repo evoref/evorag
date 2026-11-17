@@ -19,6 +19,7 @@ use evorag_store::{Envelope, Read, ReadTxn, WriteOp};
 use evorag_types::{Id, IdGen, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::fold::{Source, VerifiedCorrection};
 use crate::gates::{
@@ -199,9 +200,24 @@ struct Compiled {
     anchors: Vec<(Vec<Vec<char>>, Vec<Side>)>,
 }
 
+impl Compiled {
+    /// `{old}` の穴があるか。
+    fn has_old(&self) -> bool {
+        self.lead
+            .iter()
+            .chain(self.anchors.iter().flat_map(|a| &a.1))
+            .any(|s| *s == Side::Old)
+    }
+}
+
 /// 照合で区別しない文字 (空白と読点)。値の鍵の正規化 v1 の後に見る (`，`・`､` は NFKC で `,`・`、` になる)。
 fn ignorable(c: char) -> bool {
     c.is_whitespace() || matches!(c, '、' | ',')
+}
+
+/// 読点 (`{old}` の穴を切る文字、04 §6 の「古い値は穴の全体」)。元の本文の文字で見る。
+fn is_comma(c: char) -> bool {
+    matches!(c, '、' | '，' | ',' | '､')
 }
 
 /// 照合の前にそろえる文字 (向きの違うアポストロフィ。"it’s" を "it's" に当てる)。
@@ -215,6 +231,19 @@ fn canon(c: char) -> char {
 /// 改行 (04 §5.2 の行の区切り)。
 fn is_line_break(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}')
+}
+
+/// 元の本文の書記素 `cluster` が文の区切りか (04 §6 の「区切りの文字の判定」)。全角の `。．！？` は常に、半角の
+/// `.!?` は後ろが空白・改行・本文の終わりのときだけ区切り (小数・URL・略語で文を切らない)。
+fn delimits(text: &str, cluster: &Range<usize>) -> bool {
+    match &text[cluster.clone()] {
+        "。" | "．" | "！" | "？" | "｡" => true,
+        "." | "!" | "?" => text[cluster.end..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace),
+        _ => false,
+    }
 }
 
 /// 照合の形: 値の鍵の正規化 v1 の後に、区別しない文字を除き、アポストロフィをそろえる。
@@ -316,7 +345,6 @@ fn compile(pattern: &str) -> Option<Compiled> {
         lead: Vec::new(),
         anchors: Vec::new(),
     };
-    // 直前が穴で、まだ区切り (Sep) を待っているか。
     let mut sep_open = false;
     let mut after_hole = false;
     for r in raw {
@@ -353,25 +381,44 @@ fn compile(pattern: &str) -> Option<Compiled> {
     (!sep_open && !c.anchors.is_empty()).then_some(c)
 }
 
-/// 照合する本文 (正規化 v1 の対応表と、区別しない文字を除いた文字の並び)。
+/// 照合する本文 (正規化 v1 の対応表と、区別しない文字を除いた文字の並び)。文の区切り・読点・空白の位置は、作る
+/// ときに表にしておき、照合の中では表を引くだけにする (照合を本文の長さにおおむね線形で終えるため)。
 struct View {
     mapped: Mapped,
     chars: Vec<char>,
     /// `chars` の文字ごとの、正規化の後の本文の範囲。
     out: Vec<Range<usize>>,
-    /// `chars[i]` と `chars[i - 1]` の間に、区別しない文字 (空白・読点) があった。
-    gap: Vec<bool>,
+    /// `chars` の文字ごとの、元の本文の書記素の範囲。
+    src: Vec<Range<usize>>,
     /// `chars[i]` と `chars[i - 1]` の間に、改行があった。
     newline: Vec<bool>,
+    /// `chars[i]` の文の番号 (区切りの文字の後と改行で増える)。
+    sid: Vec<usize>,
+    /// 文ごとの (始まり, 終わり)。終わりは文の区切りの文字を含まない。
+    sentences: Vec<(usize, usize)>,
+    /// `[0, i)` の文の区切りの文字の数。
+    term_before: Vec<usize>,
+    /// `[0, i)` の位置の改行 (`newline[j]`) の数。
+    newline_before: Vec<usize>,
+    /// `i` 以前で最後の、`gap`・読点のある位置 (無ければ `usize::MAX`)。
+    prev_gap: Vec<usize>,
+    prev_comma: Vec<usize>,
+    /// `i` 以降で最初の、`gap`・読点のある位置 (無ければ `chars.len()`)。
+    next_gap: Vec<usize>,
+    next_comma: Vec<usize>,
 }
 
 impl View {
+    /// 表を作る。正規化の後の文字が [`MATCH_MAX_CHARS`] を超えれば `None` (型を当てない)。
     fn new(text: &str) -> Option<Self> {
         let mapped = Mapped::new(text)?;
         let mut chars = Vec::new();
         let mut out = Vec::new();
+        let mut src = Vec::new();
         let mut gap = Vec::new();
+        let mut comma = Vec::new();
         let mut newline = Vec::new();
+        let mut term = Vec::new();
         let mut skipped = false;
         let mut prev_cluster: Option<Range<usize>> = None;
         for (i, c) in mapped.text().char_indices() {
@@ -385,18 +432,75 @@ impl View {
                 .filter(|p| p.end <= cluster.start)
                 .map_or("", |p| &text[p.end..cluster.start]);
             newline.push(between.chars().any(is_line_break));
+            comma.push(between.chars().any(is_comma));
             gap.push(skipped || !between.is_empty());
+            term.push(delimits(text, &cluster));
             skipped = false;
-            prev_cluster = Some(cluster);
             chars.push(canon(c));
             out.push(i..i + c.len_utf8());
+            src.push(cluster.clone());
+            prev_cluster = Some(cluster);
+            if chars.len() > MATCH_MAX_CHARS {
+                return None;
+            }
         }
+        let n = chars.len();
+        let mut sid = Vec::with_capacity(n);
+        let mut sentences: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            let new_sentence = i == 0 || term[i - 1] || newline[i];
+            if new_sentence {
+                sentences.push((i, i));
+            }
+            sid.push(sentences.len() - 1);
+            if !term[i]
+                && let Some(s) = sentences.last_mut()
+            {
+                s.1 = i + 1;
+            }
+        }
+        let prefix = |flags: &[bool]| -> Vec<usize> {
+            let mut v = Vec::with_capacity(n + 1);
+            v.push(0);
+            for &f in flags {
+                v.push(v.last().copied().unwrap_or(0) + usize::from(f));
+            }
+            v
+        };
+        let prev = |flags: &[bool]| -> Vec<usize> {
+            let mut last = usize::MAX;
+            flags
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| {
+                    if f {
+                        last = i;
+                    }
+                    last
+                })
+                .collect()
+        };
+        let next = |flags: &[bool]| -> Vec<usize> {
+            let mut v = vec![n; n + 1];
+            for i in (0..n).rev() {
+                v[i] = if flags[i] { i } else { v[i + 1] };
+            }
+            v
+        };
         Some(Self {
+            term_before: prefix(&term),
+            newline_before: prefix(&newline),
+            prev_gap: prev(&gap),
+            prev_comma: prev(&comma),
+            next_gap: next(&gap),
+            next_comma: next(&comma),
             mapped,
             chars,
             out,
-            gap,
+            src,
             newline,
+            sid,
+            sentences,
         })
     }
 
@@ -404,37 +508,47 @@ impl View {
         self.chars.len()
     }
 
-    /// `chars[i]` が文の区切りか (`。`・`!`・`?` と、後ろが空白・改行・本文の終わりの `.`。全角の `．！？` は
-    /// NFKC で半角になる)。`.` を後ろで見るのは、URL や小数の `.` で文を切らないため。
-    fn is_term(&self, i: usize) -> bool {
-        match self.chars[i] {
-            '。' | '!' | '?' => true,
-            '.' => i + 1 == self.len() || self.gap[i + 1] || self.newline[i + 1],
-            _ => false,
-        }
+    /// 元の本文のバイト範囲 `r` に当たる `chars` の範囲。
+    fn region_of(&self, r: &Range<usize>) -> Range<usize> {
+        let s = self.src.partition_point(|x| x.start < r.start);
+        let e = self.src.partition_point(|x| x.start < r.end);
+        s..e
     }
 
     /// 錨の始まり `a` の前の穴の始まり (同じ文の頭)。
     fn sentence_start(&self, a: usize) -> usize {
-        let mut s = a;
-        while s > 0 && !self.newline[s] && !self.is_term(s - 1) {
-            s -= 1;
-        }
-        s
+        self.sentences[self.sid[a]].0
     }
 
-    /// 錨の終わり `b` の後の穴の終わり (同じ文の終わり)。
+    /// 錨の終わり `b` の後の穴の終わり (同じ文の終わり。直後が改行なら空)。
     fn sentence_end(&self, b: usize) -> usize {
-        let mut e = b;
-        while e < self.len() && !self.newline[e] && !self.is_term(e) {
-            e += 1;
+        if b >= self.len() || self.newline[b] {
+            return b;
         }
-        e
+        self.sentences[self.sid[b]].1.max(b)
     }
 
-    /// `[b, a)` が同じ文の中か (文の区切りも改行も含まない)。
+    /// `[b, a)` が同じ文の中か (文の区切りを含まず、`b` から `a` までに改行が無い)。
     fn within_sentence(&self, b: usize, a: usize) -> bool {
-        (b..a).all(|j| !self.is_term(j)) && (b..=a).all(|j| j >= self.len() || !self.newline[j])
+        let nl_end = (a + 1).min(self.len());
+        self.term_before[a] == self.term_before[b]
+            && self.newline_before[nl_end] == self.newline_before[b.min(nl_end)]
+    }
+
+    /// `(s, e)` の中の、最後か最初の区切り (`marks` は `prev_*`・`next_*` の表)。
+    fn mark_in(
+        &self,
+        s: usize,
+        e: usize,
+        last: bool,
+        prev: &[usize],
+        next: &[usize],
+    ) -> Option<usize> {
+        if e <= s + 1 {
+            return None;
+        }
+        let j = if last { prev[e - 1] } else { next[s + 1] };
+        (j != usize::MAX && j > s && j < e).then_some(j)
     }
 
     /// `chars` の範囲 (空でない) を、正規化の後の本文の範囲にする。
@@ -458,33 +572,25 @@ impl View {
             && !(self.chars[b - 1].is_ascii_alphanumeric() && word(after))
     }
 
-    /// 穴の本文の端の句読点と、文末の「よ」「です」を除いた範囲 (1 文字は残す)。値の位置と記録の本文に使う。
-    fn trim(&self, r: &Range<usize>) -> Range<usize> {
-        let punct = |c: char| matches!(c, '。' | '.' | '!' | '?');
-        let (mut s, mut e) = (r.start, r.end);
-        loop {
-            let before = (s, e);
-            while e - s > 1 && punct(self.chars[s]) {
-                s += 1;
+    /// 錨の変種の一致 (`region` の中、始まりの順。同じ始まりなら長い変種が先)。
+    fn occurrences(&self, variants: &[Vec<char>], region: &Range<usize>) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for f in variants {
+            let len = f.len();
+            if len == 0 || region.end < region.start + len {
+                continue;
             }
-            while e - s > 1 && punct(self.chars[e - 1]) {
-                e -= 1;
-            }
-            if e - s > 2 && self.chars[e - 2..e] == ['で', 'す'] {
-                e -= 2;
-            } else if e - s > 1 && self.chars[e - 1] == 'よ' {
-                e -= 1;
-            }
-            if (s, e) == before {
-                return s..e;
+            for a in region.start..=region.end - len {
+                if self.chars[a] == f[0]
+                    && self.chars[a..a + len] == f[..]
+                    && self.bounded(a, a + len)
+                {
+                    out.push((a, len));
+                }
             }
         }
-    }
-
-    /// 穴を分ける区切り (読点・空白) の位置。`last` なら最後、そうでなければ最初。
-    fn split_at(&self, r: &Range<usize>, last: bool) -> Option<usize> {
-        let mut gaps = (r.start + 1..r.end).filter(|&j| self.gap[j]);
-        if last { gaps.next_back() } else { gaps.next() }
+        out.sort_by_key(|&(a, len)| (a, std::cmp::Reverse(len)));
+        out
     }
 }
 
@@ -496,6 +602,27 @@ struct HoleAt {
     range: Range<usize>,
     /// 後ろに固定の部分が無い (末尾の穴)。値の始まりを穴の始まりに合わせる。
     trailing: bool,
+    /// 末尾の穴で、文末で終わる (終わりの「よ」「です」を 1 回だけ除く)。
+    at_end: bool,
+}
+
+impl HoleAt {
+    /// 値を比べる範囲 (04 §6 の「文末の「よ」「です」」)。文末で終わる末尾の穴の、終わりの「です」か「よ」を
+    /// 1 回だけ除く (1 文字は残す)。ほかの穴は除かない。
+    fn trimmed(&self, v: &View) -> Range<usize> {
+        let r = self.range.clone();
+        if !(self.trailing && self.at_end) {
+            return r;
+        }
+        let tail = &v.chars[r.clone()];
+        if tail.len() > 2 && tail.ends_with(&['で', 'す']) {
+            r.start..r.end - 2
+        } else if tail.len() > 1 && tail.ends_with(&['よ']) {
+            r.start..r.end - 1
+        } else {
+            r
+        }
+    }
 }
 
 /// 型の最初の一致 (04 §6 の「訂正の型の使い方」)。
@@ -512,113 +639,153 @@ impl Matched {
     }
 }
 
-/// 穴の並び `sides` を、本文の範囲 `region` に置く。2 つなら読点・空白で分ける (`last_gap` なら最後の区切り)。
-/// 末尾の穴の並びなら、最後の穴を末尾の穴にする。
-fn place(
-    v: &View,
-    sides: &[Side],
+/// 照合の状態 (型・本文・範囲と、錨ごとの一致の表)。
+struct Matcher<'a> {
+    c: &'a Compiled,
+    v: &'a View,
     region: Range<usize>,
-    last_gap: bool,
-    trailing: bool,
-    out: &mut Vec<HoleAt>,
-) -> Option<()> {
-    match sides {
-        [] => Some(()),
-        [side] => {
-            (region.start < region.end).then_some(())?;
-            out.push(HoleAt {
-                side: *side,
-                range: region,
-                trailing,
-            });
-            Some(())
-        }
-        [a, b] => {
-            let m = v.split_at(&region, last_gap)?;
-            out.push(HoleAt {
-                side: *a,
-                range: region.start..m,
-                trailing: false,
-            });
-            out.push(HoleAt {
-                side: *b,
-                range: m..region.end,
-                trailing,
-            });
-            Some(())
-        }
-        _ => None,
-    }
+    occ: Vec<Vec<(usize, usize)>>,
 }
 
-/// 錨の位置 (始まり, 長さ) から穴を置く。穴のどれかが空なら `None`。
-fn assemble(c: &Compiled, v: &View, placed: &[(usize, usize)]) -> Option<Matched> {
-    let mut holes = Vec::new();
-    let (a0, _) = placed[0];
-    let lead_start = v.sentence_start(a0);
-    place(v, &c.lead, lead_start..a0, true, false, &mut holes)?;
-    let mut end = 0;
-    for (k, (_, sides)) in c.anchors.iter().enumerate() {
-        let (a, len) = placed[k];
-        let b = a + len;
-        end = b;
-        match placed.get(k + 1) {
-            Some(&(next, _)) => place(v, sides, b..next, true, false, &mut holes)?,
-            None => {
-                let e = v.sentence_end(b);
-                place(v, sides, b..e, false, true, &mut holes)?;
-                if !sides.is_empty() {
-                    end = e;
+impl Matcher<'_> {
+    /// 穴の並び `sides` を `[s, e)` に置く。2 つなら読点・空白で分ける (`last_gap` なら最後の区切り)。`{old}`
+    /// の穴は読点でも切る (後ろに固定の部分がある穴は最後の読点の後から、末尾の穴は最初の読点の前まで)。
+    fn place(
+        &self,
+        sides: &[Side],
+        (s, e): (usize, usize),
+        last_gap: bool,
+        trailing: bool,
+        at_end: bool,
+        out: &mut Vec<HoleAt>,
+    ) -> Option<()> {
+        let v = self.v;
+        let mut one =
+            |side: Side, s: usize, e: usize, trailing: bool, at_end: bool| -> Option<()> {
+                let (mut s, mut e, mut at_end) = (s, e, at_end);
+                if side == Side::Old
+                    && let Some(j) = v.mark_in(s, e, !trailing, &v.prev_comma, &v.next_comma)
+                {
+                    if trailing {
+                        e = j;
+                        at_end = false;
+                    } else {
+                        s = j;
+                    }
+                }
+                (s < e).then_some(())?;
+                out.push(HoleAt {
+                    side,
+                    range: s..e,
+                    trailing,
+                    at_end,
+                });
+                Some(())
+            };
+        match sides {
+            [] => Some(()),
+            [side] => one(*side, s, e, trailing, at_end),
+            [a, b] => {
+                let m = v.mark_in(s, e, last_gap, &v.prev_gap, &v.next_gap)?;
+                one(*a, s, m, false, false)?;
+                one(*b, m, e, trailing, at_end)
+            }
+            _ => None,
+        }
+    }
+
+    /// 最初の錨の前の穴が置けるか (置けなければ、その錨の位置からは当たらない)。
+    fn lead(&self, a0: usize, out: &mut Vec<HoleAt>) -> Option<usize> {
+        let s = self.v.sentence_start(a0).max(self.region.start);
+        self.place(&self.c.lead, (s, a0), true, false, false, out)?;
+        Some(s)
+    }
+
+    /// 錨の位置 (始まり, 長さ) から穴を置く。穴のどれかが空なら `None`。
+    fn assemble(&self, placed: &[(usize, usize)]) -> Option<Matched> {
+        let mut holes = Vec::new();
+        let (a0, _) = placed[0];
+        let lead_start = self.lead(a0, &mut holes)?;
+        let mut end = 0;
+        for (k, (_, sides)) in self.c.anchors.iter().enumerate() {
+            let (a, len) = placed[k];
+            let b = a + len;
+            end = b;
+            match placed.get(k + 1) {
+                Some(&(next, _)) => self.place(sides, (b, next), true, false, false, &mut holes)?,
+                None => {
+                    let sentence_end = self.v.sentence_end(b);
+                    let e = sentence_end.min(self.region.end).max(b);
+                    self.place(sides, (b, e), false, true, e == sentence_end, &mut holes)?;
+                    if !sides.is_empty() {
+                        end = e;
+                    }
                 }
             }
         }
+        let start = if self.c.lead.is_empty() {
+            a0
+        } else {
+            lead_start
+        };
+        Some(Matched {
+            holes,
+            span: start..end,
+        })
     }
-    let start = if c.lead.is_empty() { a0 } else { lead_start };
-    Some(Matched {
-        holes,
-        span: start..end,
-    })
-}
 
-/// 錨 `k` から先を、本文の前から当てる。最初に穴まで置けた一致を返す (すべての組を数え上げない)。
-fn search(c: &Compiled, v: &View, k: usize, placed: &mut Vec<(usize, usize)>) -> Option<Matched> {
-    if k == c.anchors.len() {
-        return assemble(c, v, placed);
-    }
-    let prev = k
-        .checked_sub(1)
-        .map(|p| (placed[p], !c.anchors[p].1.is_empty()));
-    let from = prev.map_or(0, |((a, len), holes)| a + len + usize::from(holes));
-    let n = v.len();
-    for a in from..n {
-        if let Some(((pa, plen), holes)) = prev {
-            let b = pa + plen;
-            if !holes && a != b {
-                break;
+    /// 錨 `k` から先を、本文の前から当てる。最初に穴まで置けた一致を返す (すべての組を数え上げない)。錨の間の
+    /// 穴は同じ文の中だけなので、次の錨は、表の中で今の位置より後の一致を、文の区切りに当たるまで試す。
+    fn search(&self, k: usize, placed: &mut Vec<(usize, usize)>) -> Option<Matched> {
+        if k == self.c.anchors.len() {
+            return self.assemble(placed);
+        }
+        let occ = &self.occ[k];
+        match k.checked_sub(1) {
+            None => {
+                for &(a, len) in occ {
+                    if self.lead(a, &mut Vec::new()).is_none() {
+                        continue;
+                    }
+                    placed.push((a, len));
+                    if let Some(m) = self.search(1, placed) {
+                        return Some(m);
+                    }
+                    placed.pop();
+                }
             }
-            // 錨の間の穴は同じ文の中だけ (先の位置も同じ区切りをまたぐので、そこで止める)。
-            if holes && !v.within_sentence(b, a) {
-                break;
+            Some(p) => {
+                let (pa, plen) = placed[p];
+                let b = pa + plen;
+                let holes = !self.c.anchors[p].1.is_empty();
+                let from = b + usize::from(holes);
+                let i = occ.partition_point(|x| x.0 < from);
+                for &(a, len) in &occ[i..] {
+                    if (!holes && a != b) || (holes && !self.v.within_sentence(b, a)) {
+                        break;
+                    }
+                    placed.push((a, len));
+                    if let Some(m) = self.search(k + 1, placed) {
+                        return Some(m);
+                    }
+                    placed.pop();
+                }
             }
         }
-        for f in &c.anchors[k].0 {
-            let len = f.len();
-            if a + len > n || v.chars[a..a + len] != f[..] || !v.bounded(a, a + len) {
-                continue;
-            }
-            placed.push((a, len));
-            if let Some(m) = search(c, v, k + 1, placed) {
-                return Some(m);
-            }
-            placed.pop();
-        }
+        None
     }
-    None
 }
 
-/// 型の最初の一致 (同じ型なら本文の前から)。
-fn first_match(c: &Compiled, v: &View) -> Option<Matched> {
-    search(c, v, 0, &mut Vec::new())
+/// 型の、`region` (`View::chars` の範囲) の中の最初の一致 (同じ型なら本文の前から)。先頭の穴は文の頭 (か範囲の
+/// 始まり) から、末尾の穴は文の終わり (か範囲の終わり) まで取る。
+fn first_match(c: &Compiled, v: &View, region: Range<usize>) -> Option<Matched> {
+    let occ = c
+        .anchors
+        .iter()
+        .map(|(variants, _)| v.occurrences(variants, &region))
+        .collect();
+    let m = Matcher { c, v, region, occ };
+    m.search(0, &mut Vec::new())
 }
 
 /// 字句の規則で見つけた訂正の型の一致 (04 §6 の記録の `pattern`・`dir_old`・`dir_new`)。
@@ -632,9 +799,9 @@ pub struct PatternMatch {
     pub dir_new: String,
 }
 
-/// 穴の本文 (前後の句読点・空白と文末の「よ」「です」を除き、[`DIR_MAX_CHARS`] 文字まで)。
-fn hole_text(text: &str, v: &View, r: &Range<usize>) -> String {
-    let t = v.trim(r);
+/// 穴の本文 (値を比べる範囲と同じに切り、[`DIR_MAX_CHARS`] 文字まで)。
+fn hole_text(text: &str, v: &View, h: &HoleAt) -> String {
+    let t = h.trimmed(v);
     let raw = match v.source(&t) {
         Some(s) => &text[s],
         None => &v.mapped.text()[v.out_range(&t)],
@@ -642,15 +809,15 @@ fn hole_text(text: &str, v: &View, r: &Range<usize>) -> String {
     raw.chars().take(DIR_MAX_CHARS).collect()
 }
 
-/// 本文 (前のふるいの後) が型を当てる長さか。
+/// 本文 (前のふるいの後) が型を当てる長さか (正規化の後の長さは [`View::new`] が見る)。
 fn matchable(text: &str) -> bool {
     text.chars().nth(MATCH_MAX_CHARS).is_none()
 }
 
 /// 本文 (前のふるいの後) に一次のふるいと訂正の型を当てる (04 §6 の「訂正の型の使い方」)。言語は本文の文字種
 /// から決める。一次のふるいは、英語は語の境界で、日本語は部分一致で当てる (04 §5.2)。型は固定の部分の長い
-/// ものから試し、最初に当たった型の、本文の前からの最初の一致を返す。[`MATCH_MAX_CHARS`] 文字を超える本文には
-/// 当てない。
+/// ものから試し、最初に当たった型の、本文の前からの最初の一致を返す。[`MATCH_MAX_CHARS`] 文字 (正規化の前と
+/// 後のどちらでも) を超える本文には当てない。
 pub fn match_correction(text: &str) -> Option<PatternMatch> {
     if !matchable(text) {
         return None;
@@ -671,14 +838,14 @@ pub fn match_correction(text: &str) -> Option<PatternMatch> {
         let Some(compiled) = compile(pattern) else {
             continue;
         };
-        let Some(m) = first_match(&compiled, &view) else {
+        let Some(m) = first_match(&compiled, &view, 0..view.len()) else {
             continue;
         };
         let new = m.hole(Side::New)?;
         return Some(PatternMatch {
             pattern: pattern.to_owned(),
-            dir_old: m.hole(Side::Old).map(|h| hole_text(text, &view, &h.range)),
-            dir_new: hole_text(text, &view, &new.range),
+            dir_old: m.hole(Side::Old).map(|h| hole_text(text, &view, h)),
+            dir_new: hole_text(text, &view, new),
         });
     }
     None
@@ -752,9 +919,9 @@ fn contains(hay: &str, needle: &str) -> bool {
     !hits_in(Mapped::new(hay).as_ref(), needle).is_empty()
 }
 
-/// 穴 `h` の中で、値が固定の部分に接する端にある一致 (04 §6 の「値の位置」)。
-fn placed_hit<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
-    let hole = v.out_range(&v.trim(&h.range));
+/// 新しい値の穴 `h` の中で、値が固定の部分に接する端にある一致 (04 §6 の「値の位置」)。
+fn placed_new<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
+    let hole = v.out_range(&h.trimmed(v));
     hits.iter().find(|x| {
         hole.start <= x.out.start
             && x.out.end <= hole.end
@@ -766,6 +933,12 @@ fn placed_hit<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
     })
 }
 
+/// 古い値の穴 `h` の全体と一致する一致 (04 §6 の「古い値は穴の全体」)。
+fn placed_old<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
+    let hole = v.out_range(&h.trimmed(v));
+    hits.iter().find(|x| x.out == hole)
+}
+
 /// 検証の関門を順に当てる (04 §6 の「関門」)。通れば検証済みの訂正を返す。
 ///
 /// 1. 訂正である: `new` が (正規化の後に) 空でない。
@@ -775,8 +948,9 @@ fn placed_hit<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
 ///    例外は無い)。
 /// 4. 古い値: 直前の応答・同じセッションのそれより前の利用者の発話・今の値のどれかにあり、関門 6 と 200 文字の
 ///    上限に通る。
-/// 5. 向き: 古い値と新しい値の値の鍵が違い、根拠の位置の本文に候補の型を当て直した最初の一致で、新しい値が
-///    `{new}` の穴の、古い値が `{old}` の穴 (型にあれば) の、固定の部分に接する端にある。
+/// 5. 向き: 根拠の範囲に候補の型を当て直した最初の一致で、新しい値が `{new}` の穴の、固定の部分に接する端に
+///    ある (その位置が括弧の内側なら、ほかの検査より先に `quoted`)。古い値と新しい値の値の鍵が違う。古い値が
+///    `{old}` の穴 (型にあれば) の全体と一致する。値の一致の語の境界は、前のふるいの後の本文の全体で見る。
 ///
 /// 出典は、新しい値の保存した本文の範囲にする (戻せなければ 2 の理由で落とす)。古い値の穴のある型では、古い値の
 /// 範囲も持つ (置き換えた事実の出典に足す、04 §5.3 の「終えた発言の出典」)。
@@ -826,22 +1000,26 @@ pub fn verify(
         return Err(Rejection::OldNotFound);
     }
 
-    // 5. 向き。
+    // 5. 向き。型は根拠の範囲に当て直し、値の一致 (語の境界) は本文の全体で探す。
+    let pattern = compile(&candidate.pattern).ok_or(Rejection::Direction)?;
+    let view = View::new(sent).ok_or(Rejection::Direction)?;
+    let region = view.region_of(&found.sent);
+    let m = first_match(&pattern, &view, region).ok_or(Rejection::Direction)?;
+    let new_hole = m.hole(Side::New).ok_or(Rejection::Direction)?;
+    let new_hits = view.mapped.find(&new_n, Edges::Word);
+    let new_hit = placed_new(&view, new_hole, &new_hits).ok_or(Rejection::Direction)?;
+    if regions.is_quoted("", &new_hit.source) {
+        return Err(Rejection::Quoted);
+    }
     let (old_vk, new_vk) = (value_key(ctx.key, &out.old), value_key(ctx.key, &out.new));
     if old_vk == new_vk {
         return Err(Rejection::Direction);
     }
-    let pattern = compile(&candidate.pattern).ok_or(Rejection::Direction)?;
-    let view = View::new(&sent[found.sent.clone()]).ok_or(Rejection::Direction)?;
-    let m = first_match(&pattern, &view).ok_or(Rejection::Direction)?;
-    let new_hole = m.hole(Side::New).ok_or(Rejection::Direction)?;
-    let new_hits = view.mapped.find(&new_n, Edges::Word);
-    let new_hit = placed_hit(&view, new_hole, &new_hits).ok_or(Rejection::Direction)?;
     let old_hit = match m.hole(Side::Old) {
         Some(h) => {
             let old_hits = view.mapped.find(&old_n, Edges::Word);
             Some(
-                placed_hit(&view, h, &old_hits)
+                placed_old(&view, h, &old_hits)
                     .ok_or(Rejection::Direction)?
                     .clone(),
             )
@@ -850,11 +1028,7 @@ pub fn verify(
     };
 
     let to_source = |hit: &Hit| -> Option<Source> {
-        let at = found.sent.start;
-        let stored = ctx
-            .utterance
-            .filtered
-            .to_stored(at + hit.source.start..at + hit.source.end)?;
+        let stored = ctx.utterance.filtered.to_stored(hit.source.clone())?;
         Some(Source {
             turn: ctx.utterance.turn,
             start: u32::try_from(stored.start).ok()?,
@@ -935,7 +1109,7 @@ pub fn utterance_excerpt<'t>(text: &'t str, pattern: &str) -> &'t str {
         .then(|| {
             let c = compile(pattern)?;
             let v = View::new(text)?;
-            let m = first_match(&c, &v)?;
+            let m = first_match(&c, &v, 0..v.len())?;
             v.source(&m.span)
         })
         .flatten();
@@ -959,9 +1133,33 @@ pub fn utterance_excerpt<'t>(text: &'t str, pattern: &str) -> &'t str {
     &text[start..end]
 }
 
-/// 検証の利用者のメッセージ: 直前の応答 (信頼しない引用の枠) と、候補の発話。本文の中の枠の印は、変わらなく
-/// なるまで除く (入れ子の印で枠を閉じて外に出られないように)。切るのは呼ぶ側 ([`tail_excerpt`]・
-/// [`utterance_excerpt`]) で行う。
+/// 枠の印に使う山括弧 (`<`・`>` と、NFKC でそれらを含む文字) を、印にならない山括弧 (`‹`・`›`) に替える。
+/// 全角・小さい形・大文字小文字・内側の空白を変えた印も、`<` と `>` が無ければ枠を閉じられない。
+fn defang(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                return match c {
+                    '<' => '‹',
+                    '>' => '›',
+                    _ => c,
+                };
+            }
+            let n: String = std::iter::once(c).nfkc().collect();
+            if n.contains('<') {
+                '‹'
+            } else if n.contains('>') {
+                '›'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// 検証の利用者のメッセージ: 直前の応答 (信頼しない引用の枠) と、候補の発話。本文の中の山括弧は、枠の印に
+/// ならない文字に替える (入れ子・全角・空白入りの印で枠を閉じられないように)。切るのは呼ぶ側
+/// ([`tail_excerpt`]・[`utterance_excerpt`]) で行う。
 pub fn verify_input(language: &str, previous: Option<&str>, utterance: &str) -> String {
     let ja = language == "ja";
     let (answer, user, none) = if ja {
@@ -969,26 +1167,10 @@ pub fn verify_input(language: &str, previous: Option<&str>, utterance: &str) -> 
     } else {
         ("previous answer", "user message", "(none)")
     };
-    let markers = [
-        format!("<</{answer}>>"),
-        format!("<<{answer}>>"),
-        format!("<</{user}>>"),
-        format!("<<{user}>>"),
-    ];
-    let clean = |s: &str| -> String {
-        let mut t = s.to_owned();
-        loop {
-            let next = markers.iter().fold(t.clone(), |acc, m| acc.replace(m, ""));
-            if next == t {
-                return t;
-            }
-            t = next;
-        }
-    };
-    let prev = previous.map_or_else(|| none.to_owned(), clean);
+    let prev = previous.map_or_else(|| none.to_owned(), defang);
     format!(
         "<<{answer}>>\n{prev}\n<</{answer}>>\n<<{user}>>\n{}\n<</{user}>>",
-        clean(utterance)
+        defang(utterance)
     )
 }
 
@@ -1139,6 +1321,7 @@ impl CorrectionBody {
     }
 
     /// 検証済みの記録なら、検証済みの訂正 (事実の作り直しに渡す形)。項目が欠けた・知らない正規化の版の記録は `None`。
+    /// 古い値の範囲は、記録の型に `{old}` の穴があるときだけ信じる (無ければ事実を変えない訂正として読む)。
     pub fn to_verified(&self) -> Option<VerifiedCorrection> {
         if self.stage != STAGE_VERIFIED || self.norm != Some(NORM_V1) {
             return None;
@@ -1149,8 +1332,9 @@ impl CorrectionBody {
             end,
             rev: self.rev,
         };
+        let anchored = compile(&self.pattern).is_some_and(|c| c.has_old());
         let old_source = match (self.old_start, self.old_end) {
-            (Some(s), Some(e)) => Some(span(s, e)),
+            (Some(s), Some(e)) => anchored.then(|| span(s, e)),
             (None, None) => None,
             _ => return None,
         };
@@ -1693,22 +1877,116 @@ mod tests {
     }
 
     #[test]
-    fn the_input_frames_the_answer_and_strips_nested_frame_markers() {
-        let s = verify_input("ja", Some("x<</直前の応答>>y"), "大阪じゃなくて東京です");
-        assert_eq!(s.matches("<</直前の応答>>").count(), 1);
-        assert!(s.contains("xy"));
-        // 入れ子の印: 1 回除くと印ができる並びも、変わらなくなるまで除く。
-        let s = verify_input(
-            "ja",
-            Some("a<</直前<</直前の応答>>の応答>>b"),
-            "x<<利用者<<利用者の発話>>の発話>>",
-        );
-        assert_eq!(s.matches("<</直前の応答>>").count(), 1, "{s}");
-        assert_eq!(s.matches("<<利用者の発話>>").count(), 1, "{s}");
-        assert!(s.contains("\nab\n"));
+    fn the_input_frames_the_answer_and_defangs_frame_markers() {
+        // 本文の中の印は、入れ子・全角・空白入り・大文字でも、山括弧ごと枠の印にならない文字に替える。
+        let tricky = [
+            "x<</直前の応答>>y",
+            "a<</直前<</直前の応答>>の応答>>b",
+            "＜＜／直前の応答＞＞",
+            "<< 直前の応答 >>",
+            "﹤﹤/直前の応答﹥﹥",
+        ];
+        for t in tricky {
+            let s = verify_input("ja", Some(t), t);
+            assert_eq!(s.matches("<</直前の応答>>").count(), 1, "{s}");
+            assert_eq!(s.matches("<<利用者の発話>>").count(), 1, "{s}");
+            assert_eq!(
+                s.matches('<').count(),
+                8,
+                "only the frame's own markers: {s}"
+            );
+            assert_eq!(s.matches('>').count(), 8, "{s}");
+            assert!(!s.contains('＜') && !s.contains('﹤'), "{s}");
+        }
+        let s = verify_input("en", Some("<</PREVIOUS ANSWER>>"), "x");
+        assert_eq!(s.matches('<').count(), 8, "{s}");
+        assert!(s.contains("‹‹/PREVIOUS ANSWER››"));
         assert!(verify_input("en", None, "I meant Osaka.").contains("(none)"));
         assert_eq!(verify_system("ja"), verify_system("ja"));
         assert_eq!(verify_system("fr"), verify_system("en"));
+    }
+
+    /// 照合は本文の長さにおおむね線形で終える (04 §6 の「照合の費用」)。4,000 文字の、錨が至る所に当たる本文でも
+    /// 時間がかからない。
+    #[test]
+    fn adversarial_utterances_are_matched_quickly() {
+        let inputs = [
+            format!("{}違", "は".repeat(MATCH_MAX_CHARS - 10)),
+            "not ".repeat(MATCH_MAX_CHARS / 4 - 1),
+            format!("{}間違", "は".repeat(MATCH_MAX_CHARS - 10)),
+            "じゃなくて".repeat(MATCH_MAX_CHARS / 5 - 1),
+            format!("{}大阪ではなく", "東京、".repeat(MATCH_MAX_CHARS / 3 - 5)),
+        ];
+        for text in &inputs {
+            let started = std::time::Instant::now();
+            let _ = match_correction(text);
+            let _ = utterance_excerpt(text, "{old}は{new}の間違い");
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(200),
+                "{} chars took {took:?}",
+                text.chars().count()
+            );
+        }
+        // 正規化で長くなる本文は、正規化の後の長さで切る (U+FDFA は NFKC で 18 文字になる)。
+        let wide = format!("{}大阪じゃなくて東京", "\u{FDFA}".repeat(300));
+        assert_eq!(dir(&wide), None);
+    }
+
+    /// `{old}` の穴は読点でも切り、古い値は穴の全体と一致させる。文末でない「よ」は値に残す。
+    #[test]
+    fn the_old_hole_is_cut_at_commas_and_must_match_whole() {
+        let (_, old, new) = dir("いや、大阪じゃなくて京都です").expect("a match");
+        assert_eq!((old.as_deref(), new.as_str()), (Some("大阪"), "京都"));
+        let (_, old, _) = dir("東大阪じゃなくて京都です").expect("a match");
+        assert_eq!(old.as_deref(), Some("東大阪"));
+        let (_, old, new) = dir("かよじゃなくてさよです").expect("a match");
+        assert_eq!((old.as_deref(), new.as_str()), (Some("かよ"), "さよ"));
+        // 文末の「です」は 1 回だけ除く。
+        let (_, _, new) = dir("大阪じゃなくてですです").expect("a match");
+        assert_eq!(new, "です");
+        let prev = Some("大阪ですね");
+        let text = "東大阪じゃなくて京都です";
+        assert_eq!(
+            run(text, prev, &output("大阪", "京都", text)),
+            Err(Rejection::Direction)
+        );
+        let text = "いや、大阪じゃなくて京都です";
+        assert!(run(text, prev, &output("大阪", "京都", text)).is_ok());
+    }
+
+    /// 値の一致の語の境界は、根拠ではなく前のふるいの後の本文の全体で見る。文の区切りは元の文字で決める。
+    #[test]
+    fn word_boundaries_and_delimiters_use_the_whole_original_text() {
+        let text = "We moved to Kyoto, not Annapolis.";
+        let out = output("Ann", "Kyoto", "Kyoto, not Ann");
+        assert_eq!(
+            run(text, Some("Ann lives in Annapolis"), &out),
+            Err(Rejection::Direction)
+        );
+        // 半角の `.` は後ろが空白か本文の終わりのときだけ文を切る。全角の `．` は常に切る。
+        let (_, old, _) = dir("Version 1.2, not 1.3 is right").expect("a match");
+        assert_eq!(old.as_deref(), Some("1.3 is right"));
+        let (_, old, _) = dir("前置き．大阪じゃなくて東京").expect("a match");
+        assert_eq!(old.as_deref(), Some("大阪"));
+        // 半角の `.` の後が読点なら、文を切らない。
+        let (_, old, _) = dir("前置き.、大阪じゃなくて東京").expect("a match");
+        assert_eq!(old.as_deref(), Some("大阪"), "the comma cuts the old hole");
+    }
+
+    /// 型に `{old}` の穴が無い記録は、古い値の範囲があっても事実を変えない訂正として読む。
+    #[test]
+    fn a_record_without_an_old_hole_is_read_as_unanchored() {
+        let turn = Id::from_bytes([1; 16]);
+        let text = "正しくは東京です";
+        let v = run(text, Some("大阪ですね"), &output("大阪", "東京", text)).expect("verified");
+        assert_eq!(v.old_source(), None);
+        let m = match_correction(text).expect("match");
+        let mut body = CorrectionBody::candidate(turn, 0, None, &m).checked(&Verdict::Verified(v));
+        body.old_start = Some(0);
+        body.old_end = Some(6);
+        let read = body.to_verified().expect("verified");
+        assert_eq!(read.old_source(), None, "no old hole, no anchor");
     }
 
     #[test]

@@ -335,13 +335,18 @@ async fn save(inner: &Arc<Inner>, id: Id, verdict: Verdict) -> Option<Option<(Ve
                     ids: &*w.ids,
                     now,
                 };
-                let (fact_ops, r) = consolidate(&tx, &ctx, vec![FactEvent::Correction(v.clone())])
-                    .map_err(
-                        |e| tracing::warn!(error = %e, "a correction could not be consolidated"),
-                    )
-                    .ok()?;
-                ops.extend(fact_ops);
-                report = r;
+                // 畳めなくても (記録を読めない・本体を書けない)、検証の結果の記録は書く。検証し直しで LLM を
+                // 呼び続けないため。検証済みの記録は残るので、事実の作り直し (`rebuild --facts`) で当て直せる。
+                match consolidate(&tx, &ctx, vec![FactEvent::Correction(v.clone())]) {
+                    Ok((fact_ops, r)) => {
+                        ops.extend(fact_ops);
+                        report = r;
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "a verified correction could not be consolidated; only the record is written"
+                    ),
+                }
             }
             Some((ops, Some(written), report))
         })
@@ -415,8 +420,19 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                         b
                     }
                 };
-                let filtered = Prefiltered::from_stored(&m.text);
-                let utterance = utterance_excerpt(filtered.text(), &c.pattern);
+                // 型の照合は、非同期の実行器を塞がないように別のスレッドで行う。
+                let m = Arc::new(m);
+                let excerpt = {
+                    let (m, pattern) = (m.clone(), c.pattern.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let filtered = Prefiltered::from_stored(&m.text);
+                        utterance_excerpt(filtered.text(), &pattern).to_owned()
+                    })
+                    .await
+                };
+                let Ok(utterance) = excerpt else {
+                    return progressed;
+                };
                 let input = fit_input(
                     inner,
                     &*llm,
@@ -424,7 +440,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                     limit,
                     counting,
                     m.previous.as_deref(),
-                    utterance,
+                    &utterance,
                 )
                 .await;
                 match input {
@@ -432,25 +448,34 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                     Some(input) => {
                         match call(inner, &*llm, slot, &system, &input, &mut tally).await {
                             Reply::Parsed(out) => {
-                                let safety = Safety::bundled();
-                                let ctx = VerifyContext {
-                                    utterance: Utterance {
-                                        turn: c.turn,
-                                        rev: c.rev,
-                                        text: &m.text,
-                                        filtered: &filtered,
-                                    },
-                                    // 関門は切る前の保存した本文で照合する。
-                                    previous: m.previous.as_deref(),
-                                    earlier: &m.earlier,
-                                    live: &m.live,
-                                    key,
-                                    safety: &safety,
+                                let (m, c, key) = (m.clone(), c.clone(), key.clone());
+                                let judged = tokio::task::spawn_blocking(move || {
+                                    let filtered = Prefiltered::from_stored(&m.text);
+                                    let safety = Safety::bundled();
+                                    let ctx = VerifyContext {
+                                        utterance: Utterance {
+                                            turn: c.turn,
+                                            rev: c.rev,
+                                            text: &m.text,
+                                            filtered: &filtered,
+                                        },
+                                        // 関門は切る前の保存した本文で照合する。
+                                        previous: m.previous.as_deref(),
+                                        earlier: &m.earlier,
+                                        live: &m.live,
+                                        key: &key,
+                                        safety: &safety,
+                                    };
+                                    match verify(&c, &out, &ctx) {
+                                        Ok(v) => Verdict::Verified(v),
+                                        Err(r) => Verdict::Rejected(r),
+                                    }
+                                })
+                                .await;
+                                let Ok(v) = judged else {
+                                    return progressed;
                                 };
-                                match verify(&c, &out, &ctx) {
-                                    Ok(v) => Verdict::Verified(v),
-                                    Err(r) => Verdict::Rejected(r),
-                                }
+                                v
                             }
                             Reply::Truncated => Verdict::Unverifiable(Unverifiable::Truncated),
                             Reply::Invalid => Verdict::Unverifiable(Unverifiable::InvalidOutput),

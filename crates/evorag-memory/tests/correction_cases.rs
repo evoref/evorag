@@ -283,7 +283,7 @@ fn correction_cases_pass() {
             *outcomes.entry(o).or_default() += 1;
         }
     }
-    assert_eq!(cases.len(), 21);
+    assert_eq!(cases.len(), 26);
     for r in Rejection::ALL {
         assert!(outcomes.contains_key(r.as_str()), "no case for `{r}`");
     }
