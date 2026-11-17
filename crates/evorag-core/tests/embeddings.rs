@@ -579,6 +579,21 @@ async fn a_crash_before_the_indexes_are_cleaned_is_finished_on_the_next_start() 
     assert_eq!(cleanup_jobs(dir.path()), 0, "the job is done");
 }
 
+/// 整理の job が済むまで、裏の処理を試し直させながら待つ (遅い CI の機械では、1 回の `settle_background` の
+/// 間に sleep-time の整理の手順まで回らないことがあるため)。最後に残っていた job の数を返す。
+async fn cleanup_finished(core: &Core) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        core.settle_background().await;
+        let left = core.pending_cleanup_jobs();
+        if left == 0 || std::time::Instant::now() > deadline {
+            return left;
+        }
+        core.retry_background_now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// 索引から除けなかったら、job を残して sleep-time に試し直す (終わるまで job の記録として `doctor` に出る)。
 /// verifies: AC-FR-309-2 (前の世代の索引の分を含む)、04 §7.7 の 2 (除けなかった分は job から再試行する)
 #[tokio::test(flavor = "multi_thread")]
@@ -604,8 +619,7 @@ async fn an_index_removal_that_fails_is_retried_from_the_job() {
     // 除けるようになったら、sleep-time の手順が job から続けて終える。
     core.inject_index_removal_failure(0);
     core.retry_background_now();
-    core.settle_background().await;
-    assert_eq!(core.pending_cleanup_jobs(), 0, "the job is done");
+    assert_eq!(cleanup_finished(&core).await, 0, "the job is done");
     core.shutdown().await;
     assert_eq!(rows(dir.path(), 2), 0, "the previous generation is cleaned");
     assert_eq!(rows(dir.path(), 5), 0, "the current generation is cleaned");
@@ -640,8 +654,7 @@ async fn a_cleanup_interrupted_by_input_still_finishes() {
         core.touch();
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    core.settle_background().await;
-    assert_eq!(core.pending_cleanup_jobs(), 0, "the job is done");
+    assert_eq!(cleanup_finished(&core).await, 0, "the job is done");
     core.shutdown().await;
     assert_eq!(rows(dir.path(), 2), 0);
 }
