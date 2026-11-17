@@ -158,6 +158,14 @@ pub(crate) async fn open(inner: &Arc<Inner>) {
         tracing::warn!("vector index could not be checked");
         return;
     };
+    if !plan.unsynced.is_empty()
+        && let Ok((_, job)) = evorag_memory::index_job(&writes(inner), plan.unsynced.clone())
+        && write_derived(inner, vec![job]).await.is_ok()
+    {
+        inner
+            .cleanup_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     if !plan.stale.is_empty() {
         let w = writes(inner);
         let ops: Vec<_> = plan
@@ -189,6 +197,8 @@ struct OpenPlan {
     stale: Vec<Id>,
     /// 突き合わせた索引 (今のモデルの記録が無ければ `None`)。
     index: Option<Arc<VecIndex>>,
+    /// 前の世代の索引から除けなかった行 (索引の整理の job に残す)。
+    unsynced: Vec<Id>,
 }
 
 fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPlan> {
@@ -240,17 +250,24 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
             stale.push(id);
         }
     }
-    if let Some(p) = previous {
-        let want: HashSet<Id> = prev.keys().map(|(t, _)| *t).collect();
-        sync_previous(&vec_dir(&root, p), &want);
-    }
+    let unsynced = match previous {
+        Some(p) => {
+            let want: HashSet<Id> = prev.keys().map(|(t, _)| *t).collect();
+            sync_previous(&vec_dir(&root, p), &want)
+        }
+        None => Vec::new(),
+    };
     let dir = vec_dir(&root, key);
     let Some(dim) = mine.values().next().map(|(_, b)| b.dim as usize) else {
         // 今のモデルの記録が無い: 索引のフォルダがあっても、中身は信用できないので消す (作り直す)。
         if dir.is_dir() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        return Some(OpenPlan { stale, index: None });
+        return Some(OpenPlan {
+            stale,
+            index: None,
+            unsynced,
+        });
     };
     let (ix, opened) = VecIndex::open(&dir, dim).ok()?;
     let want: HashSet<Id> = mine.keys().map(|(t, _)| *t).collect();
@@ -290,6 +307,7 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
     Some(OpenPlan {
         stale,
         index: Some(Arc::new(ix)),
+        unsynced,
     })
 }
 
@@ -351,21 +369,28 @@ fn remove_from_generation(dir: &std::path::Path, gone: &HashSet<Id>) -> bool {
 }
 
 /// 前の世代の索引を、DB の記録と突き合わせる (起動時の突き合わせをすべての世代に当てる、04 §7.7 の 2)。
-/// `want` は、DB に記録のある前のモデルの埋め込みの対象。それ以外の行を除く。
-fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) {
+/// `want` は、DB に記録のある前のモデルの埋め込みの対象。それ以外の行を除く。除けなかった行を返す (呼び手が
+/// 索引の整理の job に残す)。読めない索引を消せないときは、次の起動でもう一度試す。
+fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) -> Vec<Id> {
     if !dir.is_dir() {
-        return;
+        return Vec::new();
     }
     let Some(ix) = VecIndex::open_existing(dir) else {
         // 読めない索引は使えないので消す (戻したときに DB から作り直す)。
-        let _ = std::fs::remove_dir_all(dir);
-        return;
+        if let Err(e) = std::fs::remove_dir_all(dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "an unreadable vector index could not be removed");
+        }
+        return Vec::new();
     };
     let extra: HashSet<Id> = ix.snapshot().ids().difference(want).copied().collect();
-    if !extra.is_empty()
-        && let Err(e) = ix.remove(&extra)
-    {
-        tracing::warn!(error = %e, "the previous vector index could not be synced");
+    match ix.remove(&extra) {
+        Ok(()) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "the previous vector index could not be synced");
+            let mut left: Vec<Id> = extra.into_iter().collect();
+            left.sort();
+            left
+        }
     }
 }
 

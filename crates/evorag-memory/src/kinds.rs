@@ -24,8 +24,11 @@ pub const SETTING_IGNORED_CONFIG: &str = "notice.ignored_config";
 pub const SETTING_ANSWER_LANGUAGE: &str = "answer.language";
 pub const SETTING_ANSWER_LENGTH: &str = "answer.length";
 pub const SETTING_ANSWER_FORMAT: &str = "answer.format";
-/// job の手順: 消した記録を退避から除く (03 §7.3)。
+/// job の手順: 消した記録を索引と退避から除く (03 §7.3、04 §7.7 の 2)。
 pub const JOB_PURGE_BACKUPS: &str = "purge_backups";
+/// job の手順: 索引の項目だけを除く (起動時の突き合わせで除けなかった、DB に記録の無い前の世代の索引の行。
+/// 退避には触れない、04 §7.7 の 2)。古い版は知らない手順の job を使わずに残す。
+pub const JOB_PURGE_INDEXES: &str = "purge_indexes";
 
 /// ターン → セッション。
 pub const REL_IN_SESSION: &str = "in_session";

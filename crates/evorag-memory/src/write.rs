@@ -43,22 +43,9 @@ fn envelope<T: serde::Serialize>(
 }
 
 /// セッションの更新時刻を `now` にし、`fields` を差し替える。セッションは書き手のトランザクションの中で読み直す
-/// (外で読んだ封筒を書き戻すと、その間の題名の変更や削除を上書きするため、04 §7.7 の 3)。
+/// (外で読んだ封筒を書き戻すと、その間の題名の変更や削除を上書きするため、04 §7.7 の 3)。一覧の並びの副索引も、
+/// 書き手が読み直した封筒から付け替える (`Patch` は種類の `derive` を作り直す)。
 fn touch_session(session: &Envelope, now: Timestamp, fields: BodyPatch, ops: &mut Vec<WriteOp>) {
-    // 一覧の並びの副索引を、新しい更新時刻に付け替える (読んだ後に変わっていれば、古い項目が残る。読む側は
-    // それを読み飛ばす)。
-    ops.push(WriteOp::DeleteLookup {
-        kind: KIND_SESSION.into(),
-        field: LOOKUP_UPDATED_AT.into(),
-        value: OwnedPart::Int(session.updated_at.as_millis()),
-        id: session.id,
-    });
-    ops.push(WriteOp::PutLookup {
-        kind: KIND_SESSION.into(),
-        field: LOOKUP_UPDATED_AT.into(),
-        value: OwnedPart::Int(now.as_millis()),
-        id: session.id,
-    });
     ops.push(WriteOp::Patch {
         kind: KIND_SESSION.into(),
         id: session.id,
@@ -658,6 +645,52 @@ pub fn purge_job(writes: &Writes<'_>, ids: Vec<Id>) -> Result<(Id, WriteOp), Bod
         },
     )?;
     Ok((id, WriteOp::Put(e)))
+}
+
+/// 索引の項目だけを除く job (04 §7.7 の 2)。
+pub fn index_job(writes: &Writes<'_>, ids: Vec<Id>) -> Result<(Id, WriteOp), BodyError> {
+    let id = writes.ids.next_id();
+    let e = envelope(
+        id,
+        KIND_JOB,
+        writes.clock.now(),
+        &JobBody {
+            task: JOB_PURGE_INDEXES.into(),
+            ids,
+        },
+    )?;
+    Ok((id, WriteOp::Put(e)))
+}
+
+/// 残っている整理の job。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupJob {
+    pub job: Id,
+    /// 索引 (と `backups` なら退避) から除く ID。
+    pub ids: Vec<Id>,
+    /// 退避からも除く ([`JOB_PURGE_BACKUPS`])。偽なら索引だけ ([`JOB_PURGE_INDEXES`])。
+    pub backups: bool,
+}
+
+/// 残っている整理の job (索引と退避の掃除。起動時と sleep-time に続きを行う)。
+pub fn pending_cleanup_jobs(
+    tx: &evorag_store::ReadTxn<'_>,
+) -> Result<Vec<CleanupJob>, crate::MemoryError> {
+    let mut out = Vec::new();
+    tx.for_each(KIND_JOB, |r| {
+        if let evorag_store::Read::Ok(e) = r
+            && let Ok(b) = e.body_as::<JobBody>()
+            && (b.task == JOB_PURGE_BACKUPS || b.task == JOB_PURGE_INDEXES)
+        {
+            out.push(CleanupJob {
+                job: e.id,
+                ids: b.ids,
+                backups: b.task == JOB_PURGE_BACKUPS,
+            });
+        }
+        true
+    })?;
+    Ok(out)
 }
 
 /// 残っている退避の整理の job (起動時に続きを行う)。

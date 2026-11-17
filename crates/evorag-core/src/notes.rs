@@ -111,18 +111,12 @@ fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
         let turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
-        let revs: HashMap<Id, u32> = turns
-            .iter()
-            .map(|t| (t.envelope.id, evorag_memory::turn_rev(&t.envelope)))
-            .collect();
         let have = notes.get(&sid).map(Vec::as_slice).unwrap_or_default();
         for seg in evorag_memory::segments(&turns, now_ms) {
             let ids = seg.ids();
             // 出典の改訂の番号が今と合わないノート (伏せ字の前の本文から作ったもの) は作り直す (04 §7.7 の 4)。
             if have.iter().any(|(_, n)| {
-                n.exchanges == ids
-                    && n.rules == NOTE_RULES
-                    && evorag_memory::note_matches(n, |t| revs.get(&t).copied())
+                n.exchanges == ids && n.rules == NOTE_RULES && evorag_memory::note_is_current(&r, n)
             }) {
                 continue;
             }

@@ -604,3 +604,41 @@ fn an_expectation_on_the_source_guards_the_whole_request() {
     h.shutdown();
     t.join().unwrap();
 }
+
+/// 前に消した ID は、同じ依頼の中で消してから作り直しても蘇らない。
+/// verifies: 04 §7.7 の 3 (書き戻させない)
+#[test]
+fn a_delete_then_put_in_one_request_does_not_resurrect_a_deleted_id() {
+    let dir = TempDir::new("writer-delete-put");
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let id = store.ids().next_id();
+    let env = noted(
+        &store,
+        id,
+        &Turnish {
+            text: "架空の発話".into(),
+            state: "confirmed".into(),
+            rev: 0,
+        },
+    );
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(env.clone())]))
+        .unwrap();
+    let delete = || WriteOp::Delete {
+        kind: "noted".into(),
+        id,
+    };
+    h.submit_wait(WriteRequest::conversation(vec![delete()]))
+        .unwrap();
+    let r = h.submit_wait(WriteRequest::conversation(vec![
+        delete(),
+        WriteOp::Put(env),
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Deleted { .. }))),
+        "{r:?}"
+    );
+    assert_eq!(store.read().unwrap().get("noted", id).unwrap(), None);
+    h.shutdown();
+    t.join().unwrap();
+}

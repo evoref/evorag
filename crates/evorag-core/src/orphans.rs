@@ -43,16 +43,7 @@ fn ids_of(r: &evorag_store::ReadTxn<'_>, kind: &str) -> Option<HashSet<Id>> {
 
 fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
     let r = store.read().ok()?;
-    let mut revs: std::collections::HashMap<Id, u32> = std::collections::HashMap::new();
-    r.for_each(KIND_TURN, |x| {
-        match x {
-            Read::Ok(e) => revs.insert(e.id, evorag_memory::turn_rev(&e)),
-            Read::Corrupt { id, .. } | Read::Newer { id, .. } => revs.insert(id, 0),
-        };
-        true
-    })
-    .ok()?;
-    let turns: HashSet<Id> = revs.keys().copied().collect();
+    let turns = ids_of(&r, KIND_TURN)?;
     let sessions = ids_of(&r, KIND_SESSION)?;
     let chunks = ids_of(&r, KIND_CHUNK)?;
     let mut p = Plan::default();
@@ -62,9 +53,7 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
             && let Ok(n) = e.body_as::<NoteBody>()
         {
             // 出典が欠けた・改訂の番号が今と合わない (伏せ字の前の本文から作った) ノートも消す (04 §7.7 の 1・4)。
-            if sessions.contains(&n.session)
-                && evorag_memory::note_matches(&n, |t| revs.get(&t).copied())
-            {
+            if sessions.contains(&n.session) && evorag_memory::note_is_current(&r, &n) {
                 notes.insert(e.id);
             } else {
                 p.notes.push(e.id);

@@ -610,3 +610,38 @@ async fn an_index_removal_that_fails_is_retried_from_the_job() {
     assert_eq!(rows(dir.path(), 2), 0, "the previous generation is cleaned");
     assert_eq!(rows(dir.path(), 5), 0, "the current generation is cleaned");
 }
+
+/// 整理の手順は、利用者の操作で sleep-time の手順が落とされても途中で止まらず、job を残したまま旗を下ろさない。
+/// verifies: 04 §7.7 の 2 (除けなかった分は job から再試行する)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleanup_interrupted_by_input_still_finishes() {
+    let dir = TempDir::new("embed-cleanup-touch");
+    let first = two_generations(dir.path()).await;
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), 6, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.inject_index_removal_failure(usize::MAX);
+    core.command(Command::OpenSession { id: first });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(core.pending_cleanup_jobs(), 1);
+
+    // 試し直しを始めさせ、その間も操作を続ける。
+    core.inject_index_removal_failure(0);
+    core.retry_background_now();
+    for _ in 0..200 {
+        core.touch();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    core.settle_background().await;
+    assert_eq!(core.pending_cleanup_jobs(), 0, "the job is done");
+    core.shutdown().await;
+    assert_eq!(rows(dir.path(), 2), 0);
+}

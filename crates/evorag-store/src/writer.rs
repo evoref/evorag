@@ -74,7 +74,8 @@ pub enum WriteOp {
     },
     /// 記録をこのトランザクションの中で読み直し、本体の項目を差し替えて書く (外で読んだ封筒を丸ごと書き戻さない、
     /// 04 §7.3・§7.7 の 3)。`updated_at` があれば更新時刻も変える。記録が無い・読めなければ、依頼の全体を断る
-    /// ([`StoreError::Stale`])。ジャーナルに書く種類なら、差し替えた封筒の `put` の行を書く。
+    /// ([`StoreError::Stale`])。本体が map でなければ [`StoreError::BadBody`]。関係と副索引は、読み直した封筒から
+    /// 作り直す (種類の `derive`)。ジャーナルに書く種類なら、差し替えた封筒の `put` の行を書く。
     Patch {
         kind: String,
         id: Id,
@@ -271,18 +272,21 @@ impl Writer {
             return Err(StoreError::NeedsRestart.into());
         }
         // 1. DB のトランザクションで操作を当てて、規則を確かめる (断られたらジャーナルにも書かない)。
-        let mut tx = self.store.write(&self.token, req.durability)?;
         let mut out = WriteOutcome::default();
         if self.store.suspect_count() > 0 {
-            out.quarantined = tx.quarantine_suspects()?;
+            // 壊れた記録は、依頼とは別の先のトランザクションで移す (依頼が断られても、移したことが残るように)。
+            let mut q = self.store.write(&self.token, req.durability)?;
+            out.quarantined = q.quarantine_suspects()?;
+            q.commit()?;
         }
-        // 消した記録を作り直さない (04 §7.7 の 3)。同じ依頼の中で消してから作るものは除く。
+        let mut tx = self.store.write(&self.token, req.durability)?;
+        // 前に消した記録を作り直さない (04 §7.7 の 3)。同じ依頼の中で消してから作っても断る。
         let mut gone: HashSet<Id> = HashSet::new();
         let mut patched = Vec::new();
         for op in &req.ops {
             match op {
                 WriteOp::Put(Envelope { kind, id, .. }) | WriteOp::Patch { kind, id, .. }
-                    if !gone.contains(id) && self.store.was_deleted(*id) =>
+                    if self.store.was_deleted(*id) =>
                 {
                     return Err(StoreError::Deleted {
                         kind: kind.clone(),
@@ -413,14 +417,25 @@ pub(crate) fn apply_op(
                 kind: kind.clone(),
                 id: *id,
             };
-            let Some(Read::Ok(mut env)) = tx.get(kind, *id)? else {
+            let Some(Read::Ok(old)) = tx.get(kind, *id)? else {
                 return Err(stale());
             };
-            env.apply_patch(fields).map_err(|_| stale())?;
+            let mut env = old.clone();
+            env.apply_patch(fields)
+                .map_err(|source| StoreError::BadBody {
+                    kind: kind.clone(),
+                    id: *id,
+                    source,
+                })?;
             if let Some(t) = updated_at {
                 env.updated_at = *t;
             }
+            // 関係と副索引 (セッションの更新時刻の副索引など) は、読み直した封筒から作り直す (外で読んだ古い
+            // 値の項目を残さないため)。
+            let store = tx.store;
+            store.undo_derived(tx, &old)?;
             tx.put(&mut env)?;
+            store.redo_derived(tx, &env)?;
             out.put.push(env.id);
             return Ok(Some(env));
         }

@@ -8,7 +8,7 @@
 //!   サムが合わない行は読み飛ばして数える (読めない行は切り詰めない)。
 //! - 削除の行がある ID の `put` の行が残っていれば (除く前に止まった)、起動時に除く。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -52,8 +52,9 @@ pub struct Scan {
     /// すべての `meta` の行 (`last_seq` に関わらず、連番の順)。古い版が取り込まずに連番だけを
     /// 進めた `meta` の行を、新しい版が探すため (03 §3.1.1 の `memory.forget_key`)。
     pub metas: Vec<(String, String)>,
-    /// すべての削除の行の ID (`last_seq` に関わらない)。書き手は、これらを `put` で作り直さない (04 §7.7 の 3)。
-    pub deleted: BTreeSet<Id>,
+    /// すべての削除の行の ID と種類 (`last_seq` に関わらない)。書き手は、これらを `put` で作り直さない
+    /// (04 §7.7 の 3)。取り込みは、これらの `put` の行を当てず、DB に残っていれば消す。
+    pub deleted: BTreeMap<Id, String>,
 }
 
 pub struct Journal {
@@ -252,7 +253,7 @@ impl Journal {
         }
         let mut scan = Scan::default();
         let mut max_seq = last_seq;
-        let mut deleted = BTreeSet::new();
+        let mut deleted: BTreeMap<Id, String> = BTreeMap::new();
         let mut put_ids = BTreeSet::new();
         let mut metas: Vec<(u64, String, String)> = Vec::new();
         for path in files(&dir)? {
@@ -274,8 +275,8 @@ impl Journal {
                     Decoded::Line(line) => {
                         max_seq = max_seq.max(line.seq);
                         match &line.op {
-                            LineOp::Delete { id, .. } => {
-                                deleted.insert(*id);
+                            LineOp::Delete { id, kind } => {
+                                deleted.insert(*id, kind.clone());
                             }
                             LineOp::Put(e) => {
                                 put_ids.insert(e.id);
@@ -307,7 +308,11 @@ impl Journal {
             fail_next: AtomicBool::new(false),
         };
         // 削除の行があるのに本文の行が残っていれば、除く (除く前に止まった、03 §6)。
-        let leftover: BTreeSet<Id> = deleted.intersection(&put_ids).copied().collect();
+        let leftover: BTreeSet<Id> = deleted
+            .keys()
+            .filter(|id| put_ids.contains(*id))
+            .copied()
+            .collect();
         journal.remove_ids(&leftover)?;
         scan.deleted = deleted;
         Ok((journal, scan))
