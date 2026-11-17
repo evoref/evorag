@@ -1743,10 +1743,13 @@ async fn delete(inner: &Arc<Inner>) {
     let _lock = inner.index_lock.lock().await;
     // 事実を書く経路のロックも取る (統合が出典の改訂の番号を照合してから書き終えるまでの間に、出典のターンを
     // 消さないように、04 §4)。鍵の順は index_lock → facts_lock (逆の順で取る経路は無い)。
+    // 事実は、そのセッションの出典を外し、出典の無くなった事実を同じ依頼で消す (04 §7.1・§7.4)。消した事実の
+    // ID (= 事実の検索の鍵の ID、04 §5.5) は、下で退避と索引から除く ID に入る。
     let facts_guard = inner.facts_lock.lock().await;
+    let now = inner.clock.now();
     let ops = inner.store.read().ok().and_then(|rtx| {
         let s = evorag_memory::load_session(&rtx, sid).ok()?;
-        evorag_memory::delete_session(&rtx, &s.envelope).ok()
+        evorag_memory::delete_session(&rtx, &s.envelope, now).ok()
     });
     let Some(mut ops) = ops else {
         reject(inner, MessageKey::NoSession);
@@ -1768,7 +1771,8 @@ async fn delete(inner: &Arc<Inner>) {
         return;
     }
     drop(facts_guard);
-    // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。
+    // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。消した事実の検索の鍵もここで除く
+    // (04 §5.5)。
     let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
     if let Some(ix) = inner.index.clone() {
         let gone = gone.clone();

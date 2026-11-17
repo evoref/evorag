@@ -1,8 +1,10 @@
 //! 出典の無い派生の記録の突き合わせ (03 §4.2 の規則 12、04 §7)。
 //!
-//! 古い版 (v0.1.2 など) は、新しい版の種類 (チャンク・ノート・埋め込み・想起への操作・訂正) を知らないので、
-//! セッションを消しても、それらを消さない。起動時に、出典の無くなったものを DB と索引から消し、退避からも
+//! 古い版 (v0.1.2 など) は、新しい版の種類 (チャンク・ノート・埋め込み・想起への操作・訂正・事実) を知らない
+//! ので、セッションを消しても、それらを消さない。起動時に、出典の無くなったものを DB と索引から消し、退避からも
 //! 除く job (03 §7.3) を同じ依頼で書く。出典の無いチャンクは `sync_chunks` が先に消す (その ID を受け取る)。
+//! 事実は、出典のターンの一部が無ければその出典を外し、すべて無ければ消す (04 §5.3 の「出典の無い事実の
+//! 掃除」。セッションの削除と同じ書き込みの入口 `drop_turns` を通す)。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use evorag_memory::{
     NoteBody, RecallFeedbackBody,
 };
 use evorag_store::{Read, Store, WriteOp};
-use evorag_types::Id;
+use evorag_types::{Id, Timestamp};
 
 use crate::Inner;
 
@@ -22,6 +24,8 @@ struct Plan {
     embeddings: Vec<Id>,
     feedback: Vec<Id>,
     corrections: Vec<Id>,
+    /// 事実の書き込み (出典を外す・消す)。何も変えなければ `None`。
+    facts: Option<evorag_memory::SourcesDropped>,
 }
 
 fn ids_of(r: &evorag_store::ReadTxn<'_>, kind: &str) -> Option<HashSet<Id>> {
@@ -37,7 +41,7 @@ fn ids_of(r: &evorag_store::ReadTxn<'_>, kind: &str) -> Option<HashSet<Id>> {
     Some(out)
 }
 
-fn plan(store: &Store) -> Option<Plan> {
+fn plan(store: &Store, now: Timestamp) -> Option<Plan> {
     let r = store.read().ok()?;
     let turns = ids_of(&r, KIND_TURN)?;
     let sessions = ids_of(&r, KIND_SESSION)?;
@@ -84,14 +88,25 @@ fn plan(store: &Store) -> Option<Plan> {
         true
     })
     .ok()?;
+    // 事実は、出典のターンの記録が DB に無ければ、その出典を外す (03 §4.2 の規則 12 の「見つけ方」)。
+    // 読めなければ、事実は次の起動で突き合わせる (ほかの派生の記録の掃除は止めない)。
+    if let Ok(facts) = evorag_memory::drop_turns(&r, &|t| !turns.contains(&t), now)
+        && !facts.ops.is_empty()
+    {
+        p.facts = Some(facts);
+    }
     Some(p)
 }
 
 /// 突き合わせる。`gone_chunks` は `sync_chunks` が消したチャンク (退避からも除く)。
 pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
     let _lock = inner.index_lock.lock().await;
+    // 事実を読んでから書き終えるまで、事実を書く経路のロックを持つ (04 §5.2.1。鍵の順は index_lock →
+    // facts_lock)。
+    let _facts = inner.facts_lock.lock().await;
     let store = inner.store.clone();
-    let Ok(Some(p)) = tokio::task::spawn_blocking(move || plan(&store)).await else {
+    let now = inner.clock.now();
+    let Ok(Some(mut p)) = tokio::task::spawn_blocking(move || plan(&store, now)).await else {
         return;
     };
     if gone_chunks.is_empty()
@@ -99,9 +114,13 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         && p.embeddings.is_empty()
         && p.feedback.is_empty()
         && p.corrections.is_empty()
+        && p.facts.is_none()
     {
         return;
     }
+    // 事実を書き換えたら (出典を外した・消した・private の写しを計算し直した)、表を作り直させる。
+    let facts_changed = p.facts.is_some();
+    let facts = p.facts.take().unwrap_or_default();
     let w = crate::writes(inner);
     let mut ops = Vec::new();
     for e in &p.embeddings {
@@ -125,13 +144,15 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         // 想起への操作はジャーナルにも書く種類なので、消したこともジャーナルに残る。
         ops.extend(w.delete_feedback(*f));
     }
+    ops.extend(facts.ops);
     let mut purge: Vec<Id> = gone_chunks.clone();
     purge.extend(
         p.notes
             .iter()
             .chain(&p.embeddings)
             .chain(&p.feedback)
-            .chain(&p.corrections),
+            .chain(&p.corrections)
+            .chain(&facts.deleted),
     );
     let Ok((_, job)) = evorag_memory::purge_job(&w, purge) else {
         return;
@@ -143,6 +164,8 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         embeddings = p.embeddings.len(),
         feedback = p.feedback.len(),
         corrections = p.corrections.len(),
+        facts_deleted = facts.deleted.len(),
+        facts_trimmed = facts.dropped.trimmed,
         "orphaned derived records removed"
     );
     if crate::write(inner, ops).await.is_err() {
@@ -155,9 +178,14 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         .collect();
     crate::embedding::remove_everywhere(inner, &gone);
     if let Some(ix) = inner.index.clone() {
-        let notes: HashSet<Id> = p.notes.into_iter().collect();
-        if !notes.is_empty() {
-            let _ = tokio::task::spawn_blocking(move || ix.remove(&notes)).await;
+        // ノートの鍵と、消した事実の検索の鍵 (ID は事実の ID、04 §5.5)。
+        let keys: HashSet<Id> = p.notes.into_iter().chain(facts.deleted).collect();
+        if !keys.is_empty() {
+            let _ = tokio::task::spawn_blocking(move || ix.remove(&keys)).await;
         }
+    }
+    if facts_changed {
+        // 表を作り直し、鍵の残りを次の sleep-time の手順で合わせる (04 §5.4・§5.5)。
+        crate::fact_table::invalidate(inner);
     }
 }

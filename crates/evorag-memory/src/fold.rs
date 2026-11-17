@@ -993,6 +993,81 @@ fn apply_choice(set: &mut FactSet, directives: &Directives, ch: &Chosen<'_>, env
     }
 }
 
+/// 出典のターンが消えたときに変えたもの ([`drop_sources`])。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Dropped {
+    /// 出典が 1 つも残らないので消した事実 (ID の順)。
+    pub deleted: Vec<Id>,
+    /// 出典の一部を外して残した事実の数。
+    pub trimmed: usize,
+    /// 消えた今の値に代わって、今の値にした矛盾の値 (ID の順、04 §7.4)。
+    pub promoted: Vec<Id>,
+}
+
+impl Dropped {
+    /// 何も変えなかったか。
+    pub fn is_empty(&self) -> bool {
+        self.deleted.is_empty() && self.trimmed == 0 && self.promoted.is_empty()
+    }
+}
+
+/// 出典のターンが消えた (セッションの削除 04 §7.1、出典の無い事実の掃除 04 §5.3・03 §4.2 の規則 12)。
+///
+/// - 消えたターン (`gone` が `true` を返すもの) の出典を外す。出典が 1 つも残らない事実は消す
+///   (`Retracted` も含む)。
+/// - 消した事実が単値の属性の今の値 (時制 `current` の `Live`) なら、04 §7.4 のとおりにする: 古い側の
+///   `Superseded` の `by` は消えた ID を指したまま残し、`Live` に戻さない。同じ (主語, 属性) の `Contested`
+///   のうち、出典の最も新しいターンが消えた値の出典の最も新しいターンより後のもの (2 つ以上あれば最も後の
+///   もの) を今の値にする。そうでない `Contested` は、`against` に消えた ID を指したまま残す (今の値なし)。
+/// - 最後に private の写しを指示から計算し直す (書き込みの入口が毎回計算し直す、04 §5.1)。
+pub fn drop_sources(
+    set: &mut FactSet,
+    directives: &Directives,
+    gone: &dyn Fn(Id) -> bool,
+) -> Dropped {
+    let mut out = Dropped::default();
+    // 消した今の値の (主語, 属性, 出典の最も新しいターン)。
+    let mut ended: Vec<(String, String, Option<Id>)> = Vec::new();
+    for f in &mut set.facts {
+        let latest = f.latest_turn();
+        let before = f.sources.len();
+        f.sources.retain(|s| !gone(s.turn));
+        if f.sources.is_empty() {
+            out.deleted.push(f.id);
+            if f.state == FactState::Live && f.tense == Tense::Current {
+                ended.push((f.subject.clone(), f.attribute.clone(), latest));
+            }
+        } else if f.sources.len() != before {
+            out.trimmed += 1;
+        }
+    }
+    out.deleted.sort_unstable();
+    set.facts
+        .retain(|f| out.deleted.binary_search(&f.id).is_err());
+    for (subject, attribute, latest) in ended {
+        let group = set.group(&subject, &attribute);
+        if set.live_current(&group).is_some() {
+            continue;
+        }
+        let next = group
+            .iter()
+            .copied()
+            .filter(|&i| matches!(set.facts[i].state, FactState::Contested { .. }))
+            .filter_map(|i| {
+                let t = set.facts[i].latest_turn()?;
+                (Some(t) > latest).then_some((t, set.facts[i].id, i))
+            })
+            .max();
+        if let Some((turn, id, i)) = next {
+            set.make_live(None, i, turn);
+            out.promoted.push(id);
+        }
+    }
+    out.promoted.sort_unstable();
+    refresh_private(set, directives);
+    out
+}
+
 /// 事実の表に入る事実を、表の順に返す (04 §5.4。予算と書式は表を作る層で当てる)。
 /// `Live` で private でないもの。並びは 属性の優先の順 → 主語 (`self` が先、残りは正規化した呼び名の順)
 /// → 記録した順 (ID)。
@@ -1351,5 +1426,66 @@ mod tests {
             "かにが苦手",
         ))]);
         assert!(t.set.facts.iter().all(|f| f.private));
+    }
+
+    /// 消えた今の値より古い矛盾の値は、今の値にせず、`against` に消えた ID を指したまま残す。出典が 1 つも
+    /// 残らない `Retracted` も消す (04 §7.4・§7.1)。
+    #[test]
+    fn an_older_contested_value_stays_when_the_current_one_is_deleted() {
+        let mut t = T::new();
+        t.fold(vec![Event::Candidate(T::cand(
+            1,
+            "residence",
+            "大阪",
+            "大阪に住んでます",
+        ))]);
+        t.fold(vec![Event::Candidate(T::cand(
+            2,
+            "residence",
+            "東京",
+            "東京に住んでます",
+        ))]);
+        t.fold(vec![Event::Candidate(T::cand(
+            3,
+            "residence",
+            "大阪",
+            "大阪に住んでます",
+        ))]);
+        let osaka = t.set.facts[0].id;
+        assert_eq!(
+            t.state_of("residence", "東京"),
+            [FactState::Contested { against: osaka }]
+        );
+        t.set.facts.push(Fact {
+            id: id(900),
+            subject: "self".into(),
+            attribute: "hobby".into(),
+            value: None,
+            vk: None,
+            tense: Tense::Current,
+            state: FactState::Retracted,
+            sources: BTreeSet::from([Source {
+                turn: id(3),
+                start: 0,
+                end: 0,
+                rev: 0,
+            }]),
+            private: false,
+        });
+        let gone = [id(1), id(3)];
+        let d = drop_sources(&mut t.set, &t.dirs, &|turn| gone.contains(&turn));
+        let mut deleted = vec![osaka, id(900)];
+        deleted.sort_unstable();
+        assert_eq!(d.deleted, deleted);
+        assert!(d.promoted.is_empty());
+        assert_eq!(
+            t.state_of("residence", "東京"),
+            [FactState::Contested { against: osaka }]
+        );
+        assert!(t.live("residence").is_empty());
+        // 何も消えなければ何も変えない。
+        let before = t.set.clone();
+        assert!(drop_sources(&mut t.set, &t.dirs, &|_| false).is_empty());
+        assert_eq!(t.set, before);
     }
 }

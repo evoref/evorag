@@ -76,10 +76,10 @@ pub(crate) fn touch(inner: &Inner) {
 }
 
 /// 忘れる・private・削除の操作をした (04 §5.4 の「作り直す時機」)。次のターンの前に必ず表を作り直し、
-/// 鍵は次の sleep-time の手順で索引から除く。
+/// 鍵の残りは次の sleep-time の手順で索引に合わせる。
 ///
-/// M3.4 で忘れる・private・削除の操作の経路を足すときは、鍵も同じトランザクションで消して `tombstone` に
-/// 入れ (04 §5.5)、ここを呼ぶ。
+/// セッションの削除と起動時の突き合わせは、消した事実の鍵を書き込みの直後に索引から除いてから、ここを呼ぶ。
+/// M3.4 で忘れる・private の操作の経路を足すときも、鍵を同じく除き (04 §5.5)、ここを呼ぶ。
 pub(crate) fn invalidate(inner: &Inner) {
     let mut st = state(inner);
     st.invalidations += 1;

@@ -502,14 +502,25 @@ impl Writes<'_> {
 /// セッションを消す操作 (04 §7、FR-309 の DB の分)。ターン、ターンを対象にした信号、関係、
 /// 副索引、セッションを 1 つの依頼で消す。ジャーナルの行と語彙の索引から消すのは、それぞれを
 /// 持つ層が足す。
+///
+/// 事実は、そのセッションのターンの出典を外し、出典の無くなった事実を消す (04 §7.1・§7.4。書き込みの
+/// 入口 [`crate::facts::drop_turns`] を通す)。`now` は書き換えた事実の更新時刻。呼ぶ側は、事実を書く経路の
+/// ロックを `tx` を開く前から書き終えるまで持つ (04 §5.2.1 の「書き込みの直列化」)。消した事実の ID は
+/// [`deleted_ids`] に入る (退避と索引から除く。事実の検索の鍵の ID は事実の ID と同じ、04 §5.5)。
 pub fn delete_session(
     tx: &evorag_store::ReadTxn<'_>,
     session: &Envelope,
+    now: Timestamp,
 ) -> Result<Vec<WriteOp>, crate::MemoryError> {
-    let mut ops = Vec::new();
+    let turns: std::collections::BTreeSet<Id> = tx
+        .links_to(session.id, REL_IN_SESSION)?
+        .into_iter()
+        .map(|(turn, _)| turn)
+        .collect();
+    let mut ops = crate::facts::drop_turns(tx, &|t| turns.contains(&t), now)?.ops;
     let mut feedback = std::collections::BTreeSet::new();
     let mut notes = std::collections::BTreeSet::new();
-    for (turn, _) in tx.links_to(session.id, REL_IN_SESSION)? {
+    for &turn in &turns {
         // ノートは出典の往復と一緒に消す (鍵の埋め込みを含む、03 §4.2 の規則 12)。
         for (n, _) in tx.links_to(turn, REL_NOTE_OF)? {
             if notes.insert(n) {

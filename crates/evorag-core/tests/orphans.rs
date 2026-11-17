@@ -498,3 +498,132 @@ async fn derived_records_go_when_a_deletion_is_replayed_from_the_journal() {
         "no turn and no derived record of the deleted session"
     );
 }
+
+/// 新しいセッションを開き、その ID を返す。
+async fn open_new_session(core: &Core, rx: &mut UnboundedReceiver<Event>) -> evorag_types::Id {
+    core.command(Command::NewSession { title: "s".into() });
+    let ev = until(rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let Some(Event::SessionOpened { session, .. }) = ev.last() else {
+        panic!()
+    };
+    session.id
+}
+
+/// 発話し、事実の抽出と統合を終えるまで待つ。発話のターンの ID を返す。
+async fn say_and_extract(
+    core: &Core,
+    rx: &mut UnboundedReceiver<Event>,
+    text: &str,
+) -> evorag_types::Id {
+    core.hold(true);
+    let turn = say(core, rx, text).await;
+    core.hold(false);
+    core.settle_background().await;
+    turn.reply_to.expect("an answer to the utterance")
+}
+
+/// 古い版 (事実を知らない版) でセッションを消した後に開くと、出典のターンの一部が無い事実はその出典を外し、
+/// すべて無い事実は消して、退避と索引からも除く (04 §5.3 の「出典の無い事実の掃除」、03 §4.2 の規則 12)。
+/// verifies: AC-FR-309-3 (古い版で消したセッションの分を、規則 12 の経路で)
+#[tokio::test(flavor = "multi_thread")]
+async fn facts_left_by_an_older_version_lose_the_deleted_sources() {
+    let dir = TempDir::new("orphans-facts");
+    prepare(dir.path(), true);
+    // 1. 2 つのセッションで事実を作る。猫の事実は両方のセッションに出典を持つ。
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
+    let two_facts = reply(
+        r#"{"c": [
+        {"t": 1, "s": "self", "a": "residence", "v": "大阪", "e": "私は大阪に住んでいて", "m": "fact", "tn": "current", "old": ""},
+        {"t": 1, "s": "self", "a": "pet", "v": "猫", "e": "猫を飼っています", "m": "fact", "tn": "current", "old": ""}]}"#,
+    );
+    let pet = reply(
+        r#"{"c": [{"t": 1, "s": "self", "a": "pet", "v": "猫",
+        "e": "猫を飼っています", "m": "fact", "tn": "current", "old": ""}]}"#,
+    );
+    let llm = chat(&[reply(REPLY), two_facts, reply(REPLY), pet], false);
+    let (core, mut rx, _) = Core::start(config(dir.path(), clock.clone()), Arc::new(llm.clone()))
+        .await
+        .unwrap();
+    core.settle().await;
+    let a = open_new_session(&core, &mut rx).await;
+    say_and_extract(&core, &mut rx, "私は大阪に住んでいて、猫を飼っています").await;
+    open_new_session(&core, &mut rx).await;
+    let b1 = say_and_extract(&core, &mut rx, "今も猫を飼っています").await;
+    assert_eq!(core.indexed_fact_keys(), 2);
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    // 2. 古い版をまねる: 事実を含む退避を作り、セッション A のターンとセッションだけを消す (事実は残る)。
+    let backup;
+    {
+        let store = Arc::new(open(dir.path(), clock.clone(), 31));
+        backup = store
+            .pre_op_backup("test", &[])
+            .unwrap()
+            .join(evorag_store::DB_FILE);
+        assert!(file_contains(&backup, "residence"));
+        let (w, h) = evorag_store::Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || w.run());
+        let mut ops = Vec::new();
+        {
+            let r = store.read().unwrap();
+            let session = evorag_memory::load_session(&r, a).unwrap().envelope;
+            for turn in evorag_memory::session_turns(&r, a).unwrap() {
+                ops.push(evorag_store::WriteOp::Delete {
+                    kind: evorag_memory::KIND_TURN.into(),
+                    id: turn.envelope.id,
+                });
+                ops.push(evorag_store::WriteOp::DeleteLinksOf(turn.envelope.id));
+            }
+            ops.push(evorag_store::WriteOp::DeleteLookup {
+                kind: evorag_memory::KIND_SESSION.into(),
+                field: "updated_at".into(),
+                value: evorag_store::key::OwnedPart::Int(session.updated_at.as_millis()),
+                id: a,
+            });
+            ops.push(evorag_store::WriteOp::Delete {
+                kind: evorag_memory::KIND_SESSION.into(),
+                id: a,
+            });
+            ops.push(evorag_store::WriteOp::DeleteLinksOf(a));
+        }
+        h.submit_wait(evorag_store::WriteRequest::conversation(ops))
+            .unwrap();
+        h.shutdown();
+        t.join().unwrap();
+    }
+
+    // 3. 開き直す (起動時の突き合わせと、退避の整理を待つ)。
+    let mut cfg = config(dir.path(), clock.clone());
+    cfg.ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 41));
+    let (core, _rx, _) = Core::start(cfg, Arc::new(chat(&[], false))).await.unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(core.indexed_fact_keys(), 1);
+    core.shutdown().await;
+
+    let store = open(dir.path(), clock, 51);
+    let r = store.read().unwrap();
+    let facts = evorag_memory::load_facts(&r).unwrap().set.facts;
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0].attribute, "pet");
+    let sources: Vec<_> = facts[0].sources.iter().map(|s| s.turn).collect();
+    assert_eq!(sources, [b1], "the deleted source is taken off");
+    let mut purges = 0;
+    r.for_each(evorag_memory::KIND_JOB, |x| {
+        if let Read::Ok(e) = x
+            && e.body_as::<evorag_memory::JobBody>().unwrap().task
+                == evorag_memory::JOB_PURGE_BACKUPS
+        {
+            purges += 1;
+        }
+        true
+    })
+    .unwrap();
+    assert_eq!(purges, 0, "the purge job is done");
+    assert!(
+        !file_contains(&backup, "residence"),
+        "the orphaned fact left the backup"
+    );
+    assert!(file_contains(&backup, "pet"), "the kept fact stays");
+}
