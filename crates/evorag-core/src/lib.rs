@@ -15,6 +15,7 @@ pub mod power;
 mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
 mod context;
+mod correction;
 mod extraction;
 mod fact_table;
 pub mod localtime;
@@ -271,6 +272,8 @@ struct Inner {
     notes: Mutex<notes::State>,
     /// 事実の抽出の手順の状態 (04 §5.2.1)。
     extraction: Mutex<extraction::State>,
+    /// 訂正の候補の検証の手順の状態 (04 §6)。
+    correction: Mutex<correction::State>,
     /// 事実の表と事実の検索の鍵の状態 (04 §5.4・§5.5)。
     fact_table: Mutex<fact_table::State>,
     /// 事実を書く経路のロック (04 §5.2.1 の「書き込みの直列化」)。記録を読む前に取り、書き手が書き終えるまで
@@ -585,6 +588,7 @@ impl Core {
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
             extraction: Mutex::new(extraction::State::default()),
+            correction: Mutex::new(correction::State::default()),
             fact_table: Mutex::new(fact_table::State::default()),
             facts_lock: Arc::new(tokio::sync::Mutex::new(())),
             precompute: cfg.precompute,
@@ -785,6 +789,20 @@ impl Core {
                 let _ = t.await;
             }
         }
+    }
+
+    /// 試験のため: ターンの改訂の番号を 1 つ進める (伏せ字 (04 §7.3、M3.4) が本文を書き換えたことをまねる)。
+    /// 伏せ字と同じく、事実を書く経路のロックの下で書く。書けたら `true`。
+    #[doc(hidden)]
+    pub async fn bump_turn_revision(&self, turn: Id) -> bool {
+        let _lock = self.inner.facts_lock.lock().await;
+        let Some(mut env) = read_env(&self.inner, evorag_memory::KIND_TURN, turn) else {
+            return false;
+        };
+        let rev = evorag_memory::turn_rev(&env) + 1;
+        env.updated_at = self.inner.clock.now();
+        env.set_body(&serde_json::json!({ "rev": rev })).is_ok()
+            && write(&self.inner, vec![WriteOp::Put(env)]).await.is_ok()
     }
 
     /// 試験のため: 事実を private にする (事実への指示を足し、次のターンの前に事実の表を作り直させる、

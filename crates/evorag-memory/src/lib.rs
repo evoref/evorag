@@ -6,6 +6,7 @@
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
 mod chars;
+mod correction;
 mod extract;
 mod facts;
 mod fold;
@@ -22,6 +23,14 @@ mod table;
 mod value_key;
 mod write;
 
+pub use correction::{
+    CandidateSkip, CorrectionBody, CorrectionCandidate, DIR_MAX_CHARS, KIND_CORRECTION,
+    LoadedCorrections, MATCH_MAX_CHARS, PatternMatch, REL_CORRECTION_OF, Rejection, Target,
+    Unverifiable, VERIFY_EXCERPT_CHARS, VERIFY_MAX_TOKENS, VERIFY_VERSION, Verdict, VerifyContext,
+    VerifyOutput, candidate_ops, checked_op, correction_sources, find_correction, load_corrections,
+    match_correction, parse_verify, previous_answer, tail_excerpt, utterance_excerpt, verify,
+    verify_input, verify_schema, verify_system,
+};
 pub use extract::{
     BUDGET_MARGIN, Batch, Counting, EXTRACT_MAX_TOKENS, EXTRACT_VERSION, ExtractJobBody,
     ExtractProgress, ExtractionOutput, JOB_EXTRACT_FACTS, Packing, REQUEST_TOKENS, UserUtterance,

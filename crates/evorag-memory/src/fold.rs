@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use evorag_types::{Id, Timestamp};
 
+use crate::correction::Target;
 use crate::lexical::Signals;
 use crate::rules::{Attributes, Cardinality};
 use crate::value_key::{BlockMark, ForgetKey, ValueKey, block_mark, normalize_v1};
@@ -119,39 +120,79 @@ pub struct Candidate {
     pub signals: Signals,
 }
 
-/// 検証済みの訂正 (04 §6)。検証を通ったものだけが作れる型にする (候補の型とは別)。
+/// 検証済みの訂正 (04 §6)。検証の関門 ([`crate::verify`]) を通ったものと、保存した検証済みの訂正を読んだもの
+/// だけが作れる型にする (候補の型 [`crate::CorrectionCandidate`] とは別)。事実の置き換え (04 §5.3) と学習 (13)
+/// には、この型しか渡せない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCorrection {
+    /// 新しい値の範囲 (候補の発話の保存した本文の位置と、その改訂の番号)。
     source: Source,
+    /// 古い値の範囲 (`{old}` の穴の中)。古い値の穴の無い型 (`I meant {new}` など) では無く、その訂正は事実を
+    /// 変えない (学習にだけ使う、04 §6 の「事実への効き方」)。
+    old_source: Option<Source>,
+    target: Target,
+    old_value: String,
     old_vk: ValueKey,
     new_value: String,
     new_vk: ValueKey,
 }
 
 impl VerifiedCorrection {
-    /// 検証を通ったものとして作る。検証の関門 (M3.3) と、保存した検証済みの訂正を読む層だけが使う。
-    /// M3.3 で使うまでは試験だけが呼ぶ。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the verification gate (M3.3) will call it")
-    )]
+    /// 検証を通ったものとして作る。検証の関門 (`correction::verify`) と、保存した検証済みの訂正を読む層と、
+    /// 試験だけが使う。
     pub(crate) fn assume_verified(
         source: Source,
+        old_source: Option<Source>,
+        target: Target,
+        old_value: String,
         old_vk: ValueKey,
         new_value: String,
         new_vk: ValueKey,
     ) -> Self {
         Self {
             source,
+            old_source,
+            target,
+            old_value,
             old_vk,
             new_value,
             new_vk,
         }
     }
 
-    /// 訂正の出典 (書き込みの入口で、改訂の番号を今のターンと突き合わせる)。
-    pub(crate) fn source(&self) -> &Source {
+    /// 訂正の出典 (新しい値の範囲。書き込みの入口で、改訂の番号を今のターンと突き合わせる)。
+    pub fn source(&self) -> &Source {
         &self.source
+    }
+
+    /// 古い値の範囲 (古い値の穴の無い型では `None`。そのときは事実を変えない)。
+    pub fn old_source(&self) -> Option<&Source> {
+        self.old_source.as_ref()
+    }
+
+    /// 直したのが事実か応答の誤りか。
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    /// 古い値 (検証の LLM の出力)。
+    pub fn old_value(&self) -> &str {
+        &self.old_value
+    }
+
+    /// 古い値の値の鍵。
+    pub fn old_vk(&self) -> &ValueKey {
+        &self.old_vk
+    }
+
+    /// 新しい値 (検証の LLM の出力)。
+    pub fn new_value(&self) -> &str {
+        &self.new_value
+    }
+
+    /// 新しい値の値の鍵。
+    pub fn new_vk(&self) -> &ValueKey {
+        &self.new_vk
     }
 }
 
@@ -402,8 +443,13 @@ pub struct Report {
     pub blocked: usize,
     /// 否定の候補で、今の値を変えなかった。
     pub negation_dropped: usize,
-    /// 検証済みの訂正で、事実を変えなかった (学習にだけ使う)。
+    /// 検証済みの訂正で、古い値が今の値のどれとも一致しないので、事実を変えなかった (学習にだけ使う)。
     pub correction_no_effect: usize,
+    /// 検証済みの訂正で、古い値が 2 つ以上の (主語, 属性) の今の値と一致し、どれを直したのか決められないので、
+    /// 事実を変えなかった (04 §6 の「事実への効き方」)。
+    pub correction_ambiguous: usize,
+    /// 検証済みの訂正で、古い値の穴の無い型 (`I meant {new}` など) なので、事実を変えなかった (04 §6)。
+    pub correction_unanchored: usize,
     /// 書き込みの入口で、出典の改訂の番号が今のターンと合わない (ターンが無いものを含む) ので捨てた
     /// (04 §4・§5.2.1)。
     pub stale_source: usize,
@@ -804,6 +850,11 @@ fn apply_correction(
     env: &mut FoldEnv<'_>,
     report: &mut Report,
 ) {
+    // 古い値の位置を発話で確かめられない訂正は、事実を変えない (学習にだけ使う、04 §6)。
+    let Some(old_source) = c.old_source else {
+        report.correction_unanchored += 1;
+        return;
+    };
     // 訂正は出典では当て済みを判定しない。古い値がもう今の値でなければ、下で効かない (04 §5.3)。
     // 古い値の値の鍵が、今の値のちょうど 1 件と一致するときだけ事実を変える (04 §6)。
     let hits: Vec<usize> = (0..set.facts.len())
@@ -812,15 +863,28 @@ fn apply_correction(
             f.state == FactState::Live && f.tense == Tense::Current && f.vk == Some(c.old_vk)
         })
         .collect();
-    let [t] = hits[..] else {
-        report.correction_no_effect += 1;
-        return;
+    let t = match hits[..] {
+        [t] => t,
+        [] => {
+            report.correction_no_effect += 1;
+            return;
+        }
+        _ => {
+            report.correction_ambiguous += 1;
+            return;
+        }
     };
     let (subject, attribute) = (set.facts[t].subject.clone(), set.facts[t].attribute.clone());
-    let Some(card) = cardinality(env, &attribute) else {
+    let Some(attr) = env.attributes.get(&attribute) else {
         report.correction_no_effect += 1;
         return;
     };
+    let card = attr.cardinality;
+    // 関門 7: 新しい値の長さを、当てる属性の上限で見る (関門 6 は書き込みの入口が先に当てる、04 §5.3)。
+    if c.new_value.chars().count() > usize::from(attr.max_chars) {
+        report.value_rejected += 1;
+        return;
+    }
     // 新しい値が忘れた値なら、訂正でも蘇らせない (04 §7.5 の「再び覚えない印と訂正・戻す」)。
     if directives.is_blocked(&block_mark(env.key, &subject, &attribute, &c.new_vk)) {
         report.blocked += 1;
@@ -850,6 +914,8 @@ fn apply_correction(
         }
     };
     let t_id = set.facts[t].id;
+    // 訂正の発話の中で古い値に一致した範囲を、置き換えた事実の出典に足す (04 §5.3 の「終えた発言の出典」)。
+    set.facts[t].sources.insert(old_source);
     match card {
         Cardinality::Single => {
             let t = set.index_of(t_id).expect("the corrected fact is present");
@@ -1061,6 +1127,14 @@ mod tests {
                 end: 6,
                 rev: 0,
             },
+            Some(Source {
+                turn: id(3),
+                start: 9,
+                end: 15,
+                rev: 0,
+            }),
+            Target::Fact,
+            "大阪".into(),
             value_key(&KEY, "大阪"),
             "東京".into(),
             value_key(&KEY, "東京"),

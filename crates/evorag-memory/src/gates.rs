@@ -512,17 +512,17 @@ fn names_a_role(text: &str, common: &CommonRules) -> bool {
 
 /// 関門 1 で見つけた根拠の位置。
 #[derive(Debug, Clone)]
-struct Found {
+pub(crate) struct Found {
     /// 送る本文 (前のふるいの後) の範囲。
-    sent: Range<usize>,
+    pub(crate) sent: Range<usize>,
     /// 保存した本文の範囲 (span)。
-    stored: Range<usize>,
+    pub(crate) stored: Range<usize>,
     kind: EvidenceMatch,
 }
 
 /// 関門 1: 根拠の位置を探す。まず生の本文で、外れたら値の鍵の正規化の後で照合する。保存した本文の位置が
 /// 書記素の境界に来ない一致と、前のふるいで除いた行をまたぐ一致は採らない。
-fn locate_evidence(u: &Utterance<'_>, evidence: &str) -> Option<Found> {
+pub(crate) fn locate_evidence(u: &Utterance<'_>, evidence: &str) -> Option<Found> {
     let first = evidence.chars().next()?;
     let bounds = grapheme_boundaries(u.text);
     let place = |sent: Range<usize>, kind: EvidenceMatch| {
@@ -552,7 +552,7 @@ fn locate_evidence(u: &Utterance<'_>, evidence: &str) -> Option<Found> {
 }
 
 /// 関門 2 の照合: `needle` を正規化して、根拠 (正規化の対応表) に語の境界で探す。
-fn hits_in(evidence: Option<&Mapped>, needle: &str) -> Vec<Hit> {
+pub(crate) fn hits_in(evidence: Option<&Mapped>, needle: &str) -> Vec<Hit> {
     let n = normalize_v1(needle);
     match evidence {
         Some(e) if !n.is_empty() => e.find(&n, Edges::Word),
@@ -561,7 +561,11 @@ fn hits_in(evidence: Option<&Mapped>, needle: &str) -> Vec<Hit> {
 }
 
 /// 関門 4: 送る本文の根拠の範囲 `evidence` の中で、値が当たる位置 (送る本文の位置)。照合は関門 2 と同じ。
-fn value_positions(sent: &str, evidence: &Range<usize>, value: &str) -> Vec<Range<usize>> {
+pub(crate) fn value_positions(
+    sent: &str,
+    evidence: &Range<usize>,
+    value: &str,
+) -> Vec<Range<usize>> {
     let base = evidence.start;
     hits_in(Mapped::new(&sent[evidence.clone()]).as_ref(), value)
         .into_iter()
@@ -571,14 +575,14 @@ fn value_positions(sent: &str, evidence: &Range<usize>, value: &str) -> Vec<Rang
 
 /// 送る本文の、引用の括弧の内側の範囲と、その括弧の属性の例外 (関門 4)。発話ごとに 1 回だけ求める。
 #[derive(Debug, Clone)]
-struct QuoteRegions<'s> {
+pub(crate) struct QuoteRegions<'s> {
     regions: Vec<(Range<usize>, &'s [String])>,
 }
 
 impl<'s> QuoteRegions<'s> {
     /// すべての言語の括弧の組を `text` に当てる。括弧の文字は 1 文字ずつ NFKC にして比べる (全角の `＂` も
     /// `"` として数える)。
-    fn new(safety: &Safety<'s>, text: &str) -> Self {
+    pub(crate) fn new(safety: &Safety<'s>, text: &str) -> Self {
         let view: Vec<(usize, char)> = text
             .char_indices()
             .map(|(i, c)| {
@@ -604,11 +608,19 @@ impl<'s> QuoteRegions<'s> {
     }
 
     /// `pos` が、`attribute` を許していない括弧の内側にあるか。
-    fn is_quoted(&self, attribute: &str, pos: &Range<usize>) -> bool {
+    pub(crate) fn is_quoted(&self, attribute: &str, pos: &Range<usize>) -> bool {
         self.regions.iter().any(|(inner, allow)| {
             !allow.iter().any(|a| a == attribute)
                 && inner.start <= pos.start
                 && pos.end <= inner.end
+        })
+    }
+
+    /// `pos` が、`attribute` を許していない括弧の内側と 1 文字でも重なるか (訂正の検証で、値や型の固定の部分が
+    /// 引用に掛かるものを落とす、04 §6 の関門 3)。
+    pub(crate) fn overlaps(&self, attribute: &str, pos: &Range<usize>) -> bool {
+        self.regions.iter().any(|(inner, allow)| {
+            !allow.iter().any(|a| a == attribute) && inner.start < pos.end && pos.start < inner.end
         })
     }
 }

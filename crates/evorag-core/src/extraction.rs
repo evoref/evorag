@@ -13,6 +13,8 @@
 //! - 書き込み: 事実を書く経路のロック (`Inner::facts_lock`) を取ってから記録を読み、書き込みの入口
 //!   (`evorag_memory::consolidate`) で畳み、事実の書き込みと進み具合を 1 つの依頼で書き終えるまで放さない。
 //!   出典の改訂の番号の照合も、このロックの下で読み直して行う (04 §4)。
+//! - 訂正の候補 (04 §6): 同じ発話の列を同じ進み具合で処理するときに、前のふるいの後の本文に字句の規則を当て
+//!   (LLM を使わない)、当たった候補を、その束の事実と同じ依頼で書く。検証は後の手順 (correction.rs) で行う。
 //! - 利用者が操作したら、出している要求ごと落とす (sleep.rs)。書き込みは落とされない task で行い、その task
 //!   にはロックを取ってから渡すので、書いた束までは残り、終了の処理はロックを取って書き終わりを待てる。
 //!   次の機会に続きから処理する。
@@ -22,10 +24,11 @@ use std::sync::Arc;
 
 use evorag_llm::{ChatMessage, ChatRequest, Generation, LlmClient, LlmError, Role};
 use evorag_memory::{
-    Counting, EXTRACT_MAX_TOKENS, Event as FactEvent, ExtractionOutput, FactCtx, GateEnv, Report,
-    Safety, Screened, Utterance, attributes, check_candidates, consolidate, extraction_fits,
-    extraction_input, extraction_schema, extraction_system, load_directives, load_extract_progress,
-    pack, parse_extraction, prefilter, utterance_budget,
+    CandidateSkip, CorrectionBody, Counting, EXTRACT_MAX_TOKENS, Event as FactEvent,
+    ExtractionOutput, FactCtx, GateEnv, Report, Safety, Screened, Utterance, attributes,
+    candidate_ops, check_candidates, consolidate, extraction_fits, extraction_input,
+    extraction_schema, extraction_system, find_correction, load_directives, load_extract_progress,
+    pack, parse_extraction, prefilter, previous_answer, utterance_budget,
 };
 use evorag_store::{Store, WriteOp};
 use evorag_types::Id;
@@ -36,7 +39,7 @@ use crate::Inner;
 use crate::probe::ChatError;
 
 /// 締切切れと 5xx が同じ束で続いたら、その束を飛ばす回数 (04 §5.2.1 の「失敗の扱い」)。
-const FAILURE_LIMIT: u32 = 3;
+pub(crate) const FAILURE_LIMIT: u32 = 3;
 
 /// 抽出の手順の状態 (このプロセスの間だけ)。
 #[derive(Default)]
@@ -54,14 +57,14 @@ pub(crate) struct State {
 
 /// 知らせる件数 (04 §5.3 の「知らせ」)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Counts {
+pub(crate) struct Counts {
     added: usize,
     replaced: usize,
     contested: usize,
 }
 
 impl Counts {
-    fn add(&mut self, r: &Report) {
+    pub(crate) fn add(&mut self, r: &Report) {
         self.added += r.added;
         self.replaced += r.replaced;
         self.contested += r.contested;
@@ -69,6 +72,20 @@ impl Counts {
 
     fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// 状態の行に件数を出す (04 §5.3 の「知らせ」)。何も変わっていなければ出さない。
+    pub(crate) fn emit(self, inner: &Inner) {
+        if !self.is_empty() {
+            crate::emit(
+                inner,
+                Event::FactsChanged {
+                    added: self.added,
+                    replaced: self.replaced,
+                    contested: self.contested,
+                },
+            );
+        }
     }
 }
 
@@ -96,7 +113,7 @@ pub(crate) fn needed(inner: &Inner) -> bool {
 
 /// 抽出の要求 (プロンプトと生成の上限) がスロットの文脈に収まるか。収まらなければ、構成ごとに 1 回だけ記録する
 /// (`doctor` の報告は後の版)。
-fn fits(inner: &Inner) -> bool {
+pub(crate) fn fits(inner: &Inner) -> bool {
     let server = inner.conn().1;
     if extraction_fits(server.n_ctx as usize) {
         return true;
@@ -120,6 +137,8 @@ struct Item {
     rev: u32,
     text: String,
     screened: Screened,
+    /// 字句の規則で見つけた訂正の候補 (04 §6)。
+    correction: Option<CorrectionBody>,
 }
 
 impl Item {
@@ -132,20 +151,27 @@ impl Item {
     }
 }
 
-/// 進み具合より後の利用者の発話を読み、前のふるいを当てる。
+/// 進み具合より後の利用者の発話を読み、前のふるいを当てる。訂正の候補も探し、直前の応答を引いておく。
 fn plan(store: &Store) -> Option<Vec<Item>> {
     let r = store.read().ok()?;
     let through = load_extract_progress(&r).ok()?.through;
-    let items = evorag_memory::user_utterances_after(&r, through)
-        .ok()?
-        .into_iter()
-        .map(|u| Item {
+    let mut items = Vec::new();
+    for u in evorag_memory::user_utterances_after(&r, through).ok()? {
+        let correction = match find_correction(&u.mode, &u.text) {
+            Some(m) => {
+                let previous = previous_answer(&r, u.session, u.turn).ok()?;
+                Some(CorrectionBody::candidate(u.turn, u.rev, previous, &m))
+            }
+            None => None,
+        };
+        items.push(Item {
             screened: prefilter(&u.mode, &u.text),
             turn: u.turn,
             rev: u.rev,
             text: u.text,
-        })
-        .collect();
+            correction,
+        });
+    }
     Some(items)
 }
 
@@ -166,6 +192,8 @@ struct Tally {
     truncated: usize,
     /// 失敗した要求 (4xx・5xx・締切切れ・繋がらない)。
     failed: usize,
+    /// 字句の規則で見つけた訂正の候補 (04 §6)。
+    corrections: usize,
 }
 
 impl Tally {
@@ -190,6 +218,7 @@ impl Drop for Tally {
             truncated = self.truncated,
             too_long = self.skipped.get("too_long").copied().unwrap_or(0),
             failed = self.failed,
+            corrections = self.corrections,
             "fact extraction pass"
         );
     }
@@ -197,7 +226,7 @@ impl Drop for Tally {
 
 /// 失敗の扱いの分け方 (04 §5.2.1 の「失敗の扱い」、06 §7)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Failure {
+pub(crate) enum Failure {
     /// サーバに繋がらない (回数に入れず、進めずに待つ)。
     Unreachable,
     /// 4xx: 要求そのものが受け付けられない (再試行せず、束を飛ばして進める)。
@@ -207,7 +236,7 @@ enum Failure {
 }
 
 impl Failure {
-    fn of(e: &ChatError) -> Self {
+    pub(crate) fn of(e: &ChatError) -> Self {
         match e {
             ChatError::TimedOut => Self::Transient,
             ChatError::Llm(LlmError::Http { status, .. }) if (400..500).contains(status) => {
@@ -430,16 +459,22 @@ fn count_failure(inner: &Inner, first: Id) -> u32 {
     n
 }
 
-/// 事実を書く経路のロックの下で、記録を読んで畳み、事実と進み具合を 1 つの依頼で書く (04 §5.2.1)。
-/// 落とされない task で行う (読んだ後に落とされて、ロックの外で書きかけにならないように)。ロックは spawn の前に
-/// 取って task に渡す (終了の処理がロックを取れたら、出した書き込みは終わっている)。
-async fn save(inner: &Arc<Inner>, events: Vec<FactEvent>, through: Id, model_key: String) -> bool {
+/// 事実を書く経路のロックの下で、記録を読んで畳み、事実と訂正の候補と進み具合を 1 つの依頼で書く
+/// (04 §5.2.1・§6)。落とされない task で行う (読んだ後に落とされて、ロックの外で書きかけにならないように)。
+/// ロックは spawn の前に取って task に渡す (終了の処理がロックを取れたら、出した書き込みは終わっている)。
+async fn save(
+    inner: &Arc<Inner>,
+    events: Vec<FactEvent>,
+    corrections: Vec<CorrectionBody>,
+    through: Id,
+    model_key: String,
+) -> bool {
     let lock = inner.facts_lock.clone().lock_owned().await;
     let worker = inner.clone();
     let task = tokio::spawn(async move {
         let _lock = lock;
         let w = worker.clone();
-        let built = tokio::task::spawn_blocking(move || -> Option<(Vec<WriteOp>, Report)> {
+        let built = tokio::task::spawn_blocking(move || -> Option<(Vec<WriteOp>, Report, bool)> {
             let key = w.facts_key.key()?;
             let safety = Safety::bundled();
             let now = w.clock.now();
@@ -454,22 +489,48 @@ async fn save(inner: &Arc<Inner>, events: Vec<FactEvent>, through: Id, model_key
             let (mut ops, report) = consolidate(&tx, &ctx, events)
                 .map_err(|e| tracing::warn!(error = %e, "facts could not be consolidated"))
                 .ok()?;
+            // 訂正の候補。このロックの下で、ターンがあり改訂の番号が読んだときと合うものだけを書く (読んでから
+            // 書くまでに削除・忘れるが入ったとき、消した本文の写しを書き戻さないため、04 §6)。そのターンに記録が
+            // もうあれば書かない。
+            let mut written = 0;
+            let mut stale = 0;
+            for c in &corrections {
+                match candidate_ops(&tx, &*w.ids, now, c).ok()? {
+                    Ok(more) => {
+                        ops.extend(more);
+                        written += 1;
+                    }
+                    Err(CandidateSkip::Stale) => stale += 1,
+                    Err(CandidateSkip::Exists) => {}
+                }
+            }
+            if stale > 0 {
+                tracing::info!(
+                    stale,
+                    "correction candidates whose turn changed or went away were not written"
+                );
+            }
+            let new_corrections = written > 0;
             let progress = load_extract_progress(&tx).ok()?;
             // 進み具合は戻さない。
             if progress.through.is_none_or(|t| t < through) {
                 ops.push(progress.advance(through, &model_key, &*w.ids, now).ok()?);
             }
-            Some((ops, report))
+            Some((ops, report, new_corrections))
         })
         .await
         .ok()
         .flatten();
-        let Some((ops, report)) = built else {
+        let Some((ops, report, new_corrections)) = built else {
             return false;
         };
         if let Err(e) = crate::write_derived(&worker, ops).await {
             tracing::warn!(error = %e, "facts could not be written");
             return false;
+        }
+        if new_corrections {
+            // 検証の手順 (04 §4 の手順 4) に、検証していない候補があることを知らせる。
+            crate::correction::touch(&worker);
         }
         tracing::info!(
             added = report.added,
@@ -495,7 +556,7 @@ async fn save(inner: &Arc<Inner>, events: Vec<FactEvent>, through: Id, model_key
 }
 
 /// `/tokenize` で数える (キャッシュする、06 §8)。使えなければ見積もり、`counting` を見積もりにする。
-async fn count_tokens(
+pub(crate) async fn count_tokens(
     inner: &Inner,
     llm: &dyn LlmClient,
     model_key: &str,
@@ -560,9 +621,17 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         );
     }
 
+    tally.corrections = items.iter().filter(|it| it.correction.is_some()).count();
     let mut progressed = false;
+    let mut start = 0;
     for batch in packing.batches {
         let through = items[batch.through].turn;
+        // 束が覆う発話 (送らない発話を含む) の訂正の候補を、束の事実と同じ依頼で書く (04 §6)。
+        let corrections: Vec<CorrectionBody> = items[start..=batch.through]
+            .iter()
+            .filter_map(|it| it.correction.clone())
+            .collect();
+        start = batch.through + 1;
         let sent: Vec<&Item> = batch.send.iter().map(|&i| &items[i]).collect();
         let events = match sent.first() {
             None => Vec::new(),
@@ -591,7 +660,15 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
                 }
             }
         };
-        if !save(inner, events, through, server.model_key.clone()).await {
+        if !save(
+            inner,
+            events,
+            corrections,
+            through,
+            server.model_key.clone(),
+        )
+        .await
+        {
             return progressed;
         }
         progressed = true;
@@ -601,15 +678,6 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         st.clean = Some(version);
         std::mem::take(&mut st.unreported)
     };
-    if !changed.is_empty() {
-        crate::emit(
-            inner,
-            Event::FactsChanged {
-                added: changed.added,
-                replaced: changed.replaced,
-                contested: changed.contested,
-            },
-        );
-    }
+    changed.emit(inner);
     progressed
 }

@@ -103,7 +103,6 @@ impl Mapped {
     }
 
     /// 正規化の後の本文 (`normalize_v1` と同じ)。
-    #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
@@ -140,8 +139,19 @@ impl Mapped {
         hits
     }
 
+    /// 正規化の後の本文のバイト位置 `out` の文字が出た、元の本文の書記素の範囲。
+    pub(crate) fn cluster_of(&self, out: usize) -> Range<usize> {
+        let i = self
+            .owners
+            .partition_point(|o| o.0 <= out)
+            .saturating_sub(1);
+        self.owners
+            .get(i)
+            .map_or(0..0, |o| self.clusters[o.1].clone())
+    }
+
     /// 出力の範囲 `[start, end)` を元の本文の範囲に戻す。端が書記素の展開の途中なら `None`。
-    fn source_of(&self, start: usize, end: usize) -> Option<Range<usize>> {
+    pub(crate) fn source_of(&self, start: usize, end: usize) -> Option<Range<usize>> {
         let i = self.owners.binary_search_by_key(&start, |o| o.0).ok()?;
         let j = self.owners.partition_point(|o| o.0 < end).checked_sub(1)?;
         let (owner_i, owner_j) = (self.owners[i].1, self.owners[j].1);
