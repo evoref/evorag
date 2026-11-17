@@ -804,6 +804,11 @@ fn main() -> ExitCode {
             recall: Some(report.recall),
             background: None,
             remote_llm: cfg.llm.allow_remote,
+            forget: Some(evorag_types::api::ForgetState {
+                mismatched: report.forget.mismatched.len(),
+                journal_pending: report.forget.journal_pending,
+                key_missing: report.forget.key_missing,
+            }),
         },
     );
     for w in &report.location_warnings {

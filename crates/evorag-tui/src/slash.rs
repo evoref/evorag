@@ -33,18 +33,20 @@ pub enum Slash {
     Private(usize),
     /// `/private off <F の番号>`。
     PrivateOff(usize),
+    /// `/forget <F の番号>` (04 §7.1)。
+    Forget(usize),
     /// 番号の形が違う (`/memory revert F2` など)。値は打った番号。
     BadNumber(String),
     /// `/style [<項目> <値>]` (07 §3)。値はコアが確かめる。
     Style(Option<(StyleItem, String)>),
-    /// 名前は予約してあるが、この版ではまだ使えない (`/forget`・`/precepts`)。
+    /// 名前は予約してあるが、この版ではまだ使えない (`/precepts`)。
     NotYet(String),
     /// 知らないコマンド・引数の誤り。
     Invalid(String),
 }
 
 /// 後の版で入るコマンド (07 §3)。
-const RESERVED: &[&str] = &["forget", "precepts"];
+const RESERVED: &[&str] = &["precepts"];
 
 /// 一覧の番号を読む (04 §7.1)。頭の文字 (`F`・`H`・`X`。大文字・小文字を問わない) は省いてよい。省いたときは、
 /// その命令が取る一覧の番号とみなす。1 から始まる。
@@ -107,6 +109,7 @@ pub fn parse(input: &str) -> Option<Slash> {
             Some(("off", n)) => numbered(n.trim(), 'F', Slash::PrivateOff),
             _ => numbered(a, 'F', Slash::Private),
         },
+        ("forget", Some(a)) => numbered(a, 'F', Slash::Forget),
         ("style", None) => Slash::Style(None),
         ("style", Some(a)) => match a.split_once(char::is_whitespace) {
             Some((item, value)) if !value.trim().contains(char::is_whitespace) => {
@@ -157,7 +160,7 @@ mod tests {
         assert_eq!(parse("/model big"), Some(Slash::Model(Some("big".into()))));
         assert_eq!(parse("/precepts"), Some(Slash::NotYet("/precepts".into())));
         assert_eq!(parse("/memory"), Some(Slash::Memory));
-        assert_eq!(parse("/forget 1"), Some(Slash::NotYet("/forget".into())));
+        assert_eq!(parse("/forget"), Some(Slash::Invalid("/forget".into())));
         assert_eq!(parse("/private"), Some(Slash::Invalid("/private".into())));
         assert_eq!(parse("/sources"), Some(Slash::Sources(None)));
         assert_eq!(parse("/sources off"), Some(Slash::Sources(Some(false))));
@@ -211,6 +214,9 @@ mod tests {
             Some(Slash::Invalid("/private".into()))
         );
         assert_eq!(parse("/private F0"), Some(Slash::BadNumber("F0".into())));
+        assert_eq!(parse("/forget F2"), Some(Slash::Forget(2)));
+        assert_eq!(parse("/forget 12"), Some(Slash::Forget(12)));
+        assert_eq!(parse("/forget H2"), Some(Slash::BadNumber("H2".into())));
         assert_eq!(parse("/private x"), Some(Slash::BadNumber("x".into())));
         assert_eq!(
             parse("/memory unblock"),

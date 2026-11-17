@@ -66,6 +66,23 @@ impl Hide {
                 != crate::forgets::TurnCheck::Current
     }
 
+    /// 画面への印の範囲 (04 §7.3)。指示の無いターンは空。指示と合わないターン ([`Self::excluded`]) は `None`
+    /// (画面は本文を出さない)。
+    pub(crate) fn marks(&self, turn: &Turn) -> Option<Vec<evorag_store::forget::Mark>> {
+        if !self.forget_turns.contains(&turn.envelope.id) {
+            return Some(Vec::new());
+        }
+        if self.excluded(&turn.envelope) {
+            return None;
+        }
+        self.forgets.marks(
+            turn.envelope.id,
+            &turn.body.text,
+            turn_rev(&turn.envelope),
+            self.redaction,
+        )
+    }
+
     /// 除くターン ([`Self::excluded`]) の本文を、伏せ字の印だけにする (会話の履歴と画面の表示。本文は使わずに、
     /// そこに発言があったことだけを残す)。除いたら `true`。
     pub(crate) fn withhold(&self, turn: &mut Turn) -> bool {

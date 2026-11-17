@@ -39,6 +39,14 @@ not_saved = "事実への操作を記録できませんでした ({detail})。"
 no_list = "番号の付いた一覧がまだありません。先に {list} を打ってください。"
 bad_number = "番号「{n}」は、表示した一覧にありません (事実は F1、履歴は H1、忘れた事実は X1 の形。頭の文字は省けます)。"
 
+[error.forget]
+busy = "応答を生成している間は、忘れられません。応答が終わるか中断してから、もう一度 /forget を打ってください。"
+outdated = "見本を出した後に記録が変わったので、実行しませんでした。新しい見本を確かめて、もう一度 Enter を押してください。"
+aborted = "伏せ字にできないので、忘れるを中止しました。本文も事実も変えていません。見本の警告を確かめてください (伏せ字にしないで、事実だけを消すこともできます)。"
+blocked = "この選択では伏せ字にできないので、実行しません。選択の「出典の発話を伏せ字にする」を外すと、発話はそのままで事実だけを消せます。"
+counting = "見本を数えています。数え終わってから Enter を押してください。"
+not_saved = "忘れるを記録できませんでした ({detail})。本文も事実も変えていません。"
+
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
 interrupted_by_shutdown = "終了のため中断しました。受け取ったところまでを保存しました。"
@@ -54,6 +62,8 @@ default_session_title = "新しい会話"
 interrupted = "(中断)"
 failed = "(失敗)"
 no_reply = "(応答なし)"
+unverified = "(本文を確かめられません。忘れた内容と本文が合わないので、表示しません)"
+hidden = "[非表示]"
 
 [ui.status]
 idle = "待機中"
@@ -69,6 +79,8 @@ recall_failed = "想起: 候補だけ → evorag setup"
 recall_rebuilding = "想起: 作り直し中 {percent}%"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
+forget_mismatched = "確かめられない本文 {count} 件"
+forget_journal = "ジャーナルの書き直し待ち"
 
 [ui.title]
 session = "セッション: {title}"
@@ -100,6 +112,7 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /memory history F1   その属性の置き換えの履歴 (H1…)。/memory revert H1 で今の値に戻す
 /memory forgotten    忘れた事実の一覧 (X1…)。/memory unblock X1 で再び覚えない印を解く
 /private F1      事実を応答に添えないようにする (確認あり)。/private off F1 で解く
+/forget F1       事実を忘れる (確認あり。既定では出典の発話を伏せ字にする)
 /style [項目 値]  答え方の既定 (言語・長さ・書式)。値なしで選ぶ窓を開く (すべてのセッションに効く)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
@@ -153,7 +166,7 @@ mark_private = " [private]"
 note_sleep_off = "  事実を新しく作っていません (memory.sleep_time = false)。"
 note_probe = "  モデルの点検で型縛りの出力が使えなかったので、事実を新しく作っていません (evorag doctor)。"
 note_key = "  事実の鍵 (memory.forget_key) が使えないので、事実の機能を止めています。事実への操作もできません (evorag doctor)。"
-hint = "/private F1・/private off F1・/memory accept F1・/memory history F1 で操作します。番号はこの一覧のものです。"
+hint = "/forget F1・/private F1・/private off F1・/memory accept F1・/memory history F1 で操作します。番号はこの一覧のものです。"
 history_title = "{subject}・{attr} の置き換えの履歴:"
 history_row = "  H{n} {value} ({at} まで){marks}"
 history_empty = "  履歴はありません。"
@@ -195,6 +208,57 @@ body = "{label}\n\nこの行に効いているすべての private の指示を�
 others = "次の行の private の印も外れます:"
 history = "履歴の値 {n} 件の private の印も外れます:"
 hint = "Enter で実行、Esc でやめる"
+
+[ui.forget]
+title = "事実を忘れる"
+target = "忘れる事実: {label}"
+counting = "数えています…"
+samples_redact = "出典の発話を伏せ字にします (前 → 後):"
+samples_hide = "発話はそのままで、想起で添える本文の中の値を [非表示] にします (前 → 後):"
+sample_before = "  {who} 前: {text}"
+sample_after = "        後: {text}"
+no_samples = "  伏せる本文はありません (事実だけを消します)。"
+others = "ほかのターンで値が一致: {turns} 件 ({matches} 箇所)"
+history = "まとめて忘れられる履歴の値: {n} 件"
+skipped = "読めずに飛ばしたターン: {n} 件 (新しい版の記録など)"
+unredacted = "値が見つからず、伏せ字にしない出典の発話: {n} 件"
+source_outside = "出典の発話の、根拠の外で値が一致した箇所: {n} 箇所 (同じ往復の応答と同じ選択で伏せます)"
+whole = "位置を戻せないので全体を [非表示] にするターン: {n} 件"
+mismatched = "忘れた内容と本文が合わないので飛ばしたターン: {n} 件"
+affected = "伏せ字に掛かるほかの事実 (自動では忘れません。忘れるときは、その行を /forget で選んでください):"
+warning = "伏せ字にできません: {reason}\n選択の「出典の発話を伏せ字にする」を外すと、発話はそのままで事実だけを消せます。"
+warn_unreadable = "伏せ字にする発話が読めません (新しい版の記録など)"
+warn_stale = "事実の出典の位置が、今の発話と合いません"
+warn_value = "発話の中の値が、記録した事実と合いません"
+warn_mismatched = "発話が、前に忘れた内容と合いません"
+kept_note = "発話は記録・ジャーナル・退避にそのまま残ります。事実の表と検索の鍵からは消え、想起で添える本文の中の値は [非表示] になります。"
+choices_folded = "選択: {summary} (Tab で開く)"
+choice_redact = "出典の発話を伏せ字にする"
+choice_history = "置き換えの履歴の値もまとめて忘れる"
+choice_echo = "同じ往復の応答の中の値も伏せる"
+choice_others = "ほかのターンの値も伏せる"
+promise_folded = "約束する範囲・しない範囲 (? で開く)"
+promise = """約束する範囲 (すぐに取り除きます):
+・evorag の DB (事実を取り消し、発話を伏せ字にし、そこから作った記録を消します。次の起動で DB のファイルを詰め直します)
+・会話のジャーナル (伏せ字にする前の行を書き直します)
+・検索の索引、自動の退避 (退避は裏で写し直します)、隔離した記録
+・llama-server の応答のスロットのキャッシュ (消去を求めます。既定の構成では断られます)
+
+約束しない範囲:
+・書き出したファイル、OS のバックアップ・スナップショット、SSD の物理的な消去
+・llama-server のログと、主記憶のプロンプトのキャッシュ (llama-server を再起動するまで残りえます)・スロットの保存
+・次の起動までの DB のファイルの空き領域、書き直せずに残ったジャーナルの行 (状態の行と evorag doctor で知らせます)
+・消すかを尋ねて残した broken/ のファイル
+・古い版 (v0.2.x) で開いている間のこと、/bad に添えた理由、セッションの題名
+・伏せ字に掛かったほかの事実 (選んで忘れるまで残ります)、伏せ字の長さから分かる値の長さ、再び覚えない印から値を推測されうること"""
+hint = "Enter で忘れる、Esc でやめる、Tab で選択を開く、? で約束の範囲、↑↓・PageUp・PageDown でスクロール"
+hint_open = "↑↓ で選び Space で切り替え、Tab で閉じる、Enter で忘れる、Esc でやめる"
+sending = "忘れています…"
+done = "忘れました。伏せ字か [非表示] にしたターン: {n} 件。"
+done_kept = "忘れました。発話はそのまま残しています。"
+broken = "broken/ に、壊れて移した DB のファイルが {n} 件あります。忘れた値が残っているかもしれません (中身を読まないので、伏せ字にはできません)。消しますか? y で消す / n で残す"
+broken_removed = "broken/ のファイルを {n} 件消しました。"
+broken_failed = "broken/ のファイルを {n} 件消せませんでした (evorag doctor で残りを確かめられます)。"
 
 [ui.band]
 related = "関係しそうな記録 (この応答には使っていません)"

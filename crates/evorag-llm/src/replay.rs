@@ -60,6 +60,10 @@ pub struct Cassette {
     /// `/slots` の答え (無ければ、使えないサーバとして断る)。
     #[serde(default)]
     pub slots: Option<Value>,
+    /// `/slots/{id}?action=erase` に答える (`--slot-save-path` 付きの構成)。偽なら 501 で断る (既定の構成)。
+    /// どちらでも、要求は `erased_slots` に記録する。
+    #[serde(default)]
+    pub slot_erase: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +147,8 @@ struct State {
     /// 生成を 1 トークンに限った要求と、終わる前に落とされた数。
     warm: Vec<ChatRequest>,
     warm_dropped: usize,
+    /// キャッシュの消去を求められたスロット (順に。断ったものも)。
+    erased: Vec<u32>,
 }
 
 /// 記録を流す `LlmClient`。複製すると同じ状態を共有する。
@@ -201,6 +207,11 @@ impl ReplayClient {
     pub fn aux_calls(&self) -> (usize, usize) {
         let st = self.lock();
         (st.embed_calls, st.rerank_calls)
+    }
+
+    /// キャッシュの消去 (`/slots/{id}?action=erase`) を求められたスロット (順に。断ったものも)。
+    pub fn erased_slots(&self) -> Vec<u32> {
+        self.lock().erased.clone()
     }
 
     /// まだ使っていない chat の記録の数。
@@ -278,6 +289,20 @@ impl LlmClient for ReplayClient {
                     status: 501,
                     body: "replay: no slots".into(),
                 }),
+            }
+        })
+    }
+
+    fn erase_slot(&self, id: u32) -> BoxFuture<'_, Result<(), LlmError>> {
+        Box::pin(async move {
+            self.lock().erased.push(id);
+            if self.cassette.slot_erase {
+                Ok(())
+            } else {
+                Err(LlmError::Http {
+                    status: 501,
+                    body: "replay: slot erase is not enabled".into(),
+                })
             }
         })
     }

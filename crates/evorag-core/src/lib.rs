@@ -20,6 +20,7 @@ pub mod export_checks;
 mod extraction;
 mod fact_ops;
 mod fact_table;
+mod forget_ops;
 mod forgets;
 pub use forgets::ForgetStatus;
 pub mod localtime;
@@ -791,8 +792,8 @@ impl Core {
             .collect()
     }
 
-    /// 照会: セッションのターン (元の順)。
-    /// 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
+    /// 照会: セッションのターン (元の順)。伏せ字と `[非表示]` の印の範囲を添える (04 §7.3)。
+    /// 忘れるの指示と合わないターンは、本文を出さずに「確かめられない」とする (04 §7.2)。
     pub fn turns(&self, session: Id) -> Vec<evorag_types::api::TurnView> {
         let Ok(rtx) = self.inner.store.read() else {
             return Vec::new();
@@ -800,11 +801,8 @@ impl Core {
         let hide = masking::Hide::load(&rtx, self.inner.language);
         evorag_memory::session_turns(&rtx, session)
             .unwrap_or_default()
-            .into_iter()
-            .map(|mut t| {
-                withhold(hide.as_ref(), &mut t);
-                views::turn(&t)
-            })
+            .iter()
+            .map(|t| views::display(hide.as_ref(), t))
             .collect()
     }
 
@@ -833,7 +831,7 @@ impl Core {
     }
 
     /// 試験のため: 忘れるを実行する (04 §7.1〜§7.3。見本を確かめずに、既定の計画で書く)。画面からの操作は
-    /// `/forget` の命令 (M3.4c の後半で足す) が同じ経路を通す。書いたら忘れるの指示の ID。
+    /// `/forget` の命令 (`Command::ForgetFact`) が同じ経路を通す。書いたら忘れるの指示の ID。
     ///
     /// # Errors
     /// 応答を生成している、中止した (04 §7.1 の「中止」)、記録を読めない・書けないとき (理由の文)。
@@ -1816,6 +1814,13 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::AcceptFact { target } => fact_ops::run(inner, fact_ops::Request::Accept(target)),
         Command::RevertFact { target } => fact_ops::run(inner, fact_ops::Request::Revert(target)),
         Command::UnblockFact { target } => fact_ops::run(inner, fact_ops::Request::Unblock(target)),
+        Command::PreviewForget { target, options } => forget_ops::preview(inner, target, options),
+        Command::ForgetFact {
+            target,
+            options,
+            plan,
+        } => forget_ops::run(inner, target, options, plan),
+        Command::DiscardBroken => forget_ops::discard_broken(inner),
         _ => {}
     }
 }
@@ -2235,12 +2240,9 @@ fn open_session(inner: &Inner, id: Id) {
         return;
     };
     // この版では読めないターンは読み飛ばし、件数を画面に知らせる (03 §4.2 の規則 11)。
-    let mut read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
-    // 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
+    let read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
+    // 印の範囲を添え、忘れるの指示と合わないターンは本文を出さない (04 §7.2・§7.3)。
     let hide = masking::Hide::load(&rtx, inner.language);
-    for t in &mut read.turns {
-        withhold(hide.as_ref(), t);
-    }
     inner
         .state
         .lock()
@@ -2255,7 +2257,7 @@ fn open_session(inner: &Inner, id: Id) {
                 read.turns
                     .iter()
                     .map(|t| {
-                        let mut v = views::turn(t);
+                        let mut v = views::display(hide.as_ref(), t);
                         decorate(inner, &mut v, &t.body, &hidden);
                         v
                     })
@@ -2264,17 +2266,6 @@ fn open_session(inner: &Inner, id: Id) {
             unreadable: read.unreadable,
         },
     );
-}
-
-/// 画面に出すターンの本文: 忘れるの指示と合わないターンは、伏せ字の印だけにする (04 §7.2)。伏せる材料を読め
-/// なければ、忘れるの指示の有無を確かめられないので、本文を出さない。
-fn withhold(hide: Option<&masking::Hide>, t: &mut evorag_memory::Turn) {
-    match hide {
-        Some(h) => {
-            h.withhold(t);
-        }
-        None => t.body.text = String::new(),
-    }
 }
 
 async fn send(inner: &Arc<Inner>, text: String) {
