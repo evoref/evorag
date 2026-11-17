@@ -485,6 +485,8 @@ async fn save(inner: &Arc<Inner>, events: Vec<FactEvent>, through: Id, model_key
             "facts consolidated"
         );
         state(&worker).unreported.add(&report);
+        // 事実の検索の鍵と事実の表は、続く sleep-time の手順で作り直す (04 §4 の手順 6・7)。
+        crate::fact_table::touch(&worker);
         true
     });
     task.await.unwrap_or(false)

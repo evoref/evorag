@@ -492,6 +492,18 @@ pub fn load_facts(tx: &ReadTxn<'_>) -> Result<LoadedFacts, MemoryError> {
     Ok(out)
 }
 
+/// 事実を 1 件読む (想起で、事実の検索の鍵が当たったときに、今の状態を確かめる、05 §3.2)。無い・読めない・
+/// 新しい `v`・知らない状態の事実は `None`。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn load_fact(tx: &ReadTxn<'_>, id: Id) -> Result<Option<Fact>, MemoryError> {
+    Ok(match tx.get(KIND_FACT, id)? {
+        Some(Read::Ok(e)) => fact_of(&e),
+        _ => None,
+    })
+}
+
 /// 封筒を核の指示にする。読めない指示・新しい `v`・知らない正規化の版の指示は、印だけを当てる
 /// `Unknown` にする (忘れた値を蘇らせないため、04 §7.5 の「知らない op の読み方」)。
 fn directive_of(e: &Envelope) -> Directive {

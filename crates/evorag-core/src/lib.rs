@@ -16,6 +16,7 @@ mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
 mod context;
 mod extraction;
+mod fact_table;
 pub mod localtime;
 pub mod logging;
 mod notes;
@@ -270,6 +271,8 @@ struct Inner {
     notes: Mutex<notes::State>,
     /// 事実の抽出の手順の状態 (04 §5.2.1)。
     extraction: Mutex<extraction::State>,
+    /// 事実の表と事実の検索の鍵の状態 (04 §5.4・§5.5)。
+    fact_table: Mutex<fact_table::State>,
     /// 事実を書く経路のロック (04 §5.2.1 の「書き込みの直列化」)。記録を読む前に取り、書き手が書き終えるまで
     /// 放さない。統合のほか、事実への指示・出典の無い事実の掃除・忘れる・`rebuild --facts` も取る。
     /// 落とされない保存の task には、spawn の前に取った鍵 (`lock_owned`) を渡す。
@@ -582,6 +585,7 @@ impl Core {
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
             extraction: Mutex::new(extraction::State::default()),
+            fact_table: Mutex::new(fact_table::State::default()),
             facts_lock: Arc::new(tokio::sync::Mutex::new(())),
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
@@ -636,6 +640,8 @@ impl Core {
             // 古い版で消した会話の派生の記録を、DB・索引・退避から除く (03 §4.2 の規則 12)。
             orphans::reconcile(&worker, gone).await;
             embedding::open(&worker).await;
+            // 事実の表を作っておく (最初の応答の経路で数えないように、04 §5.4)。
+            fact_table::prepare(&worker).await;
             let done = worker.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let jobs = worker
@@ -1745,6 +1751,8 @@ async fn delete(inner: &Arc<Inner>) {
         .session = None;
     notes::touch(inner);
     extraction::touch(inner);
+    // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
+    fact_table::invalidate(inner);
     emit(inner, Event::SessionDeleted { id: sid });
     let worker = inner.clone();
     let task = tokio::task::spawn_blocking(move || purge(&worker, job, &ids));
@@ -2099,6 +2107,7 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
         return Vec::new();
     };
     let gone = plan.delete.clone();
+    let fact_keys = plan.fact_keys;
     let mut docs = plan.keep;
     let deleted = plan.delete.len();
     let created = plan.create.len();
@@ -2132,14 +2141,17 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
     })
     .await;
     match result {
-        Ok(Ok(n)) => tracing::info!(
-            docs = n,
-            created,
-            deleted,
-            rebuilt = rebuild,
-            ms = started.elapsed().as_millis() as u64,
-            "lexical index synced"
-        ),
+        Ok(Ok(n)) => {
+            fact_table::set_keyed(inner, fact_keys);
+            tracing::info!(
+                docs = n,
+                created,
+                deleted,
+                rebuilt = rebuild,
+                ms = started.elapsed().as_millis() as u64,
+                "lexical index synced"
+            );
+        }
         _ => tracing::warn!("lexical index sync failed"),
     }
     gone
@@ -2661,6 +2673,21 @@ fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id, extra: Vec<I
     }
 }
 
+/// システムプロンプト (05 §4.1 の順 1〜4) と、置いた事実の表。答え方の既定と事実の表が変わらなければ、
+/// ターンをまたいで同じバイト列になる (ADR-0017、AC-FR-304-5)。
+pub(crate) async fn system_message(
+    inner: &Inner,
+    session: Id,
+    defaults: &prompt::AnswerDefaults,
+) -> (ChatMessage, Option<evorag_memory::FactTable>) {
+    let mut text = prompt::system_prompt(inner.language, defaults);
+    let table = fact_table::for_turn(inner, session).await;
+    if let Some(t) = &table {
+        text = prompt::with_fact_table(text, &t.text);
+    }
+    (ChatMessage::new(Role::System, text), table)
+}
+
 /// LLM に送る会話 (05 §4.1)。
 pub(crate) struct Conversation {
     /// 発話 `user_turn` より前の発言 (失敗した応答と、この発話への前の応答は除く)。
@@ -2781,6 +2808,10 @@ async fn generate(
     let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
     let conv = conversation(inner, session, user_turn);
+    // システムプロンプトは凍結の核・選べる既定・事実の表だけ。日時と引用は今の発話の側に置く (ADR-0017)。
+    let defaults = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
+    let (system, table) = system_message(inner, session, &defaults).await;
+    let budgets = context::frame_budgets(n_ctx, reserve, table.is_some());
     // 以前の会話を引く (05 §3)。このセッションでメモリを切っていれば引かない (FR-409)。
     let memory = if memory_on(inner, session) {
         Some(
@@ -2791,8 +2822,7 @@ async fn generate(
                 &*llm,
                 &inner.tokens,
                 &server.model_key,
-                n_ctx,
-                reserve,
+                budgets.recall,
                 session,
                 user_turn,
                 conv.next_source,
@@ -2805,12 +2835,6 @@ async fn generate(
     } else {
         None
     };
-    // システムプロンプトは凍結の核と選べる既定だけ。日時と引用は今の発話の側に置く (ADR-0017)。
-    let defaults = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
-    let system = ChatMessage::new(
-        Role::System,
-        prompt::system_prompt(inner.language, &defaults),
-    );
     let quote = memory.as_ref().and_then(|m| m.quote.clone());
     let (text, at) = conv
         .current
@@ -2844,6 +2868,7 @@ async fn generate(
         band: recall_obs.band,
         user_attached: recall_obs.user_attached,
         degraded: recall_obs.degraded,
+        fact_table: table.map(|t| t.version),
     };
     let req = ChatRequest {
         messages: assembled.messages,

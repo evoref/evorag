@@ -89,11 +89,14 @@ pub(crate) fn current(inner: &Inner) -> Option<(String, Arc<VecIndex>)> {
 }
 
 /// 足りないチャンク (語彙の索引にあって、今のモデルのベクトルの索引に無く、飛ばしていないもの) と、全体の数。
+/// 事実の検索の鍵は埋め込まない (語彙の索引だけ、fact_table.rs) ので数えない。
 fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
     let Some(lex) = &inner.index else {
         return (Vec::new(), 0);
     };
-    let all = lex.snapshot().ids();
+    let mut all = lex.snapshot().ids();
+    let fact_keys = crate::fact_table::keyed(inner);
+    all.retain(|id| !fact_keys.contains(id));
     let have: HashSet<Id> = match current(inner) {
         Some((k, ix)) if k == key => ix.snapshot().ids(),
         _ => HashSet::new(),

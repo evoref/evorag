@@ -72,6 +72,46 @@ pub fn reserve_for_output(n_ctx: usize, configured: Option<usize>) -> usize {
     configured.unwrap_or_else(|| (n_ctx / 4).max(1024))
 }
 
+/// 想起の引用の枠の予算 (トークン、05 §4.1 の順 6)。
+pub(crate) const RECALL_BUDGET: usize = 800;
+/// 予算を半分にする `n_ctx` の目安 (05 §4.1)。
+const SMALL_CTX: usize = 8192;
+/// 小さな `n_ctx` で、履歴に残したい量 (トークン、05 §4.1)。
+const HISTORY_FLOOR: usize = 2000;
+
+/// 枠ごとの予算 (トークン、05 §4.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameBudgets {
+    /// 想起の引用 (順 6)。
+    pub recall: usize,
+    /// 事実の表 (順 4)。表を置かないときは 0 (使わない枠の予算は履歴に回す)。
+    pub facts: usize,
+}
+
+/// 枠ごとの予算を決める (05 §4.1)。`n_ctx` が小さく (8,192 未満)、履歴に 2,000 トークンを残せないときは、
+/// 想起 → 事実の順に予算を半分にする。`n_ctx` と生成に残す量だけで決まるので、事実の表の予算はターンごとに
+/// 変わらない (表のバイト列を保つため)。
+pub(crate) fn frame_budgets(n_ctx: usize, reserve: usize, with_facts: bool) -> FrameBudgets {
+    let mut b = FrameBudgets {
+        recall: RECALL_BUDGET,
+        facts: if with_facts {
+            evorag_memory::TABLE_BUDGET
+        } else {
+            0
+        },
+    };
+    let short = |b: &FrameBudgets| {
+        n_ctx < SMALL_CTX && n_ctx.saturating_sub(reserve + b.recall + b.facts) < HISTORY_FLOOR
+    };
+    if short(&b) {
+        b.recall /= 2;
+        if short(&b) {
+            b.facts /= 2;
+        }
+    }
+    b
+}
+
 /// 履歴の 1 つの発言。
 pub struct Past {
     /// このターンの ID。
@@ -162,6 +202,34 @@ mod tests {
         assert_eq!(estimate("abcd"), 1);
         assert_eq!(estimate("abcde"), 2);
         assert_eq!(estimate(""), 0);
+    }
+
+    #[test]
+    fn small_contexts_halve_recall_first_then_facts() {
+        let full = FrameBudgets {
+            recall: 800,
+            facts: 600,
+        };
+        assert_eq!(frame_budgets(8192, 2048, true), full);
+        // 4096 − 1024 − 800 − 600 = 1672 < 2000: 想起を半分にすると 2072 で足りる。
+        assert_eq!(
+            frame_budgets(4096, 1024, true),
+            FrameBudgets {
+                recall: 400,
+                facts: 600
+            }
+        );
+        // 3072 − 1024 − 400 − 600 < 2000: 事実も半分にする。
+        assert_eq!(
+            frame_budgets(3072, 1024, true),
+            FrameBudgets {
+                recall: 400,
+                facts: 300
+            }
+        );
+        // 表を置かないときは、想起の判定は事実の枠を数えない (v0.2 と同じ)。
+        assert_eq!(frame_budgets(4096, 1024, false).recall, 800);
+        assert_eq!(frame_budgets(3072, 1024, false).recall, 400);
     }
 
     #[test]

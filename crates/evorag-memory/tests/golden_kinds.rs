@@ -111,6 +111,8 @@ fn turn_v1() {
                 band: vec![id("019a6a2b-0000-7000-8000-00000000000b")],
                 user_attached: vec![id("019a6a2b-0000-7000-8000-00000000000c")],
                 degraded: vec![DEGRADED_NO_EMBED.into()],
+                // 見本 (tests/fixtures/) は v0.2 の形のまま。事実の表の版は任意の項目なので、無くても読める。
+                fact_table: None,
             }),
         },
     );

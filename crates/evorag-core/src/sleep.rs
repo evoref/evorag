@@ -91,6 +91,8 @@ pub(crate) enum Step {
     Notes,
     /// 事実の候補を抽出して統合する (04 §5.2.1、04 §4 の手順 3・5)。sleep-time の手順。
     Extract,
+    /// 事実の検索の鍵を索引に合わせ、事実の表を作り直す (04 §5.4・§5.5、04 §4 の手順 6・7)。sleep-time の手順。
+    FactTable,
     /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
     Backup,
 }
@@ -134,6 +136,9 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     }
     if !waiting(Step::Extract) && crate::extraction::needed(inner) {
         return Some(Step::Extract);
+    }
+    if !waiting(Step::FactTable) && crate::fact_table::needed(inner) {
+        return Some(Step::FactTable);
     }
     if !waiting(Step::Backup)
         && inner.startup_done.load(Ordering::SeqCst)
@@ -312,6 +317,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
             Step::Embed => crate::embedding::run(inner).await,
             Step::Notes => crate::notes::run(inner).await,
             Step::Extract => crate::extraction::run(inner).await,
+            Step::FactTable => crate::fact_table::run(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

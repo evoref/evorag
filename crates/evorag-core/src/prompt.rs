@@ -2,6 +2,7 @@
 //!
 //! - **凍結の核**: 安全の指示、日時の印の読み方、引用の扱い方と出典の示し方。誰も変えない。
 //! - **選べる既定**: 答える言語・長さ・書式のそれぞれについて、同梱した文から 1 つ (07 §3)。
+//! - **事実の表** (順 4): 表の版が変わったときだけ変わる ([`with_fact_table`]、04 §5.4)。
 //!
 //! システムプロンプトには、今の日時・想起の引用・要求ごとに変わる区切りの印を入れない
 //! (ADR-0017)。日時は発話の側に付け ([`stamp`])、引用は今の発話の直前に置く ([`quote_block`])。
@@ -264,6 +265,16 @@ pub fn system_prompt(lang: PromptLanguage, defaults: &AnswerDefaults) -> String 
         out.push_str(t);
     }
     out
+}
+
+/// システムプロンプトの末尾に事実の表 (05 §4.1 の順 4、04 §5.4) を置く。表の前置きと本文は
+/// `evorag_memory::fact_table` が作る。
+pub fn with_fact_table(system: String, table: &str) -> String {
+    format!(
+        "{system}
+
+{table}"
+    )
 }
 
 /// 発話の先頭に付ける日時 (05 §4.1)。ターンに記録した時刻から作る。
