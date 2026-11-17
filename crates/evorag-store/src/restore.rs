@@ -216,7 +216,7 @@ fn read_carried(db: &Database, carry: &dyn Fn(&Envelope) -> bool) -> Result<Carr
     Ok(out)
 }
 
-/// 戻す DB の写し `file` に、引き継ぐものを書き、退避だけに置く `meta` ([`crate::meta::BACKUP_MAX_ID`]) を消す。
+/// 戻す DB の写し `file` に、引き継ぐものを書く。
 fn write_carried(file: &Path, carried: &Carried) -> Result<(), StoreError> {
     let db = Database::open(file).map_err(crate::store::db)?;
     let tx = db.begin_write().map_err(crate::store::db)?;
@@ -230,8 +230,6 @@ fn write_carried(file: &Path, carried: &Carried) -> Result<(), StoreError> {
                 .map_err(crate::store::db)?;
         }
         let mut m = tx.open_table(META).map_err(crate::store::db)?;
-        m.remove(crate::meta::BACKUP_MAX_ID.as_bytes())
-            .map_err(crate::store::db)?;
         if let Some(v) = &carried.compact_pending {
             m.insert(crate::meta::COMPACT_PENDING.as_bytes(), v.as_slice())
                 .map_err(crate::store::db)?;

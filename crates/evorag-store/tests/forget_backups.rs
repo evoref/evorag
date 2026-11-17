@@ -107,6 +107,8 @@ struct Ids {
     removed: Id,
     quarantined_turn: Id,
     other_quarantine: Id,
+    reply: Id,
+    signal: Id,
 }
 
 const SECRET_TEXT: &str = "my locker code is 4242, remember";
@@ -150,7 +152,11 @@ fn seed(store: &Store) -> Ids {
     };
     let mut q_secret = next(KIND_QUARANTINE, quarantine(secret.id, SECRET_TEXT));
     let mut q_other = next(KIND_QUARANTINE, quarantine(other.id, "nothing"));
+    let mut reply = next("turn", map(vec![("text", "noted".into())]));
+    let mut signal = next("sample", map(vec![("kind", "bad".into())]));
     for e in [
+        &mut reply,
+        &mut signal,
         &mut session,
         &mut secret,
         &mut other,
@@ -169,6 +175,10 @@ fn seed(store: &Store) -> Ids {
     tx.put_link(other.id, "in_session", session.id, &[])
         .unwrap();
     tx.put_link(removed.id, "about", other.id, &[]).unwrap();
+    tx.put_link(reply.id, "reply_to", secret.id, &[]).unwrap();
+    tx.put_link(signal.id, "target", secret.id, &[]).unwrap();
+    tx.put_lookup("sample", "target", &Part::Id(secret.id), signal.id)
+        .unwrap();
     tx.put_lookup("chunk", "turn", &Part::Id(secret.id), stale_chunk.id)
         .unwrap();
     tx.put_lookup("chunk", "turn", &Part::Id(other.id), other_chunk.id)
@@ -192,6 +202,8 @@ fn seed(store: &Store) -> Ids {
         removed: removed.id,
         quarantined_turn: q_secret.id,
         other_quarantine: q_other.id,
+        reply: reply.id,
+        signal: signal.id,
     }
 }
 
@@ -330,8 +342,6 @@ fn a_backup_is_rewritten_with_the_turn_redacted_and_targets_dropped() {
                 );
             }
         }
-        // 写しの meta に ID の最大がある。
-        assert!(rows(&file, META).contains_key(meta::BACKUP_MAX_ID.as_bytes()));
     }
 
     // もう一度当てても変わらない (対象はすでに無い・当たっている)。
@@ -355,11 +365,15 @@ fn backups_proven_to_hold_no_target_are_skipped() {
     let ids = seed(&store);
     let daily = store.daily_backup(None).unwrap().unwrap();
     let file = daily.join(DB_FILE);
-    let max = rows(&file, META)[meta::BACKUP_MAX_ID.as_bytes()].clone();
-    let max: Id = String::from_utf8(max).unwrap().parse().unwrap();
-    assert!(max >= ids.other_quarantine);
+    // 退避の記録の ID の最大 (最後に書いた記録)。
+    let max = rows(&file, RECORDS)
+        .keys()
+        .map(|k| Id::from_bytes(k[k.len() - 16..].try_into().unwrap()))
+        .max()
+        .unwrap();
+    assert_eq!(max, ids.signal);
 
-    // 退避の後にできた記録だけが対象: ID の最大より大きいので、開くだけで飛ばす。
+    // 退避の後にできた記録だけが対象: 記録の表から求めた ID の最大より大きいので、中を走査せずに飛ばす。
     let later = store.ids().next_id();
     assert!(later > max);
     let before: Vec<_> = [META, RECORDS, LINKS, LOOKUP, BLOBS]
@@ -386,8 +400,7 @@ fn backups_proven_to_hold_no_target_are_skipped() {
         "a skipped backup is not touched"
     );
 
-    // ID の最大を持たない退避 (古い版の退避) でも、記録の表と副索引で対象が無いと確かめて飛ばす。
-    evorag_store::testutil::raw_remove_meta(&daily, meta::BACKUP_MAX_ID);
+    // ID の最大より小さい対象も、記録の表と副索引で無いと確かめて飛ばす。
     let unknown = Id::from_bytes([0x01; 16]);
     let p = ForgetRecopy {
         remove: BTreeSet::from([unknown]),
@@ -451,6 +464,86 @@ fn a_turn_that_does_not_match_is_dropped_from_the_copy() {
     assert!(!records.contains_key(&record_key("chunk", ids.stale_chunk)));
     assert!(!records.contains_key(&record_key(KIND_QUARANTINE, ids.quarantined_turn)));
     assert!(records.contains_key(&record_key("turn", ids.other_turn)));
+    // 除いたターンを指す関係と副索引は ID だけなので残す (restore がジャーナルからターンを戻す)。
+    let links = rows(&daily.join(DB_FILE), LINKS);
+    for (from, to) in [
+        (ids.reply, ids.secret_turn),
+        (ids.signal, ids.secret_turn),
+        (ids.secret_turn, ids.session),
+    ] {
+        assert!(
+            links
+                .keys()
+                .any(|k| k.starts_with(&id_key(from)) && k.ends_with(&id_key(to))),
+            "{from} -> {to}"
+        );
+    }
+    assert!(
+        rows(&daily.join(DB_FILE), LOOKUP)
+            .keys()
+            .any(|k| mentions(k, ids.secret_turn) && mentions(k, ids.signal))
+    );
+}
+
+fn id_key(id: Id) -> Vec<u8> {
+    let mut k = KeyBuf::new();
+    k.id(id);
+    k.into_bytes()
+}
+
+/// 写しにターンの記録が無く、その隔離の記録だけがある退避も、飛ばさずに隔離の記録を除く。
+/// verifies: 03 §7.3 (伏せ字にしたターンの quarantine の記録を消す、飛ばす退避)
+#[test]
+fn a_quarantined_copy_of_a_turn_is_dropped_even_without_the_turn() {
+    let dir = TempDir::new("forget-recopy-quarantine-only");
+    let c = clock();
+    let store = open(dir.path(), c.clone());
+    let ids = seed(&store);
+    let daily = store.daily_backup(None).unwrap().unwrap();
+    evorag_store::testutil::raw_remove_record(&daily, "turn", ids.secret_turn);
+    let never = |_: &Envelope, _: &RecopyView<'_>| false;
+    let p = ForgetRecopy {
+        remove: BTreeSet::new(),
+        turns: BTreeMap::from([(ids.secret_turn, vec![secret_redaction().0])]),
+        marker: M.into(),
+        candidates: Vec::new(),
+        drop: &never,
+    };
+    let n = store.forget_backups(None, &p, &|| false).unwrap();
+    // 日次は写し直す。週次はターンを持つので、伏せ字にして写し直す。
+    assert_eq!(n.rewritten, 2, "{n:?}");
+    let records = rows(&daily.join(DB_FILE), RECORDS);
+    assert!(!records.contains_key(&record_key(KIND_QUARANTINE, ids.quarantined_turn)));
+    assert!(records.contains_key(&record_key(KIND_QUARANTINE, ids.other_quarantine)));
+}
+
+/// 読めない記録 (チェックサムが合わない) は、対象の ID を文字列で含むときだけ写しから除く。
+/// verifies: 03 §7.3 (写し方)、03 §8 (読めない記録)
+#[test]
+fn unreadable_records_naming_a_target_are_dropped() {
+    let dir = TempDir::new("forget-recopy-corrupt");
+    let c = clock();
+    let store = open(dir.path(), c.clone());
+    let ids = seed(&store);
+    let daily = store.daily_backup(None).unwrap().unwrap();
+    evorag_store::testutil::raw_corrupt_record(&daily, "chunk", ids.stale_chunk);
+    evorag_store::testutil::raw_corrupt_record(&daily, "chunk", ids.other_chunk);
+    let rule = drop_rule;
+    let p = ForgetRecopy {
+        remove: BTreeSet::new(),
+        turns: BTreeMap::from([(ids.secret_turn, vec![secret_redaction().0])]),
+        marker: M.into(),
+        candidates: Vec::new(),
+        drop: &rule,
+    };
+    store.forget_backups(None, &p, &|| false).unwrap();
+    let records = rows(&daily.join(DB_FILE), RECORDS);
+    assert!(!records.contains_key(&record_key("chunk", ids.stale_chunk)));
+    assert!(records.contains_key(&record_key("chunk", ids.other_chunk)));
+    // 除いた記録の blob も除く。読めないまま残した記録の blob は残す。
+    let blobs = rows(&daily.join(DB_FILE), BLOBS);
+    assert!(!blobs.values().any(|v| v == b"vector-of-secret"));
+    assert!(blobs.values().any(|v| v == b"vector-of-other"));
 }
 
 /// 開けない退避があっても、ほかの退避は写し直してから失敗を返す (呼び手は job を残す)。
@@ -489,7 +582,7 @@ fn restore_carries_cleanup_jobs_and_compact_pending() {
         let mut tx = store.write(&tok, Durability::Immediate).unwrap();
         tx.put(&mut old_job).unwrap();
         tx.commit().unwrap();
-        let daily = store.daily_backup(None).unwrap().unwrap();
+        store.daily_backup(None).unwrap().unwrap();
         assert!(!store.compact_pending().unwrap());
 
         let mut job = Envelope::new(store.ids().next_id(), "job", 1, now, "");
@@ -505,8 +598,6 @@ fn restore_carries_cleanup_jobs_and_compact_pending() {
         tx.set_compact_pending().unwrap();
         tx.commit().unwrap();
         assert!(store.compact_pending().unwrap());
-        // 退避の meta の ID の最大は、退避にだけ置く。
-        assert!(rows(&daily.join(DB_FILE), META).contains_key(meta::BACKUP_MAX_ID.as_bytes()));
         (job.id, other.id, old_job.id)
     };
     let backup = list_backups(dir.path(), None)
@@ -529,7 +620,6 @@ fn restore_carries_cleanup_jobs_and_compact_pending() {
     );
     drop(r);
     assert!(store.compact_pending().unwrap());
-    assert_eq!(store.meta(meta::BACKUP_MAX_ID).unwrap(), None);
 }
 
 /// `compact.pending` は書き換えてよく、消せる。知らない値は「要らない」として読む。

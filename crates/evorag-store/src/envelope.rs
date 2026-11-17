@@ -196,6 +196,16 @@ impl Envelope {
         out
     }
 
+    /// 値の配置の版を知っていて、チェックサムが合うか (本体を復号しない。退避の写し直しの下見に使う)。
+    pub(crate) fn is_intact(key: &[u8], value: &[u8]) -> bool {
+        match value.split_first() {
+            Some((&LAYOUT_V1, rest)) => rest
+                .split_first_chunk::<8>()
+                .is_some_and(|(sum, cbor)| u64::from_le_bytes(*sum) == checksum(key, cbor)),
+            _ => false,
+        }
+    }
+
     /// `records` の値のバイト列を読む。チェックサムは復号の前に確かめる。
     pub fn decode(key: &[u8], value: &[u8]) -> Result<Self, DecodeError> {
         let (&layout, rest) = value

@@ -90,6 +90,15 @@ pub enum InvalidRedaction {
     EmptyRange { start: usize, end: usize },
     #[error("range {start}..{end} is outside the text or not on a character boundary")]
     OutOfText { start: usize, end: usize },
+    #[error("a stored position does not fit in this platform's usize")]
+    Position,
+    #[error("the stored hash is not 64 lowercase hex digits")]
+    Hash,
+}
+
+/// DB に記録した位置の組を範囲にする (`usize` に収まらなければ `None`)。
+fn stored_range((start, end): (u64, u64)) -> Option<Range<usize>> {
+    Some(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
 }
 
 /// 1 つの忘れるの指示が 1 つのターンにした伏せ字 (04 §7.5 の `redactions` のうち、そのターンの要素をまとめたもの)。
@@ -138,6 +147,26 @@ impl Redaction {
             ranges,
             hash,
         })
+    }
+
+    /// 指示の本体に記録した値 (`rev_before`・`rev_after`・`{start, end}` の並び・64 桁の 16 進のハッシュ) から作る。
+    /// 位置は、この環境の `usize` に収まることを確かめる (本文に収まるかは、当てるときに確かめる)。
+    ///
+    /// # Errors
+    /// 位置が `usize` に収まらないとき、ハッシュが読めないとき、ほかは [`Self::new`] と同じ。
+    pub fn from_stored(
+        rev_before: u32,
+        rev_after: u32,
+        ranges: impl IntoIterator<Item = (u64, u64)>,
+        hash: &str,
+    ) -> Result<Self, InvalidRedaction> {
+        let hash: TextHash = hash.parse().map_err(|_| InvalidRedaction::Hash)?;
+        let ranges = ranges
+            .into_iter()
+            .map(stored_range)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(InvalidRedaction::Position)?;
+        Self::new(rev_before, rev_after, ranges, hash)
     }
 
     /// 操作のときに、今の本文 `text` (改訂の番号 `rev`) の範囲 `ranges` を伏せ字にする記述を作る。改訂の番号は
@@ -191,22 +220,24 @@ impl Redaction {
     /// 終わりへ寄せる。範囲の始まりちょうどの位置は、その範囲ではずらさない。
     #[must_use]
     pub fn remap(&self, pos: usize, marker: &str, edge: Edge) -> usize {
-        let (mut removed, mut added) = (0, 0);
+        // 範囲はまとめて始まりの順に並んでいるので減算は負にならないが、DB から読んだ値で桁あふれしないように
+        // 飽和させる。
+        let (mut removed, mut added) = (0usize, 0usize);
         for r in &self.ranges {
             if r.end <= pos {
-                removed += r.end - r.start;
-                added += marker.len();
+                removed = removed.saturating_add(r.end - r.start);
+                added = added.saturating_add(marker.len());
             } else if r.start < pos {
-                let at = r.start - removed + added;
+                let at = r.start.saturating_sub(removed).saturating_add(added);
                 return match edge {
                     Edge::Start => at,
-                    Edge::End => at + marker.len(),
+                    Edge::End => at.saturating_add(marker.len()),
                 };
             } else {
                 break;
             }
         }
-        pos - removed + added
+        pos.saturating_sub(removed).saturating_add(added)
     }
 
     /// 範囲 (span・貼り付けの範囲・`[非表示]` の範囲) を伏せ字の後の位置に直す。始まりは [`Edge::Start`]、
@@ -225,7 +256,7 @@ impl Redaction {
             .iter()
             .map(|r| {
                 let at = self.remap(r.start, marker, Edge::Start);
-                at..at + marker.len()
+                at..at.saturating_add(marker.len())
             })
             .collect()
     }
@@ -430,6 +461,16 @@ pub struct HiddenRange {
     pub range: Range<usize>,
 }
 
+impl HiddenRange {
+    /// 指示の本体に記録した値 (`{turn, rev, start, end}` の `rev`・`start`・`end`) から作る。位置が `usize` に
+    /// 収まらないか、空・逆向きの範囲なら `None`。
+    #[must_use]
+    pub fn from_stored(rev: u32, start: u64, end: u64) -> Option<Self> {
+        let range = stored_range((start, end))?;
+        (range.start < range.end).then_some(Self { rev, range })
+    }
+}
+
 /// 1 つの忘れるの指示が 1 つのターンに持つもの ([`display_marks`] の入力)。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TurnDirective<'a> {
@@ -444,10 +485,14 @@ pub struct TurnDirective<'a> {
 /// ([`Redaction::remap_range`])。`[非表示]` の範囲が後の伏せ字に重なるときは、写した範囲 (印を含む) を
 /// `[非表示]` にする。`[非表示]` の範囲に含まれる伏せ字の印は除く (表示では `[非表示]` が覆う)。
 ///
+/// 求めた範囲は今の本文 `text` で確かめ、本文の外・文字の境界でない範囲と、本文がその範囲で印の文字列になって
+/// いない伏せ字は除く (DB から読んだ位置が壊れていても、本文の外を指す範囲を返さない)。
+///
 /// 指示を順に当てて `rev_now` に届かない・追い越す (指示が欠けている・ターンがまだ伏せ字になっていない)、または
 /// 範囲の改訂の番号が合わないときは `None` (呼び手は、そのターンを「合わないターン」として扱う、04 §7.2)。
 #[must_use]
 pub fn display_marks(
+    text: &str,
     rev_now: u32,
     directives: &[TurnDirective<'_>],
     marker: &str,
@@ -487,6 +532,12 @@ pub fn display_marks(
     if rev != rev_now {
         return None;
     }
+    marks.retain(|m| {
+        let Some(shown) = text.get(m.range.clone()) else {
+            return false;
+        };
+        !shown.is_empty() && (m.kind == MarkKind::Hidden || shown == marker)
+    });
     Some(normalize_marks(marks))
 }
 
@@ -861,7 +912,7 @@ mod tests {
                 hidden: &[],
             },
         ];
-        let marks = display_marks(2, &dirs, M).expect("marks");
+        let marks = display_marks(&t2, 2, &dirs, M).expect("marks");
         let shown: Vec<(&str, MarkKind)> = marks
             .iter()
             .map(|m| (&t2[m.range.clone()], m.kind))
@@ -875,8 +926,8 @@ mod tests {
             ]
         );
         // 今の番号が合わない (まだ伏せ字になっていない・指示が欠けている) ときは求めない。
-        assert_eq!(display_marks(1, &dirs, M), None);
-        assert_eq!(display_marks(3, &dirs, M), None);
+        assert_eq!(display_marks(&t1, 1, &dirs, M), None);
+        assert_eq!(display_marks(&t2, 3, &dirs, M), None);
     }
 
     #[test]
@@ -898,9 +949,49 @@ mod tests {
                 hidden: &[],
             },
         ];
-        let marks = display_marks(1, &dirs, M).expect("marks");
+        let marks = display_marks(&t1, 1, &dirs, M).expect("marks");
         assert_eq!(marks.len(), 1, "{marks:?}");
         assert_eq!(marks[0].kind, MarkKind::Hidden);
         assert_eq!(&t1[marks[0].range.clone()], format!("b{M}"));
+    }
+
+    /// DB から読んだ壊れた位置でも、桁あふれせず、本文の外を指す範囲を返さない。
+    #[test]
+    fn stored_positions_are_checked_and_arithmetic_saturates() {
+        let text = "aa XX bb";
+        let (r, t1) = plan(text, 0, &[span(text, "XX")]);
+        let stored = Redaction::from_stored(0, 1, [(3, 5)], &r.hash().to_string()).unwrap();
+        assert_eq!(stored, r);
+        assert_eq!(
+            Redaction::from_stored(0, 1, [(3, 5)], "zz"),
+            Err(InvalidRedaction::Hash)
+        );
+        assert_eq!(HiddenRange::from_stored(0, 5, 5), None);
+        assert_eq!(HiddenRange::from_stored(0, 6, 2), None);
+        // 本文より遥かに大きい位置: 写しても飽和するだけで、印の範囲からは除く。
+        let huge =
+            Redaction::new(0, 1, std::iter::once(usize::MAX - 2..usize::MAX), r.hash()).unwrap();
+        assert_eq!(huge.remap(usize::MAX, M, Edge::End), usize::MAX);
+        assert_eq!(huge.remap(usize::MAX - 1, M, Edge::End), usize::MAX);
+        let far = [HiddenRange {
+            rev: 1,
+            range: 100..200,
+        }];
+        let dirs = [
+            TurnDirective {
+                redaction: Some(&r),
+                hidden: &[],
+            },
+            TurnDirective {
+                redaction: None,
+                hidden: &far,
+            },
+        ];
+        let marks = display_marks(&t1, 1, &dirs, M).expect("marks");
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert_eq!(&t1[marks[0].range.clone()], M);
+        // 本文がその位置で印になっていない (伏せ字が当たっていない本文) なら、伏せ字の印を返さない。
+        let marks = display_marks(&"x".repeat(t1.len()), 1, &dirs, M).expect("marks");
+        assert!(marks.is_empty(), "{marks:?}");
     }
 }

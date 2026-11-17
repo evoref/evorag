@@ -2,7 +2,10 @@
 //!
 //! 退避の論理的な写しの途中で記録を変える: 伏せ字にするターンには、そのターンのすべての忘れるの指示を指示の ID
 //! の順に純粋な核 ([`crate::forget::apply_to_turn`]) で当て (合わなければそのターンを写しから除く)、封筒の
-//! チェックサムを計算し直す。除く ID の記録と、その関係・副索引・`blobs`・`quarantine` の記録を写さない。
+//! チェックサムを計算し直す。除く ID (`remove` と呼び手の判定で除く記録) の記録と、その関係・副索引・`blobs`・
+//! `quarantine` の記録を写さない。合わないターンは記録と `blobs`・`quarantine` だけを除き、そのターンを指す関係と
+//! 副索引は残す (ID だけで本文を持たず、restore はジャーナルからターンを戻すため)。読めない記録は、対象の ID を
+//! 文字列で含むものを除く。
 //! 値の鍵を使う判定 (印に当たる事実・`vks` に当たる訂正) と、出典の改訂の番号の判定は、呼び手が
 //! [`ForgetRecopy::drop`] で渡す。写し終えたら元の退避の DB を閉じてから入れ替える。
 
@@ -199,18 +202,20 @@ fn recopy_one(file: &Path, plan: &ForgetRecopy<'_>) -> Result<bool, StoreError> 
 /// 対象を含みうるか。含まないことを確かめられたときだけ `false` (03 §7.3 の「飛ばす退避」)。
 fn may_hold_targets(src: &Database, plan: &ForgetRecopy<'_>) -> Result<bool, StoreError> {
     let targets = plan.id_targets();
-    if !targets.is_empty() {
-        // 写したときの ID の最大より、対象の ID がすべて大きければ、どの対象も (その隔離も) 含まない。隔離の記録の
-        // ID は元の記録より後に作るので、元の記録の ID が最大より大きければ、隔離の記録も無い。
-        let below_max = match backup::recorded_max_id(src)? {
-            Some(max) => targets.iter().next().is_some_and(|min| *min <= max),
-            None => true,
+    let rtx = src.begin_read().map_err(db)?;
+    if let Some(min) = targets.first() {
+        // 退避の記録の ID の最大より、対象の ID がすべて大きければ、どの対象も (その隔離・派生の記録も) 含まない。
+        // 隔離・派生の記録の ID は元の記録より後に作るので、元の記録の ID が最大より大きければ、それらも無い。
+        // 最大は退避の記録の表から求める (`meta` の値は信じない)。
+        let below_max = match max_record_id(&rtx)? {
+            MaxId::Known(max) => *min <= max,
+            MaxId::Empty => false,
+            MaxId::Unknown => true,
         };
-        if below_max && holds_any(src, &targets)? {
+        if below_max && holds_any(&rtx, &targets)? {
             return Ok(true);
         }
     }
-    let rtx = src.begin_read().map_err(db)?;
     let lookup = rtx.open_table(LOOKUP).map_err(db)?;
     for probe in &plan.candidates {
         let start = probe.prefix();
@@ -226,25 +231,89 @@ fn may_hold_targets(src: &Database, plan: &ForgetRecopy<'_>) -> Result<bool, Sto
     Ok(false)
 }
 
-/// 記録の表のキーか `quarantine` の記録の元の ID に、`targets` のどれかがあるか。
-fn holds_any(src: &Database, targets: &BTreeSet<Id>) -> Result<bool, StoreError> {
-    let rtx = src.begin_read().map_err(db)?;
+/// 退避の記録の ID の最大。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaxId {
+    /// 記録が無い。
+    Empty,
+    Known(Id),
+    /// 種類と ID の形でないキーがあり、求められない。
+    Unknown,
+}
+
+/// 記録の表の ID の最大を、種類ごとの最後のキーから求める (種類の前方一致の終わりへ飛びながら、種類の数 × log n)。
+fn max_record_id(rtx: &redb::ReadTransaction) -> Result<MaxId, StoreError> {
+    let t = rtx.open_table(RECORDS).map_err(db)?;
+    let mut from: Vec<u8> = Vec::new();
+    let mut max: Option<Id> = None;
+    loop {
+        let Some(first) = t
+            .range::<&[u8]>((Bound::Included(from.as_slice()), Bound::Unbounded))
+            .map_err(db)?
+            .next()
+        else {
+            break;
+        };
+        let (k, _) = first.map_err(db)?;
+        let Some((kind, _)) = crate::store::split_record_key(k.value()) else {
+            return Ok(MaxId::Unknown);
+        };
+        let mut prefix = KeyBuf::new();
+        prefix.str(&kind);
+        let prefix = prefix.into_bytes();
+        let end = key::prefix_end(&prefix);
+        let upper = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+        let last = t
+            .range::<&[u8]>((Bound::Included(prefix.as_slice()), upper))
+            .map_err(db)?
+            .next_back();
+        let Some(last) = last else {
+            return Ok(MaxId::Unknown);
+        };
+        let (k, _) = last.map_err(db)?;
+        let Some((_, id)) = crate::store::split_record_key(k.value()) else {
+            return Ok(MaxId::Unknown);
+        };
+        max = max.max(Some(id));
+        match end {
+            Some(e) => from = e,
+            None => break,
+        }
+    }
+    Ok(max.map_or(MaxId::Empty, MaxId::Known))
+}
+
+/// 記録の表のキー、`quarantine` の記録の元の ID、チェックサムの合わない記録の値 (ID の文字列) に、`targets` の
+/// どれかがあるか。
+fn holds_any(rtx: &redb::ReadTransaction, targets: &BTreeSet<Id>) -> Result<bool, StoreError> {
+    let needles = id_strings(targets.iter());
     let t = rtx.open_table(RECORDS).map_err(db)?;
     for item in t.iter().map_err(db)? {
         let (k, v) = item.map_err(db)?;
-        let Some((kind, id)) = crate::store::split_record_key(k.value()) else {
+        let (k, v) = (k.value(), v.value());
+        let Some((kind, id)) = crate::store::split_record_key(k) else {
             continue;
         };
-        if targets.contains(&id) {
-            return Ok(true);
-        }
-        if kind == KIND_QUARANTINE
-            && quarantined_id(k.value(), v.value()).is_some_and(|o| targets.contains(&o))
+        if targets.contains(&id)
+            || (kind == KIND_QUARANTINE
+                && quarantined_id(k, v).is_some_and(|o| targets.contains(&o)))
+            || (!Envelope::is_intact(k, v) && contains_any(v, &needles))
         {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// ID の文字列の形 (封筒と本体が ID を書く形)。
+fn id_strings<'a>(ids: impl Iterator<Item = &'a Id>) -> Vec<Vec<u8>> {
+    ids.map(|id| id.to_string().into_bytes()).collect()
+}
+
+fn contains_any(haystack: &[u8], needles: &[Vec<u8>]) -> bool {
+    needles
+        .iter()
+        .any(|n| !n.is_empty() && haystack.windows(n.len()).any(|w| w == n.as_slice()))
 }
 
 /// `quarantine` の記録が持つ、元の記録の ID (本体の `id`)。
@@ -262,9 +331,12 @@ fn quarantined_id(k: &[u8], v: &[u8]) -> Option<Id> {
 /// 1 つの退避の写しで変えるもの。
 #[derive(Debug, Default)]
 struct Changes {
-    /// 写さない記録の ID (その関係・副索引・`blobs` も写さない)。
+    /// 記録と、その関係・副索引・`blobs` を写さない ID (`remove` と、呼び手の判定で除く記録)。
     drop: BTreeSet<Id>,
     drop_bytes: BTreeSet<[u8; 16]>,
+    /// 記録と `blobs` だけを写さない ID (合わないターン、読めずに対象の ID を含む記録、隔離の記録)。関係と副索引は
+    /// ID だけなので残す (restore はジャーナルからターンを戻す)。
+    drop_record: BTreeSet<Id>,
     /// 伏せ字にしたターンの、書き直した値 (チェックサムを計算し直したもの)。
     rewritten: BTreeMap<Id, Vec<u8>>,
 }
@@ -273,10 +345,11 @@ impl Changes {
     fn scan(src: &Database, plan: &ForgetRecopy<'_>) -> Result<Self, StoreError> {
         let rtx = src.begin_read().map_err(db)?;
         let records = rtx.open_table(RECORDS).map_err(db)?;
+        let needles = id_strings(plan.id_targets().iter());
         let mut out = Self::default();
         let mut turns: BTreeMap<Id, TurnInCopy> = BTreeMap::new();
         let mut quarantined: Vec<(Id, Id)> = Vec::new();
-        // 1 回目: 除く ID、伏せ字にするターン、隔離の記録。
+        // 1 回目: 除く ID、伏せ字にするターン、隔離の記録、読めない記録。
         for item in records.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let (k, v) = (k.value(), v.value());
@@ -291,9 +364,14 @@ impl Changes {
                     _ => TurnInCopy::Dropped,
                 };
                 if state == TurnInCopy::Dropped {
-                    out.drop.insert(id);
+                    out.drop_record.insert(id);
                 }
                 turns.insert(id, state);
+            } else if Envelope::decode(k, v).is_err() {
+                // 読めない記録は判定にかけられないので、対象の ID を文字列で含むものを除く (安全の側)。
+                if contains_any(v, &needles) {
+                    out.drop_record.insert(id);
+                }
             } else if kind == KIND_QUARANTINE
                 && let Some(orig) = quarantined_id(k, v)
             {
@@ -308,7 +386,11 @@ impl Changes {
             let Some((kind, id)) = crate::store::split_record_key(k) else {
                 continue;
             };
-            if kind == KIND_QUARANTINE || out.drop.contains(&id) || turns.contains_key(&id) {
+            if kind == KIND_QUARANTINE
+                || out.drop.contains(&id)
+                || out.drop_record.contains(&id)
+                || turns.contains_key(&id)
+            {
                 continue;
             }
             if let Ok(env) = Envelope::decode(k, v)
@@ -317,10 +399,15 @@ impl Changes {
                 out.drop.insert(id);
             }
         }
-        // 除く記録と伏せ字にするターンの隔離の記録 (隔離した原文に伏せる前の本文が残るため、04 §7.2)。
+        // 除く記録・除く ID・伏せ字にするターンの隔離の記録 (隔離した原文に伏せる前の本文が残るため、04 §7.2)。
+        // 写しに元の記録が無くても、計画の ID なら除く。
         for (qid, orig) in quarantined {
-            if out.drop.contains(&orig) || turns.contains_key(&orig) {
-                out.drop.insert(qid);
+            if out.drop.contains(&orig)
+                || out.drop_record.contains(&orig)
+                || plan.remove.contains(&orig)
+                || plan.turns.contains_key(&orig)
+            {
+                out.drop_record.insert(qid);
             }
         }
         out.drop_bytes = out.drop.iter().map(|i| *i.as_bytes()).collect();
@@ -355,16 +442,17 @@ impl Changes {
     }
 
     fn is_empty(&self) -> bool {
-        self.drop.is_empty() && self.rewritten.is_empty()
+        self.drop.is_empty() && self.drop_record.is_empty() && self.rewritten.is_empty()
     }
 
     fn row(&self, table: Table, k: &[u8]) -> Row {
         let dropped = |id: &Id| self.drop.contains(id);
+        let record_gone = |id: &Id| dropped(id) || self.drop_record.contains(id);
         let parts = || key::decode(k).ok();
         let gone = match table {
             Table::Meta => false,
             Table::Records => match crate::store::split_record_key(k) {
-                Some((_, id)) if dropped(&id) => true,
+                Some((_, id)) if record_gone(&id) => true,
                 Some((_, id)) => {
                     if let Some(bytes) = self.rewritten.get(&id) {
                         return Row::Replace(bytes.clone());
@@ -373,7 +461,7 @@ impl Changes {
                 }
                 None => false,
             },
-            // 関係は (from, rel, to) と逆向きの行の両方に ID を持つ。
+            // 関係は (from, rel, to) と逆向きの行の両方に ID を持つ。除くのは `drop` の ID の関係だけ。
             Table::Links => match parts() {
                 Some(p) => p
                     .iter()
@@ -386,7 +474,7 @@ impl Changes {
                 None => mentions(k, &self.drop_bytes),
             },
             Table::Blobs => match parts() {
-                Some(p) => matches!(p.first(), Some(OwnedPart::Id(id)) if dropped(id)),
+                Some(p) => matches!(p.first(), Some(OwnedPart::Id(id)) if record_gone(id)),
                 None => mentions(k, &self.drop_bytes),
             },
         };

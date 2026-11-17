@@ -8,11 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use evorag_types::Id;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
+use crate::fsutil;
 use crate::store::{StoreError, TABLES, db};
-use crate::{fsutil, meta};
 
 /// 退避のフォルダ (データ根から)。
 pub const BACKUPS_DIR: &str = "backups";
@@ -77,8 +76,7 @@ pub fn logical_copy_excluding(
     })
 }
 
-/// 行ごとに `row` で扱いを決めて写す (忘れるの写し直し、03 §7.3)。写しの `meta` には、写した記録の ID の最大を
-/// [`meta::BACKUP_MAX_ID`] に書く (元の DB の同じキーは写さない)。
+/// 行ごとに `row` で扱いを決めて写す (忘れるの写し直し、03 §7.3)。
 pub(crate) fn logical_copy_rows(
     src: &Database,
     dst: &Path,
@@ -107,7 +105,6 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
     for t in TABLES {
         tx.open_table(t).map_err(db)?;
     }
-    let mut max_id: Option<Id> = None;
     let mut in_batch = 0;
     for (i, t) in TABLES.iter().enumerate() {
         let kind = TABLE_KINDS[i];
@@ -115,19 +112,11 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let (k, v) = (k.value(), v.value());
-            if kind == Table::Meta && k == meta::BACKUP_MAX_ID.as_bytes() {
-                continue;
-            }
             let replaced = match row(kind, k, v)? {
                 Row::Drop => continue,
                 Row::Keep => None,
                 Row::Replace(bytes) => Some(bytes),
             };
-            if kind == Table::Records
-                && let Some((_, id)) = crate::store::split_record_key(k)
-            {
-                max_id = max_id.max(Some(id));
-            }
             tx.open_table(*t)
                 .map_err(db)?
                 .insert(k, replaced.as_deref().unwrap_or(v))
@@ -141,13 +130,6 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
                 in_batch = 0;
             }
         }
-    }
-    if let Some(max) = max_id {
-        tx.open_table(crate::store::META)
-            .map_err(db)?
-            .insert(meta::BACKUP_MAX_ID.as_bytes(), max.to_string().as_bytes())
-            .map_err(db)?;
-        stats.rows[0] += 1;
     }
     tx.set_durability(redb::Durability::Immediate).map_err(db)?;
     tx.commit().map_err(db)?;
@@ -163,16 +145,6 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
         }
     }
     Ok(stats)
-}
-
-/// 退避の `meta` に記録した、写したときの記録の ID の最大 ([`meta::BACKUP_MAX_ID`])。無い (古い退避) か読めなければ
-/// `None`。
-pub(crate) fn recorded_max_id(src: &Database) -> Result<Option<Id>, StoreError> {
-    let rtx = src.begin_read().map_err(db)?;
-    let t = rtx.open_table(crate::store::META).map_err(db)?;
-    Ok(t.get(meta::BACKUP_MAX_ID.as_bytes())
-        .map_err(db)?
-        .and_then(|v| String::from_utf8_lossy(v.value()).parse().ok()))
 }
 
 /// UTC のミリ秒を `YYYYMMDDTHHMMSSmmmZ` にする (フォルダの名前が時刻の順に並ぶように)。
