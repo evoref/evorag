@@ -407,6 +407,169 @@ async fn facts_of_a_deleted_session_leave_the_table_and_the_keys() {
     assert_eq!(keys, 0);
 }
 
+/// 別のセッションで、猫の事実をもう一度言う (出典が 2 つのセッションにまたがる事実にする)。
+const PET_AGAIN: &str = "今も猫を飼っています";
+const PET_FACT: &str = r#"{"c": [{"t": 1, "s": "self", "a": "pet", "v": "猫",
+    "e": "猫を飼っています", "m": "fact", "tn": "current", "old": ""}]}"#;
+
+/// 新しいセッションを開き、その ID を返す。
+async fn open_new_session(core: &Core, rx: &mut UnboundedReceiver<Event>) -> Id {
+    core.command(Command::NewSession { title: "s".into() });
+    let ev = until(rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    let Some(Event::SessionOpened { session, .. }) = ev.last() else {
+        panic!()
+    };
+    session.id
+}
+
+fn file_contains(file: &Path, text: &str) -> bool {
+    std::fs::read(file)
+        .map(|b| b.windows(text.len()).any(|w| w == text.as_bytes()))
+        .unwrap_or(false)
+}
+
+/// セッションを消すと、そのセッションだけを出典とする事実は同じ操作で消え、その検索の鍵もすぐに索引から除かれる
+/// (以後の想起に出ない)。ほかのセッションにも出典のある事実は、消したセッションの出典だけを外して残す。次のターン
+/// の表は作り直され、退避からも消した事実を除く (04 §7.1・§7.2・§5.4・§5.5、03 §7.3)。
+///
+/// verifies: AC-FR-309-3
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_removes_its_facts_and_their_keys_at_once() {
+    let dir = TempDir::new("fact-table-delete-facts");
+    prepare(dir.path());
+    let llm = chat(&[
+        reply(REPLY),
+        reply(TWO_FACTS),
+        reply(REPLY),
+        reply(PET_FACT),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    let a = open_new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES_AND_PET).await;
+    open_new_session(&core, &mut rx).await;
+    let b1 = say(&core, &mut rx, PET_AGAIN).await;
+    assert_eq!(core.indexed_fact_keys(), 2);
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+    // 事実を含む退避を作っておく (削除で、消した事実を除いて写し直されるか確かめる)。
+    let backup = open(dir.path(), 11)
+        .pre_op_backup("test", &[])
+        .unwrap()
+        .join(evorag_store::DB_FILE);
+    assert!(file_contains(&backup, "residence"));
+
+    let again = chat(&[reply(REPLY), reply(REPLY)]);
+    let (core, mut rx) = start(dir.path(), &again, 9).await;
+    core.command(Command::OpenSession { id: a });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    // 知らせの前に、消した事実の鍵は索引から除かれている (sleep-time を待たない)。
+    assert_eq!(core.indexed_fact_keys(), 1);
+    open_new_session(&core, &mut rx).await;
+    ask(&core, &mut rx, "residence").await;
+    ask(&core, &mut rx, "pet").await;
+    core.shutdown().await;
+    assert_eq!(again.remaining(), 0);
+
+    let reqs = answers(&again);
+    let sys = system(&reqs[0]);
+    assert!(!sys.contains("大阪"), "{sys}");
+    assert!(sys.ends_with("| 利用者 | pet | 猫 |"), "{sys}");
+    assert!(!quoted(&reqs[0]), "the deleted fact's key recalls nothing");
+    assert!(quoted(&reqs[1]), "the kept fact's key still recalls");
+
+    let store = open(dir.path(), 13);
+    let r = store.read().unwrap();
+    let facts = evorag_memory::load_facts(&r).unwrap().set.facts;
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0].attribute, "pet");
+    let sources: Vec<Id> = facts[0].sources.iter().map(|s| s.turn).collect();
+    assert_eq!(sources, [b1]);
+    let mut purges = 0;
+    r.for_each(evorag_memory::KIND_JOB, |x| {
+        if let evorag_store::Read::Ok(e) = x
+            && e.body_as::<evorag_memory::JobBody>().unwrap().task
+                == evorag_memory::JOB_PURGE_BACKUPS
+        {
+            purges += 1;
+        }
+        true
+    })
+    .unwrap();
+    assert_eq!(purges, 0, "the purge job is done");
+    assert!(
+        !file_contains(&backup, "residence"),
+        "the deleted fact left the backup"
+    );
+    assert!(
+        file_contains(&backup, "pet"),
+        "the kept fact stays in the backup"
+    );
+}
+
+/// 後継として private になっていた値は、言い直したセッションを消して後継でなくなっても private のまま残り、
+/// 事実の表に出ない。削除と同じ依頼で、その値だけの private の指示が足され、ジャーナルにも書かれる
+/// (04 §7.5 の「後継」)。
+///
+/// verifies: AC-FR-309-3
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successor_stays_private_after_its_restating_session_is_deleted() {
+    let dir = TempDir::new("fact-table-private-delete");
+    prepare(dir.path());
+    let llm = chat(&[
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    open_new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    // 別の値を指定した、後継にも効く private の指示 (この時点の大阪は後継ではない)。
+    assert!(core.make_fact_private("self", "residence", "京都").await);
+    open_new_session(&core, &mut rx).await;
+    say(&core, &mut rx, LIVES).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    open_new_session(&core, &mut rx).await;
+    ask(&core, &mut rx, "うん").await;
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    let reqs = answers(&llm);
+    let sys = system(&reqs[2]);
+    assert!(!sys.contains("大阪"), "{sys}");
+
+    let store = open(dir.path(), 13);
+    let r = store.read().unwrap();
+    let facts = evorag_memory::load_facts(&r).unwrap().set.facts;
+    let [osaka] = &facts[..] else {
+        panic!("{facts:?}")
+    };
+    assert_eq!(osaka.sources.len(), 1, "the restating source is taken off");
+    assert!(osaka.private, "still private");
+    let directives = evorag_memory::load_directives(&r).unwrap();
+    let value_only: Vec<_> = directives
+        .iter()
+        .filter(|d| {
+            d.kind
+                == DirectiveKind::Private {
+                    scope: Scope::ValueOnly,
+                }
+        })
+        .collect();
+    assert_eq!(value_only.len(), 1, "{directives:?}");
+    assert_eq!(value_only[0].vk, osaka.vk);
+    assert_eq!(value_only[0].subject, "self");
+    assert_eq!(value_only[0].attribute, "residence");
+    let journaled = std::fs::read_dir(dir.path().join("journal"))
+        .unwrap()
+        .any(|e| file_contains(&e.unwrap().path(), "value_only"));
+    assert!(journaled, "the directive is in the journal");
+}
+
 /// 今のセッションだけを出典とする事実の鍵は、想起の候補にしない (04 §5.5)。当たりがターンに直して何も残らない
 /// まま「添えた」にならない。
 #[tokio::test(flavor = "multi_thread")]

@@ -39,13 +39,13 @@ pub use extract::{
 };
 pub use facts::{
     FactBody, FactCtx, FactDirectiveBody, HiddenBody, KIND_FACT, KIND_FACT_DIRECTIVE, LoadedFacts,
-    REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, add_directive, consolidate, diff_ops,
-    load_directives, load_fact, load_facts, rebuild,
+    REL_CANCELS, REL_FACT_SRC, RedactionBody, SourceBody, SourcesDropped, add_directive,
+    consolidate, diff_ops, drop_turns, load_directives, load_fact, load_facts, rebuild,
 };
 pub use fold::{
-    Candidate, Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState,
-    FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private,
-    table_order,
+    Candidate, Choice, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet,
+    FactState, FoldEnv, Mood, Report, Scope, Source, Tense, VerifiedCorrection, drop_sources, fold,
+    refresh_private, table_order,
 };
 pub use gates::{
     Accepted, EvidenceMatch, GateEnv, GateReason, MAX_SUBJECT_CHARS, RawCandidate, RawMood, Safety,

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::extract::turn_rev;
 use crate::fold::{
-    Choice, Directive, DirectiveKind, Directives, Event, Fact, FactSet, FactState, FoldEnv, Report,
-    Scope, Source, Tense, fold,
+    Choice, Directive, DirectiveKind, Directives, Dropped, Event, Fact, FactSet, FactState,
+    FoldEnv, Report, Scope, Source, Tense, drop_sources, fold,
 };
 use crate::gates::{Safety, check_subject, check_text, check_value};
 use crate::kinds::KIND_TURN;
@@ -774,6 +774,90 @@ pub fn rebuild(
     Ok((diff_ops(&before, &set, ctx.now)?, report))
 }
 
+/// 出典のターンが消えたときの書き込み ([`drop_turns`])。
+#[derive(Debug, Clone, Default)]
+pub struct SourcesDropped {
+    /// 書き込みの操作 (事実の記録と、その関係・副索引)。
+    pub ops: Vec<WriteOp>,
+    /// 消した事実 (ID の順。事実の検索の鍵の ID も同じ、04 §5.5)。読めない事実で、出典がすべて無くなった
+    /// ものも含む。
+    pub deleted: Vec<Id>,
+    /// 核で変えたもの。
+    pub dropped: Dropped,
+}
+
+/// 出典のターンが消えたときの書き込みの操作を返す (セッションの削除 04 §7.1、出典の無い事実の掃除
+/// 04 §5.3・03 §4.2 の規則 12)。`gone` は、消えた (消す) ターンなら `true` を返す。
+///
+/// 畳みの核 ([`drop_sources`]) で出典を外し、出典の無くなった事実を消し (置き換えの連鎖は 04 §7.4)、前後の
+/// 差を [`diff_ops`] で操作にする。新しい `v`・知らない状態の事実は書き換えず、出典 (本体の `sources` の
+/// `turn`) がすべて消えたときだけ、本体を解釈せずに消す (03 §4.2 の規則 6 の「忘れる・削除」)。
+/// 事実への指示は消さない (03 §3.3)。出典が外れて private でなくなる事実には、その値だけの private の指示
+/// (ID は `ids` から) を同じ操作の列で足す (04 §7.5 の「後継」。指示はジャーナルにも書かれる)。
+///
+/// 呼ぶ側は、[`consolidate`] と同じく、事実を書く経路のロックを `tx` を開く前から書き終えるまで持つ。
+///
+/// # Errors
+/// 記録を読めない・本体を書けないとき。
+pub fn drop_turns(
+    tx: &ReadTxn<'_>,
+    gone: &dyn Fn(Id) -> bool,
+    ids: &dyn IdGen,
+    now: Timestamp,
+) -> Result<SourcesDropped, MemoryError> {
+    let before = load_facts(tx)?;
+    let mut dirs = load_directives(tx)?;
+    let mut set = before.set.clone();
+    let mut new_id = || ids.next_id();
+    let dropped = drop_sources(
+        &mut set,
+        &mut dirs,
+        crate::rules::attributes(),
+        gone,
+        &mut new_id,
+    );
+    let mut ops = Vec::new();
+    for d in &dropped.directives {
+        ops.extend(directive_ops(d, now)?);
+    }
+    ops.extend(diff_ops(&before, &set, now)?);
+    let mut deleted = dropped.deleted.clone();
+    if before.unknown > 0 {
+        tx.for_each(KIND_FACT, |r| {
+            if let Read::Ok(e) = r
+                && !before.envelopes.contains_key(&e.id)
+                && let Ok(SourcesField { sources }) = e.body_as::<SourcesField>()
+                && !sources.is_empty()
+                && sources.iter().all(|s| gone(s.turn))
+            {
+                ops.extend(fact_entries(&e).iter().map(|x| x.delete(KIND_FACT, e.id)));
+                ops.push(WriteOp::DeleteLinksOf(e.id));
+                ops.push(WriteOp::Delete {
+                    kind: KIND_FACT.into(),
+                    id: e.id,
+                });
+                deleted.push(e.id);
+            }
+            true
+        })?;
+        deleted.sort_unstable();
+    }
+    Ok(SourcesDropped {
+        ops,
+        deleted,
+        dropped,
+    })
+}
+
+/// 指示の記録を足す操作 (本体と、その関係・副索引)。種類 `fact_directive` はジャーナルにも書かれる。
+fn directive_ops(d: &Directive, now: Timestamp) -> Result<Vec<WriteOp>, BodyError> {
+    let mut env = Envelope::new(d.id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, now, "");
+    env.set_body(&FactDirectiveBody::from_directive(d))?;
+    let mut ops = derive_directive(&env);
+    ops.insert(0, WriteOp::Put(env));
+    Ok(ops)
+}
+
 /// 事実への指示を足し、その効き目を事実に当てた書き込みの操作を返す (04 §7.5)。
 /// 採る・戻すは指示の時点で 1 回当て、private とその解除は事実の写しを計算し直す。
 ///
@@ -816,10 +900,7 @@ pub fn add_directive(
         attribute: attribute.to_owned(),
         vk,
     };
-    let mut env = Envelope::new(id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, ctx.now, "");
-    env.set_body(&FactDirectiveBody::from_directive(&d))?;
-    let mut ops = derive_directive(&env);
-    ops.insert(0, WriteOp::Put(env));
+    let mut ops = directive_ops(&d, ctx.now)?;
 
     let before = load_facts(tx)?;
     let mut dirs = load_directives(tx)?;
@@ -1100,6 +1181,110 @@ mod tests {
             [2u8, 3, 4].map(|n| Id::from_bytes([n; 16]))
         );
         assert!(withdrawn(&after, &after).is_empty());
+    }
+
+    /// 出典のターンが消えたとき: 読める事実は出典を外し、出典の無くなった事実を消す。知らない状態の事実は
+    /// 書き換えず、出典がすべて消えたときだけ消す (04 §5.1 の「知らない状態の読み方」、03 §4.2 の規則 12)。
+    #[test]
+    fn dropping_turns_trims_or_deletes_facts_and_leaves_newer_ones_unless_orphaned() {
+        use std::sync::Arc;
+
+        use evorag_store::testutil::TempDir;
+        use evorag_store::{OpenOptions, Store, WriteRequest, Writer};
+        use evorag_types::{ManualClock, UuidV7Gen};
+
+        let dir = TempDir::new("facts-drop");
+        let now = Timestamp::from_millis(1_762_650_000_000);
+        let clock = Arc::new(ManualClock::new(now));
+        let (store, _) = Store::open(OpenOptions {
+            data_root: dir.path().to_path_buf(),
+            evorag_version: "0.3.0".into(),
+            kinds: crate::kinds(),
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock.clone(), 1)),
+            config_file: None,
+        })
+        .expect("open");
+        let store = Arc::new(store);
+        let (writer, handle) = Writer::new(store.clone()).expect("writer");
+        let thread = std::thread::spawn(move || writer.run());
+
+        let (kept, gone) = (Id::from_bytes([1; 16]), Id::from_bytes([2; 16]));
+        let source = |turn| SourceBody {
+            turn,
+            rev: 0,
+            start: Some(0),
+            end: Some(3),
+        };
+        let put = |n: u8, state: &str, turns: &[Id]| {
+            let mut b = fact_body(state);
+            b.attribute = "hobby".into();
+            b.vk = Some(format!("{n:02x}").repeat(32));
+            b.sources = turns.iter().map(|t| source(*t)).collect();
+            let mut e = Envelope::new(Id::from_bytes([n; 16]), KIND_FACT, FACT_V, now, "");
+            e.set_body(&b).expect("body");
+            let mut ops = derive_fact(&e);
+            ops.push(WriteOp::Put(e));
+            ops
+        };
+        let mut ops = Vec::new();
+        ops.extend(put(10, "live", &[kept, gone])); // 出典を外す
+        ops.extend(put(11, "live", &[gone])); // 消す
+        ops.extend(put(12, "someday", &[kept, gone])); // 知らない状態: そのまま
+        ops.extend(put(13, "someday", &[gone])); // 知らない状態: 消す
+        handle
+            .submit_wait(WriteRequest::background(ops))
+            .expect("facts");
+
+        let dropped = {
+            let tx = store.read().expect("read");
+            drop_turns(
+                &tx,
+                &|t| t == gone,
+                &UuidV7Gen::with_seed(clock.clone(), 2),
+                now,
+            )
+            .expect("drop")
+        };
+        assert_eq!(dropped.deleted, [11u8, 13].map(|n| Id::from_bytes([n; 16])));
+        assert_eq!(dropped.dropped.trimmed, 1);
+        handle
+            .submit_wait(WriteRequest::background(dropped.ops))
+            .expect("write");
+        let tx = store.read().expect("read");
+        let mut left = Vec::new();
+        tx.for_each(KIND_FACT, |r| {
+            if let Read::Ok(e) = r {
+                let turns: Vec<Id> = e
+                    .body_as::<SourcesField>()
+                    .expect("sources")
+                    .sources
+                    .iter()
+                    .map(|s| s.turn)
+                    .collect();
+                left.push((e.id, turns));
+            }
+            true
+        })
+        .expect("facts");
+        assert_eq!(
+            left,
+            [
+                (Id::from_bytes([10; 16]), vec![kept]),
+                (Id::from_bytes([12; 16]), vec![kept, gone]),
+            ]
+        );
+        // 外した出典の関係も消える。
+        let src: Vec<Id> = tx
+            .links_from(Id::from_bytes([10; 16]), REL_FACT_SRC)
+            .expect("links")
+            .into_iter()
+            .map(|(to, _)| to)
+            .collect();
+        assert_eq!(src, [kept]);
+        drop(tx);
+        handle.shutdown();
+        thread.join().expect("writer");
     }
 
     #[test]

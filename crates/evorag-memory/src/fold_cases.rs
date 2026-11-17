@@ -1,6 +1,6 @@
 //! 統合の回帰ケース (`tests/memory-cases/consolidation.toml`、09 §3.5) を、純粋な核 (`fold`) で走らせる。
 //!
-//! 書式は `tests/memory-cases/README.md`。まだ作っていない操作 (忘れる・セッションの削除、M3.4) を
+//! 書式は `tests/memory-cases/README.md`。まだ作っていない操作 (忘れる、M3.4) を
 //! 使う事例は `PENDING` に明示して載せ、黙って飛ばさない。`PENDING` の事例が通ったら、一覧から外すよう
 //! 試験を落とす。
 //!
@@ -14,17 +14,15 @@ use toml::Value;
 
 use crate::fold::{
     Candidate, Choice, Directive, DirectiveKind, Directives, Event, FactSet, FactState, FoldEnv,
-    Mood, Scope, Source, Tense, VerifiedCorrection, fold, refresh_private, table_order,
+    Mood, Scope, Source, Tense, VerifiedCorrection, drop_sources, fold, refresh_private,
+    table_order,
 };
 use crate::lexical::signals;
 use crate::rules::attributes;
 use crate::value_key::{ForgetKey, normalize_v1, value_key};
 
-/// M3.4 (忘れる・セッションの削除) で通す事例。
+/// M3.4 (忘れる) で通す事例。
 const PENDING: &[(&str, &str)] = &[
-    ("C21", "M3.4: delete_session"),
-    ("C22", "M3.4: delete_session"),
-    ("C23", "M3.4: delete_session"),
     ("C28", "M3.4: forget"),
     ("C29", "M3.4: forget"),
     ("C34", "M3.4: forget"),
@@ -70,15 +68,23 @@ mod db {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
 
+    use evorag_store::key::OwnedPart;
     use evorag_store::testutil::TempDir;
     use evorag_store::{Envelope, OpenOptions, Store, WriteOp, WriteRequest, Writer, WriterHandle};
     use evorag_types::{Id, IdGen, ManualClock, Timestamp, UuidV7Gen};
 
-    use super::id_at;
     use crate::facts::{FactCtx, add_directive, consolidate, load_facts, rebuild};
     use crate::fold::{DirectiveKind, Event, FactSet};
     use crate::gates::Safety;
-    use crate::kinds::{KIND_TURN, TurnBody, TurnRole, TurnState};
+    use crate::kinds::{
+        KIND_SESSION, KIND_TURN, LOOKUP_UPDATED_AT, REL_IN_SESSION, SessionBody, SessionState,
+        TurnBody, TurnRole, TurnState,
+    };
+
+    use super::id_at;
+
+    /// 記録の時刻 (回帰ケースの時刻とは別。ID の順だけが意味を持つ)。
+    const NOW: Timestamp = Timestamp::from_millis(1_762_650_000_000);
     use crate::rules::attributes;
     use crate::value_key::{ForgetKey, ValueKey};
 
@@ -109,6 +115,8 @@ mod db {
         safety: Safety<'static>,
         /// 純粋な核の側の指示の ID → ストアの側の指示の ID。
         pub directives: BTreeMap<Id, Id>,
+        /// 書いたセッション。
+        sessions: BTreeSet<Id>,
     }
 
     impl Db {
@@ -135,6 +143,7 @@ mod db {
                 ids: CaseIds(Mutex::new((0, 0))),
                 safety: Safety::bundled(),
                 directives: BTreeMap::new(),
+                sessions: BTreeSet::new(),
             }
         }
 
@@ -145,16 +154,29 @@ mod db {
         }
 
         /// 発話のターンを書く (書き込みの入口が、出典の改訂の番号を今のターンと突き合わせるため)。
-        pub fn add_turn(&self, id: Id, text: &str) {
-            let mut e = Envelope::new(
-                id,
-                KIND_TURN,
-                1,
-                Timestamp::from_millis(1_762_650_000_000),
-                "",
-            );
+        /// セッションが無ければ作る (セッションの削除が、関係からターンをたどるため)。
+        pub fn add_turn(&mut self, id: Id, session: Id, text: &str) {
+            let mut ops = Vec::new();
+            if self.sessions.insert(session) {
+                let mut s = Envelope::new(session, KIND_SESSION, 1, NOW, "");
+                s.set_body(&SessionBody {
+                    title: "case".into(),
+                    mode: "chat".into(),
+                    state: SessionState::Active,
+                    memory: None,
+                })
+                .expect("session body");
+                ops.push(WriteOp::Put(s));
+                ops.push(WriteOp::PutLookup {
+                    kind: KIND_SESSION.into(),
+                    field: LOOKUP_UPDATED_AT.into(),
+                    value: OwnedPart::Int(NOW.as_millis()),
+                    id: session,
+                });
+            }
+            let mut e = Envelope::new(id, KIND_TURN, 1, NOW, "");
             e.set_body(&TurnBody {
-                session: id_at(0, 0),
+                session,
                 role: TurnRole::User,
                 state: TurnState::Confirmed,
                 text: text.to_owned(),
@@ -167,7 +189,29 @@ mod db {
                 obs: None,
             })
             .expect("turn body");
-            self.submit(vec![WriteOp::Put(e)]);
+            ops.push(WriteOp::Put(e));
+            ops.push(WriteOp::PutLink {
+                from: id,
+                rel: REL_IN_SESSION.into(),
+                to: session,
+                attrs: Vec::new(),
+            });
+            self.submit(ops);
+        }
+
+        /// セッションを消す (書き込みの入口を通して、事実の出典も外す、04 §7.1)。
+        pub fn delete_session(&self, session: Id) {
+            let ops = {
+                let tx = self.store.read().expect("read");
+                let s = crate::read::load_session(&tx, session).expect("the session");
+                let clock = ManualClock::new(NOW);
+                let writes = crate::write::Writes {
+                    clock: &clock,
+                    ids: &self.ids,
+                };
+                crate::write::delete_session(&tx, &s.envelope, &writes).expect("delete session")
+            };
+            self.submit(ops);
         }
 
         fn ctx<'a>(&'a self, key: &'a ForgetKey) -> FactCtx<'a> {
@@ -176,7 +220,7 @@ mod db {
                 attributes: attributes(),
                 safety: &self.safety,
                 ids: &self.ids,
-                now: Timestamp::from_millis(1_762_650_000_000),
+                now: NOW,
             }
         }
 
@@ -289,6 +333,8 @@ struct Runner {
     seq: u64,
     last_ms: i64,
     turns: BTreeMap<String, (Id, String)>,
+    /// セッションの名前 → ID と、そのターン。
+    sessions: BTreeMap<String, (Id, BTreeSet<Id>)>,
     set: FactSet,
     dirs: Directives,
     /// それまでに当てた候補と訂正 (作り直しと順の入れ替えで当て直す)。
@@ -304,6 +350,7 @@ impl Runner {
             seq: 0,
             last_ms: 0,
             turns: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             set: FactSet::default(),
             dirs: Directives::default(),
             history: Vec::new(),
@@ -389,7 +436,17 @@ impl Runner {
                 self.last_ms = ms;
                 let tid = self.next_id(ms);
                 let text = s(body, "text").expect("text");
-                self.db.add_turn(tid, text);
+                let name = s(body, "session").unwrap_or("default").to_owned();
+                let sid = match self.sessions.get(&name) {
+                    Some((sid, _)) => *sid,
+                    None => self.next_id(ms),
+                };
+                self.sessions
+                    .entry(name)
+                    .or_insert_with(|| (sid, BTreeSet::new()))
+                    .1
+                    .insert(tid);
+                self.db.add_turn(tid, sid, text);
                 self.turns.insert(
                     s(body, "id").expect("id").to_owned(),
                     (tid, text.to_owned()),
@@ -457,7 +514,34 @@ impl Runner {
                 let did = self.next_id(self.last_ms);
                 match kind {
                     "forget" => return Err(Outcome::Pending("M3.4: forget")),
-                    "delete_session" => return Err(Outcome::Pending("M3.4: delete_session")),
+                    "delete_session" => {
+                        let name = s(body, "session").expect("session");
+                        let (sid, gone) = self.sessions.remove(name).expect("a known session");
+                        self.db.ids.at(self.last_ms);
+                        self.db.delete_session(sid);
+                        let is_gone = |t: Id| gone.contains(&t);
+                        let mut seq = self.seq;
+                        let ms = self.last_ms;
+                        let mut new_id = || {
+                            seq += 1;
+                            id_at(ms, seq)
+                        };
+                        drop_sources(
+                            &mut self.set,
+                            &mut self.dirs,
+                            attributes(),
+                            &is_gone,
+                            &mut new_id,
+                        );
+                        self.seq = seq;
+                        // 消したターンの候補と訂正は、作り直しでも当て直さない (書き込みの入口が、ターンの
+                        // 無い出典を捨てるのと同じ)。
+                        self.history.retain(|e| match e {
+                            Event::Candidate(c) => !is_gone(c.source.turn),
+                            Event::Correction(c) => !is_gone(c.source().turn),
+                            Event::Choose { .. } => true,
+                        });
+                    }
                     "rebuild_facts" => self.replay(false),
                     "shuffle" => self.replay(true),
                     "private" | "accept" | "revert" => {

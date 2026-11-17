@@ -218,7 +218,7 @@ fn deleting_a_session_removes_its_turns_signals_and_links() {
 
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(gone)).unwrap()
+        delete_session(&rtx, &env.session(gone), &env.writes()).unwrap()
     };
     env.write(ops);
 
@@ -290,7 +290,7 @@ fn the_conversation_is_rebuilt_from_the_journal_alone() {
         env.write(ops);
         let ops = {
             let rtx = env.store.read().unwrap();
-            delete_session(&rtx, &env.session(gone)).unwrap()
+            delete_session(&rtx, &env.session(gone), &env.writes()).unwrap()
         };
         env.write(ops);
         env.write(vec![evorag_store::WriteOp::SetMetaOnce {
@@ -372,7 +372,7 @@ fn deleting_a_session_removes_its_text_from_the_journal() {
     assert!(journal_text(dir.path()).contains("秘密の本文"));
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(sid)).unwrap()
+        delete_session(&rtx, &env.session(sid), &env.writes()).unwrap()
     };
     env.write(ops);
     let text = journal_text(dir.path());
@@ -569,7 +569,7 @@ fn a_turn_this_version_cannot_read_is_counted_and_the_rest_of_the_session_opens(
     // セッションを消すと、読めないターンも一緒に消える (FR-309)。
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(sid)).unwrap()
+        delete_session(&rtx, &env.session(sid), &env.writes()).unwrap()
     };
     env.write(ops);
     let rtx = env.store.read().unwrap();
