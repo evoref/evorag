@@ -792,7 +792,8 @@ pub struct SourcesDropped {
 /// 畳みの核 ([`drop_sources`]) で出典を外し、出典の無くなった事実を消し (置き換えの連鎖は 04 §7.4)、前後の
 /// 差を [`diff_ops`] で操作にする。新しい `v`・知らない状態の事実は書き換えず、出典 (本体の `sources` の
 /// `turn`) がすべて消えたときだけ、本体を解釈せずに消す (03 §4.2 の規則 6 の「忘れる・削除」)。
-/// 事実への指示は消さない (03 §3.3)。
+/// 事実への指示は消さない (03 §3.3)。出典が外れて private でなくなる事実には、その値だけの private の指示
+/// (ID は `ids` から) を同じ操作の列で足す (04 §7.5 の「後継」。指示はジャーナルにも書かれる)。
 ///
 /// 呼ぶ側は、[`consolidate`] と同じく、事実を書く経路のロックを `tx` を開く前から書き終えるまで持つ。
 ///
@@ -801,13 +802,25 @@ pub struct SourcesDropped {
 pub fn drop_turns(
     tx: &ReadTxn<'_>,
     gone: &dyn Fn(Id) -> bool,
+    ids: &dyn IdGen,
     now: Timestamp,
 ) -> Result<SourcesDropped, MemoryError> {
     let before = load_facts(tx)?;
-    let dirs = load_directives(tx)?;
+    let mut dirs = load_directives(tx)?;
     let mut set = before.set.clone();
-    let dropped = drop_sources(&mut set, &dirs, gone);
-    let mut ops = diff_ops(&before, &set, now)?;
+    let mut new_id = || ids.next_id();
+    let dropped = drop_sources(
+        &mut set,
+        &mut dirs,
+        crate::rules::attributes(),
+        gone,
+        &mut new_id,
+    );
+    let mut ops = Vec::new();
+    for d in &dropped.directives {
+        ops.extend(directive_ops(d, now)?);
+    }
+    ops.extend(diff_ops(&before, &set, now)?);
     let mut deleted = dropped.deleted.clone();
     if before.unknown > 0 {
         tx.for_each(KIND_FACT, |r| {
@@ -834,6 +847,15 @@ pub fn drop_turns(
         deleted,
         dropped,
     })
+}
+
+/// 指示の記録を足す操作 (本体と、その関係・副索引)。種類 `fact_directive` はジャーナルにも書かれる。
+fn directive_ops(d: &Directive, now: Timestamp) -> Result<Vec<WriteOp>, BodyError> {
+    let mut env = Envelope::new(d.id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, now, "");
+    env.set_body(&FactDirectiveBody::from_directive(d))?;
+    let mut ops = derive_directive(&env);
+    ops.insert(0, WriteOp::Put(env));
+    Ok(ops)
 }
 
 /// 事実への指示を足し、その効き目を事実に当てた書き込みの操作を返す (04 §7.5)。
@@ -878,10 +900,7 @@ pub fn add_directive(
         attribute: attribute.to_owned(),
         vk,
     };
-    let mut env = Envelope::new(id, KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, ctx.now, "");
-    env.set_body(&FactDirectiveBody::from_directive(&d))?;
-    let mut ops = derive_directive(&env);
-    ops.insert(0, WriteOp::Put(env));
+    let mut ops = directive_ops(&d, ctx.now)?;
 
     let before = load_facts(tx)?;
     let mut dirs = load_directives(tx)?;
@@ -1182,7 +1201,7 @@ mod tests {
             evorag_version: "0.3.0".into(),
             kinds: crate::kinds(),
             clock: clock.clone(),
-            ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+            ids: Arc::new(UuidV7Gen::with_seed(clock.clone(), 1)),
             config_file: None,
         })
         .expect("open");
@@ -1219,7 +1238,13 @@ mod tests {
 
         let dropped = {
             let tx = store.read().expect("read");
-            drop_turns(&tx, &|t| t == gone, now).expect("drop")
+            drop_turns(
+                &tx,
+                &|t| t == gone,
+                &UuidV7Gen::with_seed(clock.clone(), 2),
+                now,
+            )
+            .expect("drop")
         };
         assert_eq!(dropped.deleted, [11u8, 13].map(|n| Id::from_bytes([n; 16])));
         assert_eq!(dropped.dropped.trimmed, 1);

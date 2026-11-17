@@ -1743,31 +1743,59 @@ async fn delete(inner: &Arc<Inner>) {
     let _lock = inner.index_lock.lock().await;
     // 事実を書く経路のロックも取る (統合が出典の改訂の番号を照合してから書き終えるまでの間に、出典のターンを
     // 消さないように、04 §4)。鍵の順は index_lock → facts_lock (逆の順で取る経路は無い)。
-    // 事実は、そのセッションの出典を外し、出典の無くなった事実を同じ依頼で消す (04 §7.1・§7.4)。消した事実の
-    // ID (= 事実の検索の鍵の ID、04 §5.5) は、下で退避と索引から除く ID に入る。
+    // 事実は、そのセッションの出典を外し、出典の無くなった事実を同じ依頼で消す (04 §7.1・§7.4)。private で
+    // なくなる値には、その値だけの private の指示を同じ依頼で足す (04 §7.5)。消した事実の ID (= 事実の検索の
+    // 鍵の ID、04 §5.5) は、下で退避と索引から除く ID に入る。
     let facts_guard = inner.facts_lock.lock().await;
-    let now = inner.clock.now();
-    let ops = inner.store.read().ok().and_then(|rtx| {
-        let s = evorag_memory::load_session(&rtx, sid).ok()?;
-        evorag_memory::delete_session(&rtx, &s.envelope, now).ok()
-    });
-    let Some(mut ops) = ops else {
-        reject(inner, MessageKey::NoSession);
-        return;
-    };
-    // 退避からも除く (03 §7.3)。途中で止まっても続けられるように、job を同じ依頼で書く。
-    let ids = evorag_memory::deleted_ids(&ops);
-    let Ok((job, put)) = evorag_memory::purge_job(&writes(inner), ids.clone()) else {
-        return;
-    };
-    ops.push(put);
-    if let Err(e) = write(inner, ops).await {
+    let failed = |detail: String| {
         emit(
             inner,
             Event::Rejected {
-                error: Message::new(MessageKey::DeleteFailed).arg("detail", e),
+                error: Message::new(MessageKey::DeleteFailed).arg("detail", detail),
             },
         );
+    };
+    // 記録を読んで操作を組み立てるのは、裏のスレッドで行う (事実の全件を読むため)。
+    let worker = inner.clone();
+    let planned = tokio::task::spawn_blocking(move || {
+        let rtx = worker.store.read().map_err(|e| e.to_string())?;
+        let s = match evorag_memory::load_session(&rtx, sid) {
+            Ok(s) => s,
+            Err(evorag_memory::MemoryError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        evorag_memory::delete_session(&rtx, &s.envelope, &writes(&worker))
+            .map(Some)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    let mut ops = match planned {
+        Ok(Ok(Some(ops))) => ops,
+        Ok(Ok(None)) => {
+            reject(inner, MessageKey::NoSession);
+            return;
+        }
+        Ok(Err(detail)) => {
+            failed(detail);
+            return;
+        }
+        Err(e) => {
+            failed(e.to_string());
+            return;
+        }
+    };
+    // 退避からも除く (03 §7.3)。途中で止まっても続けられるように、job を同じ依頼で書く。
+    let ids = evorag_memory::deleted_ids(&ops);
+    let (job, put) = match evorag_memory::purge_job(&writes(inner), ids.clone()) {
+        Ok(x) => x,
+        Err(e) => {
+            failed(e.to_string());
+            return;
+        }
+    };
+    ops.push(put);
+    if let Err(e) = write(inner, ops).await {
+        failed(e);
         return;
     }
     drop(facts_guard);

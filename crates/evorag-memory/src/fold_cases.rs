@@ -204,7 +204,12 @@ mod db {
             let ops = {
                 let tx = self.store.read().expect("read");
                 let s = crate::read::load_session(&tx, session).expect("the session");
-                crate::write::delete_session(&tx, &s.envelope, NOW).expect("delete session")
+                let clock = ManualClock::new(NOW);
+                let writes = crate::write::Writes {
+                    clock: &clock,
+                    ids: &self.ids,
+                };
+                crate::write::delete_session(&tx, &s.envelope, &writes).expect("delete session")
             };
             self.submit(ops);
         }
@@ -512,9 +517,23 @@ impl Runner {
                     "delete_session" => {
                         let name = s(body, "session").expect("session");
                         let (sid, gone) = self.sessions.remove(name).expect("a known session");
+                        self.db.ids.at(self.last_ms);
                         self.db.delete_session(sid);
                         let is_gone = |t: Id| gone.contains(&t);
-                        drop_sources(&mut self.set, &self.dirs, &is_gone);
+                        let mut seq = self.seq;
+                        let ms = self.last_ms;
+                        let mut new_id = || {
+                            seq += 1;
+                            id_at(ms, seq)
+                        };
+                        drop_sources(
+                            &mut self.set,
+                            &mut self.dirs,
+                            attributes(),
+                            &is_gone,
+                            &mut new_id,
+                        );
+                        self.seq = seq;
                         // 消したターンの候補と訂正は、作り直しでも当て直さない (書き込みの入口が、ターンの
                         // 無い出典を捨てるのと同じ)。
                         self.history.retain(|e| match e {

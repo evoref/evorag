@@ -996,54 +996,80 @@ fn apply_choice(set: &mut FactSet, directives: &Directives, ch: &Chosen<'_>, env
 /// 出典のターンが消えたときに変えたもの ([`drop_sources`])。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Dropped {
-    /// 出典が 1 つも残らないので消した事実 (ID の順)。
+    /// 畳みの前にあって、後に無い事実 (ID の順)。出典が 1 つも残らないので消したものと、繰り上げた値に
+    /// 合わせて消した同じ値の矛盾を含む。
     pub deleted: Vec<Id>,
     /// 出典の一部を外して残した事実の数。
     pub trimmed: usize,
     /// 消えた今の値に代わって、今の値にした矛盾の値 (ID の順、04 §7.4)。
     pub promoted: Vec<Id>,
+    /// 出典が外れて後継でなくなり、private でなくなるはずだった事実に足した、その値だけの private の指示
+    /// (04 §7.5 の「後継」)。呼ぶ側は、同じ依頼で指示の記録として書く。
+    pub directives: Vec<Directive>,
 }
 
 impl Dropped {
     /// 何も変えなかったか。
     pub fn is_empty(&self) -> bool {
-        self.deleted.is_empty() && self.trimmed == 0 && self.promoted.is_empty()
+        self.deleted.is_empty()
+            && self.trimmed == 0
+            && self.promoted.is_empty()
+            && self.directives.is_empty()
     }
 }
 
 /// 出典のターンが消えた (セッションの削除 04 §7.1、出典の無い事実の掃除 04 §5.3・03 §4.2 の規則 12)。
 ///
-/// - 消えたターン (`gone` が `true` を返すもの) の出典を外す。出典が 1 つも残らない事実は消す
-///   (`Retracted` も含む)。
+/// - 消えたターン (`gone` が `true` を返すもの) の出典を外す。それで出典が 1 つも残らなくなった事実は消す
+///   (`Retracted` も含む)。もともと出典の無い事実には触れない (関係の無い削除で、消したり兄弟を繰り上げたり
+///   しない)。
 /// - 消した事実が単値の属性の今の値 (時制 `current` の `Live`) なら、04 §7.4 のとおりにする: 古い側の
 ///   `Superseded` の `by` は消えた ID を指したまま残し、`Live` に戻さない。同じ (主語, 属性) の `Contested`
-///   のうち、出典の最も新しいターンが消えた値の出典の最も新しいターンより後のもの (2 つ以上あれば最も後の
-///   もの) を今の値にする。そうでない `Contested` は、`against` に消えた ID を指したまま残す (今の値なし)。
-/// - 最後に private の写しを指示から計算し直す (書き込みの入口が毎回計算し直す、04 §5.1)。
+///   のうち、残った出典の最も新しいターンが消えた値の出典の最も新しいターンより後のもの (2 つ以上あれば最も
+///   後のもの、同じなら事実の ID の大きいもの) を今の値にし、残りの `Contested` の `against` をその値に
+///   付け替える。そうでない `Contested` は、`against` に消えた ID を指したまま残す (今の値なし)。予定の値、
+///   多値の属性の値、過去形・否定で終えた値が消えたときは繰り上げない。
+/// - private の写しを指示から計算し直す (書き込みの入口が毎回計算し直す、04 §5.1)。出典が外れて後継で
+///   なくなり private でなくなる事実には、その値だけ (`value_only`) の private の指示を `new_id` の ID で
+///   足してから計算し直す (04 §7.5)。足した指示は `directives` にも入り、`Dropped::directives` で返す。
 pub fn drop_sources(
     set: &mut FactSet,
-    directives: &Directives,
+    directives: &mut Directives,
+    attributes: &Attributes,
     gone: &dyn Fn(Id) -> bool,
+    new_id: &mut dyn FnMut() -> Id,
 ) -> Dropped {
     let mut out = Dropped::default();
+    let ids_before: BTreeSet<Id> = set.facts.iter().map(|f| f.id).collect();
+    let was_private: BTreeSet<Id> = set
+        .facts
+        .iter()
+        .filter(|f| f.private)
+        .map(|f| f.id)
+        .collect();
     // 消した今の値の (主語, 属性, 出典の最も新しいターン)。
     let mut ended: Vec<(String, String, Option<Id>)> = Vec::new();
+    let mut emptied: BTreeSet<Id> = BTreeSet::new();
     for f in &mut set.facts {
         let latest = f.latest_turn();
         let before = f.sources.len();
         f.sources.retain(|s| !gone(s.turn));
-        if f.sources.is_empty() {
-            out.deleted.push(f.id);
-            if f.state == FactState::Live && f.tense == Tense::Current {
-                ended.push((f.subject.clone(), f.attribute.clone(), latest));
-            }
-        } else if f.sources.len() != before {
+        if f.sources.len() == before {
+            continue;
+        }
+        if !f.sources.is_empty() {
             out.trimmed += 1;
+            continue;
+        }
+        emptied.insert(f.id);
+        let single = attributes
+            .get(&f.attribute)
+            .is_some_and(|a| a.cardinality == Cardinality::Single);
+        if single && f.state == FactState::Live && f.tense == Tense::Current {
+            ended.push((f.subject.clone(), f.attribute.clone(), latest));
         }
     }
-    out.deleted.sort_unstable();
-    set.facts
-        .retain(|f| out.deleted.binary_search(&f.id).is_err());
+    set.facts.retain(|f| !emptied.contains(&f.id));
     for (subject, attribute, latest) in ended {
         let group = set.group(&subject, &attribute);
         if set.live_current(&group).is_some() {
@@ -1064,7 +1090,29 @@ pub fn drop_sources(
         }
     }
     out.promoted.sort_unstable();
+    // private でなくなる事実に、その値だけの private の指示を足す (04 §7.5 の「後継」)。
+    for f in &set.facts {
+        if !was_private.contains(&f.id) || directives.is_private(f) {
+            continue;
+        }
+        let Some(vk) = f.vk else {
+            continue;
+        };
+        let d = Directive {
+            id: new_id(),
+            kind: DirectiveKind::Private {
+                scope: Scope::ValueOnly,
+            },
+            subject: f.subject.clone(),
+            attribute: f.attribute.clone(),
+            vk: Some(vk),
+        };
+        out.directives.push(d.clone());
+        directives.push(d);
+    }
     refresh_private(set, directives);
+    let ids_after: BTreeSet<Id> = set.facts.iter().map(|f| f.id).collect();
+    out.deleted = ids_before.difference(&ids_after).copied().collect();
     out
 }
 
@@ -1428,64 +1476,239 @@ mod tests {
         assert!(t.set.facts.iter().all(|f| f.private));
     }
 
+    impl T {
+        /// ターン `turns` を消す ([`drop_sources`])。
+        fn drop_turns(&mut self, turns: &[u64]) -> Dropped {
+            let gone: Vec<Id> = turns.iter().map(|&n| id(n)).collect();
+            let mut next = self.next;
+            let mut new_id = || {
+                next += 1;
+                id(next)
+            };
+            let d = drop_sources(
+                &mut self.set,
+                &mut self.dirs,
+                attributes(),
+                &|turn| gone.contains(&turn),
+                &mut new_id,
+            );
+            self.next = next;
+            d
+        }
+
+        /// 事実を直接置く (畳みでは作れない形を含む)。
+        fn put(&mut self, n: u64, a: &str, v: &str, state: FactState, turns: &[u64]) -> Id {
+            self.set.facts.push(Fact {
+                id: id(n),
+                subject: "self".into(),
+                attribute: a.into(),
+                value: Some(v.into()),
+                vk: Some(value_key(&KEY, v)),
+                tense: Tense::Current,
+                state,
+                sources: turns
+                    .iter()
+                    .map(|&t| Source {
+                        turn: id(t),
+                        start: 0,
+                        end: 3,
+                        rev: 0,
+                    })
+                    .collect(),
+                private: false,
+            });
+            id(n)
+        }
+
+        fn contested(&self, a: &str, v: &str) -> Option<Id> {
+            match self.state_of(a, v)[..] {
+                [FactState::Contested { against }] => Some(against),
+                _ => None,
+            }
+        }
+    }
+
+    fn says(turn: u64, a: &str, v: &str) -> Event {
+        Event::Candidate(T::cand(turn, a, v, &format!("{v}に住んでます")))
+    }
+
     /// 消えた今の値より古い矛盾の値は、今の値にせず、`against` に消えた ID を指したまま残す。出典が 1 つも
-    /// 残らない `Retracted` も消す (04 §7.4・§7.1)。
+    /// 残らない `Retracted` も消す。何も消えなければ何も変えない (04 §7.4・§7.1)。
     #[test]
     fn an_older_contested_value_stays_when_the_current_one_is_deleted() {
         let mut t = T::new();
-        t.fold(vec![Event::Candidate(T::cand(
-            1,
-            "residence",
-            "大阪",
-            "大阪に住んでます",
-        ))]);
-        t.fold(vec![Event::Candidate(T::cand(
-            2,
-            "residence",
-            "東京",
-            "東京に住んでます",
-        ))]);
-        t.fold(vec![Event::Candidate(T::cand(
-            3,
-            "residence",
-            "大阪",
-            "大阪に住んでます",
-        ))]);
+        t.fold(vec![says(1, "residence", "大阪")]);
+        t.fold(vec![says(2, "residence", "東京")]);
+        t.fold(vec![says(3, "residence", "大阪")]);
         let osaka = t.set.facts[0].id;
-        assert_eq!(
-            t.state_of("residence", "東京"),
-            [FactState::Contested { against: osaka }]
-        );
-        t.set.facts.push(Fact {
-            id: id(900),
-            subject: "self".into(),
-            attribute: "hobby".into(),
-            value: None,
-            vk: None,
-            tense: Tense::Current,
-            state: FactState::Retracted,
-            sources: BTreeSet::from([Source {
-                turn: id(3),
-                start: 0,
-                end: 0,
-                rev: 0,
-            }]),
-            private: false,
-        });
-        let gone = [id(1), id(3)];
-        let d = drop_sources(&mut t.set, &t.dirs, &|turn| gone.contains(&turn));
-        let mut deleted = vec![osaka, id(900)];
+        assert_eq!(t.contested("residence", "東京"), Some(osaka));
+        let retracted = t.put(900, "hobby", "x", FactState::Retracted, &[3]);
+        let d = t.drop_turns(&[1, 3]);
+        let mut deleted = vec![osaka, retracted];
         deleted.sort_unstable();
         assert_eq!(d.deleted, deleted);
         assert!(d.promoted.is_empty());
-        assert_eq!(
-            t.state_of("residence", "東京"),
-            [FactState::Contested { against: osaka }]
-        );
+        assert_eq!(t.contested("residence", "東京"), Some(osaka));
         assert!(t.live("residence").is_empty());
-        // 何も消えなければ何も変えない。
         let before = t.set.clone();
-        assert!(drop_sources(&mut t.set, &t.dirs, &|_| false).is_empty());
+        assert!(t.drop_turns(&[]).is_empty());
         assert_eq!(t.set, before);
+    }
+
+    /// 繰り上げるのは、出典の最も新しいターンが最も後の矛盾の値。残りの矛盾の値は、その値に付け替える。
+    #[test]
+    fn the_newest_contested_value_is_promoted_and_the_others_follow_it() {
+        let mut t = T::new();
+        t.fold(vec![says(1, "residence", "大阪")]);
+        t.fold(vec![says(2, "residence", "東京")]);
+        t.fold(vec![says(4, "residence", "神戸")]);
+        t.fold(vec![says(3, "residence", "京都")]);
+        let d = t.drop_turns(&[1]);
+        assert_eq!(t.live("residence"), ["神戸"]);
+        let kobe = t
+            .set
+            .facts
+            .iter()
+            .find(|f| f.value.as_deref() == Some("神戸"));
+        let kobe = kobe.expect("神戸").id;
+        assert_eq!(d.promoted, [kobe]);
+        assert_eq!(t.contested("residence", "東京"), Some(kobe));
+        assert_eq!(t.contested("residence", "京都"), Some(kobe));
+    }
+
+    /// 出典の最も新しいターンが同じなら、事実の ID の大きい矛盾の値を繰り上げる (04 §7.4)。
+    #[test]
+    fn a_tie_promotes_the_larger_fact_id() {
+        let mut t = T::new();
+        let osaka = t.put(1, "residence", "大阪", FactState::Live, &[1]);
+        let against = FactState::Contested { against: osaka };
+        t.put(2, "residence", "東京", against, &[2]);
+        let kyoto = t.put(3, "residence", "京都", against, &[2]);
+        let d = t.drop_turns(&[1]);
+        assert_eq!(d.promoted, [kyoto]);
+        assert_eq!(t.contested("residence", "東京"), Some(kyoto));
+    }
+
+    /// 矛盾の値の出典の一部が同時に消えたら、残った出典の最も新しいターンで比べる。
+    #[test]
+    fn a_partly_removed_contested_value_is_judged_by_its_remaining_sources() {
+        let mut t = T::new();
+        let osaka = t.put(1, "residence", "大阪", FactState::Live, &[2]);
+        t.put(
+            2,
+            "residence",
+            "東京",
+            FactState::Contested { against: osaka },
+            &[1, 3],
+        );
+        let d = t.drop_turns(&[2, 3]);
+        assert_eq!(d.deleted, [osaka]);
+        assert_eq!(d.trimmed, 1);
+        assert!(d.promoted.is_empty());
+        assert_eq!(t.contested("residence", "東京"), Some(osaka));
+    }
+
+    /// 予定の値・多値の属性の値・過去形や否定で終えた値・もともと出典の無い値が消えても、矛盾の値は
+    /// 繰り上げない (04 §7.4)。
+    #[test]
+    fn only_a_deleted_current_single_value_promotes() {
+        // 予定の値。
+        let mut t = T::new();
+        let osaka = t.put(1, "residence", "大阪", FactState::Live, &[1]);
+        t.put(
+            2,
+            "residence",
+            "東京",
+            FactState::Contested { against: osaka },
+            &[2],
+        );
+        t.put(3, "residence", "京都", FactState::Live, &[3]);
+        t.set.facts[2].tense = Tense::Planned;
+        let d = t.drop_turns(&[3]);
+        assert!(d.promoted.is_empty());
+        assert_eq!(t.live("residence"), ["大阪"]);
+        assert_eq!(t.contested("residence", "東京"), Some(osaka));
+
+        // 多値の属性 (畳みでは作らない形でも、繰り上げない)。
+        let mut t = T::new();
+        let ramen = t.put(1, "likes", "ラーメン", FactState::Live, &[1]);
+        t.put(
+            2,
+            "likes",
+            "うどん",
+            FactState::Contested { against: ramen },
+            &[2],
+        );
+        assert!(t.drop_turns(&[1]).promoted.is_empty());
+        assert_eq!(t.contested("likes", "うどん"), Some(ramen));
+
+        // 過去形・否定で終えた値。
+        let mut t = T::new();
+        let ended = FactState::Superseded {
+            by: None,
+            at: id(3).timestamp(),
+        };
+        let osaka = t.put(1, "residence", "大阪", ended, &[1, 3]);
+        t.put(
+            2,
+            "residence",
+            "東京",
+            FactState::Contested { against: osaka },
+            &[2],
+        );
+        let d = t.drop_turns(&[1, 3]);
+        assert_eq!(d.deleted, [osaka]);
+        assert!(d.promoted.is_empty());
+        assert_eq!(t.contested("residence", "東京"), Some(osaka));
+
+        // もともと出典の無い値は、関係の無い削除では消さない。
+        let mut t = T::new();
+        let osaka = t.put(1, "residence", "大阪", FactState::Live, &[]);
+        t.put(
+            2,
+            "residence",
+            "東京",
+            FactState::Contested { against: osaka },
+            &[2],
+        );
+        t.put(3, "hobby", "釣り", FactState::Live, &[3]);
+        let d = t.drop_turns(&[3]);
+        assert_eq!(d.deleted, [id(3)]);
+        assert!(d.promoted.is_empty());
+        assert_eq!(t.live("residence"), ["大阪"]);
+    }
+
+    /// 削除で出典が外れて後継でなくなる値には、その値だけの private の指示を足し、private のまま残す
+    /// (04 §7.5 の「後継」)。
+    #[test]
+    fn a_successor_stays_private_after_its_later_source_is_deleted() {
+        let mut t = T::new();
+        t.fold(vec![says(1, "residence", "大阪")]);
+        t.dirs.push(Directive {
+            id: id(2),
+            kind: DirectiveKind::Private {
+                scope: Scope::Successors,
+            },
+            subject: "self".into(),
+            attribute: "residence".into(),
+            vk: Some(value_key(&KEY, "京都")),
+        });
+        t.fold(vec![says(3, "residence", "大阪")]);
+        assert!(t.set.facts[0].private, "a successor after the restatement");
+        let d = t.drop_turns(&[3]);
+        assert!(t.set.facts[0].private, "still private after the deletion");
+        let [added] = &d.directives[..] else {
+            panic!("one directive: {:?}", d.directives);
+        };
+        assert_eq!(
+            added.kind,
+            DirectiveKind::Private {
+                scope: Scope::ValueOnly
+            }
+        );
+        assert_eq!(added.vk, Some(value_key(&KEY, "大阪")));
+        assert!(t.dirs.iter().any(|x| x == added));
+        // もう一度消しても、指示を重ねない。
+        assert!(t.drop_turns(&[3]).directives.is_empty());
     }
 }

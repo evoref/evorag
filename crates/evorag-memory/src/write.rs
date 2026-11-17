@@ -504,20 +504,25 @@ impl Writes<'_> {
 /// 持つ層が足す。
 ///
 /// 事実は、そのセッションのターンの出典を外し、出典の無くなった事実を消す (04 §7.1・§7.4。書き込みの
-/// 入口 [`crate::facts::drop_turns`] を通す)。`now` は書き換えた事実の更新時刻。呼ぶ側は、事実を書く経路の
+/// 入口 [`crate::facts::drop_turns`] を通す。private でなくなる事実には、その値だけの private の指示を足す、
+/// 04 §7.5)。`writes` の時計は書き換えた事実の更新時刻に、ID は足す指示に使う。呼ぶ側は、事実を書く経路の
 /// ロックを `tx` を開く前から書き終えるまで持つ (04 §5.2.1 の「書き込みの直列化」)。消した事実の ID は
 /// [`deleted_ids`] に入る (退避と索引から除く。事実の検索の鍵の ID は事実の ID と同じ、04 §5.5)。
+///
+/// # Errors
+/// 記録を読めない・本体を書けないとき。
 pub fn delete_session(
     tx: &evorag_store::ReadTxn<'_>,
     session: &Envelope,
-    now: Timestamp,
+    writes: &Writes<'_>,
 ) -> Result<Vec<WriteOp>, crate::MemoryError> {
     let turns: std::collections::BTreeSet<Id> = tx
         .links_to(session.id, REL_IN_SESSION)?
         .into_iter()
         .map(|(turn, _)| turn)
         .collect();
-    let mut ops = crate::facts::drop_turns(tx, &|t| turns.contains(&t), now)?.ops;
+    let mut ops =
+        crate::facts::drop_turns(tx, &|t| turns.contains(&t), writes.ids, writes.clock.now())?.ops;
     let mut feedback = std::collections::BTreeSet::new();
     let mut notes = std::collections::BTreeSet::new();
     for &turn in &turns {

@@ -14,7 +14,7 @@ use evorag_memory::{
     NoteBody, RecallFeedbackBody,
 };
 use evorag_store::{Read, Store, WriteOp};
-use evorag_types::{Id, Timestamp};
+use evorag_types::{Id, IdGen, Timestamp};
 
 use crate::Inner;
 
@@ -41,7 +41,7 @@ fn ids_of(r: &evorag_store::ReadTxn<'_>, kind: &str) -> Option<HashSet<Id>> {
     Some(out)
 }
 
-fn plan(store: &Store, now: Timestamp) -> Option<Plan> {
+fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
     let r = store.read().ok()?;
     let turns = ids_of(&r, KIND_TURN)?;
     let sessions = ids_of(&r, KIND_SESSION)?;
@@ -90,7 +90,7 @@ fn plan(store: &Store, now: Timestamp) -> Option<Plan> {
     .ok()?;
     // 事実は、出典のターンの記録が DB に無ければ、その出典を外す (03 §4.2 の規則 12 の「見つけ方」)。
     // 読めなければ、事実は次の起動で突き合わせる (ほかの派生の記録の掃除は止めない)。
-    if let Ok(facts) = evorag_memory::drop_turns(&r, &|t| !turns.contains(&t), now)
+    if let Ok(facts) = evorag_memory::drop_turns(&r, &|t| !turns.contains(&t), ids, now)
         && !facts.ops.is_empty()
     {
         p.facts = Some(facts);
@@ -105,8 +105,10 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
     // facts_lock)。
     let _facts = inner.facts_lock.lock().await;
     let store = inner.store.clone();
+    let ids = inner.ids.clone();
     let now = inner.clock.now();
-    let Ok(Some(mut p)) = tokio::task::spawn_blocking(move || plan(&store, now)).await else {
+    let Ok(Some(mut p)) = tokio::task::spawn_blocking(move || plan(&store, &*ids, now)).await
+    else {
         return;
     };
     if gone_chunks.is_empty()
@@ -144,6 +146,8 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         // 想起への操作はジャーナルにも書く種類なので、消したこともジャーナルに残る。
         ops.extend(w.delete_feedback(*f));
     }
+    // 消した事実 (同じ値に合わせて消した矛盾の値も含む) は、操作の列から求める。
+    let gone_facts = evorag_memory::deleted_ids(&facts.ops);
     ops.extend(facts.ops);
     let mut purge: Vec<Id> = gone_chunks.clone();
     purge.extend(
@@ -152,7 +156,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
             .chain(&p.embeddings)
             .chain(&p.feedback)
             .chain(&p.corrections)
-            .chain(&facts.deleted),
+            .chain(&gone_facts),
     );
     let Ok((_, job)) = evorag_memory::purge_job(&w, purge) else {
         return;
@@ -164,7 +168,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         embeddings = p.embeddings.len(),
         feedback = p.feedback.len(),
         corrections = p.corrections.len(),
-        facts_deleted = facts.deleted.len(),
+        facts_deleted = gone_facts.len(),
         facts_trimmed = facts.dropped.trimmed,
         "orphaned derived records removed"
     );
@@ -179,7 +183,7 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
     crate::embedding::remove_everywhere(inner, &gone);
     if let Some(ix) = inner.index.clone() {
         // ノートの鍵と、消した事実の検索の鍵 (ID は事実の ID、04 §5.5)。
-        let keys: HashSet<Id> = p.notes.into_iter().chain(facts.deleted).collect();
+        let keys: HashSet<Id> = p.notes.into_iter().chain(gone_facts).collect();
         if !keys.is_empty() {
             let _ = tokio::task::spawn_blocking(move || ix.remove(&keys)).await;
         }

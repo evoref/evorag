@@ -1124,7 +1124,7 @@ id = "AC-FR-309-3"
 requirement = "FR-309"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/fact_table.rs::deleting_a_session_removes_its_facts_and_their_keys_at_once", "crates/evorag-memory/src/fold_cases.rs::consolidation_cases_hold_on_the_pure_core", "crates/evorag-core/tests/orphans.rs::facts_left_by_an_older_version_lose_the_deleted_sources"]
+tests = ["crates/evorag-core/tests/fact_table.rs::deleting_a_session_removes_its_facts_and_their_keys_at_once", "crates/evorag-core/tests/fact_table.rs::a_successor_stays_private_after_its_restating_session_is_deleted", "crates/evorag-memory/src/fold_cases.rs::consolidation_cases_hold_on_the_pure_core", "crates/evorag-core/tests/orphans.rs::facts_left_by_an_older_version_lose_the_deleted_sources"]
 manual = ""
 note = "セッションだけを出典とする事実は消え、他の出典を持つ事実は出典だけを外す。消えた今の値の置き換えの連鎖は 04 §7.4 のとおり (回帰ケース C21〜C23)。消した事実の検索の鍵は削除の直後に索引から除き、退避からも除く。古い版で消したセッションの事実は、起動時の突き合わせで同じく扱う (規則 12)。"
 

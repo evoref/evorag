@@ -113,12 +113,7 @@ fn a_broken_database_is_moved_aside_and_restored_from_the_backup_and_the_journal
         env.say(sid, "退避の後");
         let ops = {
             let rtx = env.store.read().unwrap();
-            delete_session(
-                &rtx,
-                &env.session(gone),
-                evorag_types::Clock::now(&*env.clock),
-            )
-            .unwrap()
+            delete_session(&rtx, &env.session(gone), &env.writes()).unwrap()
         };
         env.write(ops);
     }
@@ -193,12 +188,7 @@ fn deleted_records_are_purged_from_the_backups() {
 
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(
-            &rtx,
-            &env.session(sid),
-            evorag_types::Clock::now(&*env.clock),
-        )
-        .unwrap()
+        delete_session(&rtx, &env.session(sid), &env.writes()).unwrap()
     };
     env.write(ops);
     let n = purge_backups(dir.path(), None, &[sid, u]).unwrap();
