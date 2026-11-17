@@ -114,6 +114,10 @@ impl<'de> serde::Deserialize<'de> for Id {
 /// ID の生成器 (02 §6)。試験では種を固定した実装を注入する。
 pub trait IdGen: Send + Sync {
     fn next_id(&self) -> Id;
+
+    /// これより後の ID だけを出すようにする (03 §3.3 の「プロセスをまたいでも単調にする」)。
+    /// 既定は何もしない (試験の固定の生成器など)。
+    fn raise_floor(&self, _floor: Id) {}
 }
 
 /// UUID v7 の生成器。同じミリ秒の中でも単調に増える (RFC 9562 §6.2 の方法 1: 12 ビットの counter)。
@@ -167,6 +171,19 @@ fn splitmix64(state: &mut u64) -> u64 {
 }
 
 impl IdGen for UuidV7Gen {
+    /// 下限の ID の時刻と counter を最後に使ったものとみなす。次の ID は、時計が下限より後なら
+    /// 時計の時刻で、そうでなければ下限の時刻のまま counter を進めて作るので、下限より大きくなる。
+    fn raise_floor(&self, floor: Id) {
+        let b = floor.as_bytes();
+        let ms = floor.timestamp().as_millis().clamp(0, MAX_MS);
+        let counter = (u16::from(b[6] & 0x0f) << 8) | u16::from(b[7]);
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if (ms, counter) > (st.last_ms, st.counter) {
+            st.last_ms = ms;
+            st.counter = counter;
+        }
+    }
+
     fn next_id(&self) -> Id {
         let now = self.clock.now().as_millis().clamp(0, MAX_MS);
         // 毒されたロックでも状態は壊れていない (更新は値の代入だけ)。
@@ -206,6 +223,29 @@ mod tests {
         let clock = Arc::new(ManualClock::new(Timestamp::from_millis(ms)));
         let g = UuidV7Gen::with_seed(clock.clone(), 42);
         (clock, g)
+    }
+
+    #[test]
+    fn ids_after_raising_the_floor_are_greater_even_when_the_clock_is_behind() {
+        // 前のプロセスが、時計が進んでいたときに出した ID。
+        let (_, ahead) = gen_at(5_000);
+        let floor = (0..3).map(|_| ahead.next_id()).last().expect("an id");
+        // 時計が戻った状態で起動し直す。
+        let (clock, g) = gen_at(1_000);
+        g.raise_floor(floor);
+        let first = g.next_id();
+        assert!(first > floor, "{first:?} > {floor:?}");
+        assert_eq!(first.timestamp().as_millis(), 5_000);
+        // 時計が下限を越えたら、時計の時刻に戻る。
+        clock.set(Timestamp::from_millis(6_000));
+        let later = g.next_id();
+        assert!(later > first);
+        assert_eq!(later.timestamp().as_millis(), 6_000);
+        // 低い下限は効かない。
+        let (_, low) = gen_at(1_000);
+        let before = g.next_id();
+        g.raise_floor(low.next_id());
+        assert!(g.next_id() > before);
     }
 
     #[test]
