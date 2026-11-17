@@ -45,7 +45,7 @@
 
 `[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化の後の照合で通ったときの `evidence_normalized`)。
 
-関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref`。
+関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
 
 | `expect` | 関門 | 意味 |
 |---|---|---|
@@ -63,10 +63,13 @@
 | `mixed_script` | 6 | 1 つの語に複数の文字体系を混ぜた並び (Script 属性。UTS #39 highly restrictive の組だけを許す) |
 | `imperative` | 6 | 命令形の文・依頼の印 (全言語を合わせて当てる) |
 | `instruction_ref` | 6 | ほかの指示への言及 |
+| `redaction_marker` | 6 | 値か根拠が伏せ字の印 (`[伏せ字]`・`[redacted]`) を含む (下の注) |
 | `too_long` | 7 | 値が属性の上限を超える |
 | `forgotten` | 8 | 再び覚えない印に当たる |
 
 `m = "negated"` の候補は関門を通り、統合 (§5.3 の「否定」) に渡る (`expect = "accept"`)。
+
+注: `redaction_marker` (04 §5.2、2026-11-17) の事例は、関門の実装と同じ PR で足す (`gates.toml` の事例は `extraction_cases.rs` がすべて走らせるので、実装より先に置くと試験が落ちる)。
 
 ## consolidation.toml と forget.toml
 
@@ -85,7 +88,7 @@
 
 | `op.kind` | 項目 | 意味 |
 |---|---|---|
-| `forget` | `target = { s, a, v }`、`redact` (既定 true)、`history` (既定 false)、`echo` (既定 true)、`others` (既定 false) | 忘れる (04 §7.1)。`echo` は同じ往復の応答の中の一致も伏せる、`others` はほかのターンの一致も伏せる |
+| `forget` | `target = { s, a, v }`、`redact` (既定 true)、`history` (既定 false)、`echo` (既定 true)、`others` (既定 false) | 忘れる (04 §7.1)。`echo` は同じ往復の応答の中の一致も伏せる、`others` はほかのターンの一致も伏せる (`redact = false` のときは、どちらも想起での `[非表示]` にする)。`history` は `Superseded` の値だけをまとめ、`Contested` の値は含めない |
 | `private` | `target`、`scope` (`successors` 既定 / `value_only`) | private にする (04 §7.5) |
 | `private_off` | `target` | private を解く |
 | `delete_session` | `session` | セッションを消す (04 §7.1) |
@@ -125,7 +128,7 @@
 
 ## 04 に決めたこと
 
-事例を書いていて、仕様だけでは期待値を 1 つに決められなかった点は、04 に書いて決めた (2026-11-16)。事例はこのとおりに書いてある。
+事例を書いていて、仕様だけでは期待値を 1 つに決められなかった点は、04 に書いて決めた (2026-11-16。F12〜F15 の 4 行は 2026-11-17)。事例はこのとおりに書いてある。
 
 | 点 | 決めたこと | 04 |
 |---|---|---|
@@ -140,3 +143,7 @@
 | 今の値が消え、それより古い矛盾の値だけが残ったとき | `Contested` のまま残し、`against` は消えた値の記録を指す | §7.4 |
 | 多値の属性の private の「後継」 | 置き換えた値に限らず、あとで並べて足した値も含む | §7.5 |
 | 関門・理由の順、訂正の型の当て方 | 上の各ファイルの節の順。訂正の型は発話の一部に当たればよい | §5.2・§6 |
+| 伏せ字の範囲に値が掛かるほかの事実 | 自動では取り消さない。span を写し直して残す (F12) | §7.1・§7.3 |
+| 忘れた値を相手にした `Contested` の作り直し | 忘れた値は記録にならないので、作り直すと今の値になりうる。この差は受け入れる (F13) | §7.5 |
+| 履歴もまとめて忘れるときの範囲 | `Superseded` の値だけ (時制を問わない)。`Contested` は含めない (F14) | §7.1 |
+| 伏せ字にしないときの `echo`・`others` | 選んだ範囲を想起での `[非表示]` にする (F15) | §7.1 |
