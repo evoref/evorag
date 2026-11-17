@@ -48,6 +48,12 @@ impl ForgetKey {
         Self(b)
     }
 
+    /// 試験で `const` に置くための形。
+    #[cfg(test)]
+    pub(crate) const fn from_bytes_const(b: [u8; 32]) -> Self {
+        Self(b)
+    }
+
     /// `meta` の値 (ちょうど 64 桁の小文字の 16 進) から読む。形が違えば `None`。
     pub fn from_hex(s: &str) -> Option<Self> {
         decode_hex32(s).map(Self)
