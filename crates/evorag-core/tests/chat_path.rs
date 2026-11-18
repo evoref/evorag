@@ -311,8 +311,13 @@ async fn sending_while_generating_is_rejected_and_shutdown_saves_the_partial_rep
         text: "一つ目".into(),
     });
     let events = until(&mut rx, |e| matches!(e, Event::Token { .. })).await;
-    let Some(Event::UserTurnSaved { turn }) = events.first() else {
-        panic!()
+    // 発話の保存は最初の Token より前に来る。その前にほかの知らせ (裏の処理の状態など) が来ることがある
+    // (遅い環境で)。
+    let Some(turn) = events.iter().find_map(|e| match e {
+        Event::UserTurnSaved { turn } => Some(turn),
+        _ => None,
+    }) else {
+        panic!("no UserTurnSaved before the first token: {events:?}")
     };
     let sid = turn.session;
     core.command(Command::Send {
