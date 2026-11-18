@@ -14,7 +14,7 @@ use evorag_update::flow::{
     self, ApplyOutcome, CheckOutcome, Context, DataGuidance, DataVerdict, FlowError, Notice,
     ReleaseInfo, RollbackOutcome,
 };
-use evorag_update::net::{HttpFetcher, NetError, policy};
+use evorag_update::net::{HttpFetcher, NetError, ProxyProblem, policy};
 use evorag_update::swap::{
     self, Build, CheckFailure, CleanupReport, Env, Failure, FileName, FileOp, GapRecovery, Op,
     OwnershipProblem, ProbeError, ProcessProbe, ResumeOutcome, ResumeReport, Startup, SwapError,
@@ -674,10 +674,12 @@ fn net_error(catalog: &Catalog, n: &NetError) -> String {
             return with_detail(catalog, text, &Reason::new(String::new()).detail(detail));
         }
         NetError::UnsupportedProxy(p) => {
-            return catalog.with(
-                K::CliUpdateUnsupportedProxy,
-                &[("var", p.var), ("url", manual)],
-            );
+            let key = match p.problem {
+                ProxyProblem::Socks => K::CliUpdateUnsupportedProxySocks,
+                ProxyProblem::Unparseable => K::CliUpdateUnsupportedProxyInvalid,
+                _ => K::CliUpdateUnsupportedProxyScheme,
+            };
+            return catalog.with(key, &[("var", p.var), ("url", manual)]);
         }
         NetError::RateLimited { reset: Some(t) } => {
             return catalog.with(
@@ -1030,6 +1032,46 @@ pub fn startup_cleanup(catalog: &Catalog, data_root: &Path, state_dir: &Path) ->
     )
 }
 
+/// TUI の起動で、設定がこの版の読めない新しい形式の版のとき (12 §7.2・§7.3)。
+///
+/// 新しい版から古い版へ戻す途中で止まったなど、残った計画を続ければ直ることがあるので、設定の誤りで止まる
+/// 前に、更新の片付けを行う (データ根のロックを取って持ったまま。`data_root` は `evorag update` と同じ読み方で
+/// 決めたもの)。返すのは、示す行と終了コード: 動いている evorag が置いてあるものと違えば、起動し直す案内と 1。
+/// ほかは、設定の誤り (`config_error`) と、`evorag update rollback`・`apply` の案内と 4 (07 §5)。
+pub fn startup_with_newer_config(
+    catalog: &Catalog,
+    data_root: &Path,
+    state_dir: &Path,
+    config_error: &str,
+) -> (Vec<String>, u8) {
+    newer_config_outcome(
+        catalog,
+        startup_cleanup(catalog, data_root, state_dir),
+        config_error,
+    )
+}
+
+/// [`startup_with_newer_config`] の、片付けの結果から示すものを決める部分。
+fn newer_config_outcome(
+    catalog: &Catalog,
+    cleanup: StartupCleanup,
+    config_error: &str,
+) -> (Vec<String>, u8) {
+    match cleanup {
+        StartupCleanup::Restart(m) => (vec![m], 1),
+        StartupCleanup::Continue { mut notices, lock } => {
+            drop(lock);
+            notices.push(
+                catalog
+                    .with(MessageKey::CliConfigError, &[("detail", config_error)])
+                    .replace("\\n", "\n"),
+            );
+            notices.push(catalog.key(MessageKey::CliConfigNewerHint));
+            (notices, 4)
+        }
+    }
+}
+
 /// [`startup_cleanup`] の、入れ方と片付けの本体 (`cleanup`) を受け取る形。`cleanup` が `None` を返すのは、
 /// 動いている実行ファイルが分からないとき (片付けない)。
 fn startup_cleanup_with(
@@ -1078,14 +1120,24 @@ fn startup_cleanup_with(
             }
             cont(out)
         }
-        Some(Ok(_)) => cont(Vec::new()),
-        Some(Err(e)) => {
+        Some(Ok(Startup::ResumeFailed {
+            error,
+            running_replaced: true,
+        })) => {
+            let reason = swap_error(catalog, &error, state_file);
+            StartupCleanup::Restart(catalog.with(
+                MessageKey::CliUpdateStartupFailedRestart,
+                &[("reason", &reason)],
+            ))
+        }
+        Some(Ok(Startup::ResumeFailed { error: e, .. })) | Some(Err(e)) => {
             let reason = swap_error(catalog, &e, state_file);
             cont(vec![catalog.with(
                 MessageKey::CliUpdateStartupFailed,
                 &[("reason", &reason)],
             )])
         }
+        Some(Ok(_)) => cont(Vec::new()),
     }
 }
 
@@ -1202,6 +1254,97 @@ mod tests {
         };
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(lock.is_some());
+    }
+
+    /// 続きが途中で失敗したときは、動いている evorag がインストール先のものと違えば (求められないときを
+    /// 含む)、失敗の理由と、起動し直す案内を示して止まる。同じなら、理由を示して続ける。
+    #[test]
+    fn startup_cleanup_restarts_when_a_failed_resume_left_another_evorag_installed() {
+        let dir = TempDir::new("cli-startup-failed");
+        let root = data_root(&dir);
+        let state = dir.path().join("state.json");
+        let c = catalog();
+        let failed = || SwapError::RevertedNotRecorded {
+            cause: None,
+            record: Box::new(SwapError::Io {
+                op: FileOp::Rename,
+                path: PathBuf::from("state.json"),
+                source: std::io::Error::other("disk full"),
+            }),
+        };
+        let restart = startup_cleanup_with(&c, &root, "zip", &state, || {
+            Some(Ok(Startup::ResumeFailed {
+                error: failed(),
+                running_replaced: true,
+            }))
+        });
+        let StartupCleanup::Restart(text) = restart else {
+            panic!("a failed resume that replaced the running evorag must restart");
+        };
+        assert!(text.contains("元に戻しましたが"), "{text}");
+        assert!(text.contains("もう一度起動してください"), "{text}");
+        assert!(!text.contains("そのまま起動します"), "{text}");
+        assert!(!held_elsewhere(&root), "the lock is released");
+
+        let cont = startup_cleanup_with(&c, &root, "zip", &state, || {
+            Some(Ok(Startup::ResumeFailed {
+                error: failed(),
+                running_replaced: false,
+            }))
+        });
+        let StartupCleanup::Continue { notices, lock } = cont else {
+            panic!("a failed resume that kept the running evorag continues");
+        };
+        let text = notices.join("\n");
+        assert!(text.contains("そのまま起動します"), "{text}");
+        assert!(lock.is_some());
+    }
+
+    /// 設定がこの版の読めない新しい形式の版のとき: 片付けで動いている evorag が置いてあるものと違えば、
+    /// 起動し直す案内と 1。ほかは、設定の誤りと `evorag update rollback`・`apply` の案内と 4。どちらも
+    /// データ根のロックを放す。
+    #[test]
+    fn a_newer_config_stops_after_the_startup_cleanup() {
+        let dir = TempDir::new("cli-startup-newer-config");
+        let root = data_root(&dir);
+        let state = dir.path().join("state.json");
+        let c = catalog();
+        let error = "config.toml: line 1: version = 2 is not supported";
+
+        let restart = startup_cleanup_with(&c, &root, "zip", &state, || {
+            Some(Ok(Startup::Resumed(ResumeReport::for_test(
+                Op::Rollback,
+                ResumeOutcome::Completed,
+                true,
+            ))))
+        });
+        let (lines, code) = newer_config_outcome(&c, restart, error);
+        assert_eq!(code, 1);
+        let text = lines.join("\n");
+        assert!(text.contains("もう一度起動してください"), "{text}");
+        assert!(!text.contains(error), "{text}");
+        assert!(!held_elsewhere(&root), "the lock is released");
+
+        let cont = startup_cleanup_with(&c, &root, "zip", &state, || {
+            Some(Ok(Startup::Resumed(ResumeReport::for_test(
+                Op::Rollback,
+                ResumeOutcome::Completed,
+                false,
+            ))))
+        });
+        let (lines, code) = newer_config_outcome(&c, cont, error);
+        assert_eq!(code, 4);
+        let text = lines.join("\n");
+        assert!(text.contains(error), "{text}");
+        assert!(
+            text.contains("evorag update rollback") && text.contains("evorag update apply"),
+            "{text}"
+        );
+        assert!(
+            text.find("evorag update rollback") > text.find(error),
+            "the hint follows the error: {text}"
+        );
+        assert!(!held_elsewhere(&root), "the lock is released");
     }
 
     /// verifies: AC-FR-805-1 (戻した版が書けないときに、移行の前の退避のパスと `evorag restore` を示して
@@ -1403,6 +1546,33 @@ mod tests {
             text.contains("ALL_PROXY") && text.contains("SOCKS"),
             "{text}"
         );
+        // 使えない理由ごとに文言を分ける。
+        let proxy = |problem| {
+            net_error(
+                &c,
+                &NetError::UnsupportedProxy(evorag_update::net::ProxyRefused {
+                    var: "HTTPS_PROXY",
+                    problem,
+                }),
+            )
+        };
+        let scheme = proxy(ProxyProblem::OtherScheme);
+        let invalid = proxy(ProxyProblem::Unparseable);
+        assert!(
+            scheme.contains("HTTPS_PROXY") && !scheme.contains("SOCKS"),
+            "{scheme}"
+        );
+        assert!(
+            invalid.contains("HTTPS_PROXY") && invalid.contains("URL として読めません"),
+            "{invalid}"
+        );
+        assert!(text != scheme && scheme != invalid && invalid != text);
+        for t in [&text, &scheme, &invalid] {
+            assert!(
+                !t.contains("not supported") && !t.contains("not a proxy URL"),
+                "{t}"
+            );
+        }
     }
 
     /// Windows の隙間の案内は、正規化したインストール先を示す。

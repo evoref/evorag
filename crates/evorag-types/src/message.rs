@@ -403,6 +403,8 @@ message_keys! {
     CliDataRootUnusable => "cli.data_root_unusable",
     /// 引数: `detail`。
     CliConfigError => "cli.config_error",
+    /// 設定が、この版の読めない新しい形式の版 (12 §7.2・§7.3)。
+    CliConfigNewerHint => "cli.config_newer_hint",
     /// 引数: `key`。
     CliConfigIgnored => "cli.config_ignored",
     /// 引数: `recorded`。
@@ -629,10 +631,16 @@ message_keys! {
     CliUpdateStartupRestart => "cli.update.startup_restart",
     /// 引数: `reason`。
     CliUpdateStartupFailed => "cli.update.startup_failed",
+    /// 続きが途中で失敗し、動いている evorag がインストール先のものと違う (12 §7.3)。引数: `reason`。
+    CliUpdateStartupFailedRestart => "cli.update.startup_failed_restart",
     /// 引数: `files`。
     CliUpdateStartupKept => "cli.update.startup_kept",
-    /// 引数: `var`・`url`。
-    CliUpdateUnsupportedProxy => "cli.update.unsupported_proxy",
+    /// SOCKS のプロキシ。引数: `var`・`url`。
+    CliUpdateUnsupportedProxySocks => "cli.update.unsupported_proxy_socks",
+    /// http・https のほかのスキーム。引数: `var`・`url`。
+    CliUpdateUnsupportedProxyScheme => "cli.update.unsupported_proxy_scheme",
+    /// URL として読めない。引数: `var`・`url`。
+    CliUpdateUnsupportedProxyInvalid => "cli.update.unsupported_proxy_invalid",
     /// 引数: `op`。
     CliUpdateRunAgain => "cli.update.run_again",
     /// 引数: `command`。

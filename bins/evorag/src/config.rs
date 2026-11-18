@@ -189,7 +189,13 @@ pub fn load_for_update(path: &Path) -> Result<UpdateConfig, String> {
             };
             match table.get("version").and_then(toml::Value::as_integer) {
                 Some(v) if v > i64::from(CONFIG_VERSION) => {
-                    newer_for_update(&text, &table, u32::try_from(v).ok()).map_err(at)
+                    let version = u32::try_from(v).map_err(|_| {
+                        at(format!(
+                            "line {}: version = {v} is out of range",
+                            line_of(&text, "version")
+                        ))
+                    })?;
+                    newer_for_update(&text, &table, version).map_err(at)
                 }
                 _ => Err(at(e)),
             }
@@ -197,13 +203,31 @@ pub fn load_for_update(path: &Path) -> Result<UpdateConfig, String> {
     }
 }
 
+/// 設定が、この版の読めない新しい形式の版 (`version` が [`CONFIG_VERSION`] より大きい) なら、
+/// `evorag update` と同じ読み方 ([`load_for_update`]) で読んだもの。ほか (読めない理由が版でない、
+/// `evorag update` の読み方でも読めない) は `None`。
+pub fn newer_config(path: &Path) -> Option<UpdateConfig> {
+    load_for_update(path)
+        .ok()
+        .filter(|u| u.version.is_some_and(|v| v > CONFIG_VERSION))
+}
+
 /// 新しい形式の版の設定から、`evorag update` の使うキーだけを読む ([`load_for_update`])。
-fn newer_for_update(
-    text: &str,
-    table: &toml::Table,
-    version: Option<u32>,
-) -> Result<UpdateConfig, String> {
-    let storage = table.get("storage").and_then(toml::Value::as_table);
+///
+/// `storage`・`update` が表でないときは、既定の値を使わずに誤りにする (行番号つき)。
+fn newer_for_update(text: &str, table: &toml::Table, version: u32) -> Result<UpdateConfig, String> {
+    let section = |name: &str| -> Result<Option<&toml::Table>, String> {
+        match table.get(name) {
+            None => Ok(None),
+            Some(toml::Value::Table(t)) => Ok(Some(t)),
+            Some(_) => Err(format!(
+                "line {}: {name} must be a table",
+                line_of(text, name)
+            )),
+        }
+    };
+    let storage = section("storage")?;
+    let update = section("update")?;
     let path_of = |key: &str| -> Result<Option<PathBuf>, String> {
         match storage.and_then(|s| s.get(key)) {
             None => Ok(None),
@@ -214,11 +238,7 @@ fn newer_for_update(
             )),
         }
     };
-    let trusted_keys = match table
-        .get("update")
-        .and_then(toml::Value::as_table)
-        .and_then(|u| u.get(TRUSTED_KEYS))
-    {
+    let trusted_keys = match update.and_then(|u| u.get(TRUSTED_KEYS)) {
         None => Vec::new(),
         Some(keys) => trusted_keys(keys).map_err(|e| {
             format!(
@@ -231,7 +251,7 @@ fn newer_for_update(
         data_root: path_of("data_root")?,
         backup_dir: path_of("backup_dir")?,
         trusted_keys,
-        version,
+        version: Some(version),
         ignored: Vec::new(),
     })
 }
@@ -759,7 +779,6 @@ url = \"http://127.0.0.1:8081\"
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 配布物に同梱する設定の例が、そのまま読める (12 §5.1)。
     /// `evorag update` は、この版の読めない新しい形式の設定でも、データ根・退避先・足した鍵だけを読んで
     /// 動く。鍵の誤りと、ほかの設定の誤りは誤りのまま (終了コード 4)。設定は書き換えない。
     #[test]
@@ -838,11 +857,59 @@ data_root = \"d\"
         assert_eq!(u.version, None);
     }
 
+    /// `evorag update` の読み方でも、表でない `storage`・`update` と、範囲外の `version` は、既定の値を
+    /// 使わずに行番号つきの誤りにする (終了コード 4)。
+    #[test]
+    fn update_refuses_malformed_sections_of_a_newer_config() {
+        let dir = evorag_store::testutil::TempDir::new("config-update-malformed");
+        let path = dir.path().join("config.toml");
+        for (bad, line, what) in [
+            ("version = 9\nstorage = 1\n", 2, "storage must be a table"),
+            (
+                "version = 9\n\nupdate = \"x\"\n",
+                3,
+                "update must be a table",
+            ),
+            ("version = 9\nupdate = [1]\n", 2, "update must be a table"),
+            ("version = 99999999999\n", 1, "out of range"),
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            let e = load_for_update(&path).expect_err(bad);
+            assert!(e.contains(&format!("line {line}: ")), "{bad}: {e}");
+            assert!(e.contains(what), "{bad}: {e}");
+            assert!(newer_config(&path).is_none(), "{bad}");
+        }
+    }
+
+    /// TUI が設定の誤りで止まる前に更新の片付けをするのは、設定がこの版の読めない新しい形式の版のとき
+    /// だけ。データ根は `evorag update` と同じ読み方で読む。
+    #[test]
+    fn only_a_newer_config_is_read_for_the_startup_cleanup() {
+        let dir = evorag_store::testutil::TempDir::new("config-newer");
+        let path = dir.path().join("config.toml");
+        let text = "version = 2\nfuture = 1\n[storage]\ndata_root = \"d\"\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(load(&path, false).is_err());
+        let u = newer_config(&path).expect("a newer config");
+        assert_eq!(u.data_root.as_deref(), Some(Path::new("d")));
+        assert_eq!(u.version, Some(2));
+        for other in [
+            "version = 1\nunknown = 1\n",
+            "unknown = 1\n",
+            "version = 1\n",
+            "[storage\n",
+        ] {
+            std::fs::write(&path, other).unwrap();
+            assert!(newer_config(&path).is_none(), "{other}");
+        }
+        assert!(newer_config(&dir.path().join("none.toml")).is_none());
+    }
+
+    /// 配布物に同梱する設定の例が、そのまま読める (12 §5.1)。
     #[test]
     fn the_shipped_example_is_valid() {
-        let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-        let text = std::fs::read_to_string(root.join("../../dist/config.example.toml")).unwrap();
-        let l = parse(&text).unwrap();
+        let text = include_str!("../../../dist/config.example.toml");
+        let l = parse(text).unwrap();
         assert!(l.ignored.is_empty(), "{:?}", l.ignored);
         assert_eq!(l.config.version, Some(CONFIG_VERSION));
     }

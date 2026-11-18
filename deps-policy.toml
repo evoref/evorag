@@ -82,6 +82,14 @@ crate = "ureq"
 features = ["default", "rustls", "_ring", "_doc", "rustls-webpki-roots", "native-tls*", "vendored", "cookies", "gzip", "brotli", "charset", "json", "multipart", "socks-proxy", "win-system-proxy"]
 reason = "evorag-update uses ureq with rustls-graviola and the OS verifier only (12 §7.5)"
 
+[[features_forbidden]]
+rule = "dist"
+crate = "evorag-update"
+# test-util は試験のための結果の型を作る口、unverified-dist は署名と配布物の検証を飛ばす入口。どちらも dev 依存と
+# xtask だけが有効にする (配布物の bin の evorag の依存の木には入れない)。
+features = ["test-util", "unverified-dist"]
+reason = "test-only and verification-skipping entry points must not ship"
+
 # workspace の crate ごとに、直接の依存として使ってよいものを列挙する規則。
 [[direct_allow]]
 rule = "R1"

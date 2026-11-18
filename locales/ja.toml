@@ -317,6 +317,7 @@ llm_unauthorized = "llama-server ({url}) が API キーを受け付けません�
 data_root_in_use = "データ根 ({path}) は、ほかの evorag (pid {pid}) が使っています。\n会話のデータは無事です。先に起動した evorag を終えてから、もう一度実行してください。"
 data_root_unusable = "データ根を使えません: {detail}"
 config_error = "設定ファイルに誤りがあります: {detail}"
+config_newer_hint = "この設定は、より新しい版の evorag のものです。古い版に戻す途中で止まったなら evorag update rollback を、新しい版に上げるなら evorag update apply を実行してください。"
 config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
 config_migrated = "設定ファイル {path} を今の版の形に書き換えました (元のファイルは {backup} に残しました)。"
 prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
@@ -509,8 +510,13 @@ startup_restart = "前回の更新の続きを整えたので (元に戻した�
 startup_failed = """
 前回の更新の片付けができませんでした: {reason}
 evorag はそのまま起動します。"""
+startup_failed_restart = """
+前回の更新の続きを整える途中で失敗しました: {reason}
+動いている evorag がインストール先の evorag と違う (または同じと確かめられない) ので、データにも設定にも触れずに止めました。evorag をもう一度起動してください。"""
 startup_kept = "インストール先に、更新の残りとは中身の違うファイルがあるので残しました: {files}"
-unsupported_proxy = "環境変数 {var} のプロキシは使えません (evorag update は http:// と https:// のプロキシだけに対応します。SOCKS には対応しません)。通信せずに止めました。{var} を直すか、手作業で更新してください: {url}"
+unsupported_proxy_socks = "環境変数 {var} の SOCKS のプロキシは使えません (evorag update は http:// と https:// のプロキシだけに対応します)。通信せずに止めました。{var} を直すか、手作業で更新してください: {url}"
+unsupported_proxy_scheme = "環境変数 {var} のプロキシは使えません (evorag update は http:// と https:// で始まるプロキシだけに対応します。スキームを省いた書き方にも対応しません)。通信せずに止めました。{var} を直すか、手作業で更新してください: {url}"
+unsupported_proxy_invalid = "環境変数 {var} の値を、プロキシの URL として読めません。通信せずに止めました。{var} を http://<ホスト>:<ポート> の形に直すか、手作業で更新してください: {url}"
 run_again = "前回の途中で止まった更新 ({op}) の続きを整えたので (元に戻した場合を含む)、動いている evorag はインストール先の evorag と違います。先に進めずに止めました。同じコマンドをもう一度実行してください。"
 reinstall = "更新するには、次のコマンドで入れ直してください: {command}"
 reinstall_steps = "次のコマンドを順に実行して、入れ直してください:"

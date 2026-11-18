@@ -698,7 +698,27 @@ fn main() -> ExitCode {
     let migrate = !matches!(args.command, None | Some(Sub::Doctor));
     let loaded = match config::load(&config_file, migrate) {
         Ok(l) => l,
-        Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
+        Err(e) => {
+            // TUI: 設定がこの版の読めない新しい形式の版なら、止まる前に更新の片付けを行う (新しい版から
+            // 戻す途中で止まった計画を続けるため、12 §7.3)。データ根は evorag update と同じ読み方で決める。
+            if args.command.is_none()
+                && let Some(p) = &places
+                && let Some(newer) = config::newer_config(&config_file)
+            {
+                let data_root = args
+                    .data_root
+                    .clone()
+                    .or(newer.data_root)
+                    .unwrap_or_else(|| p.data_root.clone());
+                let (lines, code) =
+                    update::startup_with_newer_config(&catalog, &data_root, &p.state_dir, &e);
+                for l in lines {
+                    eprintln!("{l}");
+                }
+                return ExitCode::from(code);
+            }
+            return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]);
+        }
     };
     if let Some(b) = &loaded.migrated {
         config_migrated(&catalog, &config_file, b);

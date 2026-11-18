@@ -1017,6 +1017,87 @@ fn a_startup_that_reverts_the_running_exe_reports_it_replaced() {
     }
 }
 
+/// 12 §7.3 (起動の片付けの続きが途中で失敗しても、失敗した時点の `evorag(.exe)` を動いているイメージ
+/// (`next`) と比べて示す)。元に戻す途中のどの操作の後で止まっても、`evorag(.exe)` が `next` でなくなって
+/// いれば、置き換わったと示す。
+#[test]
+fn a_startup_whose_revert_fails_part_way_reports_whether_the_running_exe_was_replaced() {
+    let mut replaced = 0;
+    for method in methods() {
+        for k in 1.. {
+            let fx = Fixture::new(Some(OLD_PREV));
+            crashed_while_reverting(&fx, method);
+            let probe = FakeProbe::default();
+            let mut hook = crash_hook(Some(k));
+            let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+            let mut inst = fx.open(method, Purpose::Startup).expect("open");
+            let ctx = format!("{method:?} crash {k}");
+            match inst.startup(&mut env) {
+                Ok(super::Startup::Resumed(report)) => {
+                    assert!(report.running_replaced, "{ctx}: {report:?}");
+                    break;
+                }
+                Ok(super::Startup::ResumeFailed {
+                    error: SwapError::Crashed,
+                    running_replaced,
+                }) => {
+                    let exe_is_next = fx.digest(FileName::Exe) == Some(sha(NEXT));
+                    assert_eq!(running_replaced, !exe_is_next, "{ctx}: {:?}", fx.listing());
+                    replaced += usize::from(running_replaced);
+                }
+                r => panic!("{ctx}: {r:?}"),
+            }
+            drop(inst);
+            recover(&fx, method, ProbeMode::Honest, None).expect("recover");
+            assert_consistent(&fx, Scenario::ApplyRejected, &ctx);
+        }
+    }
+    assert!(replaced > 0);
+}
+
+/// 12 §7.3 (元に戻して `evorag(.exe)` を `current` にした後、計画を済みにできないときも、動いている `next`
+/// は置いてあるものと違うと示す。呼ぶ側は止まる)。
+#[test]
+fn a_startup_whose_revert_cannot_be_recorded_reports_the_running_exe_replaced() {
+    for method in methods() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        crashed_while_reverting(&fx, method);
+        let probe = FakeProbe::default();
+        let mut blocked = None;
+        let r = {
+            // 続きの最初の操作の後に、状態のファイルを置けなくする (開くときに状態のフォルダの権限を
+            // 締め直すので、開く前には塞げない)。
+            let mut hook = |_| {
+                if blocked.is_none() {
+                    blocked = Some(block_state_file(&fx));
+                }
+                false
+            };
+            let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+            let mut inst = fx.open(method, Purpose::Startup).expect("open");
+            inst.startup(&mut env)
+        };
+        match blocked {
+            Some(Some(restore)) => drop(restore),
+            _ => {
+                eprintln!("skipped: cannot block the state file here");
+                return;
+            }
+        }
+        match r {
+            Ok(super::Startup::ResumeFailed {
+                error: SwapError::RevertedNotRecorded { cause: None, .. },
+                running_replaced: true,
+            }) => {}
+            r => panic!("{method:?}: {r:?}"),
+        }
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)), "{method:?}");
+        assert!(fx.has_plan(), "{method:?}");
+        recover(&fx, method, ProbeMode::Honest, None).expect("recover");
+        assert_consistent(&fx, Scenario::ApplyRejected, &format!("{method:?}"));
+    }
+}
+
 /// 続きが、動いているイメージと同じものを `evorag(.exe)` に残すとき (置き終えた・戻したが元から
 /// `current` だった) は、置き換わったとは示さない。動いているイメージの SHA-256 は、計画があるときだけ求める。
 #[test]
