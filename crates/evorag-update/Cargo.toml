@@ -1,0 +1,33 @@
+[package]
+name = "evorag-update"
+description = "evorag: 本体の更新の検証 (署名つきの release.json と配布物、12 §5.2・§5.3・§7.2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# cargo xtask dist・verify-release が、署名の前の release.json と自分で作った配布物を、同じ規則で読む。
+# 本体 (bins/evorag) では使わない。
+dist = []
+
+[dependencies]
+minisign-verify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# 配布物の読み手。どちらで読むかは配布物の名前の末尾で決める (12 §5.3。cfg では決めない)。
+zip = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+# 試験の鍵で minisign の署名を作る (Ed25519 と、prehash の BLAKE2b-512)。試験だけの依存。
+ed25519-compact = { version = "2.1.1", default-features = false }
+blake2 = "0.10.6"
+
+[lints]
+workspace = true
