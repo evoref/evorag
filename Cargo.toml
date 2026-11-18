@@ -19,7 +19,7 @@ members = [
 
 [workspace.package]
 # v0.1.0 のリリースまでは内部カウンタ 0.0.x (docs/11-dev-workflow.md §9.1)。
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # rust-toolchain.toml の版と同じにする (docs/11-dev-workflow.md §1.1)。
 rust-version = "1.99"
@@ -89,7 +89,7 @@ graviola = "=0.4.5"
 # `evorag update apply` でこの版へ更新できる、今の版の下限 (release.json の upgrade_from、12 §5.3)。
 # v0.1〜v0.4 は直前の機能リリースの `.0` 以上で、この版より小さい (cargo xtask verify-release が確かめる)。
 # 版上げの PR で、直前の機能リリースの `.0` に直す (例: 0.3.0 なら "0.2.0")。
-upgrade_from = "0.1.0"
+upgrade_from = "0.2.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
