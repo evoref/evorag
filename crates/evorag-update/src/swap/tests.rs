@@ -75,6 +75,18 @@ impl VersionProbe for FakeProbe {
     }
 }
 
+/// インストール先にファイルを書く。Unix では権限を 0o755 にする (試験を走らせる利用者の umask が
+/// 002 でも、group が書けるファイルにならないように。インストール先の確かめが断るため)。
+fn put(path: PathBuf, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(&path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// インストール先と状態のフォルダ。
 struct Fixture {
     root: TempDir,
@@ -87,9 +99,9 @@ impl Fixture {
         // よらず、インストール先の確かめに通るように)。
         evorag_store::fsutil::create_private_dir(&root.path().join("install")).expect("mkdir");
         let fx = Self { root };
-        std::fs::write(fx.path(FileName::Exe), exe(CURRENT)).expect("write exe");
+        put(fx.path(FileName::Exe), exe(CURRENT)).expect("write exe");
         if let Some(p) = prev {
-            std::fs::write(fx.path(FileName::Prev), exe(p)).expect("write prev");
+            put(fx.path(FileName::Prev), exe(p)).expect("write prev");
         }
         fx
     }
@@ -377,7 +389,7 @@ fn a_prev_without_a_record_is_identified_by_its_version_output() {
     // `db format:` の行が無ければ、過去の版の表から決める。
     assert_eq!(prev.db_format(), Some("0.2"));
 
-    std::fs::write(fx.path(FileName::Prev), b"not an evorag").expect("write");
+    put(fx.path(FileName::Prev), b"not an evorag").expect("write");
     let probe = FakeProbe::default();
     let mut env = Env::new(&probe);
     assert!(matches!(
@@ -578,7 +590,7 @@ fn a_plan_for_another_folder_is_refused_without_touching_files() {
 fn an_exe_matching_no_role_is_left_alone_with_the_plan() {
     let fx = Fixture::new(Some(OLD_PREV));
     crashed_after_plan(&fx);
-    std::fs::write(fx.path(FileName::Exe), b"someone else's file").expect("write");
+    put(fx.path(FileName::Exe), b"someone else's file").expect("write");
     let before = fx.listing();
     let plan_before = fx.state_json();
     let probe = FakeProbe::default();
@@ -608,8 +620,8 @@ fn an_unreadable_state_file_is_refused_with_manual_steps() {
 fn files_matching_no_role_are_reported_and_kept() {
     let fx = Fixture::new(Some(OLD_PREV));
     crashed_after_plan(&fx);
-    std::fs::write(fx.path(FileName::Rejected), b"user file").expect("write");
-    std::fs::write(fx.path(FileName::New), b"half written").expect("write");
+    put(fx.path(FileName::Rejected), b"user file").expect("write");
+    put(fx.path(FileName::New), b"half written").expect("write");
     let probe = FakeProbe::default();
     let mut env = Env::new(&probe);
     let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
@@ -631,9 +643,9 @@ fn files_matching_no_role_are_reported_and_kept() {
 #[test]
 fn leftovers_are_cleaned_up_by_name_without_a_plan() {
     let fx = Fixture::new(None);
-    std::fs::write(fx.path(FileName::Tmp), exe(OLD_PREV)).expect("write");
+    put(fx.path(FileName::Tmp), exe(OLD_PREV)).expect("write");
     for name in [FileName::New, FileName::Rejected, FileName::Probe] {
-        std::fs::write(fx.path(name), b"x").expect("write");
+        put(fx.path(name), b"x").expect("write");
     }
     let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
     let report = inst.cleanup_by_name(Strictness::Strict).expect("cleanup");
@@ -659,8 +671,8 @@ fn leftovers_are_cleaned_up_by_name_without_a_plan() {
 #[test]
 fn an_unrelated_tmp_is_kept_and_blocks_updates() {
     let fx = Fixture::new(None);
-    std::fs::write(fx.path(FileName::PrevOld), exe(OLD_PREV)).expect("write");
-    std::fs::write(fx.path(FileName::Tmp), b"someone else's file").expect("write");
+    put(fx.path(FileName::PrevOld), exe(OLD_PREV)).expect("write");
+    put(fx.path(FileName::Tmp), b"someone else's file").expect("write");
     let before = fx.listing();
     let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
     assert!(matches!(
@@ -696,7 +708,7 @@ fn an_unrelated_tmp_is_kept_and_blocks_updates() {
     ));
     assert_eq!(fx.listing(), after_cleanup);
     // evorag.prev と同じ中身なら消す。
-    std::fs::write(fx.path(FileName::Tmp), exe(OLD_PREV)).expect("write");
+    put(fx.path(FileName::Tmp), exe(OLD_PREV)).expect("write");
     let report = inst.cleanup_by_name(Strictness::Strict).expect("strict");
     assert_eq!(report.removed, vec![FileName::Tmp]);
 }
@@ -705,8 +717,8 @@ fn an_unrelated_tmp_is_kept_and_blocks_updates() {
 #[test]
 fn apply_runs_the_prechecks_itself() {
     let fx = Fixture::new(Some(OLD_PREV));
-    std::fs::write(fx.path(FileName::Probe), b"x").expect("write");
-    std::fs::write(fx.path(FileName::Rejected), b"x").expect("write");
+    put(fx.path(FileName::Probe), b"x").expect("write");
+    put(fx.path(FileName::Rejected), b"x").expect("write");
     run(&fx, Method::HOST, Scenario::ApplyWithPrev, None).expect("apply");
     assert_consistent(&fx, Scenario::ApplyWithPrev, "prechecked");
 }
@@ -719,7 +731,7 @@ fn a_foreign_file_at_a_target_moves_nothing() {
     let fx = Fixture::new(Some(OLD_PREV));
     crashed_after_plan(&fx);
     std::fs::rename(fx.path(FileName::Prev), fx.path(FileName::PrevOld)).expect("mv");
-    std::fs::write(fx.path(FileName::Prev), b"user file").expect("write");
+    put(fx.path(FileName::Prev), b"user file").expect("write");
     assert_refused_untouched(&fx, |e| {
         matches!(
             e,
@@ -733,7 +745,7 @@ fn a_foreign_file_at_a_target_moves_nothing() {
     let fx = Fixture::new(Some(OLD_PREV));
     crashed_after_plan(&fx);
     std::fs::rename(fx.path(FileName::Exe), fx.path(FileName::Tmp)).expect("mv");
-    std::fs::write(fx.path(FileName::Prev), b"user file").expect("write");
+    put(fx.path(FileName::Prev), b"user file").expect("write");
     assert_refused_untouched(&fx, |e| {
         matches!(
             e,
@@ -1330,7 +1342,7 @@ mod unix {
             return;
         }
         std::fs::remove_file(fx.path(FileName::Prev)).expect("rm");
-        std::fs::write(fx.path(FileName::Prev), exe(OLD_PREV)).expect("write");
+        put(fx.path(FileName::Prev), exe(OLD_PREV)).expect("write");
         std::os::unix::fs::chown(fx.path(FileName::Prev), Some(1), None).expect("chown");
         assert!(matches!(
             inst.identify_prev(&mut env),
@@ -1498,7 +1510,7 @@ mod windows {
     #[test]
     fn a_locked_leftover_refuses_updates_but_not_startup() {
         let fx = Fixture::new(None);
-        std::fs::write(fx.path(FileName::New), b"x").expect("write");
+        put(fx.path(FileName::New), b"x").expect("write");
         let t = hold(fx.path(FileName::New), Duration::from_secs(5));
         let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
         assert!(matches!(
