@@ -957,6 +957,254 @@ fn assert_link_exe_is_refused(fx: &Fixture) {
     ));
 }
 
+/// 計画を `reverting` にした直後に止めた状態を作る (元に戻すのに失敗したのと同じ: 計画は `reverting`、
+/// `evorag(.exe)` は `next`)。
+fn crashed_while_reverting(fx: &Fixture, method: Method) {
+    let probe = FakeProbe::with(ProbeMode::Wrong);
+    let mut hook = |e| e == Event::StateSaved && fx.state_json()["plan"]["reverting"] == true;
+    let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+    let mut inst = fx.open(method, Purpose::Update).expect("open");
+    let r = inst.apply_bytes(
+        &exe(NEXT),
+        sha(NEXT),
+        &build(CURRENT),
+        &build(NEXT),
+        &mut env,
+    );
+    assert!(matches!(r, Err(SwapError::Crashed)), "{method:?}: {r:?}");
+    assert_eq!(fx.digest(FileName::Exe), Some(sha(NEXT)), "{method:?}");
+    assert_eq!(fx.state_json()["plan"]["reverting"], true, "{method:?}");
+}
+
+/// 12 §7.3 (続きが元に戻して、動いているイメージ (`next`) と `evorag(.exe)` (`current`) が違えば、
+/// そう示す。呼ぶ側はデータの移行の前に止まり、もう一度起動するよう示す)
+#[test]
+fn a_startup_that_reverts_the_running_exe_reports_it_replaced() {
+    for method in methods() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        crashed_while_reverting(&fx, method);
+        // 起動の片付けを、`next` (今の evorag(.exe)) として動かす。
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        let report = if method == Method::HOST {
+            match super::startup(&fx.dir().join(EXE_NAME), &fx.state_dir(), &mut env) {
+                Ok(super::Startup::Resumed(report)) => report,
+                r => panic!("{method:?}: {r:?}"),
+            }
+        } else {
+            let mut inst = fx.open(method, Purpose::Startup).expect("open");
+            inst.resume(&mut env).expect("resume").expect("a plan")
+        };
+        assert!(
+            matches!(report.outcome, ResumeOutcome::Reverted { .. }),
+            "{method:?}: {report:?}"
+        );
+        assert!(report.running_replaced, "{method:?}: {report:?}");
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)), "{method:?}");
+        assert_consistent(&fx, Scenario::ApplyRejected, &format!("{method:?}"));
+    }
+}
+
+/// 続きが、動いているイメージと同じものを `evorag(.exe)` に残すとき (置き終えた・戻したが元から
+/// `current` だった) は、置き換わったとは示さない。動いているイメージの SHA-256 は、計画があるときだけ求める。
+#[test]
+fn a_resume_that_keeps_the_running_exe_reports_no_replacement() {
+    let mut resumed = 0;
+    for method in methods() {
+        for s in [Scenario::ApplyWithPrev, Scenario::Rollback] {
+            for k in 1.. {
+                let fx = Fixture::new(s.prev());
+                if !matches!(run(&fx, method, s, Some(k)), Err(SwapError::Crashed)) {
+                    break;
+                }
+                if !fx.has_plan() || !fx.path(FileName::Exe).exists() {
+                    continue;
+                }
+                let probe = FakeProbe::default();
+                let mut env = Env::new(&probe);
+                let mut inst = fx.open(method, Purpose::Startup).expect("open");
+                assert!(!inst.running_digest_computed(), "computed on open");
+                let report = inst.resume(&mut env).expect("resume").expect("a plan");
+                assert!(inst.running_digest_computed());
+                let ctx = format!("{method:?} {s:?} crash {k}: {report:?}");
+                assert!(!report.running_replaced, "{ctx}");
+                assert_consistent(&fx, s, &ctx);
+                resumed += 1;
+            }
+        }
+    }
+    assert!(resumed > 0);
+    // 計画が無ければ求めない。
+    let fx = Fixture::new(Some(OLD_PREV));
+    let probe = FakeProbe::default();
+    let mut env = Env::new(&probe);
+    let mut inst = fx.open(Method::HOST, Purpose::Startup).expect("open");
+    assert!(inst.resume(&mut env).expect("resume").is_none());
+    inst.cleanup_by_name(Strictness::Lenient).expect("cleanup");
+    assert!(!inst.running_digest_computed());
+}
+
+/// 状態のファイルを置けなくする (Unix: `update` のフォルダを読むだけにする。Windows: `state.json` を
+/// 削除の共有なしで開いておく)。落とすと戻す。Unix の root は置けなくできないので `None`。
+fn block_state_file(fx: &Fixture) -> Option<Restore> {
+    let update = fx.state_dir().join("update");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if evorag_store::fsutil::effective_uid() == 0 {
+            return None;
+        }
+        std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o500)).ok()?;
+        Some(Restore(Box::new(move || {
+            let _ = std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o700));
+        })))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        let mut held = Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(update.join("state.json"))
+                .ok()?,
+        );
+        Some(Restore(Box::new(move || drop(held.take()))))
+    }
+}
+
+/// 元に戻した後に計画を済みにできなければ、「元に戻したが記録できなかった」と示し (戻せなかったとは
+/// 言わない)、計画を残す。次の続きが済ませる。
+#[test]
+fn a_revert_that_cannot_be_recorded_says_the_files_were_put_back() {
+    for method in methods() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let probe = FakeProbe::with(ProbeMode::Wrong);
+        let mut armed = false;
+        let mut blocked = None;
+        let r = {
+            let mut hook = |e| {
+                if e == Event::StateSaved && fx.state_json()["plan"]["reverting"] == true {
+                    armed = true;
+                } else if e == Event::StateWritten && armed && blocked.is_none() {
+                    blocked = Some(block_state_file(&fx));
+                }
+                false
+            };
+            let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+            let mut inst = fx.open(method, Purpose::Update).expect("open");
+            inst.apply_bytes(
+                &exe(NEXT),
+                sha(NEXT),
+                &build(CURRENT),
+                &build(NEXT),
+                &mut env,
+            )
+        };
+        match blocked {
+            Some(Some(restore)) => drop(restore),
+            _ => {
+                eprintln!("skipped: cannot block the state file here");
+                return;
+            }
+        }
+        let e = r.expect_err("not recorded");
+        assert!(
+            matches!(
+                e,
+                SwapError::RevertedNotRecorded {
+                    cause: Some(Failure::Check(_)),
+                    ..
+                }
+            ),
+            "{method:?}: {e:?}"
+        );
+        assert!(e.to_string().contains("put back"), "{e}");
+        assert_eq!(e.exit_code(), 1);
+        assert!(!e.needs_manual_recovery());
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)), "{method:?}");
+        assert!(fx.has_plan(), "{method:?}");
+        recover(&fx, method, ProbeMode::Wrong, None).expect("recover");
+        assert_consistent(&fx, Scenario::ApplyRejected, &format!("{method:?}"));
+    }
+}
+
+/// 上から置く方式: 写した evorag.tmp を読み直して `current` と合わなければ、改名の前に写しを消して止める。
+#[test]
+fn a_copy_that_does_not_match_is_removed_before_any_rename() {
+    let tamper = |fx: &Fixture| {
+        let tmp = fx.path(FileName::Tmp);
+        move |e: Event| {
+            if e == Event::Wrote(FileName::Tmp) {
+                std::fs::write(&tmp, b"corrupted copy").expect("tamper");
+            }
+            false
+        }
+    };
+    let is_mismatch = |e: &SwapError| {
+        matches!(
+            e,
+            SwapError::CopiedDigestMismatch {
+                name: FileName::Tmp
+            }
+        )
+    };
+    let assert_untouched = |fx: &Fixture| {
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)));
+        for name in FileName::LEFTOVERS {
+            assert!(!fx.path(name).exists(), "{name}: {:?}", fx.listing());
+        }
+        assert!(!fx.has_plan());
+    };
+    // apply: 段 2 の写し。
+    let fx = Fixture::new(Some(OLD_PREV));
+    let probe = FakeProbe::default();
+    let mut events = Vec::new();
+    let inner = tamper(&fx);
+    let mut inst = fx.open(Method::Replace, Purpose::Update).expect("open");
+    let r = {
+        let mut hook = |e| {
+            events.push(e);
+            inner(e)
+        };
+        let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+        inst.apply_bytes(
+            &exe(NEXT),
+            sha(NEXT),
+            &build(CURRENT),
+            &build(NEXT),
+            &mut env,
+        )
+    };
+    match &r {
+        Err(SwapError::Reverted(Failure::Other(e))) if is_mismatch(e) => {}
+        r => panic!("{r:?}"),
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Renamed(_, FileName::Exe))),
+        "{events:?}"
+    );
+    assert_untouched(&fx);
+    drop(inst);
+    // rollback: 1 の写し。
+    let fx = Fixture::new(Some(OLD_PREV));
+    let probe = FakeProbe::default();
+    let mut inst = fx.open(Method::Replace, Purpose::Update).expect("open");
+    let prev = inst.identify_prev(&mut Env::new(&probe)).expect("prev");
+    let mut hook = tamper(&fx);
+    let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+    let e = inst
+        .rollback(&prev, &build(CURRENT), &mut env)
+        .expect_err("refused");
+    assert!(is_mismatch(&e), "{e:?}");
+    assert_untouched(&fx);
+}
+
 #[cfg(unix)]
 mod unix {
     use std::os::unix::fs::PermissionsExt;
@@ -1091,6 +1339,35 @@ mod unix {
             })
         ));
         assert_eq!(probe.calls.get(), 0);
+    }
+
+    /// 12 §7.2 (rollback の 2: インストール先の確かめに通らなければ、evorag.prev を `--version` で
+    /// 動かさない)
+    #[test]
+    fn identify_prev_checks_the_install_dir_before_running_evorag_prev() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+        let set = |mode| {
+            std::fs::set_permissions(fx.dir(), std::fs::Permissions::from_mode(mode))
+                .expect("chmod");
+        };
+        let probe = FakeProbe::default();
+        set(0o775);
+        let r = inst.identify_prev(&mut Env::new(&probe));
+        set(0o755);
+        assert!(
+            matches!(
+                r,
+                Err(SwapError::UnsafeOwnership {
+                    problem: super::super::OwnershipProblem::WritableByOthers,
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+        assert_eq!(probe.calls.get(), 0);
+        inst.identify_prev(&mut Env::new(&probe)).expect("prev");
+        assert_eq!(probe.calls.get(), 1);
     }
 
     /// Linux・macOS の rollback で計画を書けなければ、写した evorag.tmp を消す。
@@ -1418,6 +1695,57 @@ mod windows {
         ));
         assert_eq!(fx.listing(), before);
         assert!(!fx.has_plan());
+    }
+
+    /// 12 §7.2 (rollback の 2: ほかの利用者が書き込めるインストール先では、evorag.prev を
+    /// `--version` で動かさない)
+    #[test]
+    fn identify_prev_refuses_a_folder_writable_by_other_users() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let ok = std::process::Command::new("icacls")
+            .arg(fx.dir())
+            .args(["/grant", "*S-1-5-32-545:(W)"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "icacls");
+        let probe = FakeProbe::default();
+        let inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        let r = inst.identify_prev(&mut Env::new(&probe));
+        assert!(
+            matches!(r, Err(SwapError::WritableByOtherUsers { .. })),
+            "{r:?}"
+        );
+        assert_eq!(probe.calls.get(), 0);
+    }
+
+    /// 12 §7.3 (Windows: インストール先の持ち主が、今の利用者・SYSTEM・Administrators・TrustedInstaller
+    /// のどれでもなければ断る)。持ち主をほかの相手にするには特権が要るので、できなければ飛ばす (判定は
+    /// evorag-store の winacl の試験が、作った SID で確かめる)。
+    #[test]
+    fn an_install_folder_owned_by_another_user_is_refused() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        inst.check_install_dir()
+            .expect("a folder we created is ours");
+        let ok = std::process::Command::new("icacls")
+            .arg(fx.dir())
+            .args(["/setowner", "*S-1-5-32-545"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: cannot give the folder another owner without privileges");
+            return;
+        }
+        assert!(
+            matches!(
+                inst.check_install_dir(),
+                Err(SwapError::OwnedByOtherUser { .. })
+            ),
+            "owned by Users"
+        );
     }
 
     /// 12 §7.2 (Windows: `evorag.prev.exe` があれば、`evorag.prev` を動かさずに断る)

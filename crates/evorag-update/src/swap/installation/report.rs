@@ -131,6 +131,13 @@ pub struct ResumeReport {
     pub missing: Vec<FileName>,
     /// 消せずに残したファイル。
     pub left: Vec<FileName>,
+    /// 動いているイメージが、続きの後の `evorag(.exe)` と違う (SHA-256 で比べる。動いているイメージの
+    /// SHA-256 を求められないときも真)。
+    ///
+    /// 例: 起動の片付けが元に戻したので、`evorag(.exe)` は `current` だが、動いているのは `next`。
+    /// 真のとき、呼ぶ側はデータの移行 (DB の形式の更新など) の前に止まり、evorag をもう一度起動するよう
+    /// 利用者に示すこと (動いている版と、置いてある版が違うため)。
+    pub running_replaced: bool,
 }
 
 /// 名前での片付けの結果。

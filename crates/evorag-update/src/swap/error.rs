@@ -163,6 +163,16 @@ pub enum SwapError {
         /// インストール先。
         dir: PathBuf,
     },
+    /// Windows: インストール先のフォルダの持ち主が、今の利用者・SYSTEM・Administrators・TrustedInstaller の
+    /// どれでもない (持ち主は DACL を書き換えられるため。12 §7.3 の「インストール先の確かめ」)。
+    #[error(
+        "the install folder {} is owned by another user; move evorag to a folder you own, such as %LOCALAPPDATA%\\Programs\\evorag",
+        dir.display()
+    )]
+    OwnedByOtherUser {
+        /// インストール先。
+        dir: PathBuf,
+    },
     /// インストール先に書き込めない。
     #[error("the install folder {} is not writable: {source}", dir.display())]
     NotWritable {
@@ -210,6 +220,12 @@ pub enum SwapError {
     /// 書いた `evorag.new` を読み直した SHA-256 が合わない。
     #[error("the written evorag.new does not match its sha256")]
     WrittenDigestMismatch,
+    /// 写した `name` (`evorag.tmp` など) を読み直した SHA-256 が、写したもとの役割と合わない。写しは消した。
+    #[error("the copy {name} does not match the file it was copied from and was removed")]
+    CopiedDigestMismatch {
+        /// 写し。
+        name: FileName,
+    },
     /// 置き換えに失敗し、元に戻した (起動できる状態)。
     #[error("the update failed and was undone: {0}")]
     Reverted(#[source] Failure),
@@ -217,6 +233,20 @@ pub enum SwapError {
     /// `update` が、計画に従って済ませる。
     #[error("the files were swapped, but recording it failed: {0}")]
     NotRecorded(#[source] Box<SwapError>),
+    /// ファイルは元に戻した (起動できる状態) が、状態のファイルに済んだことを書けなかった。計画が残るので、
+    /// 次の起動の片付けか `update` が、計画に従って済ませる。`cause` は、置き換えの途中で戻したときの
+    /// 置き換えの失敗 (計画の続きで戻したときは無い)。
+    #[error(
+        "{}the files were put back, but recording it failed: {record}",
+        cause.as_ref().map(|c| format!("the update failed ({c}); ")).unwrap_or_default()
+    )]
+    RevertedNotRecorded {
+        /// 置き換えの失敗。
+        cause: Option<Failure>,
+        /// 状態のファイルを書けなかった理由。
+        #[source]
+        record: Box<SwapError>,
+    },
     /// 置き換えに失敗し、元に戻すのにも失敗した。計画を残した (次の update と起動の片付けが続ける)。
     #[error("the update failed ({cause}) and could not be undone: {revert}")]
     RevertFailed {
@@ -312,6 +342,7 @@ impl SwapError {
             | Self::UnrelatedLeftover { .. }
             | Self::BlockingFile { .. }
             | Self::WritableByOtherUsers { .. }
+            | Self::OwnedByOtherUser { .. }
             | Self::NotWritable { .. }
             | Self::NotRegularFile { .. }
             | Self::UnsafeOwnership { .. }
@@ -321,8 +352,10 @@ impl SwapError {
             | Self::Changed { .. }
             | Self::SameFile
             | Self::WrittenDigestMismatch
+            | Self::CopiedDigestMismatch { .. }
             | Self::Reverted(_)
             | Self::NotRecorded(_)
+            | Self::RevertedNotRecorded { .. }
             | Self::RevertFailed { .. } => Failure::Other(Box::new(self)),
             #[cfg(test)]
             Self::Crashed => Failure::Other(Box::new(self)),

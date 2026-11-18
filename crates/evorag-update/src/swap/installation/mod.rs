@@ -10,6 +10,7 @@ mod fileops;
 mod report;
 mod sequence;
 
+use std::cell::OnceCell;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,9 @@ use converge::Entry;
 ///
 /// 呼ぶ側は、データ根のロック (03 §9) を先に取って持っていること (片付けの間に、ほかの evorag が
 /// 起動しないように)。`running_exe` は [`std::env::current_exe`] の結果を渡す。
+///
+/// [`Startup::Resumed`] の [`ResumeReport::running_replaced`] が真なら、呼ぶ側はデータの移行の前に止まり、
+/// evorag をもう一度起動するよう利用者に示す (動いているのは、置いてあるのと違う版のため)。
 ///
 /// # Errors
 ///
@@ -65,7 +69,16 @@ pub struct Installation {
     dir: PathBuf,
     state: StatePaths,
     method: Method,
-    running: Option<Sha256Digest>,
+    /// [`Self::open`] に渡された、動いている実行ファイルのパス。
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "only Linux reads the running image itself")
+    )]
+    running_exe: PathBuf,
+    /// その正規化したパス。
+    running_path: PathBuf,
+    /// 動いているイメージの SHA-256 ([`Self::running_digest`])。要るときに 1 回だけ求める。
+    running: OnceCell<Option<Sha256Digest>>,
     _lock: File,
 }
 
@@ -75,10 +88,16 @@ impl Installation {
     /// `running_exe` は正規化してから (シンボリックリンクをたどって) フォルダと名前を取る。名前は Windows と
     /// macOS では大文字と小文字を区別せずに比べる。
     ///
-    /// 動いている実行ファイルの SHA-256 (続きで「続きを進めているのが `next` 自身か」を見る) は、
-    /// `running_exe` のファイルから求める。Linux で `running_exe` が [`std::env::current_exe`] と同じ
-    /// ファイルなら、`/proc/self/exe` (動いているイメージそのもの) から求める (名前の上のファイルが
-    /// 差し替わっていても、動いているものを見る)。試験は別のパスを渡すので、ファイルから求める。
+    /// 正規化はシンボリックリンクを解くので、`evorag` がリンク (例: `~/.local/bin/evorag` から
+    /// `/opt/evorag/evorag` へ) なら、インストール先 (置き換えるフォルダ) はリンクの先のフォルダになり、
+    /// リンクそのものには触れない。
+    ///
+    /// 動いている実行ファイルの SHA-256 (続きで「続きを進めているのが `next` 自身か」と
+    /// [`ResumeReport::running_replaced`] を見る) は、ここでは求めない。計画の続きで要るときに、ファイルを
+    /// 動かす前に 1 回だけ、`running_exe` のファイルから求める (計画が無ければ求めない)。Linux で
+    /// `running_exe` が [`std::env::current_exe`] と同じファイルなら、`/proc/self/exe` (動いているイメージ
+    /// そのもの) から求める (名前の上のファイルが差し替わっていても、動いているものを見る)。試験は別の
+    /// パスを渡すので、ファイルから求める。
     ///
     /// # Errors
     ///
@@ -102,15 +121,15 @@ impl Installation {
             })?;
         let state = StatePaths::new(state_dir);
         let lock = lock_update(&state)?;
-        let mut inst = Self {
+        Ok(Self {
             dir,
             state,
             method: Method::HOST,
-            running: None,
+            running_exe: running_exe.to_path_buf(),
+            running_path,
+            running: OnceCell::new(),
             _lock: lock,
-        };
-        inst.running = inst.running_digest(running_exe, &running_path);
-        Ok(inst)
+        })
     }
 
     /// インストール先 (正規化したパス)。
@@ -148,6 +167,9 @@ impl Installation {
     ///
     /// 役割はファイルの名前ではなく SHA-256 で見分ける。データ根のロックは呼ぶ側が先に取る。
     ///
+    /// [`ResumeReport::running_replaced`] が真なら、呼ぶ側はデータの移行の前に止まり、evorag をもう一度
+    /// 起動するよう利用者に示す (`update` が続きを済ませたときも同じ)。
+    ///
     /// # Errors
     ///
     /// [`Self::pending`] の理由のほか、次のときは何も動かさず、計画を残す (どれも手で戻す手順を示す):
@@ -160,7 +182,13 @@ impl Installation {
             return Ok(None);
         };
         self.check_plan_dir(&plan)?;
-        self.converge(plan, st.done, env).map(Some)
+        // ファイルを動かす前に、動いているイメージの SHA-256 を求めておく (Windows と macOS は名前の上の
+        // ファイルから求めるため、動かした後では別のファイルを読む)。
+        let running = self.running_digest();
+        let mut report = self.converge(plan, st.done, env)?;
+        report.running_replaced =
+            running.is_none_or(|r| self.inspect(FileName::Exe).ok() != Some(Entry::File(r)));
+        Ok(Some(report))
     }
 
     /// 計画が無いときに、名前で片付ける (12 §7.3)。`evorag(.exe)` が無ければ何もしない。
@@ -235,7 +263,8 @@ impl Installation {
     ///
     /// `evorag(.exe)` がリンク・名前の代理のリパースポイント・通常のファイルでない、Unix で持ち主か
     /// 権限が条件に合わない、Windows でほかの利用者がフォルダに書き込める
-    /// ([`SwapError::WritableByOtherUsers`])、書き込めない。
+    /// ([`SwapError::WritableByOtherUsers`]) かフォルダの持ち主が今の利用者・SYSTEM・Administrators・
+    /// TrustedInstaller のどれでもない ([`SwapError::OwnedByOtherUser`])、書き込めない。
     pub fn check_install_dir(&self) -> Result<(), SwapError> {
         let exe = self.path(FileName::Exe);
         let meta = std::fs::symlink_metadata(&exe)
@@ -253,10 +282,19 @@ impl Installation {
             unix_ownership(&exe, &meta)?;
         }
         #[cfg(windows)]
-        if fsutil::writable_by_others(&self.dir).map_err(SwapError::io(FileOp::Read, &self.dir))? {
-            return Err(SwapError::WritableByOtherUsers {
-                dir: self.dir.clone(),
-            });
+        {
+            if fsutil::owned_by_others(&self.dir).map_err(SwapError::io(FileOp::Read, &self.dir))? {
+                return Err(SwapError::OwnedByOtherUser {
+                    dir: self.dir.clone(),
+                });
+            }
+            if fsutil::writable_by_others(&self.dir)
+                .map_err(SwapError::io(FileOp::Read, &self.dir))?
+            {
+                return Err(SwapError::WritableByOtherUsers {
+                    dir: self.dir.clone(),
+                });
+            }
         }
         let not_writable = |source| SwapError::NotWritable {
             dir: self.dir.clone(),
@@ -274,11 +312,16 @@ impl Installation {
     /// `evorag.prev` の版を決める (12 §7.2 の rollback の 1・2)。最後に済んだ操作の `current` の
     /// SHA-256 が合えばその記録を、合わなければ `--version` の出力を使う。
     ///
+    /// 始める前にインストール先を確かめる ([`Self::check_install_dir`])。ほかの利用者が差し替えられる
+    /// フォルダの `evorag.prev` を動かさないため。
+    ///
     /// # Errors
     ///
-    /// `evorag.prev` が無い・通常のファイルでない・ほかの利用者のもの、動かせない、1 行目が
-    /// `evorag <版>` でない、Windows で `evorag.prev.exe` がある ([`SwapError::BlockingFile`])。
+    /// インストール先の確かめに通らない ([`Self::check_install_dir`])、`evorag.prev` が無い・通常の
+    /// ファイルでない・ほかの利用者のもの、動かせない、1 行目が `evorag <版>` でない、Windows で
+    /// `evorag.prev.exe` がある ([`SwapError::BlockingFile`])。
     pub fn identify_prev(&self, env: &mut Env<'_>) -> Result<PrevInfo, SwapError> {
+        self.check_install_dir()?;
         let sha256 = match self.inspect(FileName::Prev)? {
             Entry::Absent => return Err(SwapError::NoPrev),
             Entry::Other => {
@@ -327,7 +370,8 @@ impl Installation {
     ///
     /// 始める前に断ったとき (インストール先は変わらない)、置き換えに失敗して元に戻したとき
     /// ([`SwapError::Reverted`]。確かめに通らないときを含む)、元に戻せなかったとき
-    /// ([`SwapError::RevertFailed`]。計画を残す)、入れ替えは済んだが記録できなかったとき
+    /// ([`SwapError::RevertFailed`]。計画を残す)、元に戻したが記録できなかったとき
+    /// ([`SwapError::RevertedNotRecorded`]。計画を残す)、入れ替えは済んだが記録できなかったとき
     /// ([`SwapError::NotRecorded`])。
     pub fn apply(
         &mut self,
@@ -369,23 +413,31 @@ impl Installation {
         Ok(st)
     }
 
-    /// 動いている実行ファイルの SHA-256 ([`Self::open`] を参照)。求められなければ `None`。
-    fn running_digest(&self, running_exe: &Path, running_path: &Path) -> Option<Sha256Digest> {
-        #[cfg(target_os = "linux")]
-        {
-            let is_self = std::env::current_exe().is_ok_and(|c| {
-                c == running_exe || canonical_exe_path(&c).is_ok_and(|c| c == running_path)
-            });
-            if is_self {
-                return fileops::digest_of_running_image();
+    /// 動いている実行ファイルの SHA-256 ([`Self::open`] を参照)。初めて呼んだときに求め、後は覚えた
+    /// ものを返す。求められなければ `None`。
+    pub(super) fn running_digest(&self) -> Option<Sha256Digest> {
+        *self.running.get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            {
+                let is_self = std::env::current_exe().is_ok_and(|c| {
+                    c == self.running_exe
+                        || canonical_exe_path(&c).is_ok_and(|c| c == self.running_path)
+                });
+                if is_self {
+                    return fileops::digest_of_running_image();
+                }
             }
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = running_exe;
-        match self.inspect_path(running_path) {
-            Ok(Entry::File(d)) => Some(d),
-            _ => None,
-        }
+            match self.inspect_path(&self.running_path) {
+                Ok(Entry::File(d)) => Some(d),
+                _ => None,
+            }
+        })
+    }
+
+    /// 動いているイメージの SHA-256 を、もう求めたか (試験のため)。
+    #[cfg(test)]
+    pub(crate) fn running_digest_computed(&self) -> bool {
+        self.running.get().is_some()
     }
 
     #[cfg(all(test, windows))]

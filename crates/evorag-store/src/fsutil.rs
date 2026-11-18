@@ -172,7 +172,10 @@ pub fn check_not_open(path: &Path) -> io::Result<()> {
 /// インストール先のフォルダに、今の利用者・SYSTEM・Administrators・TrustedInstaller のほかの相手へ
 /// 書き込みの類の権限を許す ACE があるか。Windows だけ。ACL を持たない置き場所・ネットワークの置き場所
 /// ([`acl_applicable`] が偽) では偽 (確かめられない)。継承だけの ACE は、中のファイルへ継承するもの
-/// (`OBJECT_INHERIT_ACE`) だけを見る (相手が CREATOR OWNER・CREATOR GROUP なら許す)。
+/// (`OBJECT_INHERIT_ACE`) だけを見る (相手が CREATOR OWNER・CREATOR GROUP なら許す)。そうした ACE は、
+/// フォルダの中に新しく作るファイル (`evorag.new`・`evorag.tmp`・`evorag.probe`) に効く。同じボリュームの
+/// 中の改名ではセキュリティ記述子が変わらない (改名したファイルは継承し直さない) ので、改名で置くファイルの
+/// 権限は、作ったときのまま。
 ///
 /// # Errors
 ///
@@ -180,6 +183,18 @@ pub fn check_not_open(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 pub fn writable_by_others(dir: &Path) -> io::Result<bool> {
     imp::writable_by_others(dir)
+}
+
+/// フォルダの持ち主が、今の利用者・SYSTEM・Administrators・TrustedInstaller のどれでもないか。Windows
+/// だけ。持ち主は DACL を書き換えられる (`WRITE_DAC` を暗に持つ) ため、インストール先の確かめで見る。
+/// ACL を持たない置き場所・ネットワークの置き場所 ([`acl_applicable`] が偽) では偽 (確かめられない)。
+///
+/// # Errors
+///
+/// 持ち主を読めないとき。
+#[cfg(windows)]
+pub fn owned_by_others(dir: &Path) -> io::Result<bool> {
+    imp::owned_by_others(dir)
 }
 
 /// 動いているプロセスの実効の利用者の ID。Unix だけ。
@@ -295,6 +310,14 @@ mod imp {
             return Ok(false);
         }
         crate::winacl::grants_write_to_others(&w)
+    }
+
+    pub fn owned_by_others(dir: &Path) -> io::Result<bool> {
+        let w = wide(dir)?;
+        if !crate::winacl::applicable(&w) {
+            return Ok(false);
+        }
+        crate::winacl::owner_is_allowed(&w).map(|allowed| !allowed)
     }
 
     pub fn create_new_file(path: &Path, _unix_mode: u32) -> io::Result<std::fs::File> {
@@ -661,6 +684,7 @@ mod tests {
         let d = dir.path().join("install");
         create_private_dir(&d).unwrap();
         assert!(!writable_by_others(&d).unwrap());
+        assert!(!owned_by_others(&d).unwrap(), "a folder we create is ours");
         let icacls = |arg: &str| {
             std::process::Command::new("icacls")
                 .arg(&d)

@@ -168,11 +168,14 @@ impl Installation {
         env.event(Event::Wrote(name))
     }
 
-    /// `from` の写しを `to` に書いて書き切る (Unix はフォルダも同期する)。
+    /// `from` の写しを `to` に書いて書き切り (Unix はフォルダも同期する)、閉じてから開き直して、SHA-256 が
+    /// `expected` (`from` の役割) と合うことを確かめる。合わなければ `to` を消して
+    /// [`SwapError::CopiedDigestMismatch`] (写しを、役割のファイルとして改名で置かないため)。
     pub(super) fn copy(
         &self,
         from: FileName,
         to: FileName,
+        expected: Sha256Digest,
         env: &mut Env<'_>,
     ) -> Result<(), SwapError> {
         let mut src = fsutil::retry_locked(|| fsutil::open_nofollow(&self.path(from)))
@@ -183,7 +186,12 @@ impl Installation {
             .map_err(SwapError::file(FileOp::Write, to))?;
         drop(dst);
         self.sync_dir(to)?;
-        env.event(Event::Wrote(to))
+        env.event(Event::Wrote(to))?;
+        if self.inspect(to)? != Entry::File(expected) {
+            let _ = fsutil::retry_locked(|| std::fs::remove_file(self.path(to)));
+            return Err(SwapError::CopiedDigestMismatch { name: to });
+        }
+        Ok(())
     }
 
     /// 方式に従って改名する (Windows は上書きしない、Unix は上から置いてフォルダを同期する)。

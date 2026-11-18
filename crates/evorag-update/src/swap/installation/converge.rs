@@ -108,6 +108,10 @@ impl Installation {
         let forward_targets = [(Exe, next), (Prev, current)];
         if forward {
             self.check_placements(&snap, &forward_targets, &roles, env)?;
+            // 動いているイメージの SHA-256 は、要るときだけ、ファイルを動かす前に求める。
+            let verified = plan.op == Op::Rollback
+                || plan.stage >= self.method.verify_stage()
+                || self.running_digest() == Some(next);
             self.place(
                 &mut snap,
                 &forward_targets,
@@ -117,9 +121,6 @@ impl Installation {
                 Mode::Apply,
                 env,
             )?;
-            let verified = plan.op == Op::Rollback
-                || plan.stage >= self.method.verify_stage()
-                || self.running == Some(next);
             if !verified {
                 match self.verify(&plan.next, env) {
                     Ok(()) => {
@@ -193,7 +194,16 @@ impl Installation {
             })?;
             ResumeOutcome::Completed
         } else {
-            self.save(None, done, env)?;
+            self.save(None, done, env).map_err(|e| {
+                if e.is_crash() {
+                    e
+                } else {
+                    SwapError::RevertedNotRecorded {
+                        cause: None,
+                        record: Box::new(e),
+                    }
+                }
+            })?;
             ResumeOutcome::Reverted { check }
         };
         Ok(ResumeReport {
@@ -202,6 +212,7 @@ impl Installation {
             untouched,
             missing,
             left,
+            running_replaced: false,
         })
     }
 
@@ -291,7 +302,7 @@ impl Installation {
                             Method::TwoStep => aside = Some(dest),
                             Method::Replace => {
                                 if real {
-                                    self.copy(target, dest, env)?;
+                                    self.copy(target, dest, d, env)?;
                                 }
                                 snap.copied(target, dest);
                             }

@@ -124,8 +124,8 @@ impl Installation {
         env: &mut Env<'_>,
     ) -> Result<ApplyReport, SwapError> {
         use FileName::{Exe, New, Prev, Tmp};
-        // 2: 今の evorag の写しを evorag.tmp に。
-        if let Err(e) = self.copy(Exe, Tmp, env) {
+        // 2: 今の evorag の写しを evorag.tmp に。読み直して `current` と合わなければ、改名の前に元に戻す。
+        if let Err(e) = self.copy(Exe, Tmp, plan.current.sha256, env) {
             return Err(self.abort(plan, done, e, env));
         }
         plan.stage = 2;
@@ -236,9 +236,10 @@ impl Installation {
         env: &mut Env<'_>,
     ) -> Result<(), SwapError> {
         use FileName::{Exe, Prev, Tmp};
-        // 1: 今の evorag の写しを evorag.tmp に。計画はその後に書く。書けなければ写しを消す。
+        // 1: 今の evorag の写しを evorag.tmp に (読み直して `current` と合うことを確かめる)。計画はその後に
+        // 書く。書けなければ写しを消す。
         if let Err(e) = self
-            .copy(Exe, Tmp, env)
+            .copy(Exe, Tmp, plan.current.sha256, env)
             .and_then(|()| self.save(Some(plan), done, env))
         {
             if !e.is_crash() {
@@ -361,6 +362,10 @@ impl Installation {
         match self.converge(plan.clone(), done.cloned(), env) {
             Ok(_) => SwapError::Reverted(cause),
             Err(e) if e.is_crash() => e,
+            Err(SwapError::RevertedNotRecorded { record, .. }) => SwapError::RevertedNotRecorded {
+                cause: Some(cause),
+                record,
+            },
             Err(e) => SwapError::RevertFailed {
                 cause,
                 revert: Box::new(e),

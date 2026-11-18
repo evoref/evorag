@@ -19,6 +19,7 @@ const OBJECT_INHERIT_ACE: u32 = 0x1;
 const CONTAINER_INHERIT_ACE: u32 = 0x2;
 const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 const SE_FILE_OBJECT: u32 = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
 const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const ACL_SIZE_INFORMATION: u32 = 2;
@@ -179,10 +180,6 @@ fn user() -> io::Result<&'static UserSid> {
     }
 }
 
-// SAFETY: SID の入れ物は作った後に書き換えない。読むだけなのでスレッドをまたいでよい。
-unsafe impl Sync for UserSid {}
-unsafe impl Send for UserSid {}
-
 /// よく知られた SID (SYSTEM・Administrators)。
 struct WellKnown {
     buf: [u32; MAX_SID / 4],
@@ -219,10 +216,6 @@ struct Allowed {
     system: WellKnown,
     admins: WellKnown,
 }
-
-// SAFETY: 作った後に書き換えない。読むだけ。
-unsafe impl Sync for Allowed {}
-unsafe impl Send for Allowed {}
 
 fn allowed() -> io::Result<(&'static UserSid, &'static Allowed)> {
     static ALLOWED: OnceLock<Result<Allowed, i32>> = OnceLock::new();
@@ -361,8 +354,9 @@ fn creator(sub_authority: u32) -> [u32; 3] {
 /// 狭めるだけ)。
 ///
 /// 継承だけの ACE (このものには効かない) は、ファイルへ継承するもの (`OBJECT_INHERIT_ACE`) だけを見る。
-/// 中に作るファイル (`evorag.new` など) と、改名で継承し直すファイルに効くため。相手が CREATOR OWNER・
-/// CREATOR GROUP なら作った者に置き換わるので許す。フォルダへだけ継承するものは見ない。
+/// フォルダの中に新しく作るファイル (`evorag.new`・`evorag.tmp`・`evorag.probe`) に効くため (同じ
+/// ボリュームの中の改名ではセキュリティ記述子が変わらず、改名したファイルは継承し直さない)。相手が
+/// CREATOR OWNER・CREATOR GROUP なら作った者に置き換わるので許す。フォルダへだけ継承するものは見ない。
 pub fn grants_write_to_others(path: &[u16]) -> io::Result<bool> {
     let (user, others) = allowed()?;
     let installer = trusted_installer();
@@ -450,6 +444,57 @@ pub fn grants_write_to_others(path: &[u16]) -> io::Result<bool> {
     result
 }
 
+/// 持ち主として許す相手か: 今の利用者・SYSTEM・Administrators・TrustedInstaller。
+///
+/// # Safety
+///
+/// `sid` は有効な SID を指すこと。
+unsafe fn is_allowed_owner(sid: Psid) -> io::Result<bool> {
+    let (user, others) = allowed()?;
+    let installer = trusted_installer();
+    let known: [Psid; 4] = [
+        user.sid(),
+        others.system.sid(),
+        others.admins.sid(),
+        installer.as_ptr().cast_mut().cast(),
+    ];
+    // SAFETY: known はどれも有効な SID を指す。sid は呼ぶ側が保証する。
+    Ok(known.iter().any(|&k| unsafe { EqualSid(sid, k) } != 0))
+}
+
+/// `path` の持ち主が、今の利用者・SYSTEM・Administrators・TrustedInstaller のどれかか。持ち主は DACL を
+/// 書き換えられる (OWNER RIGHTS の ACE で狭めていなければ `WRITE_DAC` を暗に持つ) ので、インストール先の
+/// 確かめで見る。持ち主が無ければ偽。
+pub fn owner_is_allowed(path: &[u16]) -> io::Result<bool> {
+    let mut owner: Psid = std::ptr::null_mut();
+    let mut sd: *mut c_void = std::ptr::null_mut();
+    // SAFETY: path は NUL で終わる UTF-16。出力のポインタはすべて有効。
+    let r = unsafe {
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r as i32));
+    }
+    let result = if owner.is_null() {
+        Ok(false)
+    } else {
+        // SAFETY: owner は GetNamedSecurityInfoW が返した記述子の中を指し、LocalFree の前まで有効。
+        unsafe { is_allowed_owner(owner) }
+    };
+    // SAFETY: GetNamedSecurityInfoW が割り当てた記述子を 1 回だけ解放する。
+    unsafe { LocalFree(sd) };
+    result
+}
+
 /// ほかの一般の利用者が使えないか: 効く ACE (継承だけのものを除く) がすべて「許す」で、相手が
 /// 今の利用者・SYSTEM・Administrators のどれかで、今の利用者にはすべての権限を許すものがある。
 /// 試験のため。
@@ -520,4 +565,42 @@ pub fn is_owner_only(path: &[u16]) -> io::Result<bool> {
     // SAFETY: GetNamedSecurityInfoW が割り当てた記述子を 1 回だけ解放する。
     unsafe { LocalFree(sd) };
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `WELL_KNOWN_SID_TYPE` の WinWorldSid (Everyone) と WinBuiltinUsersSid (Users)。
+    const WIN_WORLD_SID: u32 = 1;
+    const WIN_BUILTIN_USERS_SID: u32 = 27;
+
+    /// 持ち主として許すのは、今の利用者・SYSTEM・Administrators・TrustedInstaller だけ。
+    #[test]
+    fn only_the_user_system_administrators_and_trusted_installer_are_allowed_owners() {
+        let (user, others) = allowed().unwrap();
+        let installer = trusted_installer();
+        let users = WellKnown::new(WIN_BUILTIN_USERS_SID).unwrap();
+        let everyone = WellKnown::new(WIN_WORLD_SID).unwrap();
+        let creator_owner = creator(0);
+        let allowed_sids: [Psid; 4] = [
+            user.sid(),
+            others.system.sid(),
+            others.admins.sid(),
+            installer.as_ptr().cast_mut().cast(),
+        ];
+        let refused_sids: [Psid; 3] = [
+            users.sid(),
+            everyone.sid(),
+            creator_owner.as_ptr().cast_mut().cast(),
+        ];
+        for sid in allowed_sids {
+            // SAFETY: どれも有効な SID を指す。
+            assert!(unsafe { is_allowed_owner(sid) }.unwrap());
+        }
+        for sid in refused_sids {
+            // SAFETY: どれも有効な SID を指す。
+            assert!(!unsafe { is_allowed_owner(sid) }.unwrap());
+        }
+    }
 }
