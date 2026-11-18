@@ -43,18 +43,18 @@
 
 ## gates.toml
 
-`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化の後の照合で通ったときの `evidence_normalized`)。
+`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化 v1 の後の照合で通ったときの `evidence_normalized`、照合の形 (04 §5.6) で通ったときの `evidence_loose`)。`stored` は、受け付けたときに記録する値 (04 §5.2 の「記録する文字列」。LLM の写しではなく、発話の保存した本文の部分文字列) で、省くと `candidate.v` と同じ。受け付けた事例は、記録する値と、その値の鍵を `stored` と比べる (`candidate.v` とは比べない)。
 
 関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
 
 | `expect` | 関門 | 意味 |
 |---|---|---|
 | `unknown_attribute` | (§5.1) | 属性が一覧に無い |
-| `evidence_missing` | 1 | 根拠が、前のふるいの後の発話に (正規化しても) 含まれない |
-| `value_not_in_evidence` | 2 | 値が根拠に含まれない (英数字は語の境界で) |
-| `old_not_in_evidence` | 2 | `old` が根拠に含まれない |
+| `evidence_missing` | 1 | 根拠が、前のふるいの後の発話に (正規化 v1 でも照合の形でも) 含まれない |
+| `value_not_in_evidence` | 2 | 値が根拠に含まれない (英数字は語の境界で)。または、発話の根拠の範囲の中の値の位置を、保存した本文に戻せない |
+| `old_not_in_evidence` | 2 | `old` が根拠か、発話の根拠の範囲に含まれない |
 | `mood` | 3 | 叙法が `question` か `hypothetical` |
-| `quoted` | 4 | 値が根拠の中で引用の括弧の内側にある (属性の例外を除く) |
+| `quoted` | 4 | 根拠の範囲の中の値の一致が、どれも引用の括弧の内側に 1 文字以上掛かる (属性の例外を除く) |
 | `subject_not_allowed` | 5 | 主語が `self` 以外で、属性がそれを許さない。または、呼び名が 32 文字を超える・根拠に含まれない・表で本人を表す語 (「利用者」・user) と同じ。呼び名が関門 6 に外れたときは、関門 6 の理由で捨てる |
 | `forbidden_category` | 6 | 一般カテゴリ Cc・Cf・Co・Cn・Cs の文字と、Default_Ignorable の文字 (04 §5.2 の関門 6) |
 | `forbidden_char` | 6 | 行・段落の区切り、表の区切り |
@@ -109,7 +109,7 @@
 
 ## corrections.toml
 
-`[[case]]` に `text` (候補の発話)、`previous` (直前の応答)、`expect_candidate` (字句の規則で候補になるか) を書く。古い値の照合の相手として、`earlier` (それより前の利用者の発話の並び) と `live` (今の Live の値、`{ s, a, v }` の並び) を書ける。候補になる事例には、型から決まる向き `direction = { old, new }` と、固定した検証の LLM の出力 `llm = { target, old, new, e }` と、`expect` (`verified` か理由) を書く。
+`[[case]]` に `text` (候補の発話)、`previous` (直前の応答)、`expect_candidate` (字句の規則で候補になるか) を書く。古い値の照合の相手として、`earlier` (それより前の利用者の発話の並び) と `live` (今の Live の値、`{ s, a, v }` の並び) を書ける。候補になる事例には、型から決まる向き `direction = { old, new }` と、固定した検証の LLM の出力 `llm = { target, old, new, e }` と、`expect` (`verified` か理由) を書く。`verified` の事例には、記録する古い値と新しい値 (穴の位置で一致した保存した本文の部分文字列、04 §6 の「訂正の型の使い方」) を `stored = { old, new }` に書ける。省いた項目は `llm` の同じ項目と同じとみなす。
 
 事例は `crates/evorag-memory/tests/correction_cases.rs` が走らせる。`direction` の `old`・`new` は、当たった型の `{old}`・`{new}` の穴の本文 (記録の `dir_old`・`dir_new`) に含まれることを確かめる (穴は「でした」「に住んでいます」など、型の後ろの語を含みうる、04 §6)。古い値の無い型 (`I meant {new}` など) は `old` を書かない。
 
@@ -122,7 +122,7 @@
 | `new_not_in_utterance` | 新しい値か根拠が発話に含まれない |
 | `quoted` | 新しい値の位置が括弧・引用符の内側にある |
 | `old_not_found` | 古い値が、直前の応答・それより前の利用者の発話・今の値のどれにも無いか、関門 6 か 200 文字の上限に外れる |
-| `direction` | LLM の出力の値が、型から決まる向きの穴の位置 (同じ文の中で、固定の部分に接する端) に無い |
+| `direction` | LLM の出力の値が、型から決まる向きの穴の位置 (同じ文の中で、固定の部分に接する端) に無い。または、記録する古い値と新しい値が、値の鍵か照合の形で同じ |
 
 関門は表の上から順に当て、最初に外れた理由を書く。引用 (コードブロック・引用の行) の中の訂正は、型を前のふるいの後の本文に当てるので候補にならない (`expect_candidate = false`)。候補の型が引用の外に当たり、検証の LLM が引用の中の値を返したときは、新しい値を前のふるいの後の本文で照合するので `new_not_in_utterance` で落ちる (04 §6 の「引用ではない」は、この 2 つに含まれる)。訂正の型は、発話の一部に当たればよい (発話の全体と一致しなくてよい)。
 
