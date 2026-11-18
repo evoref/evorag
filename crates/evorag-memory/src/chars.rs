@@ -187,7 +187,13 @@ pub(crate) fn has_mixed_script_word(value: &str) -> bool {
     false
 }
 
-/// 語を空白で区切らない文字 (漢字・かな。長音符のような共通の文字も含む)。引用符の前後の判定 (関門 4) に使う。
+/// 一般カテゴリ Zs (空白の区切り。U+0020・U+3000・NBSP など)。照合の形 (04 §5.6) で落とせる空白。
+pub(crate) fn is_space_separator(c: char) -> bool {
+    c.general_category() == GeneralCategory::SpaceSeparator
+}
+
+/// 語を空白で区切らない文字 (漢字・かな。長音符のような共通の文字も含む)。引用符の前後の判定 (関門 4) と、
+/// 照合の形 (04 §5.6) で落とす空白の判定に使う。
 pub(crate) fn is_unspaced_letter(c: char) -> bool {
     // Common と Inherited の Script_Extensions はすべての文字体系を含むので、数えない。
     let ext = c.script_extension();

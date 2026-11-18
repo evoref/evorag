@@ -322,3 +322,67 @@ expect = { turns = [
   { turn = "a1", text = "私は[非表示]に住んでいます" },
   { turn = "b1", text = "[非表示]のおすすめの店を教えて" },
 ] }
+
+[[case]]
+id = "F16"
+title = "応答の中の、漢字・かなの間の空白だけが違う写しも伏せ字にする (照合の形で探す)"
+spec = "04 §5.6 の照合の順、§7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "誕生日は7 月 22 日ですね。7月22日、覚えました" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "birthday", state = "Retracted", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "誕生日は[伏せ字]です" },
+  { id = "a2", text = "誕生日は[伏せ字]ですね。[伏せ字]、覚えました" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }], table = [] }
+
+[[case]]
+id = "F17"
+title = "伏せ字にしないで忘れたときも、応答の中の空白を挟んだ写しを想起で [非表示] にする"
+spec = "04 §5.6 の照合の順、§7.5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "誕生日は7 月 22 日ですね" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" }, redact = false }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "誕生日は7月22日です" },
+  { id = "a2", text = "誕生日は7 月 22 日ですね" },
+], recall = [
+  { turn = "a1", text = "誕生日は[非表示]です" },
+  { turn = "a2", text = "誕生日は[非表示]ですね" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }] }
+
+[[case]]
+id = "F18"
+title = "空白の有無だけが違う書き方の事実も、照合の鍵が vks にあるので一緒に取り消す"
+spec = "04 §7.1 の取り消す事実、§7.2 の 2"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "誕生日は 7 月 22 日だよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "birthday", v = "7 月 22 日", e = "誕生日は 7 月 22 日だよ" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "birthday", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "birthday", state = "Retracted", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "誕生日は[伏せ字]です" },
+  { id = "b1", text = "誕生日は [伏せ字]だよ" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }], table = [] }

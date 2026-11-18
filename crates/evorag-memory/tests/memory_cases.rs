@@ -75,13 +75,19 @@ fn check_candidate(id: &str, c: &Value, text: Option<&str>, raw_evidence: bool, 
         );
     }
     assert!(!subject.is_empty(), "{id}: empty subject");
+    // 正規化 v1 か照合の形 (04 §5.6) で含まれればよい (改行をまたぐ値の事例は、LLM が改行を空白にして写す)。
+    let within = |hay: &str, needle: &str| {
+        use evorag_memory::{normalize_loose, normalize_v1};
+        normalize_v1(hay).contains(&normalize_v1(needle))
+            || normalize_loose(hay).contains(&normalize_loose(needle))
+    };
     if raw_evidence && let Some(text) = text {
-        assert!(text.contains(e), "{id}: evidence `{e}` is not in the text");
+        assert!(within(text, e), "{id}: evidence `{e}` is not in the text");
     }
     if raw_value {
-        assert!(e.contains(v), "{id}: value `{v}` is not in the evidence");
+        assert!(within(e, v), "{id}: value `{v}` is not in the evidence");
         if let Some(old) = s(c, "old") {
-            assert!(e.contains(old), "{id}: old `{old}` is not in the evidence");
+            assert!(within(e, old), "{id}: old `{old}` is not in the evidence");
         }
     }
 }
@@ -140,10 +146,34 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
         assert!(GATE_REASONS.contains(&expect), "{id}: expect `{expect}`");
         reasons.insert(expect.to_owned());
         if let Some(count) = s(&case, "count") {
-            assert_eq!(count, "evidence_normalized", "{id}: count");
+            assert!(
+                ["evidence_normalized", "evidence_loose"].contains(&count),
+                "{id}: count `{count}`"
+            );
             assert_eq!(
                 expect, "accept",
                 "{id}: count is only for accepted candidates"
+            );
+        }
+        if let Some(subject) = s(&case, "stored_subject") {
+            assert_eq!(
+                expect, "accept",
+                "{id}: stored_subject is only for accepted candidates"
+            );
+            assert_eq!(
+                subject,
+                evorag_memory::normalize_v1(subject),
+                "{id}: stored_subject is in the normalized form"
+            );
+        }
+        if let Some(stored) = s(&case, "stored") {
+            assert_eq!(
+                expect, "accept",
+                "{id}: stored is only for accepted candidates"
+            );
+            assert!(
+                text.contains(stored),
+                "{id}: stored `{stored}` is not in the text"
             );
         }
         let c = case
@@ -174,7 +204,10 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
                         && (!attr.other_subjects
                             || chars(subject) > evorag_memory::MAX_SUBJECT_CHARS
                             || !req(c, "e", &id).to_lowercase().contains(&folded)
-                            || evorag_memory::SELF_LABELS.contains(&folded.as_str())),
+                            || evorag_memory::SELF_LABELS.iter().any(|w| {
+                                evorag_memory::normalize_loose(w)
+                                    == evorag_memory::normalize_loose(subject)
+                            })),
                     "{id}"
                 );
             }

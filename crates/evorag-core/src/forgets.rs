@@ -22,7 +22,7 @@ use evorag_memory::{
     ForgetEnv, ForgetOptions, ForgetPreview, JOB_FORGET_BACKUPS, JobBody, KIND_CHUNK,
     KIND_CORRECTION, KIND_EMBEDDING, KIND_FACT, KIND_FACT_DIRECTIVE, KIND_JOB, KIND_NOTE,
     KIND_TURN, NoteBody, OP_FORGET, PlanHash, TurnBody, TurnForgets, TurnRole, ValueKey,
-    attributes, block_mark, hidden_marker, journal_cuts, load_directives, plan_forget,
+    attributes, block_mark, hidden_marker, journal_cuts, load_directives, loose_key, plan_forget,
     redaction_marker, replay_forgets, turn_rev_checked,
 };
 use evorag_store::forget::{Redaction, TurnOutcome, apply_to_turn};
@@ -150,25 +150,35 @@ fn unsettled_turns(r: &ReadTxn<'_>, marker: &str) -> Result<BTreeSet<Id>, String
 /// 起動時の当て直し (04 §7.2 の「起動の順」)。`Core::start` が、書き手を作った後、照会と命令を受け付ける前に
 /// 呼ぶ。
 pub(crate) async fn startup(inner: &Arc<Inner>) {
-    recreate_backup_jobs(inner).await;
+    let flagged = recreate_backup_jobs(inner).await;
     let outcome = recheck(inner).await;
     if outcome.changed {
         tracing::info!("forgets were replayed at startup");
+    }
+    // `forget.recheck` は、job を書き、忘れるの当て直しを `memory.forget_key` で済ませた後にだけ消す (03 §3.1.1)。
+    // 鍵が使えない・当て直しを書けなかったときは残す (立っている間は書き出しを断る、03 §11)。
+    if flagged && outcome.replayed_with_key {
+        if let Err(e) = crate::write(inner, vec![WriteOp::ClearForgetRecheck]).await {
+            tracing::warn!(error = %e, "the forget recheck flag could not be cleared");
+        }
+    } else if flagged {
+        tracing::warn!("forgets are not fully replayed; the forget recheck flag is kept");
     }
     // sleep-time の前にも残りが無いかを確かめる (04 §7.2)。
     state(inner).recheck = true;
 }
 
 /// `meta` の `forget.recheck` が立っていれば (03 §4.2 の規則 12 の (1) と restore の後)、事実への指示の関係と
-/// 副索引を作り直し、すべての忘れるの指示の `forget_backups` の job を書き、同じ依頼で印を消す。書けなければ
-/// 印を残し、次の起動で続ける。
-async fn recreate_backup_jobs(inner: &Arc<Inner>) {
+/// 副索引を作り直し、忘れるの指示の `forget_backups` の job を書く (job の残っている指示には書き足さない。印が
+/// 残って次の起動でまた呼ばれても、job を重ねないため)。印は消さない (当て直しの後に [`startup`] が消す)。
+/// 印が立っていて、job を書けたときだけ真。
+async fn recreate_backup_jobs(inner: &Arc<Inner>) -> bool {
     match inner.store.meta(meta::FORGET_RECHECK) {
         Ok(Some(v)) if v == meta::FORGET_RECHECK_SET => {}
-        Ok(_) => return,
+        Ok(_) => return false,
         Err(e) => {
             tracing::warn!(error = %e, "the forget recheck flag could not be read");
-            return;
+            return false;
         }
     }
     let store = inner.store.clone();
@@ -177,10 +187,31 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
     let planned = tokio::task::spawn_blocking(move || -> Result<Vec<WriteOp>, String> {
         let r = store.read().map_err(|e| e.to_string())?;
         let mut ops = evorag_memory::rebuild_directive_indexes(&r).map_err(|e| e.to_string())?;
+        let mut queued: BTreeSet<Id> = BTreeSet::new();
+        r.for_each(KIND_JOB, |x| {
+            if let Read::Ok(e) = x
+                && let Ok(b) = e.body_as::<JobBody>()
+                && b.task == JOB_FORGET_BACKUPS
+                && let Some(d) = b.directive
+            {
+                queued.insert(d);
+            }
+            true
+        })
+        .map_err(|e| e.to_string())?;
         ops.extend(
-            evorag_memory::forget_backups_for_all(&r, &*ids, now).map_err(|e| e.to_string())?,
+            evorag_memory::forget_backups_for_all(&r, &*ids, now)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|op| match op {
+                    WriteOp::Put(e) if e.kind == KIND_JOB => e
+                        .body_as::<JobBody>()
+                        .ok()
+                        .and_then(|b| b.directive)
+                        .is_none_or(|d| !queued.contains(&d)),
+                    _ => true,
+                }),
         );
-        ops.push(WriteOp::ClearForgetRecheck);
         Ok(ops)
     })
     .await
@@ -188,10 +219,19 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
     .and_then(|r| r);
     match planned {
         Ok(ops) => match crate::write(inner, ops).await {
-            Ok(()) => crate::flag_cleanup(inner),
-            Err(e) => tracing::warn!(error = %e, "forget backup jobs could not be recreated"),
+            Ok(()) => {
+                crate::flag_cleanup(inner);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "forget backup jobs could not be recreated");
+                false
+            }
         },
-        Err(e) => tracing::warn!(error = %e, "forget directives could not be read"),
+        Err(e) => {
+            tracing::warn!(error = %e, "forget directives could not be read");
+            false
+        }
     }
 }
 
@@ -200,6 +240,8 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
 pub(crate) struct Outcome {
     /// DB の記録を変えた。
     pub(crate) changed: bool,
+    /// 事実の層 (印による取り消し) まで、`memory.forget_key` で当て直しを済ませた (書くものが無かったときを含む)。
+    pub(crate) replayed_with_key: bool,
 }
 
 /// 忘れるの当て直しを確かめ、残りがあれば当てる (起動時と sleep-time)。何度当てても同じ。落とされない task で
@@ -258,7 +300,7 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
             );
             state(inner).key_missing = true;
         }
-        match planned.map(|(replay, _)| replay) {
+        let replayed = match planned.map(|(replay, _)| replay) {
             Ok(replay) if replay.changed() => {
                 // 先に済ませる処理を、書く前に止める (04 §7.2 の「捨てるキャッシュ」)。
                 drop(inner.pre.stop());
@@ -279,19 +321,23 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
                             .copied()
                             .collect();
                         after_change(inner, gone).await;
+                        true
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "replayed forgets could not be written");
                         failed = true;
+                        false
                     }
                 }
             }
-            Ok(_) => {}
+            Ok(_) => true,
             Err(e) => {
                 tracing::warn!(error = %e, "forgets could not be replayed");
                 failed = true;
+                false
             }
-        }
+        };
+        out.replayed_with_key = replayed && !key_missing;
     }
     let journal_pending = rewrite_journal(inner).await;
     let store = inner.store.clone();
@@ -730,7 +776,8 @@ struct RecopyRules {
     /// 指示の記録が形として正しくない伏せ字のターン (写しから記録だけを除く)。
     drop_turns: BTreeSet<Id>,
     candidates: Vec<LookupProbe>,
-    /// この ID 以上の記録を持つ退避は飛ばさない (副索引で引けない訂正・ノートを除きうるため)。
+    /// この ID 以上の記録を持つ退避は飛ばさない (副索引で引けない訂正・ノートと、照合の鍵だけで印に当たる事実を
+    /// 除きうるため。値を忘れた指示の job では最小の ID にして、記録のある退避をすべて調べる)。
     scan_from: Option<Id>,
     dirs: Directives,
     /// すべての忘れるの指示の `vks`。
@@ -793,6 +840,17 @@ impl RecopyRules {
         }
         // 訂正とノートは副索引で引けないので、job の指示より後の記録を持つ退避は飛ばさない。
         let scan_from = directives.iter().copied().min();
+        // 事実は照合の鍵 (04 §5.6) でも印に当たる (「7月22日」を忘れたときの「7 月 22 日」)。照合の鍵で当たる事実の
+        // 値の鍵は `vks` に無く、副索引 (`candidates`) では引けないので、値を忘れた指示の job があれば、記録のある
+        // 退避は飛ばさずにすべて調べる (安全の側。変えるものが無ければ書き直さない)。
+        let forgets_values = bodies
+            .iter()
+            .any(|(id, b)| directives.contains(id) && !b.vks.is_empty());
+        let scan_from = if forgets_values {
+            Some(Id::from_bytes([0; 16]))
+        } else {
+            scan_from
+        };
         let read_turn = |t: Id| -> Option<TurnBody> {
             match r.get(KIND_TURN, t).ok()?? {
                 Read::Ok(e) => e.body_as::<TurnBody>().ok(),
@@ -867,12 +925,15 @@ impl RecopyRules {
                 let Some(key) = &self.key else {
                     return false;
                 };
+                // 値の鍵の印と照合の鍵の印の両方で引く (当て直しの取り消しと同じ、04 §7.2)。
                 e.body_as::<FactBody>().is_ok_and(|b| {
                     b.state != "retracted"
                         && b.vk
                             .as_deref()
                             .and_then(ValueKey::from_hex)
-                            .is_some_and(|vk| {
+                            .into_iter()
+                            .chain(b.value.as_deref().map(|v| loose_key(key, v)))
+                            .any(|vk| {
                                 self.dirs.is_blocked(&block_mark(
                                     key,
                                     &b.subject,
@@ -886,11 +947,15 @@ impl RecopyRules {
             KIND_CORRECTION => e.body_as::<CorrectionBody>().is_ok_and(|b| {
                 self.turns.contains_key(&b.turn)
                     || self.drop_turns.contains(&b.turn)
-                    || [b.old_vk.as_deref(), b.new_vk.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(ValueKey::from_hex)
-                        .any(|v| self.vks.contains(&v))
+                    || match &self.key {
+                        // 値の鍵と照合の鍵の両方で比べる (当て直しの訂正の消し方と同じ、04 §7.5)。
+                        Some(key) => b.value_keys(key).iter().any(|v| self.vks.contains(v)),
+                        None => [b.old_vk.as_deref(), b.new_vk.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .filter_map(ValueKey::from_hex)
+                            .any(|v| self.vks.contains(&v)),
+                    }
                     || self
                         .unredacted
                         .iter()

@@ -304,6 +304,44 @@ async fn extraction_writes_facts_and_advances_the_watermark() {
     assert_eq!(stored(dir.path()).1, Some(u2));
 }
 
+/// LLM が数字と漢字の間に空白を足して写した根拠と値 (「7 月 22 日」) も、照合の形 (04 §5.6) で受け付け、
+/// 記録する値は発話の書き方 (「7月22日」) にする (04 §5.2 の「記録する文字列」)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spaced_copy_from_the_model_is_stored_as_the_user_wrote_it() {
+    const BIRTHDAY: &str = "誕生日は7月22日です";
+    const SPACED: &str = r#"{"c": [{"t": 1, "s": "self", "a": "birthday", "v": "7 月 22 日",
+        "e": "誕生日は 7 月 22 日です", "m": "fact", "tn": "current", "old": ""}]}"#;
+    let dir = TempDir::new("extraction-spaced");
+    prepare(dir.path(), true);
+    let llm = chat(&[reply(REPLY), reply(SPACED)]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    let u1 = say(&core, &mut rx, BIRTHDAY).await;
+    let ev = until(&mut rx, |e| matches!(e, Event::FactsChanged { .. })).await;
+    assert_eq!(
+        ev.last(),
+        Some(&Event::FactsChanged {
+            added: 1,
+            replaced: 0,
+            contested: 0
+        })
+    );
+    core.shutdown().await;
+    assert_eq!(llm.remaining(), 0);
+
+    let (facts, through) = stored(dir.path());
+    assert_eq!(through, Some(u1));
+    assert_eq!(facts.len(), 1);
+    let f = &facts[0];
+    assert_eq!(
+        (f.subject.as_str(), f.attribute.as_str(), f.value.as_deref()),
+        ("self", "birthday", Some("7月22日"))
+    );
+    assert_eq!(f.state, "live");
+    let span = f.sources[0].start.unwrap() as usize..f.sources[0].end.unwrap() as usize;
+    assert_eq!(&BIRTHDAY[span], BIRTHDAY);
+}
+
 /// 型に合わない答えは 1 回だけやり直し、それでも合わなければ束を飛ばして進み具合を進める。
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invalid_reply_is_retried_once_then_the_batch_is_skipped() {

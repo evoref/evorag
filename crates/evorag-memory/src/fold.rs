@@ -342,6 +342,25 @@ impl Directives {
         })
     }
 
+    /// 値 `value` (値の鍵 `vk`) が、(主語, 属性) の再び覚えない印に当たるか。値の鍵と照合の形の鍵
+    /// ([`crate::loose_key`]) の両方を引く (04 §5.2 の関門 8、§7.6)。
+    pub fn blocks_value(
+        &self,
+        key: &ForgetKey,
+        subject: &str,
+        attribute: &str,
+        vk: &ValueKey,
+        value: &str,
+    ) -> bool {
+        self.is_blocked(&block_mark(key, subject, attribute, vk))
+            || self.is_blocked(&block_mark(
+                key,
+                subject,
+                attribute,
+                &crate::value_key::loose_key(key, value),
+            ))
+    }
+
     /// 新しい版の知らない指示の数 (印だけを当て、ほかは当てずに数える、04 §7.5)。
     pub fn unknown_count(&self) -> usize {
         self.list
@@ -668,7 +687,7 @@ fn apply_candidate(
         report.unknown_attribute += 1;
         return;
     };
-    if directives.is_blocked(&block_mark(env.key, &c.subject, &c.attribute, &c.vk)) {
+    if directives.blocks_value(env.key, &c.subject, &c.attribute, &c.vk, &c.value) {
         report.blocked += 1;
         return;
     }
@@ -936,7 +955,7 @@ fn apply_correction(
         return;
     }
     // 新しい値が忘れた値なら、訂正でも蘇らせない (04 §7.5 の「再び覚えない印と訂正・戻す」)。
-    if directives.is_blocked(&block_mark(env.key, &subject, &attribute, &c.new_vk)) {
+    if directives.blocks_value(env.key, &subject, &attribute, &c.new_vk, &c.new_value) {
         report.blocked += 1;
         return;
     }
@@ -1000,8 +1019,17 @@ fn apply_choice(set: &mut FactSet, directives: &Directives, ch: &Chosen<'_>, env
         vk,
         choice,
     } = *ch;
-    // 忘れた値は、戻すでも蘇らせない (04 §7.5)。
-    if directives.is_blocked(&block_mark(env.key, subject, attribute, vk)) {
+    // 忘れた値は、戻すでも蘇らせない (04 §7.5)。値の鍵の印と、その値の事実の照合の鍵の印の両方で引く (§7.6)。
+    let value = set
+        .facts
+        .iter()
+        .find(|f| f.subject == subject && f.attribute == attribute && f.vk == Some(*vk))
+        .and_then(|f| f.value.clone());
+    let blocked = match value.as_deref() {
+        Some(v) => directives.blocks_value(env.key, subject, attribute, vk, v),
+        None => directives.is_blocked(&block_mark(env.key, subject, attribute, vk)),
+    };
+    if blocked {
         return;
     }
     let group = set.group(subject, attribute);
@@ -1816,5 +1844,35 @@ mod tests {
         assert!(t.dirs.iter().any(|x| x == added));
         // もう一度消しても、指示を重ねない。
         assert!(t.drop_turns(&[3]).directives.is_empty());
+    }
+
+    /// 再び覚えない印は、値の鍵の印と照合の鍵の印の両方で引く (04 §7.6)。
+    #[test]
+    fn blocks_look_up_both_the_value_key_and_the_loose_key() {
+        let forgotten = |v: &str| {
+            let vk = value_key(&KEY, v);
+            Directives::new(vec![Directive {
+                id: id(1),
+                kind: DirectiveKind::Forget {
+                    marks: vec![
+                        block_mark(&KEY, "self", "birthday", &vk),
+                        block_mark(&KEY, "self", "birthday", &crate::loose_key(&KEY, v)),
+                    ],
+                },
+                subject: "self".into(),
+                attribute: "birthday".into(),
+                vk: Some(vk),
+            }])
+        };
+        let check = |d: &Directives, v: &str| {
+            d.blocks_value(&KEY, "self", "birthday", &value_key(&KEY, v), v)
+        };
+        let d = forgotten("7月22日");
+        assert!(check(&d, "7月22日"));
+        assert!(check(&d, "7 月 22 日"));
+        assert!(!check(&d, "7月23日"));
+        let d = forgotten("7 月 22 日");
+        assert!(check(&d, "7月22日"));
+        assert!(check(&d, "7 月 22 日"));
     }
 }

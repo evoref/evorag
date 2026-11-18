@@ -5,7 +5,11 @@
 //!   試験 (`all_scalars_are_frozen`) が落ちる。
 //! - HMAC-SHA256 は sha2 の上に組む (RFC 2104)。結果は秘密の比較に使わないので、定数時間にしない。
 //! - HMAC に入れるバイト列は 04 §5.6 のとおりに凍結する (用途の印・長さを前に置く・値の鍵は生の 32 バイト)。
+//! - 照合の形 v1 (04 §5.6) も **凍結する** (忘れるの印に入るため): 元の本文から、正規化 v1 に加えて、語を空白で
+//!   区切らない文字 (漢字・かな) に接する空白の連なり (Zs だけのもの) を落とす。試験
+//!   (`loose_form_is_frozen`) が落ちたら、正規化 v1 と同じく古い結果を保つ。
 
+use std::cell::OnceCell;
 use std::fmt;
 use std::ops::Range;
 
@@ -40,10 +44,65 @@ pub fn normalize_v1(s: &str) -> String {
     out
 }
 
-/// 正規化 v1 の結果と、元の本文の位置との対応表 (04 §5.6)。
+/// 照合の形 v1 で落とす、元の本文の書記素 (`clusters` の番号ごとに、落とすか、04 §5.6)。
+///
+/// 空白 (White_Space) だけの書記素の連なりのうち、次の 2 つを満たすものを落とす。
+/// - 連なりの文字がすべて一般カテゴリ Zs (U+0020・U+3000・NBSP など)。Cc (TAB・改行など)・Zl・Zp を含む連なりは
+///   落とさない (行の区切りをまたいで値をつながない)。
+/// - 連なりのすぐ前か後ろの書記素の最初の文字が、語を空白で区切らない文字 (`is_unspaced_letter`。関門 4 と同じ)。
+///   英数字・ハングル・記号どうしの間の空白は残す ("Ann a" を "Anna" に、"5 kg" を "5kg" に当てない)。
+fn dropped_spaces(s: &str, clusters: &[Range<usize>]) -> Vec<bool> {
+    let mut out = vec![false; clusters.len()];
+    let blank = |k: usize| s[clusters[k].clone()].chars().all(char::is_whitespace);
+    let first = |k: usize| s[clusters[k].clone()].chars().next();
+    let mut i = 0;
+    while i < clusters.len() {
+        if !blank(i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < clusters.len() && blank(i) {
+            i += 1;
+        }
+        let only_zs = (start..i).all(|k| {
+            s[clusters[k].clone()]
+                .chars()
+                .all(crate::chars::is_space_separator)
+        });
+        let before = start.checked_sub(1).and_then(first);
+        let after = if i < clusters.len() { first(i) } else { None };
+        let next_to_unspaced = [before, after]
+            .into_iter()
+            .flatten()
+            .any(crate::chars::is_unspaced_letter);
+        if only_zs && next_to_unspaced {
+            out[start..i].fill(true);
+        }
+    }
+    out
+}
+
+/// 照合の形 v1 (04 §5.6)。**凍結する**。元の本文から [`dropped_spaces`] の空白を除き、正規化 v1 を当てる。
+/// 照合 (関門 1・2・4・5、訂正の検証、伏せる範囲の探索) と、忘れるの印の照合の形の鍵 ([`loose_key`]) に使う。
+/// 値の鍵 ([`value_key`]) と主語の記録は正規化 v1 のまま。
+pub fn normalize_loose(s: &str) -> String {
+    let clusters = crate::chars::graphemes(s);
+    let dropped = dropped_spaces(s, &clusters);
+    let kept: String = clusters
+        .iter()
+        .zip(&dropped)
+        .filter(|(_, d)| !**d)
+        .map(|(r, _)| &s[r.clone()])
+        .collect();
+    normalize_v1(&kept)
+}
+
+/// 正規化 v1 (か照合の形) の結果と、元の本文の位置との対応表 (04 §5.6)。
 ///
 /// 元の本文を書記素ごとに正規化してつなぎ、出力の文字ごとに、どの書記素から出たかを持つ。照合の一致は、
-/// 両端が書記素の展開の切れ目に来たものだけを採る (一致の端が 1 つの文字の展開の途中なら一致としない)。
+/// 両端が書記素の展開の切れ目に来たものだけを採る (一致の端が 1 つの文字の展開の途中なら一致としない)。照合の
+/// 形で落とした空白は出力に何も出さないので、一致の端が落とした空白に来ることはない。
 #[derive(Debug, Clone)]
 pub(crate) struct Mapped {
     text: String,
@@ -74,10 +133,40 @@ impl Mapped {
     /// 食い違うとき (書記素をまたぐ合成など) は `None` (位置を戻せないので、正規化の後の照合をしない)。
     pub(crate) fn new(s: &str) -> Option<Self> {
         let clusters = crate::chars::graphemes(s);
+        let (text, owners) = Self::build(s, &clusters, None);
+        (text == normalize_v1(s)).then_some(Self {
+            text,
+            owners,
+            clusters,
+        })
+    }
+
+    /// 照合の形 v1 ([`normalize_loose`]) の対応表を作る。書記素ごとの結果が [`normalize_loose`] と食い違うときは
+    /// `None`。
+    pub(crate) fn loose(s: &str) -> Option<Self> {
+        let clusters = crate::chars::graphemes(s);
+        let dropped = dropped_spaces(s, &clusters);
+        let (text, owners) = Self::build(s, &clusters, Some(&dropped));
+        (text == normalize_loose(s)).then_some(Self {
+            text,
+            owners,
+            clusters,
+        })
+    }
+
+    /// 書記素ごとに正規化してつなぐ。`dropped` の書記素は出力に何も出さない。
+    fn build(
+        s: &str,
+        clusters: &[Range<usize>],
+        dropped: Option<&[bool]>,
+    ) -> (String, Vec<(usize, usize)>) {
         let mut text = String::with_capacity(s.len());
         let mut owners = Vec::new();
         let mut pending_space: Option<usize> = None;
         for (ci, r) in clusters.iter().enumerate() {
+            if dropped.is_some_and(|d| d[ci]) {
+                continue;
+            }
             let nfkc: String = s[r.clone()].nfkc().collect();
             let folded = unicase::UniCase::unicode(nfkc.as_str()).to_folded_case();
             for c in folded.nfkc() {
@@ -95,11 +184,7 @@ impl Mapped {
                 }
             }
         }
-        (text == normalize_v1(s)).then_some(Self {
-            text,
-            owners,
-            clusters,
-        })
+        (text, owners)
     }
 
     /// 正規化の後の本文 (`normalize_v1` と同じ)。
@@ -181,6 +266,25 @@ impl Mapped {
             .map_or(0..0, |o| self.clusters[o.1].clone())
     }
 
+    /// 元の本文の範囲 `source` (書記素の境界) に当たる、正規化の後の本文の範囲。`source` の両端が、出力に文字を
+    /// 出した書記素の端に来なければ `None` (照合の形の一致の位置を、正規化 v1 の位置に直すのに使う)。
+    pub(crate) fn out_of_source(&self, source: &Range<usize>) -> Option<Range<usize>> {
+        let cluster = |o: &(usize, usize)| &self.clusters[o.1];
+        let i = self
+            .owners
+            .partition_point(|o| cluster(o).start < source.start);
+        let j = self
+            .owners
+            .partition_point(|o| cluster(o).end <= source.end)
+            .checked_sub(1)?;
+        let (first, last) = (self.owners.get(i)?, self.owners.get(j)?);
+        if i > j || cluster(first).start != source.start || cluster(last).end != source.end {
+            return None;
+        }
+        let end = self.owners.get(j + 1).map_or(self.text.len(), |o| o.0);
+        Some(first.0..end)
+    }
+
     /// 出力の範囲 `[start, end)` を元の本文の範囲に戻す。端が書記素の展開の途中なら `None`。
     pub(crate) fn source_of(&self, start: usize, end: usize) -> Option<Range<usize>> {
         let i = self.owners.binary_search_by_key(&start, |o| o.0).ok()?;
@@ -191,6 +295,154 @@ impl Mapped {
         (starts_clean && ends_clean)
             .then(|| self.clusters[owner_i].start..self.clusters[owner_j].end)
     }
+}
+
+/// 探す文字列の、正規化 v1 の形と照合の形 (04 §5.6)。どちらも元の文字列から作る。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Needle {
+    pub(crate) v1: String,
+    pub(crate) loose: String,
+}
+
+impl Needle {
+    pub(crate) fn new(s: &str) -> Self {
+        Self {
+            v1: normalize_v1(s),
+            loose: normalize_loose(s),
+        }
+    }
+
+    /// 正規化すると空 (探さない)。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.v1.is_empty() || self.loose.is_empty()
+    }
+}
+
+/// 探す相手の本文と、その正規化 v1 と照合の形の対応表 (照合の形は要るときだけ作る)。照合は正規化 v1 → 照合の形
+/// の順に行い、照合の形は正規化 v1 で 1 つも当たらないときだけ使う (04 §5.6)。
+#[derive(Debug)]
+pub(crate) struct Haystack<'t> {
+    text: &'t str,
+    v1: Option<Mapped>,
+    loose: OnceCell<Option<Mapped>>,
+}
+
+/// 本文の中の一致をすべて探した結果 ([`Haystack::find_all`])。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// 一致する元の本文の範囲 (空なら一致なし)。
+    Ranges(Vec<Range<usize>>),
+    /// 正規化 v1 の一致の範囲は戻せたが、照合の形の対応表を作れず、照合の形の本文には値がある (照合の形の一致の
+    /// 位置を戻せない)。正規化 v1 の範囲は捨てずに持つ。呼び手は伏せる側に倒す (本文の全体や根拠の範囲の全体を
+    /// 伏せる・伏せ字を中止する)。
+    Partial(Vec<Range<usize>>),
+    /// 正規化した本文に値はあるが、対応表を作れず位置を戻せない。
+    Unplaceable,
+}
+
+impl<'t> Haystack<'t> {
+    pub(crate) fn new(text: &'t str) -> Self {
+        Self {
+            text,
+            v1: Mapped::new(text),
+            loose: OnceCell::new(),
+        }
+    }
+
+    /// 元の本文。
+    pub(crate) fn text(&self) -> &'t str {
+        self.text
+    }
+
+    /// 正規化 v1 の対応表。
+    pub(crate) fn v1(&self) -> Option<&Mapped> {
+        self.v1.as_ref()
+    }
+
+    /// 照合の形の対応表。
+    pub(crate) fn loose(&self) -> Option<&Mapped> {
+        self.loose.get_or_init(|| Mapped::loose(self.text)).as_ref()
+    }
+
+    /// `needle` の一致 (`Hit::source` は元の本文の位置。`Hit::out` は当たった段の正規化の後の位置)。正規化 v1 で
+    /// `keep` を満たす一致が無いときだけ照合の形で探す。
+    pub(crate) fn find_where(
+        &self,
+        needle: &Needle,
+        edges: Edges,
+        keep: impl Fn(&Hit) -> bool,
+    ) -> Vec<Hit> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let v1: Vec<Hit> = self.v1().map_or_else(Vec::new, |m| {
+            m.find(&needle.v1, edges)
+                .into_iter()
+                .filter(&keep)
+                .collect()
+        });
+        if !v1.is_empty() {
+            return v1;
+        }
+        self.loose().map_or_else(Vec::new, |m| {
+            m.find(&needle.loose, edges)
+                .into_iter()
+                .filter(&keep)
+                .collect()
+        })
+    }
+
+    /// `needle` の一致 ([`Self::find_where`] のすべて)。
+    pub(crate) fn find(&self, needle: &Needle, edges: Edges) -> Vec<Hit> {
+        self.find_where(needle, edges, |_| true)
+    }
+
+    /// 本文の中の `needle` の一致をすべて探す (伏せ字・`[非表示]` の範囲、04 §5.6 の「照合の順」・§7.3)。正規化
+    /// v1 の一致を先に採り、照合の形では、それと重ならない一致だけを足す (元の本文の位置、前から順)。`widen` なら
+    /// 端が文字の展開の途中に来た一致も、その書記素まで広げて採る ([`Mapped::find_widened`])。正規化 v1 の対応表を
+    /// 作れず、正規化した本文に値が含まれるときは `Unplaceable`。照合の形の対応表だけを作れず、照合の形の本文に
+    /// 値が含まれるときは、正規化 v1 の範囲を持つ `Partial`。
+    pub(crate) fn find_all(&self, needle: &Needle, edges: Edges, widen: Widen) -> Placed {
+        if needle.is_empty() {
+            return Placed::Ranges(Vec::new());
+        }
+        let search = |m: &Mapped, n: &str| -> Vec<Range<usize>> {
+            match widen {
+                Widen::No => m.find(n, edges).into_iter().map(|h| h.source).collect(),
+                Widen::ToGraphemes => m.find_widened(n, edges),
+            }
+        };
+        let mut out = match self.v1() {
+            Some(m) => search(m, &needle.v1),
+            None if normalize_v1(self.text).contains(&needle.v1) => return Placed::Unplaceable,
+            None => Vec::new(),
+        };
+        match self.loose() {
+            Some(m) => {
+                let extra: Vec<Range<usize>> = search(m, &needle.loose)
+                    .into_iter()
+                    .filter(|r| !out.iter().any(|x| x.start < r.end && r.start < x.end))
+                    .collect();
+                out.extend(extra);
+            }
+            None if normalize_loose(self.text).contains(&needle.loose) => {
+                out.sort_by_key(|r| (r.start, r.end));
+                return Placed::Partial(out);
+            }
+            None => {}
+        }
+        out.sort_by_key(|r| (r.start, r.end));
+        Placed::Ranges(out)
+    }
+}
+
+/// [`Haystack::find_all`] で、端が文字の展開の途中に来た一致を広げるか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Widen {
+    /// 広げない (一致としない)。
+    No,
+    /// その書記素まで広げて採る (伏せる側に倒す)。
+    ToGraphemes,
 }
 
 /// データ根ごとの HMAC の鍵 (`meta` の `memory.forget_key` を復号した 32 バイト、03 §3.1.1)。
@@ -260,7 +512,19 @@ hex32!(BlockMark);
 
 /// 値の鍵: HMAC-SHA256(K, "evorag.vk.1" ‖ 0x00 ‖ UTF-8 (正規化 v1 (値)))。
 pub fn value_key(key: &ForgetKey, value: &str) -> ValueKey {
-    let n = normalize_v1(value);
+    key_of(key, &normalize_v1(value))
+}
+
+/// 照合の形の鍵: HMAC-SHA256(K, "evorag.vk.1" ‖ 0x00 ‖ UTF-8 (照合の形 v1 (値)))。値の鍵と同じ形の入力で、
+/// 正規化 v1 の代わりに照合の形 ([`normalize_loose`]) を入れる (落とす空白の無い値では、値の鍵と同じになる)。
+/// 忘れるの指示の印と `vks` に、値の鍵と並べて入れ、関門 8 と訂正の「忘れた値」の検査で値の鍵と両方を引く
+/// (04 §5.6・§7.6)。
+pub fn loose_key(key: &ForgetKey, value: &str) -> ValueKey {
+    key_of(key, &normalize_loose(value))
+}
+
+/// 正規化した値 `n` の鍵。
+fn key_of(key: &ForgetKey, n: &str) -> ValueKey {
     let mut msg = Vec::with_capacity(VK_TAG.len() + n.len());
     msg.extend_from_slice(VK_TAG);
     msg.extend_from_slice(n.as_bytes());
@@ -488,5 +752,136 @@ mod tests {
         assert_eq!(sources("5歳の娘", "5歳の娘", Edges::Word), ["5歳の娘"]);
         // 重なる一致も返す。
         assert_eq!(sources("aaa", "aa", Edges::Any), ["aa", "aa"]);
+    }
+
+    #[test]
+    fn loose_form_examples() {
+        let cases = [
+            // 漢字・かなに接する空白 (Zs) は除く。
+            ("7 月 22 日", "7月22日"),
+            ("7月22日", "7月22日"),
+            ("RTX4070 を使う", "rtx4070を使う"),
+            ("田中 さん", "田中さん"),
+            ("東京\u{3000}タワー", "東京タワー"),
+            ("東京 \u{00A0} タワー", "東京タワー"),
+            ("ｶﾞｽ と 水", "ガスと水"),
+            ("長音 ー x", "長音ーx"),
+            // 英数字・ハングル・記号どうしの間の空白は残す。
+            ("Ann a", "ann a"),
+            ("5 kg", "5 kg"),
+            ("서울 시", "서울 시"),
+            ("C++ と C#", "c++とc#"),
+            ("a - b", "a - b"),
+            // Cc・Zl・Zp を含む空白の連なりは除かない (1 つの空白にまとめる)。
+            ("東京\nタワー", "東京 タワー"),
+            ("東京 \t タワー", "東京 タワー"),
+            ("東京\u{2028}タワー", "東京 タワー"),
+            ("東京\r\nタワー", "東京 タワー"),
+            // 両端は正規化 v1 と同じく除く。
+            ("  東京 ", "東京"),
+            ("", ""),
+        ];
+        for (input, want) in cases {
+            assert_eq!(normalize_loose(input), want, "{input:?}");
+        }
+    }
+
+    /// 凍結の試験 (04 §5.6 の照合の形 v1): 空白を除くかの判定 (語を空白で区切らない文字と Zs) と正規化 v1 を、
+    /// すべての Unicode のスカラー値で固定する。依存 (unicode-script・unicode-properties・unicode-segmentation
+    /// など) を上げて変わったら、ここが落ちる。そのときは値を書き換えず、古い結果を例外の表で保つ。
+    #[test]
+    fn loose_form_is_frozen() {
+        let mut h = Sha256::new();
+        for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+            // 前後の文字が `c` のときに空白を除くか。
+            let n = normalize_loose(&format!("{c} {c}"));
+            h.update(n.as_bytes());
+            h.update([0xff]);
+            // 空白の連なりが `c` だけのときに除くか。
+            if c.is_whitespace() {
+                let n = normalize_loose(&format!("あ{c}あ"));
+                h.update(n.as_bytes());
+                h.update([0xfe]);
+            }
+        }
+        assert_eq!(
+            hex(&h.finalize()),
+            "2590f68c2590a96dccfdb9980bb4090f29d0b954a530a8fabdd1237d9a60d56b"
+        );
+    }
+
+    #[test]
+    fn loose_keys_follow_the_loose_form() {
+        let k = ForgetKey::from_bytes([7; 32]);
+        // 照合の鍵は、照合の形が同じなら同じ。落とす空白の無い値では値の鍵と同じ。
+        assert_eq!(loose_key(&k, "7 月 22 日"), loose_key(&k, "7月22日"));
+        assert_eq!(loose_key(&k, "7 月 22 日"), value_key(&k, "7月22日"));
+        assert_ne!(value_key(&k, "7 月 22 日"), value_key(&k, "7月22日"));
+        assert_ne!(loose_key(&k, "5 kg"), loose_key(&k, "5kg"));
+        assert_eq!(loose_key(&k, "Tokyo"), value_key(&k, "Tokyo"));
+    }
+
+    fn loose_sources<'t>(text: &'t str, needle: &str, edges: Edges) -> Vec<&'t str> {
+        let m = Mapped::loose(text).expect("consistent");
+        assert_eq!(m.text(), normalize_loose(text));
+        m.find(&normalize_loose(needle), edges)
+            .into_iter()
+            .map(|h| &text[h.source])
+            .collect()
+    }
+
+    #[test]
+    fn loose_positions_return_to_the_original_text() {
+        // 一致の範囲は、最初の文字の始まりから最後の文字の終わりまで (除いた空白で始まり・終わらない)。
+        assert_eq!(
+            loose_sources("誕生日は 7 月 22 日 です", "7月22日", Edges::Any),
+            ["7 月 22 日"]
+        );
+        assert_eq!(
+            loose_sources("誕生日は7月22日です", "7 月 22 日", Edges::Word),
+            ["7月22日"]
+        );
+        // 英数字どうしの空白は残るので、"Ann a" は "Anna" に当たらない。
+        assert!(loose_sources("Ann a", "anna", Edges::Word).is_empty());
+        assert!(loose_sources("5 kg です", "5kg", Edges::Word).is_empty());
+        // 改行をまたいでは当たらない。
+        assert!(loose_sources("東京\nタワー", "東京タワー", Edges::Any).is_empty());
+        // 語の境界は照合の形の本文で見る。
+        assert!(loose_sources("RTX40701 を", "rtx4070", Edges::Word).is_empty());
+    }
+
+    #[test]
+    fn loose_hits_map_back_to_v1_positions() {
+        let text = "誕生日は 7 月 22 日です";
+        let v1 = Mapped::new(text).expect("v1");
+        let loose = Mapped::loose(text).expect("loose");
+        let hit = loose
+            .find("7月22日", Edges::Word)
+            .pop()
+            .expect("a loose hit");
+        let out = v1.out_of_source(&hit.source).expect("v1 range");
+        assert_eq!(&v1.text()[out], "7 月 22 日");
+        // 文字の途中に来る範囲は直せない。
+        let start = text.find('月').expect("月");
+        assert!(v1.out_of_source(&(start + 1..start + 3)).is_none());
+    }
+
+    #[test]
+    fn haystacks_try_v1_before_the_loose_form() {
+        let text = "7月22日と7 月 22 日";
+        let hay = Haystack::new(text);
+        // 照合の順 (関門): 正規化 v1 で当たれば照合の形は使わない。
+        let hits = hay.find(&Needle::new("7月22日"), Edges::Word);
+        let got: Vec<&str> = hits.iter().map(|h| &text[h.source.clone()]).collect();
+        assert_eq!(got, ["7月22日"]);
+        // すべてを探すとき (伏せる範囲): 正規化 v1 の一致に、重ならない照合の形の一致を足す。
+        let Placed::Ranges(all) = hay.find_all(&Needle::new("7月22日"), Edges::Word, Widen::No)
+        else {
+            panic!("placeable");
+        };
+        let got: Vec<&str> = all.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(got, ["7月22日", "7 月 22 日"]);
+        // 正規化 v1 で当たらなければ照合の形で探す。
+        assert_eq!(hay.find(&Needle::new("7 月22日"), Edges::Word).len(), 2);
     }
 }

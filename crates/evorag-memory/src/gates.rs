@@ -27,7 +27,9 @@ use crate::prefilter::Prefiltered;
 use crate::rules::{
     Attribute, Attributes, CommonRules, LanguageRules, all_language_rules, common_rules, fold,
 };
-use crate::value_key::{Edges, ForgetKey, Hit, Mapped, block_mark, normalize_v1, value_key};
+use crate::value_key::{
+    Edges, ForgetKey, Haystack, Hit, Mapped, Needle, normalize_loose, normalize_v1, value_key,
+};
 
 /// 抽出の LLM が出した叙法 (04 §5.2 の出力の型 `m`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -160,6 +162,19 @@ pub enum EvidenceMatch {
     Raw,
     /// 値の鍵の正規化の後で一致した (別の理由 `evidence_normalized` として数える)。
     Normalized,
+    /// 照合の形 (04 §5.6) で一致した (別の理由 `evidence_loose` として数える)。
+    Loose,
+}
+
+impl EvidenceMatch {
+    /// 別に数える理由の名前 (`tests/memory-cases/README.md` の `count`)。生の本文で一致したものは `None`。
+    pub const fn count(self) -> Option<&'static str> {
+        match self {
+            Self::Raw => None,
+            Self::Normalized => Some("evidence_normalized"),
+            Self::Loose => Some("evidence_loose"),
+        }
+    }
 }
 
 /// 関門を通った候補。
@@ -185,11 +200,15 @@ impl<'a> Safety<'a> {
 }
 
 impl Safety<'_> {
-    /// 正規化 v1 の後の主語 `subject` が、どれかの言語の本人を指す語 (`reading.subject_self`) か。
-    fn names_self(&self, subject: &str) -> bool {
-        self.languages
-            .iter()
-            .any(|r| r.reading.subject_self.iter().any(|w| w == subject))
+    /// 主語 `subject` (正規化 v1 の形と照合の形) が、どれかの言語の本人を指す語 (`reading.subject_self`) か。
+    /// どちらかの形で同じなら当たる (04 §5.1。「わ たし」も当たる)。
+    fn names_self(&self, subject: &Needle) -> bool {
+        self.languages.iter().any(|r| {
+            r.reading
+                .subject_self
+                .iter()
+                .any(|w| same_word(&Needle::new(w), subject))
+        })
     }
 }
 
@@ -264,17 +283,46 @@ fn check_one<'s>(
     // 関門 1: 根拠が、前のふるいの後の発話にある (除いた行をまたがない)。
     let found = locate_evidence(utterance, &raw.evidence).ok_or(GateReason::EvidenceMissing)?;
 
-    // 関門 2: 値と `old` が根拠にある (正規化の後、英数字は語の境界で)。
-    let e = Mapped::new(&raw.evidence);
-    if hits_in(e.as_ref(), &raw.value).is_empty() {
+    // 関門 2: 値と `old` が根拠にあり、発話の根拠の範囲の中にもある (正規化 v1 → 照合の形、英数字は語の境界で)。
+    let e = Haystack::new(&raw.evidence);
+    let value_needle = Needle::new(&raw.value);
+    if e.find(&value_needle, Edges::Word).is_empty() {
         return Err(GateReason::ValueNotInEvidence);
     }
-    let old = raw.old.as_deref().filter(|o| !normalize_v1(o).is_empty());
-    if let Some(o) = old
-        && hits_in(e.as_ref(), o).is_empty()
+    let old_needle = raw
+        .old
+        .as_deref()
+        .map(Needle::new)
+        .filter(|o| !o.is_empty());
+    if let Some(o) = &old_needle
+        && e.find(o, Edges::Word).is_empty()
     {
         return Err(GateReason::OldNotInEvidence);
     }
+    let sent = utterance.filtered.text();
+    // 語の境界は、根拠の範囲の端ではなく送る本文の全体で見る (LLM が根拠を語の途中で切っても、"Annabelle" から
+    // "Ann" を記録しない、04 §5.2 の関門 2)。
+    let whole = Haystack::new(sent);
+    let in_span = |n: &Needle| -> Vec<Range<usize>> { within(&whole, n, &found.sent) };
+    let positions = in_span(&value_needle);
+    if positions.is_empty() {
+        return Err(GateReason::ValueNotInEvidence);
+    }
+    // `old` は根拠の範囲の中の一致を、括弧の内側かを問わずに採る。正規化 v1 で違う一致が混じるときは、どれを
+    // 置き換えるか決められないので空とみなす (04 §5.2 の「記録する文字列」)。
+    let old = match &old_needle {
+        None => None,
+        Some(o) => {
+            let texts: Vec<&str> = in_span(o)
+                .iter()
+                .map(|h| stored_text(utterance, h))
+                .collect::<Option<_>>()
+                .ok_or(GateReason::OldNotInEvidence)?;
+            let first = *texts.first().ok_or(GateReason::OldNotInEvidence)?;
+            let n = normalize_v1(first);
+            texts.iter().all(|t| normalize_v1(t) == n).then_some(first)
+        }
+    };
 
     // 関門 3: 叙法。
     let mood = match raw.mood {
@@ -283,29 +331,34 @@ fn check_one<'s>(
         RawMood::Question | RawMood::Hypothetical => return Err(GateReason::Mood),
     };
 
-    // 関門 4: 送る本文の、根拠の範囲の中の値の位置が、引用の括弧の内側だけにない (1 つでも外にあればよい)。
-    // 括弧は送る本文の全体で組にする (根拠の外で開いた括弧も数える)。
-    let sent = utterance.filtered.text();
+    // 関門 4: 送る本文の、根拠の範囲の中の値の位置のうち、引用の括弧の内側に 1 文字も掛からないものがある。
+    // 括弧は送る本文の全体で組にする (根拠の外で開いた括弧も数える)。記録する値は、その最初の位置の保存した
+    // 本文 (04 §5.2 の「記録する文字列」)。
     let regions = quotes.get_or_init(|| QuoteRegions::new(env.safety, sent));
-    let mut positions = value_positions(sent, &found.sent, &raw.value);
-    if positions.is_empty() {
-        // 根拠の位置で値を戻せないとき (書記素をまたぐ正規化) は、根拠の範囲の全体で見る。
-        positions.push(found.sent.clone());
-    }
-    if positions
+    let at = positions
         .iter()
-        .all(|p| regions.is_quoted(&attribute.name, p))
-    {
-        return Err(GateReason::Quoted);
+        .find(|p| !regions.overlaps(&attribute.name, p))
+        .ok_or(GateReason::Quoted)?;
+    let value = stored_text(utterance, at).ok_or(GateReason::ValueNotInEvidence)?;
+
+    // 関門 5: 主語 (`check_subject`)。`self` 以外の呼び名は、根拠と発話の根拠の範囲の両方に含まれ、記録する
+    // 主語は根拠の範囲の中の最初の一致の保存した本文から作る。
+    let mut subject = check_subject(env.safety, attribute, &raw.subject)?;
+    if subject != SELF {
+        let s = Needle::new(&raw.subject);
+        if e.find(&s, Edges::Word).is_empty() {
+            return Err(GateReason::SubjectNotAllowed);
+        }
+        let written = in_span(&s)
+            .first()
+            .and_then(|h| stored_text(utterance, h))
+            .ok_or(GateReason::SubjectNotAllowed)?;
+        subject = check_subject(env.safety, attribute, written)?;
     }
 
-    // 関門 5: 主語 (`check_subject`)。`self` 以外の呼び名は、根拠にも含まれる (正規化の後、英数字は語の境界で)。
-    let subject = check_subject(env.safety, attribute, &raw.subject)?;
-    if subject != SELF && hits_in(e.as_ref(), &raw.subject).is_empty() {
-        return Err(GateReason::SubjectNotAllowed);
-    }
-
-    // 関門 6・7。根拠の伏せ字の印は、値の関門 6 の後、関門 7 の前に当てる (関門 6 の最後の理由)。
+    // 関門 6・7。関門 6 は記録する値と LLM の写しの両方に当てる。根拠の伏せ字の印は、値の関門 6 の後、関門 7 の前に
+    // 当てる (関門 6 の最後の理由)。
+    check_text(env.safety, value)?;
     check_text(env.safety, &raw.value)?;
     // 根拠は、LLM の写しと、一致した保存した本文の範囲の両方で見る (正規化の後の照合で通った根拠の印を逃さない)。
     if has_redaction_marker(&raw.evidence)
@@ -316,13 +369,13 @@ fn check_one<'s>(
     {
         return Err(GateReason::RedactionMarker);
     }
-    check_length(attribute, &raw.value)?;
+    check_length(attribute, value)?;
 
-    // 関門 8: 再び覚えない印。
-    let vk = value_key(env.key, &raw.value);
+    // 関門 8: 再び覚えない印 (値の鍵と照合の鍵の両方で引く)。
+    let vk = value_key(env.key, value);
     if env
         .directives
-        .is_blocked(&block_mark(env.key, &subject, &attribute.name, &vk))
+        .blocks_value(env.key, &subject, &attribute.name, &vk, value)
     {
         return Err(GateReason::Forgotten);
     }
@@ -339,7 +392,7 @@ fn check_one<'s>(
         signals: signals(&sent[found.sent.clone()], &subject),
         subject,
         attribute: attribute.name.clone(),
-        value: raw.value.clone(),
+        value: value.to_owned(),
         vk,
         mood,
         tense: raw.tense,
@@ -349,6 +402,17 @@ fn check_one<'s>(
         candidate,
         evidence: found.kind,
     })
+}
+
+/// 送る本文の範囲 `sent` の、保存した本文の部分文字列 (戻せなければ `None`)。
+fn stored_text<'u>(utterance: &Utterance<'u>, sent: &Range<usize>) -> Option<&'u str> {
+    let stored = utterance.filtered.to_stored(sent.clone())?;
+    utterance.text.get(stored)
+}
+
+/// 2 つの語が、正規化 v1 か照合の形のどちらかで同じか (本人を指す語・表の書式の語との比べ、04 §5.2 の関門 5)。
+fn same_word(a: &Needle, b: &Needle) -> bool {
+    a.v1 == b.v1 || a.loose == b.loose
 }
 
 /// 主語の `self`。
@@ -361,6 +425,8 @@ pub const MAX_SUBJECT_CHARS: usize = 32;
 /// 通れば、統合に渡す形の主語 (`self` か、値の鍵の正規化 v1 の後の呼び名) を返す。
 ///
 /// - `self` と、同梱の言語の本人を指す語 (「私」「I」など) は `self` にそろえる。
+/// - 本人を指す語と表の書式の語との比べは、正規化 v1 と照合の形 (04 §5.6) の両方で行い、どちらかで同じなら
+///   当たる (「わ たし」は `self`、「利用 者」は捨てる)。
 /// - ほかの呼び名は、次の順に当てる: 正規化で空や `self` になる・属性が `self` 以外の主語を許さない・事実の表で
 ///   `self` を表す語 ([`crate::SELF_LABELS`]。表の上で本人を詐称しないため) と同じ・正規化の後に
 ///   [`MAX_SUBJECT_CHARS`] を超える (ここまでは `SubjectNotAllowed`) → 関門 6 ([`check_text`]。元の呼び名と
@@ -377,16 +443,18 @@ pub fn check_subject(
     if subject == SELF {
         return Ok(SELF.to_owned());
     }
-    let s = normalize_v1(subject);
-    if safety.names_self(&s) {
+    let forms = Needle::new(subject);
+    if safety.names_self(&forms) {
         return Ok(SELF.to_owned());
     }
+    let s = forms.v1.clone();
     if s.is_empty()
         || s == SELF
+        || forms.loose == SELF
         || !attribute.other_subjects
         || crate::table::SELF_LABELS
             .iter()
-            .any(|w| normalize_v1(w) == s)
+            .any(|w| same_word(&Needle::new(w), &forms))
         || s.chars().count() > MAX_SUBJECT_CHARS
     {
         return Err(GateReason::SubjectNotAllowed);
@@ -421,11 +489,14 @@ fn check_length(attribute: &Attribute, value: &str) -> Result<(), GateReason> {
 
 /// 伏せ字の印 (`[伏せ字]`・`[redacted]`。プロンプトの言語に関わらず両方) を含むか (04 §5.2 の関門 6)。値の鍵の
 /// 正規化 (NFKC と case folding、空白をまとめる) の後で照合する (`[REDACTED]`・全角の括弧も当てる)。
+///
+/// 照合の形 (04 §5.6) でも照合する (`[伏 せ字]` も当てる)。
 fn has_redaction_marker(text: &str) -> bool {
-    let text = normalize_v1(text);
-    crate::mask::REDACTION_MARKERS
-        .iter()
-        .any(|m| text.contains(&normalize_v1(m)))
+    let text = Needle::new(text);
+    crate::mask::REDACTION_MARKERS.iter().any(|m| {
+        let m = Needle::new(m);
+        text.v1.contains(&m.v1) || text.loose.contains(&m.loose)
+    })
 }
 
 /// 関門 6 を文字列 (値と、`self` 以外の主語の呼び名) に当てる (04 §5.2)。事実の表も、置く行の主語と値に当て直す
@@ -439,8 +510,10 @@ fn has_redaction_marker(text: &str) -> bool {
 /// - 役割の詐称は、規則の並びに加えて、`<` の直後の英字・`/`・`|`・`!` (会話の型のタグ) と、役割の語の後の
 ///   コロン (間の空白は問わない) を捨てる。
 /// - 文字体系の混在は、NFKC の後 (case folding はしない) の Unicode の Script で見る (`has_mixed_script_word`)。
-/// - 語の照合 (役割の詐称・命令形・ほかの指示への言及) は、値の鍵の正規化 v1 の形と、結合文字を落とした骨格
-///   (`skeleton`) の両方に当てる。命令形は、除外の語の一致にすっかり収まる一致だけを数えない。
+/// - 語の照合 (役割の詐称・命令形・ほかの指示への言及・伏せ字の印) は、値の鍵の正規化 v1 の形と、結合文字を
+///   落とした骨格 (`skeleton`) と、照合の形 (`normalize_loose`、04 §5.6。漢字・かなの間に空白を挟んで一覧を
+///   抜けないため) に当てる。URL の印は正規化 v1 の形と骨格に当てる。命令形は、除外の語の一致にすっかり収まる
+///   一致だけを数えない。
 ///
 /// 既知の限界: 数字や記号で文字を置き換えた語 (`1gn0re`) と、空白で割った語 (`i g n o r e`) は捕まえない。
 ///
@@ -470,13 +543,17 @@ pub fn check_text(safety: &Safety<'_>, value: &str) -> Result<(), GateReason> {
     }
     let text = normalize_v1(value);
     let bare = skeleton(value);
-    let forms = [text.as_str(), bare.as_str()];
+    let loose = normalize_loose(value);
+    let forms = [text.as_str(), bare.as_str(), loose.as_str()];
     let contains_any = |list: &[String]| {
         forms
             .iter()
             .any(|f| list.iter().any(|w| f.contains(w.as_str())))
     };
-    if contains_any(&common.url_markers) {
+    if forms[..2]
+        .iter()
+        .any(|f| common.url_markers.iter().any(|w| f.contains(w.as_str())))
+    {
         return Err(GateReason::Url);
     }
     if contains_any(&common.role_markers)
@@ -552,7 +629,8 @@ pub(crate) struct Found {
     kind: EvidenceMatch,
 }
 
-/// 関門 1: 根拠の位置を探す。まず生の本文で、外れたら値の鍵の正規化の後で照合する。保存した本文の位置が
+/// 関門 1: 根拠の位置を探す。まず生の本文で、外れたら値の鍵の正規化 v1 の後で、それでも外れたら照合の形
+/// (04 §5.6) で照合する。保存した本文の位置が
 /// 書記素の境界に来ない一致と、前のふるいで除いた行をまたぐ一致は採らない。
 pub(crate) fn locate_evidence(u: &Utterance<'_>, evidence: &str) -> Option<Found> {
     let first = evidence.chars().next()?;
@@ -573,35 +651,51 @@ pub(crate) fn locate_evidence(u: &Utterance<'_>, evidence: &str) -> Option<Found
         }
         from = at + first.len_utf8();
     }
-    let needle = normalize_v1(evidence);
+    let needle = Needle::new(evidence);
     if needle.is_empty() {
         return None;
     }
-    Mapped::new(sent)?
-        .find(&needle, Edges::Any)
+    let normalized = Mapped::new(sent).and_then(|m| {
+        m.find(&needle.v1, Edges::Any)
+            .into_iter()
+            .find_map(|h| place(h.source, EvidenceMatch::Normalized))
+    });
+    if normalized.is_some() {
+        return normalized;
+    }
+    // 照合の形 (04 §5.6): 漢字・かなに接する空白を除いて照合する。
+    Mapped::loose(sent)?
+        .find(&needle.loose, Edges::Any)
         .into_iter()
-        .find_map(|h| place(h.source, EvidenceMatch::Normalized))
+        .find_map(|h| place(h.source, EvidenceMatch::Loose))
 }
 
-/// 関門 2 の照合: `needle` を正規化して、根拠 (正規化の対応表) に語の境界で探す。
-pub(crate) fn hits_in(evidence: Option<&Mapped>, needle: &str) -> Vec<Hit> {
-    let n = normalize_v1(needle);
-    match evidence {
-        Some(e) if !n.is_empty() => e.find(&n, Edges::Word),
-        _ => Vec::new(),
-    }
+/// 関門 2 の照合: `needle` を本文 `hay` に、正規化 v1 → 照合の形の順に、語の境界で探す (`Hit::source` は `hay`
+/// の位置)。
+pub(crate) fn hits_in(hay: &str, needle: &str) -> Vec<Hit> {
+    Haystack::new(hay).find(&Needle::new(needle), Edges::Word)
 }
 
 /// 関門 4: 送る本文の根拠の範囲 `evidence` の中で、値が当たる位置 (送る本文の位置)。照合は関門 2 と同じ。
+///
+/// 語の境界は、根拠の範囲の端ではなく送る本文の全体で見る (04 §5.2 の関門 2)。
 pub(crate) fn value_positions(
     sent: &str,
     evidence: &Range<usize>,
     value: &str,
 ) -> Vec<Range<usize>> {
-    let base = evidence.start;
-    hits_in(Mapped::new(&sent[evidence.clone()]).as_ref(), value)
+    within(&Haystack::new(sent), &Needle::new(value), evidence)
+}
+
+/// 本文 `whole` の中の `needle` の一致のうち、範囲 `span` に収まるもの (`whole` の位置)。照合は正規化 v1 →
+/// 照合の形の順 (範囲の中に正規化 v1 の一致が無いときだけ照合の形)、英数字は本文の全体の語の境界で。
+fn within(whole: &Haystack<'_>, needle: &Needle, span: &Range<usize>) -> Vec<Range<usize>> {
+    whole
+        .find_where(needle, Edges::Word, |h| {
+            span.start <= h.source.start && h.source.end <= span.end
+        })
         .into_iter()
-        .map(|h| base + h.source.start..base + h.source.end)
+        .map(|h| h.source)
         .collect()
 }
 
@@ -732,6 +826,7 @@ fn quoted_regions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fold::Directives;
 
     fn regions<'t>(text: &'t str, open: &str, close: &str) -> Vec<&'t str> {
         let view: Vec<(usize, char)> = text.char_indices().collect();
@@ -858,10 +953,122 @@ mod tests {
     fn self_words_become_self() {
         let safety = Safety::bundled();
         for s in ["私", "ぼく", "I", "ME", "Myself"] {
-            assert!(safety.names_self(&normalize_v1(s)), "{s:?}");
+            assert!(safety.names_self(&Needle::new(s)), "{s:?}");
         }
         for s in ["妻", "ken", "self", ""] {
-            assert!(!safety.names_self(s), "{s:?}");
+            assert!(!safety.names_self(&Needle::new(s)), "{s:?}");
         }
+    }
+
+    fn accept_one(text: &str, raw: &RawCandidate) -> Result<Accepted, GateReason> {
+        let key = ForgetKey::from_bytes([9; 32]);
+        let directives = Directives::default();
+        let safety = Safety::bundled();
+        let env = GateEnv {
+            attributes: crate::rules::attributes(),
+            safety: &safety,
+            key: &key,
+            directives: &directives,
+        };
+        let filtered = Prefiltered::from_stored(text);
+        let u = Utterance {
+            turn: Id::from_bytes([1; 16]),
+            rev: 0,
+            text,
+            filtered: &filtered,
+        };
+        check_candidate(&env, &u, raw)
+    }
+
+    fn raw(a: &str, v: &str, e: &str, old: Option<&str>) -> RawCandidate {
+        RawCandidate {
+            subject: SELF.into(),
+            attribute: a.into(),
+            value: v.into(),
+            evidence: e.into(),
+            mood: RawMood::Fact,
+            tense: Tense::Current,
+            old: old.map(str::to_owned),
+        }
+    }
+
+    /// 記録する `old` は根拠の範囲の中の発話の本文 (04 §5.2 の「記録する文字列」)。
+    #[test]
+    fn old_is_taken_from_the_evidence_span() {
+        let key = ForgetKey::from_bytes([9; 32]);
+        // 照合の形で見つけた `old` は、発話の書き方で値の鍵を作る。
+        let text = "7月3日じゃなくて7月13日が誕生日です";
+        let a = accept_one(
+            text,
+            &raw(
+                "birthday",
+                "7 月 13 日",
+                "7 月 3 日じゃなくて 7 月 13 日が誕生日です",
+                Some("7 月 3 日"),
+            ),
+        )
+        .expect("accepted");
+        assert_eq!(a.evidence, EvidenceMatch::Loose);
+        assert_eq!(a.candidate.value, "7月13日");
+        assert_eq!(a.candidate.old_vk, Some(value_key(&key, "7月3日")));
+        // 正規化 v1 で違う一致が混じるときは、`old` を空とみなす。
+        let mixed = "ラ ーメンとラー メン、じゃなくてうどんが好き";
+        let a =
+            accept_one(mixed, &raw("likes", "うどん", mixed, Some("ラーメン"))).expect("accepted");
+        assert_eq!(a.candidate.old_vk, None);
+        // 括弧の内側かは問わない。
+        let quoted = "「ラーメン」じゃなくてうどんが好き";
+        let a = accept_one(quoted, &raw("likes", "うどん", quoted, Some("ラーメン")))
+            .expect("accepted");
+        assert_eq!(a.candidate.old_vk, Some(value_key(&key, "ラーメン")));
+    }
+
+    /// 値の位置を、括弧の内側に掛からない最初の一致にする。
+    #[test]
+    fn the_recorded_value_is_the_first_unquoted_match() {
+        let text = "「7 月 22 日」ではなく 7月22日 が誕生日";
+        let a = accept_one(text, &raw("birthday", "7月22日", text, None)).expect("accepted");
+        assert_eq!(a.candidate.value, "7月22日");
+        let quoted_only = "誕生日は「7 月 22 日」と書いてあった";
+        assert_eq!(
+            accept_one(quoted_only, &raw("birthday", "7月22日", quoted_only, None)),
+            Err(GateReason::Quoted)
+        );
+    }
+
+    /// 関門 6 の語の一覧の検査は、照合の形にも当てる (文字体系の混在の判定には当てない)。
+    #[test]
+    fn word_lists_also_see_the_loose_form() {
+        let safety = Safety::bundled();
+        let attr = crate::rules::attributes().get("likes").expect("bundled");
+        for (value, want) in [
+            ("新しい 指 示", GateReason::InstructionRef),
+            ("[伏 せ字]めぐり", GateReason::RedactionMarker),
+        ] {
+            assert_eq!(check_value(&safety, attr, value), Err(want), "{value:?}");
+        }
+        // 空白を除くと繋がる別の語は、文字体系の混在にしない。
+        assert_eq!(check_value(&safety, attr, "Python と Rust"), Ok(()));
+    }
+
+    /// 語の境界は根拠の範囲の端ではなく、送る本文の全体で見る (LLM が根拠を語の途中で切ったとき)。
+    #[test]
+    fn word_boundaries_use_the_whole_text_not_the_evidence_edges() {
+        for (text, a, v, e) in [
+            ("Please call me Annabelle.", "name", "Ann", "call me Ann"),
+            ("RTX4070Tiを使っています", "device", "RTX4070", "RTX4070"),
+        ] {
+            assert_eq!(
+                accept_one(text, &raw(a, v, e, None)),
+                Err(GateReason::ValueNotInEvidence),
+                "{text:?}"
+            );
+        }
+        let a = accept_one(
+            "RTX4070 Tiではなく RTX4070 を使っています",
+            &raw("device", "RTX4070", "RTX4070 を使っています", None),
+        )
+        .expect("accepted");
+        assert_eq!(a.candidate.value, "RTX4070");
     }
 }

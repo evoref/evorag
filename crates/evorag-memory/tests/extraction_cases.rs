@@ -10,7 +10,7 @@ use evorag_memory::{
     Directive, DirectiveKind, Directives, Event, EvidenceMatch, FactSet, FoldEnv, ForgetKey,
     GateEnv, GateReason, Prefiltered, RawCandidate, RawMood, Safety, Screened, Tense, Utterance,
     all_language_rules, attributes, block_mark, check_candidate, check_candidates, check_value,
-    fold, normalize_v1, prefilter, value_key,
+    fold, loose_key, normalize_loose, normalize_v1, prefilter, value_key,
 };
 use evorag_types::Id;
 use toml::Value;
@@ -119,7 +119,7 @@ fn raw_candidate(id: &str, c: &Value) -> RawCandidate {
     }
 }
 
-/// 事例の `forgotten` を、忘れるの指示の印にする。
+/// 事例の `forgotten` を、忘れるの指示の印 (値の鍵の印と照合の鍵の印、04 §7.6) にする。
 fn directives(id: &str, case: &Value, key: &ForgetKey) -> Directives {
     let list = case
         .get("forgotten")
@@ -132,11 +132,14 @@ fn directives(id: &str, case: &Value, key: &ForgetKey) -> Directives {
                     let subject = normalize_v1(field("s"));
                     let attribute = field("a").to_owned();
                     let vk = value_key(key, field("v"));
+                    let lk = loose_key(key, field("v"));
+                    let mut marks = vec![block_mark(key, &subject, &attribute, &vk)];
+                    if lk != vk {
+                        marks.push(block_mark(key, &subject, &attribute, &lk));
+                    }
                     Directive {
                         id: id_at(1, u64::try_from(i).expect("few")),
-                        kind: DirectiveKind::Forget {
-                            marks: vec![block_mark(key, &subject, &attribute, &vk)],
-                        },
+                        kind: DirectiveKind::Forget { marks },
                         subject,
                         attribute,
                         vk: Some(vk),
@@ -174,10 +177,9 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
     match got {
         Ok(a) => {
             assert_eq!(want, "accept", "{id}: accepted, want `{want}`");
-            let want_count = s(case, "count");
             assert_eq!(
-                a.evidence == EvidenceMatch::Normalized,
-                want_count == Some("evidence_normalized"),
+                a.evidence.count(),
+                s(case, "count"),
                 "{id}: evidence match {:?}",
                 a.evidence
             );
@@ -185,20 +187,41 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
             let span = usize::try_from(c.source.start).expect("u32")
                 ..usize::try_from(c.source.end).expect("u32");
             let quoted = &text[span];
-            if a.evidence == EvidenceMatch::Raw {
-                assert_eq!(quoted, raw.evidence, "{id}: span");
-            } else {
-                assert_eq!(
+            match a.evidence {
+                EvidenceMatch::Raw => assert_eq!(quoted, raw.evidence, "{id}: span"),
+                EvidenceMatch::Normalized => assert_eq!(
                     normalize_v1(quoted),
                     normalize_v1(&raw.evidence),
                     "{id}: span"
-                );
+                ),
+                _ => assert_eq!(
+                    normalize_loose(quoted),
+                    normalize_loose(&raw.evidence),
+                    "{id}: span"
+                ),
             }
+            // 記録する値は発話の本文の部分文字列 (`stored`。省くと `candidate.v`)。
+            let stored = s(case, "stored").unwrap_or(&raw.value);
             assert_eq!(c.source.turn, utterance.turn, "{id}");
             assert_eq!(c.attribute, raw.attribute, "{id}");
-            assert_eq!(c.value, raw.value, "{id}");
-            assert_eq!(c.vk, value_key(&key, &raw.value), "{id}");
-            assert_eq!(c.subject, expected_subject(&raw.subject), "{id}");
+            assert_eq!(c.value, stored, "{id}");
+            assert!(text.contains(stored), "{id}: `stored` is in the utterance");
+            assert_eq!(c.vk, value_key(&key, stored), "{id}");
+            let want_subject = expected_subject(&raw.subject);
+            if let Some(stored) = s(case, "stored_subject") {
+                // 記録する主語は根拠の範囲の本文に正規化 v1 を当てたもの (`stored_subject`)。
+                assert_eq!(c.subject, stored, "{id}: subject");
+            } else if want_subject == "self" || c.subject == "self" {
+                assert_eq!(c.subject, want_subject, "{id}");
+            } else {
+                // 記録する主語は根拠の範囲の本文から作る (照合の形で LLM の写しと同じ)。
+                assert_eq!(c.subject, normalize_v1(&c.subject), "{id}");
+                assert_eq!(
+                    normalize_loose(&c.subject),
+                    normalize_loose(&want_subject),
+                    "{id}: subject"
+                );
+            }
             assert_eq!(
                 c.old_vk,
                 raw.old.as_deref().map(|o| value_key(&key, o)),
@@ -215,12 +238,16 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
 }
 
 /// 候補の主語が統合に渡る形: `self`、本人を指す語 (どれかの言語の `reading.subject_self`) なら `self`、
-/// ほかは正規化 v1 の後の呼び名。
+/// ほかは正規化 v1 の後の呼び名。本人を指す語との比べは正規化 v1 と照合の形の両方で行う。
 fn expected_subject(raw: &str) -> String {
     let s = normalize_v1(raw);
-    let names_self = all_language_rules()
-        .iter()
-        .any(|r| r.reading.subject_self.contains(&s));
+    let l = normalize_loose(raw);
+    let names_self = all_language_rules().iter().any(|r| {
+        r.reading
+            .subject_self
+            .iter()
+            .any(|w| *w == s || normalize_loose(w) == l)
+    });
     if raw == "self" || names_self {
         "self".to_owned()
     } else {
@@ -243,7 +270,7 @@ fn prefilter_cases_pass() {
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 95);
+    assert_eq!(run_gates(&[]), 109);
 }
 
 #[test]

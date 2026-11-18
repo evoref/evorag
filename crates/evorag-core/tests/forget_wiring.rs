@@ -28,7 +28,7 @@ use evorag_types::api::{
     Command, Event, FactKey, FactList, FactRow, ForgetOptions as ForgetChoices, ForgetPlanHash,
     ForgetPreview, Role, TurnMarkKind,
 };
-use evorag_types::{Clock, Id, ManualClock, MessageKey, Timestamp, UuidV7Gen};
+use evorag_types::{Clock, Id, IdGen, ManualClock, MessageKey, Timestamp, UuidV7Gen};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 const REPLY: &str = "了解です";
@@ -650,6 +650,67 @@ async fn the_backup_job_rewrites_daily_weekly_and_pre_op_backups() {
     let _ = turn;
 }
 
+/// 照合の鍵 (04 §5.6) だけで忘れた値に当たる事実 (「7月22日」を忘れたときの「7 月 22 日」) を持つ退避も、
+/// 飛ばさずに写し直し、その事実を除く。値の鍵の副索引では引けないため。
+///
+/// verifies: 03 §7.3 (`forget_backups`)、04 §7.6 (照合の鍵の印)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backup_job_drops_facts_matching_only_by_the_loose_key() {
+    const SPACED: &str = "7 月 22 日";
+    const PLAIN: &str = "7月22日";
+    let dir = TempDir::new("forget-backups-loose");
+    let root = dir.path();
+    let (turn, _) = conversation(root, clock_at(T0)).await;
+    let fact = |c: &Closed, value: &str| evorag_memory::Fact {
+        id: c.ids.next_id(),
+        subject: "self".into(),
+        attribute: "birthday".into(),
+        value: Some(value.into()),
+        vk: Some(evorag_memory::value_key(&c.key(), value)),
+        tense: evorag_memory::Tense::Current,
+        state: evorag_memory::FactState::Live,
+        sources: [evorag_memory::Source {
+            turn,
+            start: 0,
+            end: 0,
+            rev: 0,
+        }]
+        .into(),
+        private: false,
+    };
+    {
+        let c = Closed::open(root);
+        // 退避には「7 月 22 日」の事実だけを入れ、生きている DB では「7月22日」の事実に替える。
+        let spaced = fact(&c, SPACED);
+        let spaced_id = spaced.id;
+        let before = evorag_memory::load_facts(&c.store.read().unwrap()).unwrap();
+        let mut set = before.set.clone();
+        set.facts.push(spaced);
+        c.write(evorag_memory::diff_ops(&before, &set, c.clock.now()).unwrap());
+        c.clock.advance(DAY);
+        c.store.daily_backup(None).unwrap().expect("a daily backup");
+        let before = evorag_memory::load_facts(&c.store.read().unwrap()).unwrap();
+        let mut set = before.set.clone();
+        set.facts.retain(|f| f.id != spaced_id);
+        set.facts.push(fact(&c, PLAIN));
+        c.write(evorag_memory::diff_ops(&before, &set, c.clock.now()).unwrap());
+    }
+    assert!(!files_with(&root.join("backups"), SPACED).is_empty());
+    let (core, mut rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + DAY + 1_000)).await;
+    let list = facts(&core, &mut rx).await;
+    let key = value_key_of(&list, PLAIN).expect("the plain fact");
+    let options = ForgetOptions {
+        redact: false,
+        ..ForgetOptions::default()
+    };
+    core.forget_now(key, options).await.unwrap();
+    core.settle().await;
+    assert_eq!(core.pending_cleanup_jobs(), 0);
+    core.shutdown().await;
+    let hits = files_with(&root.join("backups"), SPACED);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
 /// 本文が忘れるの指示と合わないターン (値を含む) は、会話の履歴に送らず、画面には本文を出さずに「確かめられ
 /// ない」とし、チャンクを埋め込まない。
 ///
@@ -897,6 +958,130 @@ async fn export_is_refused_until_the_forget_is_replayed() {
     assert!(turns.contains(MARKER), "{turns}");
     let hits = files_with(&out, VALUE);
     assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// `forget.recheck` が立っている (戻した・修復した・古い版で開いた) データ根は、起動して当て直すまで書き出しを
+/// 断る。照合の鍵 (04 §5.6) だけで忘れた値に当たる事実は、HMAC の鍵を持たない書き出しの確かめでは見分けられない
+/// ため。起動して当て直した後は、その事実を値のまま書き出さない。
+///
+/// verifies: 03 §11 (private と忘れる)、04 §7.2・§7.6
+#[tokio::test(flavor = "multi_thread")]
+async fn export_is_refused_while_the_forget_recheck_flag_is_set() {
+    const SPACED: &str = "7 月 22 日";
+    const PLAIN: &str = "7月22日";
+    let dir = TempDir::new("forget-export-recheck");
+    let root = dir.path();
+    let (turn, _) = conversation(root, clock_at(T0)).await;
+    {
+        let c = Closed::open(root);
+        let key = c.key();
+        let fact = |value: &str| evorag_memory::Fact {
+            id: c.ids.next_id(),
+            subject: "self".into(),
+            attribute: "birthday".into(),
+            value: Some(value.into()),
+            vk: Some(evorag_memory::value_key(&key, value)),
+            tense: evorag_memory::Tense::Current,
+            state: evorag_memory::FactState::Live,
+            sources: [evorag_memory::Source {
+                turn,
+                start: 0,
+                end: 0,
+                rev: 0,
+            }]
+            .into(),
+            private: false,
+        };
+        let (spaced, plain) = (fact(SPACED), fact(PLAIN));
+        let plain_id = plain.id;
+        let target = evorag_memory::row_key(&plain).expect("a value row");
+        let before = evorag_memory::load_facts(&c.store.read().unwrap()).unwrap();
+        let mut set = before.set.clone();
+        set.facts.extend([spaced, plain]);
+        c.write(evorag_memory::diff_ops(&before, &set, c.clock.now()).unwrap());
+        // 「7月22日」を伏せ字にしないで忘れる指示 (とその関係・副索引) だけを書き、取り消しは当て直しに任せる。
+        let env = ForgetEnv {
+            key: &key,
+            attributes: evorag_memory::attributes(),
+            marker: MARKER,
+            hidden_marker: "[非表示]",
+            ids: &c.ids,
+            now: c.clock.now(),
+        };
+        let options = ForgetOptions {
+            redact: false,
+            ..ForgetOptions::default()
+        };
+        let plan = evorag_memory::plan_forget(&c.store.read().unwrap(), &env, &target, options)
+            .unwrap()
+            .expect("the forget is planned");
+        let d = plan.directive;
+        let ops: Vec<WriteOp> = plan
+            .ops
+            .into_iter()
+            .filter(|op| match op {
+                WriteOp::Put(e) => e.id == d,
+                WriteOp::PutLink { from, .. } => *from == d,
+                WriteOp::PutLookup { id, .. } => *id == d,
+                _ => false,
+            })
+            .collect();
+        c.write(ops);
+        // 生きている DB には、照合の鍵だけで印に当たる「7 月 22 日」の事実だけを残す。
+        let before = evorag_memory::load_facts(&c.store.read().unwrap()).unwrap();
+        let mut set = before.set.clone();
+        set.facts.retain(|f| f.id != plain_id);
+        c.write(evorag_memory::diff_ops(&before, &set, c.clock.now()).unwrap());
+    }
+    evorag_store::testutil::raw_set_meta(root, meta::FORGET_RECHECK, meta::FORGET_RECHECK_SET);
+    let out = root.join("export");
+    let checks = ExportFilter::new();
+    let err = export(root, &out, &export_opts(&checks)).unwrap_err();
+    assert!(matches!(err, ExportError::PendingForget), "{err:?}");
+    assert!(!out.exists());
+
+    let (core, _rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + 2 * 3_600_000)).await;
+    core.settle().await;
+    core.shutdown().await;
+    let checks = ExportFilter::new();
+    export(root, &out, &export_opts(&checks)).unwrap();
+    let hits = files_with(&out, SPACED);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// `memory.forget_key` が使えない起動では、忘れるの当て直しを鍵で済ませられないので、`forget.recheck` を消さず、
+/// 書き出しを断り続ける (03 §3.1.1・§11)。
+///
+/// verifies: 03 §3.1.1 (`forget.recheck`)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recheck_flag_stays_while_the_forget_key_is_unusable() {
+    let dir = TempDir::new("forget-recheck-no-key");
+    let root = dir.path();
+    let (_, key) = conversation(root, clock_at(T0)).await;
+    {
+        let c = Closed::open(root);
+        let plan = c.plan(&key);
+        c.write(plan.ops);
+    }
+    // ジャーナルの鍵と合わない鍵にして、事実の機能を止める (鍵が使えない)。
+    evorag_store::testutil::raw_set_meta(root, meta::FORGET_KEY, &"0".repeat(64));
+    evorag_store::testutil::raw_set_meta(root, meta::FORGET_RECHECK, meta::FORGET_RECHECK_SET);
+    let (core, _rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + 2 * 3_600_000)).await;
+    assert!(!core.facts_enabled());
+    core.settle().await;
+    core.shutdown().await;
+    {
+        let c = Closed::open(root);
+        assert_eq!(
+            c.recheck_flag().as_deref(),
+            Some(meta::FORGET_RECHECK_SET),
+            "the flag is kept"
+        );
+    }
+    let out = root.join("export");
+    let checks = ExportFilter::new();
+    let err = export(root, &out, &export_opts(&checks)).unwrap_err();
+    assert!(matches!(err, ExportError::PendingForget), "{err:?}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------

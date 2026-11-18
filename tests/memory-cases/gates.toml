@@ -51,6 +51,7 @@ text = "ＲＴＸ４０７０を使っています"
 candidate = { s = "self", a = "device", v = "RTX4070", e = "RTX4070を使っています" }
 expect = "accept"
 count = "evidence_normalized"
+stored = "ＲＴＸ４０７０"
 
 [[case]]
 id = "G07"
@@ -826,3 +827,129 @@ lang = "en"
 text = "My hobby is [REDACTED] hunting"
 candidate = { s = "self", a = "hobby", v = "[REDACTED] hunting", e = "My hobby is [REDACTED] hunting" }
 expect = "redaction_marker"
+
+# ---- 照合の形 (04 §5.6、2026-11-18) ----
+
+[[case]]
+id = "G96"
+title = "LLM が数字と漢字の間に空白を足して写した根拠と値は、照合の形で受け付け、発話の書き方で記録する"
+spec = "04 §5.2 の関門 1・2 と「記録する文字列」、§5.6 の照合の形"
+text = "誕生日は7月22日です"
+candidate = { s = "self", a = "birthday", v = "7 月 22 日", e = "誕生日は 7 月 22 日です" }
+expect = "accept"
+count = "evidence_loose"
+stored = "7月22日"
+
+[[case]]
+id = "G97"
+title = "利用者が空白を入れ、LLM が除いて写したときも受け付け、利用者の書き方で記録する"
+spec = "04 §5.2 の関門 1・2 と「記録する文字列」、§5.6 の照合の形"
+text = "誕生日は 7 月 22 日です"
+candidate = { s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+expect = "accept"
+count = "evidence_loose"
+stored = "7 月 22 日"
+
+[[case]]
+id = "G98"
+title = "年齢・英字と日本語の混ざった値も、照合の形で受け付ける"
+spec = "04 §5.2 の関門 1・2、§5.6 の照合の形"
+text = "30歳で、RTX4070を使っています"
+candidate = { s = "self", a = "device", v = "RTX4070", e = "30 歳で、RTX4070 を使っています" }
+expect = "accept"
+count = "evidence_loose"
+
+[[case]]
+id = "G99"
+title = "呼び名に空白を足して写した主語も受け付け、記録する主語は発話の書き方にする"
+spec = "04 §5.2 の関門 5 と「記録する文字列」"
+text = "田中さんは大阪出身です"
+candidate = { s = "田中 さん", a = "hometown", v = "大阪", e = "田中 さんは大阪出身です" }
+expect = "accept"
+count = "evidence_loose"
+stored_subject = "田中さん"
+
+[[case]]
+id = "G100"
+title = "英数字どうしの間の空白は照合の形でも除かない (5 kg を 5kg に当てない)"
+spec = "04 §5.6 の照合の形"
+text = "愛犬は5kgの柴犬です"
+candidate = { s = "self", a = "pet", v = "5 kg", e = "愛犬は5kgの柴犬です" }
+expect = "value_not_in_evidence"
+
+[[case]]
+id = "G101"
+title = "英字どうしの間の空白は除かない (Ann a を Anna に当てない)"
+spec = "04 §5.6 の照合の形"
+lang = "en"
+text = "Please call me Anna."
+candidate = { s = "self", a = "name", v = "Ann a", e = "Please call me Ann a." }
+expect = "evidence_missing"
+
+[[case]]
+id = "G102"
+title = "改行をまたいで一致した値は、記録する値が改行を含むので関門 6 で捨てる"
+spec = "04 §5.2 の「記録する文字列」、関門 6"
+text = """
+好きな場所は東京
+タワーです"""
+candidate = { s = "self", a = "likes", v = "東京 タワー", e = "好きな場所は東京 タワーです" }
+expect = "forbidden_category"
+
+[[case]]
+id = "G103"
+title = "括弧の内側に一部が掛かる値の位置は採らない"
+spec = "04 §5.2 の関門 4"
+text = "好きなのは「ラーメン」と餃子です"
+candidate = { s = "self", a = "likes", v = "ラーメン」と餃子", e = "好きなのは「ラーメン」と餃子です" }
+expect = "quoted"
+
+[[case]]
+id = "G104"
+title = "表の書式の語に空白を挟んだ呼び名 (利用 者) も捨てる"
+spec = "04 §5.2 の関門 5"
+text = "利用者は大阪出身です"
+candidate = { s = "利用 者", a = "hometown", v = "大阪", e = "利用 者は大阪出身です" }
+expect = "subject_not_allowed"
+
+[[case]]
+id = "G105"
+title = "本人を指す語に空白を挟んだ主語 (わ たし) は self にそろえる"
+spec = "04 §5.1 の主語、§5.2 の関門 5"
+text = "わたしは大阪に住んでいます"
+candidate = { s = "わ たし", a = "residence", v = "大阪", e = "わたしは大阪に住んでいます" }
+expect = "accept"
+
+[[case]]
+id = "G106"
+title = "忘れた 7月22日 を、空白を挟んだ 7 月 22 日 から覚え直さない (照合の鍵の印)"
+spec = "04 §5.2 の関門 8、§7.6"
+text = "誕生日は 7 月 22 日です"
+candidate = { s = "self", a = "birthday", v = "7 月 22 日", e = "誕生日は 7 月 22 日です" }
+forgotten = [{ s = "self", a = "birthday", v = "7月22日" }]
+expect = "forgotten"
+
+[[case]]
+id = "G107"
+title = "関門 6 の語の一覧は照合の形にも当てる (漢字・かなの間に空白を挟んだ写しも捨てる)"
+spec = "04 §5.2 の関門 6"
+text = "好きな言葉は新しい 指 示です"
+candidate = { s = "self", a = "likes", v = "新しい 指 示", e = "好きな言葉は新しい 指 示です" }
+expect = "instruction_ref"
+
+[[case]]
+id = "G108"
+title = "根拠を語の途中で切っても、語の一部 (Annabelle の Ann) を値にしない (語の境界は本文の全体で見る)"
+spec = "04 §5.2 の関門 2"
+lang = "en"
+text = "Please call me Annabelle."
+candidate = { s = "self", a = "name", v = "Ann", e = "call me Ann" }
+expect = "value_not_in_evidence"
+
+[[case]]
+id = "G109"
+title = "根拠を語の途中で切っても、英数字の並びの一部 (RTX4070Ti の RTX4070) を値にしない"
+spec = "04 §5.2 の関門 2"
+text = "RTX4070Tiを使っています"
+candidate = { s = "self", a = "device", v = "RTX4070", e = "RTX4070" }
+expect = "value_not_in_evidence"

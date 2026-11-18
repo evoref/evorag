@@ -296,3 +296,52 @@ expect_candidate = true
 direction = { old = "かよ", new = "さよ" }
 llm = { target = "fact", old = "かよ", new = "さよ", e = "かよじゃなくてさよです" }
 expect = "verified"
+
+# ---- 照合の形 (04 §5.6・§6、2026-11-18) ----
+
+[[case]]
+id = "K27"
+title = "LLM が空白を足して写した新しい値と古い値を照合の形で探し、穴の位置の発話の書き方で記録する"
+spec = "04 §6 の関門 2・4・5、訂正の型の使い方"
+live = [{ s = "self", a = "birthday", v = "5月3日" }]
+previous = "誕生日は5月3日ですね"
+text = "いや、5月3日じゃなくて5月13日です"
+expect_candidate = true
+direction = { old = "5月3日", new = "5月13日" }
+llm = { target = "fact", old = "5 月 3 日", new = "5 月 13 日", e = "いや、 5 月 3 日じゃなくて 5 月 13 日です" }
+expect = "verified"
+stored = { old = "5月3日", new = "5月13日" }
+
+[[case]]
+id = "K28"
+title = "利用者が空白を入れ、LLM が除いて写したときも検証済みにし、利用者の書き方で記録する"
+spec = "04 §6 の関門 2・5、訂正の型の使い方"
+previous = "誕生日は5月3日ですね"
+text = "いや、5 月 3 日じゃなくて 5 月 13 日です"
+expect_candidate = true
+direction = { old = "5 月 3 日", new = "5 月 13 日" }
+llm = { target = "fact", old = "5月3日", new = "5月13日", e = "いや、5月3日じゃなくて5月13日です" }
+expect = "verified"
+stored = { old = "5 月 3 日", new = "5 月 13 日" }
+
+[[case]]
+id = "K29"
+title = "空白の有無だけが違う古い値と新しい値は、照合の形で同じなので向きの関門で落とす"
+spec = "04 §6 の関門 5"
+previous = "東京 タワーの近くですね"
+text = "東京 タワーじゃなくて東京タワーです"
+expect_candidate = true
+direction = { old = "東京 タワー", new = "東京タワー" }
+llm = { target = "fact", old = "東京 タワー", new = "東京タワー", e = "東京 タワーじゃなくて東京タワーです" }
+expect = "direction"
+
+[[case]]
+id = "K30"
+title = "穴の位置の本文が TAB を含むときは、記録する新しい値に関門 6 を当てて落とす"
+spec = "04 §6 の訂正の型の使い方"
+previous = "大阪 府ですね"
+text = "いや、大阪\t府じゃなくて京都\t府です"
+expect_candidate = true
+direction = { old = "大阪\t府", new = "京都\t府" }
+llm = { target = "fact", old = "大阪 府", new = "京都 府", e = "いや、大阪 府じゃなくて京都 府です" }
+expect = "new_not_in_utterance"

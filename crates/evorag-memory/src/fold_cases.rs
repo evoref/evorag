@@ -1210,9 +1210,9 @@ fn consolidation_cases_hold_on_the_pure_core() {
     assert!(passed >= 33, "passed {passed}");
 }
 
-/// verifies: 04 §7.1〜§7.3・§7.5 (忘れるの回帰ケース F01〜F15)、AC-FR-307-4、AC-FR-307-5
+/// verifies: 04 §7.1〜§7.3・§7.5 (忘れるの回帰ケース F01〜F18)、AC-FR-307-4、AC-FR-307-5
 #[test]
 fn forget_cases_hold_in_the_store_and_replay_the_same() {
     let passed = run_cases("forget.toml", true);
-    assert_eq!(passed, 15, "passed {passed}");
+    assert_eq!(passed, 18, "passed {passed}");
 }
