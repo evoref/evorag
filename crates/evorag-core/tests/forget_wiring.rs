@@ -940,13 +940,15 @@ async fn the_forget_command_previews_then_forgets_with_the_plan_hash() {
     assert_eq!(&t.text[t.marks[0].range.clone()], MARKER);
     match ev.last() {
         Some(Event::FactForgotten {
-            list,
+            list: Some(list),
             redacted,
             journal_pending,
             broken,
+            slow_next_turn,
         }) => {
             assert!(value_key_of(list, VALUE).is_none(), "{list:?}");
             assert_eq!((*redacted, *journal_pending, *broken), (1, false, 0));
+            assert!(slow_next_turn);
         }
         other => panic!("{other:?}"),
     }
@@ -1092,4 +1094,84 @@ async fn after_the_forget_command_the_value_is_gone_from_requests_and_files() {
     assert!(hits.is_empty(), "{hits:?}");
     let c = Closed::open(root);
     assert!(c.turn(turn).0.text.contains(MARKER));
+}
+
+/// 忘れるを実行している間 (命令を受けてから結果を知らせるまで) は、発話と作り直しを受け付けない。発話は入力欄に
+/// 戻す。忘れた後の発話は、値を含まずに送る。
+///
+/// verifies: 04 §7.1 (受け付けないとき)、AC-FR-307-1
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_during_a_pending_forget_is_refused() {
+    let dir = TempDir::new("forget-pending");
+    let root = dir.path();
+    let (_, key) = conversation(root, clock_at(T0)).await;
+    let llm = chat(&[reply(KEYS), reply(REPLY)]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 3_600_000)).await;
+    core.hold(true);
+    reopen(&core, &mut rx).await;
+    let preview = preview_of(&core, &mut rx, &key, ForgetChoices::default()).await;
+    let from = llm.requests().len();
+    // 忘れるを、ロックを待つところで止めておく。
+    let lock = core.hold_index_lock().await;
+    core.command(Command::ForgetFact {
+        target: key.clone(),
+        options: ForgetChoices::default(),
+        plan: preview.plan.clone().unwrap(),
+    });
+    core.command(Command::Send { text: ASK.into() });
+    let ev = until(&mut rx, |e| {
+        matches!(e, Event::SendRejected { .. } | Event::UserTurnSaved { .. })
+    })
+    .await;
+    match ev.last() {
+        Some(Event::SendRejected { text, error }) => {
+            assert_eq!(text, ASK, "the utterance goes back to the input");
+            assert_eq!(error.key, MessageKey::ForgetInProgress);
+        }
+        other => panic!("{other:?}"),
+    }
+    core.command(Command::Retry);
+    let ev = until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
+    let Some(Event::Rejected { error }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(error.key, MessageKey::ForgetInProgress);
+    drop(lock);
+    let ev = until(&mut rx, |e| {
+        matches!(
+            e,
+            Event::FactForgotten { .. } | Event::ForgetRejected { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(ev.last(), Some(Event::FactForgotten { .. })),
+        "{ev:?}"
+    );
+    ask(&core, &mut rx, ASK).await;
+    let sent: Vec<String> = llm.requests()[from..]
+        .iter()
+        .flat_map(|r| r.messages.iter().map(|m| m.content.clone()))
+        .collect();
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|m| !m.contains(VALUE)), "{sent:?}");
+    core.shutdown().await;
+}
+
+/// セッションを消した後も、応答のモデルのすべてのスロットにキャッシュの消去を求める (06 §4)。
+///
+/// verifies: 04 §7.2 (llama-server の行)、06 §4
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_asks_to_erase_the_slot_caches() {
+    let dir = TempDir::new("delete-erase");
+    let root = dir.path();
+    prepare(root);
+    let llm = chat(&[]);
+    let (core, mut rx, _) = start(root, &llm, 7, clock_at(T0)).await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    assert_eq!(llm.erased_slots(), [0, 1]);
+    core.shutdown().await;
 }

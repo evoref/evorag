@@ -131,7 +131,7 @@ fn start_idle(inner: &Arc<Inner>, text: String) {
     if !inner.precompute || on_battery(inner).is_some_and(|b| b != OnBattery::Normal) {
         return;
     }
-    if text.trim().is_empty() || crate::is_running(inner) {
+    if text.trim().is_empty() || crate::is_running(inner) || crate::forgetting(inner) {
         return;
     }
     let Some(session) = crate::current_session(inner) else {

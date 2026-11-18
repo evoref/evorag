@@ -270,6 +270,14 @@ message_keys! {
     ForgetBlocked => "error.forget.blocked",
     /// 見本がまだ届いていない。
     ForgetCounting => "error.forget.counting",
+    /// 忘れるを実行している間に、発話・作り直しを送ろうとした。
+    ForgetInProgress => "error.forget.in_progress",
+    /// 忘れるを書いた後に、事実の一覧を読み直せなかった (忘れるは済んでいる)。
+    UiForgetListUnreadable => "ui.forget.list_unreadable",
+    /// 忘れるの確認の画面を閉じたが、実行は続いている。
+    UiForgetContinues => "ui.forget.continues",
+    /// 確認の画面の外で忘れるが済み、`broken/` に置き場所が残っている。引数: `n`。
+    UiForgetBrokenLater => "ui.forget.broken_later",
     /// 引数: `detail`。
     ForgetNotSaved => "error.forget.not_saved",
     UiForgetTitle => "ui.forget.title",

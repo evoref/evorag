@@ -9,30 +9,35 @@
 //! - `broken/` ([`discard_broken`]): 忘れるの後に、残っている壊れた DB のファイルの数を知らせ、利用者が選んだら
 //!   消す (中身を読まないので伏せ字にはできない、04 §7.2)。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use evorag_llm::LlmError;
 use evorag_memory::{
-    ForgetAbort, ForgetEnv, KIND_TURN, Turn, TurnBody, attributes, hidden_marker, plan_forget,
+    ForgetAbort, ForgetEnv, KIND_TURN, TurnBody, attributes, hidden_marker, plan_forget,
     redaction_marker,
 };
 use evorag_store::{Read, ReadTxn};
 use evorag_types::api::{
     Event, FactKey, FactList, ForgetOptions, ForgetPlanHash, ForgetPreview, ForgetSample,
-    ForgetWarning, Role,
+    ForgetWarning, Role, TurnView,
 };
 use evorag_types::{Id, Message, MessageKey};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{Inner, emit, fact_ops, forgets, masking, views};
 
-/// 見本の 1 行で、変わる箇所の前と後に残す文字の数。
+/// 見本の 1 行で、変わる箇所の前と後に残す書記素の数。
 const SAMPLE_CONTEXT: usize = 24;
-/// 見本の 1 行の長さの上限 (文字)。超えた分は「…」で省く。
+/// 見本の 1 行の長さの上限 (書記素)。超えた分は「…」で省く。
 const SAMPLE_MAX: usize = 120;
-/// スロットのキャッシュの消去を 1 つ待つ長さ (応えない llama-server で終了を止めないため)。
+/// スロットの数え上げと、キャッシュの消去を 1 つ待つ長さ (応えない llama-server で終了を止めないため)。
 const ERASE_WAIT: Duration = Duration::from_secs(5);
+/// スロットのキャッシュの消去の全体を待つ長さ。
+const ERASE_TOTAL: Duration = Duration::from_secs(10);
 /// `/slots` で数えられないときに、`total_slots` から求めるスロットの数の上限。
 const ERASE_MAX_SLOTS: u32 = 64;
 
@@ -57,18 +62,25 @@ fn warning(a: &ForgetAbort) -> Option<ForgetWarning> {
     }
 }
 
-/// 改行とタブを空白にする (見本は 1 行で出す)。
-fn flat(chars: &[char]) -> String {
-    chars
+/// 空白 (改行・タブを含む) の書記素を 1 つの空白にする (見本は 1 行で出す)。
+fn flat(graphemes: &[&str]) -> String {
+    graphemes
         .iter()
-        .map(|c| if c.is_whitespace() { ' ' } else { *c })
+        .map(|g| {
+            if g.chars().all(char::is_whitespace) {
+                " "
+            } else {
+                *g
+            }
+        })
         .collect()
 }
 
-/// 前と後の本文から、変わる箇所の周りを 1 行ずつ切り出す (04 §7.1 の「1 行ずつ見本として示す」)。
+/// 前と後の本文から、変わる箇所の周りを 1 行ずつ切り出す (04 §7.1 の「1 行ずつ見本として示す」)。長さは書記素で
+/// 数え、書記素の途中で切らない。
 fn one_line(before: &str, after: &str) -> (String, String) {
-    let b: Vec<char> = before.chars().collect();
-    let a: Vec<char> = after.chars().collect();
+    let b: Vec<&str> = before.graphemes(true).collect();
+    let a: Vec<&str> = after.graphemes(true).collect();
     let prefix = b.iter().zip(&a).take_while(|(x, y)| x == y).count();
     let rest = b.len().min(a.len()) - prefix;
     let suffix = b
@@ -79,7 +91,7 @@ fn one_line(before: &str, after: &str) -> (String, String) {
         .take_while(|(x, y)| x == y)
         .count();
     let start = prefix.saturating_sub(SAMPLE_CONTEXT);
-    let cut = |text: &[char]| -> String {
+    let cut = |text: &[&str]| -> String {
         let end = (text.len() - suffix + SAMPLE_CONTEXT).min(text.len());
         let mut out = String::new();
         if start > 0 {
@@ -132,7 +144,7 @@ fn to_api(
             .collect(),
         other_turns: p.other_turns,
         other_matches: p.other_matches,
-        history: p.history,
+        history_values: p.history,
         affected: p.affected.clone(),
         unredacted_sources: p.unredacted_sources.len(),
         source_outside: p.source_outside,
@@ -151,7 +163,7 @@ fn blocked(target: FactKey, options: ForgetOptions, w: ForgetWarning) -> ForgetP
         samples: Vec::new(),
         other_turns: 0,
         other_matches: 0,
-        history: 0,
+        history_values: 0,
         affected: Vec::new(),
         unredacted_sources: 0,
         source_outside: 0,
@@ -247,25 +259,40 @@ fn spawn(inner: &Arc<Inner>, job: impl Future<Output = ()> + Send + 'static) {
     bg.push(task);
 }
 
-/// `PreviewForget`: 忘れるの見本 (04 §7.1 の「見本と計画」)。記録は変えない。
+/// 見本の求めが、最後の求めか (選択を続けて変えたとき、古い選択の見本を作らない・知らせない)。
+fn latest(inner: &Inner, seq: u64) -> bool {
+    inner.forget_preview_seq.load(Ordering::SeqCst) == seq
+}
+
+/// `PreviewForget`: 忘れるの見本 (04 §7.1 の「見本と計画」)。記録は変えない。最後の求めの見本だけを知らせる。
 pub(crate) fn preview(inner: &Arc<Inner>, target: FactKey, options: ForgetOptions) {
     let Some(key) = inner.facts_key.key().cloned() else {
         rejected(inner, Message::new(MessageKey::FactsDisabled), None, None);
         return;
     };
+    let seq = inner.forget_preview_seq.fetch_add(1, Ordering::SeqCst) + 1;
     let worker = inner.clone();
     spawn(inner, async move {
         let w = worker.clone();
-        let made = tokio::task::spawn_blocking(move || make_preview(&w, &key, target, options))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
+        let made = tokio::task::spawn_blocking(move || {
+            if !latest(&w, seq) {
+                return Ok(None);
+            }
+            make_preview(&w, &key, target, options).map(Some)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        if !latest(&worker, seq) {
+            return;
+        }
         match made {
-            Ok(Previewed::Ready(preview)) => {
+            Ok(None) => {}
+            Ok(Some(Previewed::Ready(preview))) => {
                 emit(&worker, Event::ForgetPreviewInfo { preview: *preview })
             }
-            Ok(Previewed::Outdated) => outdated(&worker),
-            Ok(Previewed::NotAValue) => rejected(
+            Ok(Some(Previewed::Outdated)) => outdated(&worker),
+            Ok(Some(Previewed::NotAValue)) => rejected(
                 &worker,
                 Message::new(MessageKey::FactsNotAllowed),
                 None,
@@ -276,7 +303,34 @@ pub(crate) fn preview(inner: &Arc<Inner>, target: FactKey, options: ForgetOption
     });
 }
 
+/// 忘れるの途中の印 (`State::forgetting`)。落とすと (結果のどれでも、task が panic しても) 印を下ろす。
+struct Forgetting(Arc<Inner>);
+
+impl Forgetting {
+    fn start(inner: &Arc<Inner>) -> Self {
+        inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forgetting = true;
+        Self(inner.clone())
+    }
+}
+
+impl Drop for Forgetting {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forgetting = false;
+    }
+}
+
 /// `ForgetFact`: 忘れる (04 §7.1〜§7.3)。結果は `FactForgotten` か `ForgetRejected` で知らせる。
+///
+/// 命令の待ち行列の中で (task を出す前に) 忘れるの途中の印を立てる。印が立っている間は、発話・作り直し・先に
+/// 済ませる処理を始めない (書く直前の計画と生成が入れ違わないため)。
 pub(crate) fn run(
     inner: &Arc<Inner>,
     target: FactKey,
@@ -287,6 +341,7 @@ pub(crate) fn run(
         rejected(inner, Message::new(MessageKey::FactsDisabled), None, None);
         return;
     }
+    let guard = Forgetting::start(inner);
     let worker = inner.clone();
     spawn(inner, async move {
         let executed = forgets::execute(
@@ -301,10 +356,17 @@ pub(crate) fn run(
                 turns,
                 journal_pending,
                 ..
-            } => done(&worker, &turns, journal_pending).await,
+            } => {
+                let shown =
+                    crate::current_session(&worker).map(|s| (s, reread(&worker, s, &turns)));
+                // 知らせ終えてから印を下ろす (次の発話は、伏せた後の本文と事実の表で送る)。
+                announce(&worker, shown, turns.len(), journal_pending);
+                drop(guard);
+                erase_slots(&worker).await;
+            }
             forgets::Executed::Changed { preview, hash } => {
                 // 見本の後に会話が増えた・裏の処理で事実が変わった: 新しい見本を出す (利用者が見ていない範囲を
-                // 伏せないため)。
+                // 伏せないため)。見本を読めなければ、新しい見本があるとは言わない (何も変えていない)。
                 let fresh = worker.store.read().ok().map(|r| {
                     to_api(
                         &r,
@@ -314,12 +376,15 @@ pub(crate) fn run(
                         Ok(ForgetPlanHash::new(hash.to_string())),
                     )
                 });
-                rejected(
-                    &worker,
-                    Message::new(MessageKey::ForgetOutdated),
-                    fresh,
-                    None,
-                );
+                match fresh {
+                    Some(p) => rejected(
+                        &worker,
+                        Message::new(MessageKey::ForgetOutdated),
+                        Some(p),
+                        None,
+                    ),
+                    None => not_saved(&worker, "the records cannot be read".into()),
+                }
             }
             forgets::Executed::Aborted(ForgetAbort::RowChanged) => outdated(&worker),
             forgets::Executed::Aborted(ForgetAbort::NotAValue) => rejected(
@@ -345,52 +410,64 @@ pub(crate) fn run(
     });
 }
 
-/// 書いた後: 開いているセッションの伏せたターンを読み直して知らせ、新しい一覧と忘れるの状態を知らせ、スロットの
-/// キャッシュの消去を求める。
-async fn done(inner: &Arc<Inner>, turns: &[Id], journal_pending: bool) {
-    if let Some(session) = crate::current_session(inner) {
-        let shown = reread(inner, session, turns);
-        if !shown.is_empty() {
-            emit(
-                inner,
-                Event::TurnsRedacted {
-                    session,
-                    turns: shown,
-                },
-            );
-        }
+/// 書いた後の知らせ: 開いているセッションの読み直したターン、新しい一覧 (読めなくても、忘れるは済んでいると
+/// 知らせる)、忘れるの状態。
+fn announce(
+    inner: &Inner,
+    shown: Option<(Id, Vec<TurnView>)>,
+    redacted: usize,
+    journal_pending: bool,
+) {
+    if let Some((session, turns)) = shown
+        && !turns.is_empty()
+    {
+        emit(inner, Event::TurnsRedacted { session, turns });
     }
-    match fact_ops::current_list(inner) {
-        Some(list) => emit(
-            inner,
-            Event::FactForgotten {
-                list,
-                redacted: turns.len(),
-                journal_pending,
-                broken: broken_entries(inner).len(),
-            },
-        ),
-        None => not_saved(inner, "the facts cannot be read after the forget".into()),
-    }
+    emit(
+        inner,
+        Event::FactForgotten {
+            list: fact_ops::current_list(inner),
+            redacted,
+            journal_pending,
+            broken: broken_entries(inner).len(),
+            // 事実の表は、次のターンの前に作り直す (04 §5.4。書いた後に無効にしてある)。
+            slow_next_turn: true,
+        },
+    );
     forgets::emit_state(inner);
-    erase_slots(inner).await;
 }
 
-/// セッション `session` のターンのうち `turns` にあるものを、印の範囲を添えて読み直す (04 §7.3)。
-fn reread(inner: &Inner, session: Id, turns: &[Id]) -> Vec<evorag_types::api::TurnView> {
+/// セッション `session` のターンのうち、`turns` にあるものと、候補の帯にその往復を含む応答を、印の範囲と帯を
+/// 添えて読み直す (04 §7.3、05 §5.2。帯の冒頭に伏せる前の値を残さないため)。
+fn reread(inner: &Inner, session: Id, turns: &[Id]) -> Vec<TurnView> {
     let Ok(r) = inner.store.read() else {
         return Vec::new();
     };
+    let all = evorag_memory::session_turns(&r, session).unwrap_or_default();
+    // 伏せたターンと、その往復の代表 (利用者の発話)。帯は往復の代表のターンを指す。
+    let mut touched: HashSet<Id> = turns.iter().copied().collect();
+    for id in turns {
+        if let Ok(Some(Read::Ok(e))) = r.get(KIND_TURN, *id)
+            && let Ok(b) = e.body_as::<TurnBody>()
+            && let Some(u) = b.reply_to
+        {
+            touched.insert(u);
+        }
+    }
     let hide = masking::Hide::load(&r, inner.language);
-    turns
-        .iter()
-        .filter_map(|&id| match r.get(KIND_TURN, id) {
-            Ok(Some(Read::Ok(e))) => {
-                let body = e.body_as::<TurnBody>().ok()?;
-                (body.session == session)
-                    .then(|| views::display(hide.as_ref(), &Turn { envelope: e, body }))
-            }
-            _ => None,
+    let hidden = crate::irrelevant_in_session(inner, &all);
+    all.iter()
+        .filter(|t| {
+            touched.contains(&t.envelope.id)
+                || t.body
+                    .obs
+                    .as_ref()
+                    .is_some_and(|o| o.band.iter().any(|b| touched.contains(b)))
+        })
+        .map(|t| {
+            let mut v = views::display(hide.as_ref(), t);
+            crate::decorate(inner, &mut v, &t.body, &hidden);
+            v
         })
         .collect()
 }
@@ -407,33 +484,37 @@ fn error_kind(e: &LlmError) -> String {
     }
 }
 
-/// 応答 (`chat`) の役割のモデルの、すべてのスロットにキャッシュの消去を求める (04 §7.2、06 §4)。構成を見分け
-/// ない。断られたら (既定の構成の 501 など) 無視する。スロットは `/slots` で数え、数えられなければ `total_slots`
-/// から求める。
+/// 応答 (`chat`) の役割のモデルの、すべてのスロットにキャッシュの消去を求める (04 §7.2、06 §4。忘れると削除の
+/// 後)。構成を見分けない。断られたら (既定の構成の 501 など) 無視する。スロットは `/slots` で数え、数えられ
+/// なければ `total_slots` から求める。応えない llama-server で終了を止めないよう、全体の長さを限る。
 pub(crate) async fn erase_slots(inner: &Inner) {
     let (client, server, _) = inner.conn();
-    let ids: Vec<u32> = match client.slots().await {
-        Ok(slots) if !slots.is_empty() => slots.iter().map(|s| s.id).collect(),
-        _ => (0..server.total_slots.clamp(1, ERASE_MAX_SLOTS)).collect(),
-    };
-    let mut erased = 0usize;
-    for id in &ids {
-        match tokio::time::timeout(ERASE_WAIT, client.erase_slot(*id)).await {
-            Ok(Ok(())) => erased += 1,
-            Ok(Err(e)) => {
-                tracing::debug!(slot = id, error = %error_kind(&e), "the slot cache was not erased");
+    let all = async {
+        let ids: Vec<u32> = match tokio::time::timeout(ERASE_WAIT, client.slots()).await {
+            Ok(Ok(slots)) if !slots.is_empty() => slots.iter().map(|s| s.id).collect(),
+            _ => (0..server.total_slots.clamp(1, ERASE_MAX_SLOTS)).collect(),
+        };
+        let mut erased = 0usize;
+        for id in &ids {
+            match tokio::time::timeout(ERASE_WAIT, client.erase_slot(*id)).await {
+                Ok(Ok(())) => erased += 1,
+                Ok(Err(e)) => {
+                    tracing::debug!(slot = id, error = %error_kind(&e), "the slot cache was not erased");
+                }
+                Err(_) => tracing::debug!(slot = id, "the slot cache erase timed out"),
             }
-            Err(_) => tracing::debug!(slot = id, "the slot cache erase timed out"),
         }
+        (ids.len(), erased)
+    };
+    match tokio::time::timeout(ERASE_TOTAL, all).await {
+        Ok((slots, erased)) => {
+            tracing::info!(slots, erased, "asked llama-server to erase the slot caches")
+        }
+        Err(_) => tracing::warn!("erasing the slot caches did not finish in time"),
     }
-    tracing::info!(
-        slots = ids.len(),
-        erased,
-        "asked llama-server to erase the slot caches"
-    );
 }
 
-/// `broken/` に残っている壊れた DB のファイルの置き場所 (03 §8 の `broken/<日時>/`)。
+/// `broken/` に残っている、壊れた DB の置き場所 (03 §8 の `broken/<日時>/`)。
 fn broken_entries(inner: &Inner) -> Vec<PathBuf> {
     let dir = inner
         .store
@@ -444,25 +525,34 @@ fn broken_entries(inner: &Inner) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// `DiscardBroken`: `broken/` のファイルを消す (利用者が選んだとき、04 §7.2)。
+/// `DiscardBroken`: `broken/` の置き場所を消す (利用者が選んだとき、04 §7.2)。ファイルの操作は裏のスレッドで行う。
 pub(crate) fn discard_broken(inner: &Arc<Inner>) {
-    let mut removed = 0;
-    let mut failed = 0;
-    for p in broken_entries(inner) {
-        let r = if p.is_dir() {
-            std::fs::remove_dir_all(&p)
-        } else {
-            std::fs::remove_file(&p)
-        };
-        match r {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                tracing::warn!(error = %e, "a broken database file could not be removed");
-                failed += 1;
+    let worker = inner.clone();
+    spawn(inner, async move {
+        let w = worker.clone();
+        let (removed, failed) = tokio::task::spawn_blocking(move || {
+            let mut removed = 0;
+            let mut failed = 0;
+            for p in broken_entries(&w) {
+                let r = if p.is_dir() {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                match r {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "a broken database folder could not be removed");
+                        failed += 1;
+                    }
+                }
             }
-        }
-    }
-    emit(inner, Event::BrokenDiscarded { removed, failed });
+            (removed, failed)
+        })
+        .await
+        .unwrap_or((0, 0));
+        emit(&worker, Event::BrokenDiscarded { removed, failed });
+    });
 }
 
 #[cfg(test)]
@@ -491,5 +581,17 @@ mod tests {
     fn an_unchanged_text_still_gives_a_line() {
         let (b, a) = one_line("同じ", "同じ");
         assert_eq!((b.as_str(), a.as_str()), ("同じ", "同じ"));
+    }
+
+    /// 長さは書記素で数え、結合文字の並びを途中で切らない。
+    #[test]
+    fn a_sample_is_cut_on_grapheme_boundaries() {
+        // 「か」+ 濁点の結合文字 (1 つの書記素) を並べる。
+        let ga = "か\u{3099}";
+        let before = format!("{}唐津", ga.repeat(SAMPLE_CONTEXT + 5));
+        let after = format!("{}[伏せ字]", ga.repeat(SAMPLE_CONTEXT + 5));
+        let (b, a) = one_line(&before, &after);
+        assert_eq!(b, format!("…{}唐津", ga.repeat(SAMPLE_CONTEXT)));
+        assert_eq!(a, format!("…{}[伏せ字]", ga.repeat(SAMPLE_CONTEXT)));
     }
 }

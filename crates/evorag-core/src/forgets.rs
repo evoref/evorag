@@ -452,6 +452,10 @@ pub(crate) async fn execute(
     let worker = inner.clone();
     tokio::spawn(async move {
         let _guards = (index, facts);
+        // ロックを待つ間に生成が始まっていたら受け付けない (04 §7.1 の「受け付けないとき」)。
+        if crate::is_running(&worker) {
+            return Executed::Busy;
+        }
         // 先に済ませる処理を、ロックを取った直後に止める (書いた後に捨てるキャッシュに、書く前の結果を足させない)。
         drop(worker.pre.stop());
         execute_locked(&worker, key, target, options, expect).await

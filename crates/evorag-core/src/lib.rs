@@ -233,6 +233,9 @@ struct Running {
 struct State {
     session: Option<Id>,
     running: Option<Running>,
+    /// `/forget` を実行している (命令を受けてから結果を知らせるまで。04 §7.1 の「受け付けないとき」の裏返しで、
+    /// その間は発話・作り直し・先に済ませる処理を始めない)。
+    forgetting: bool,
 }
 
 struct Inner {
@@ -336,6 +339,8 @@ struct Inner {
     forget: Mutex<forgets::State>,
     /// 忘れるの退避の写し直しの回 (動いている間に足された job は、次の回にまとめる)。
     forget_batch: Mutex<forgets::Batch>,
+    /// 最後に求められた忘れるの見本の番号 (古い求めの見本は知らせない)。
+    forget_preview_seq: std::sync::atomic::AtomicU64,
 }
 
 /// 途中まで済んだ較正の、問いごとの結果。
@@ -663,6 +668,7 @@ impl Core {
             command_loop: Mutex::new(None),
             forget: Mutex::new(forgets::State::default()),
             forget_batch: Mutex::new(forgets::Batch::default()),
+            forget_preview_seq: std::sync::atomic::AtomicU64::new(0),
         });
         // 忘れるの当て直し (04 §7.2 の「起動の順」): 書き手を作った後、照会と命令を受け付ける前。`Core` を返す
         // のはこの後なので、照会と命令は当て直しを終えてから届く。
@@ -848,6 +854,13 @@ impl Core {
             forgets::Executed::Busy => Err("a reply is being generated".into()),
             forgets::Executed::Failed(e) => Err(e),
         }
+    }
+
+    /// 試験のため: 索引を書き換える経路の鍵を取って持つ (落とすまで、忘れる・削除などがロックを待つ。忘れるの
+    /// 途中の操作をまねる)。
+    #[doc(hidden)]
+    pub async fn hold_index_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inner.index_lock.clone().lock_owned().await
     }
 
     /// 試験のための注入: 次のジャーナルの書き直しを、決まった点で失敗させる (09 §3.5)。
@@ -1741,6 +1754,15 @@ fn is_running(inner: &Inner) -> bool {
         .is_some_and(|r| !r.done && !r.task.is_finished())
 }
 
+/// `/forget` を実行しているか (その間は生成を始めない)。
+fn forgetting(inner: &Inner) -> bool {
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forgetting
+}
+
 fn current_session(inner: &Inner) -> Option<Id> {
     inner
         .state
@@ -1959,11 +1981,12 @@ async fn delete(inner: &Arc<Inner>) {
         };
         run_cleanup_job(&worker, &job, indexes_done).await;
     });
-    inner
-        .background
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(task);
+    // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。
+    let worker = inner.clone();
+    let erase = tokio::spawn(async move { forget_ops::erase_slots(&worker).await });
+    let mut bg = inner.background.lock().unwrap_or_else(|e| e.into_inner());
+    bg.push(task);
+    bg.push(erase);
 }
 
 /// 消した ID を、語彙の索引と、今と前の世代のすべてのベクトルの索引から除く (04 §7.7 の 2)。呼び手は
@@ -2273,6 +2296,17 @@ async fn send(inner: &Arc<Inner>, text: String) {
         reject(inner, MessageKey::Busy);
         return;
     }
+    // 忘れるの途中は送らない (伏せ字にする往復が生成の途中にならないため)。発話は入力欄に戻す。
+    if forgetting(inner) {
+        emit(
+            inner,
+            Event::SendRejected {
+                text,
+                error: Message::new(MessageKey::ForgetInProgress),
+            },
+        );
+        return;
+    }
     let Some(sid) = current_session(inner) else {
         reject(inner, MessageKey::NoSession);
         return;
@@ -2329,6 +2363,10 @@ async fn send(inner: &Arc<Inner>, text: String) {
 async fn regenerate(inner: &Arc<Inner>, retry: bool) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
         return;
     }
     let Some(sid) = current_session(inner) else {
@@ -2991,6 +3029,10 @@ fn feedback_body(
 async fn attach_band(inner: &Arc<Inner>, answer: Id, target: Id) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
         return;
     }
     let Some(sid) = current_session(inner) else {

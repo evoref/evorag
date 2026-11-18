@@ -293,6 +293,10 @@ pub struct App {
     ctrl_c_armed: bool,
     /// 事実の一覧などの番号と行の対応。
     pub facts: FactRefs,
+    /// `/forget` の実行を送り、結果を待っている (その間は発話を送らない)。
+    pub(crate) forget_pending: bool,
+    /// 確認の画面の外で忘れるが済んだときの、`broken/` の置き場所の数 (次に事実の一覧を開いたときに尋ねる)。
+    pub(crate) pending_broken: Option<usize>,
 }
 
 impl App {
@@ -311,6 +315,8 @@ impl App {
             style_picker: false,
             ctrl_c_armed: false,
             facts: FactRefs::default(),
+            forget_pending: false,
+            pending_broken: None,
         }
     }
 
@@ -791,6 +797,7 @@ impl App {
                     None
                 };
                 self.show_facts(list.clone(), head);
+                self.ask_pending_broken();
             }
             Event::FactHistoryInfo { history } => {
                 let body = self.history_text(history);
@@ -1620,6 +1627,12 @@ impl App {
         if self.generating() {
             // 生成中も書けるが、送るのは完了か中断の後 (07 §2.2)。入力欄に残す。
             let m = self.catalog.key(MessageKey::Busy);
+            self.notice(m);
+            return Vec::new();
+        }
+        if self.forget_pending {
+            // 忘れるの途中は送らない (コアも断る)。入力欄に残す。
+            let m = self.catalog.key(MessageKey::ForgetInProgress);
             self.notice(m);
             return Vec::new();
         }
@@ -2876,7 +2889,7 @@ mod tests {
             }],
             other_turns: 2,
             other_matches: 3,
-            history: 1,
+            history_values: 1,
             affected: vec![fkey("dietary", 'd', FactStatus::Live)],
             unredacted_sources: 0,
             source_outside: 0,
@@ -2985,6 +2998,18 @@ mod tests {
             a.on_key(Key::Enter { newline: false }).is_empty(),
             "sent once"
         );
+        // 結果を待つ間は、発話を送らずに入力欄に残す。
+        a.mode = Mode::Chat;
+        type_text(&mut a, "次の話");
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert_eq!(a.input.text(), "次の話");
+        assert!(a.notices.last().unwrap().contains("忘れています"));
+        a.input.take();
+        a.mode = Mode::ConfirmForget(Box::new(crate::forget::ForgetConfirm {
+            sending: true,
+            preview: Some(forget_preview(target.clone(), defaults, "h1")),
+            ..crate::forget::ForgetConfirm::new(target.clone(), "あなた・住んでいる所: 大阪".into())
+        }));
 
         // 見本が古くなっていた: 新しい見本に置き換えて、もう一度 Enter を待つ。
         a.on_event(Event::ForgetRejected {
@@ -3015,20 +3040,80 @@ mod tests {
             items: Vec::new(),
         });
         a.on_event(Event::FactForgotten {
-            list: after.clone(),
+            list: Some(after.clone()),
             redacted: 1,
             journal_pending: true,
             broken: 2,
+            slow_next_turn: true,
         });
         assert_eq!(a.mode, Mode::ConfirmBroken { n: 2 });
         assert_eq!(a.facts.list, Some(after));
         assert!(a.facts.history.is_none());
         assert!(a.notices.iter().any(|n| n.contains("忘れました")));
         assert!(a.notices.iter().any(|n| n.contains("ジャーナル")));
+        assert!(a.notices.iter().any(|n| n.contains("少し長く")));
+        // 問いは y か n (Esc) だけを受ける。
+        assert!(a.on_key(Key::Char('x')).is_empty());
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert_eq!(a.mode, Mode::ConfirmBroken { n: 2 });
         assert_eq!(
             a.on_key(Key::Char('y')),
             vec![Action::Command(Command::DiscardBroken)]
         );
+        assert_eq!(a.mode, Mode::Chat);
+        // 送れるようになった。
+        type_text(&mut a, "次の話");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![
+                Action::Command(Command::NewSession {
+                    title: a.catalog.key(MessageKey::UiDefaultSessionTitle)
+                }),
+                Action::Command(Command::Send {
+                    text: "次の話".into()
+                })
+            ]
+        );
+    }
+
+    /// 実行の後に Esc で確認の画面を閉じたら、忘れるは続いていると知らせる。画面の外で済んだら、ほかの画面を問い
+    /// で上書きせず、`broken/` は次に事実の一覧を開いたときに尋ねる。一覧を読み直せなければ、前の番号を使えなく
+    /// する。
+    ///
+    /// verifies: 04 §7.2 (`broken/` の行)、07 §3 (`/forget`)
+    #[test]
+    fn a_forget_finished_outside_the_confirmation_asks_about_broken_later() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        let target = fkey("residence", 'a', FactStatus::Live);
+        run(&mut a, "/forget F1");
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target, ForgetOptions::default(), "h"),
+        });
+        assert_eq!(a.on_key(Key::Enter { newline: false }).len(), 1);
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+        assert!(a.notices.last().unwrap().contains("続けています"));
+        a.mode = Mode::Help;
+        a.on_event(Event::FactForgotten {
+            list: None,
+            redacted: 1,
+            journal_pending: false,
+            broken: 1,
+            slow_next_turn: true,
+        });
+        assert_eq!(a.mode, Mode::Help, "another screen is not replaced");
+        assert!(a.facts.list.is_none(), "old numbers are dropped");
+        assert!(a.notices.iter().any(|n| n.contains("読み直せなかった")));
+        assert!(a.notices.last().unwrap().contains("次に /memory"));
+        a.mode = Mode::Chat;
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert_eq!(a.mode, Mode::ConfirmBroken { n: 1 });
+        assert!(a.on_key(Key::Esc).is_empty());
         assert_eq!(a.mode, Mode::Chat);
     }
 
@@ -3068,7 +3153,7 @@ mod tests {
         assert!(a.notices.last().unwrap().contains("応答を生成している間"));
     }
 
-    /// 伏せたターンが知らされたら、本文と印だけを置き換える。伏せ字の範囲はそのまま、`[非表示]` の範囲は印に置き
+    /// 伏せたターンが知らされたら、読み直したターン (本文・印・帯) に置き換える。伏せ字の範囲はそのまま、`[非表示]` の範囲は印に置き
     /// 換えて見分けられる表示にし、確かめられないターンは本文の代わりにそのことを示す。
     ///
     /// verifies: 04 §7.3 (画面への印の範囲)、07 §2.1
@@ -3109,7 +3194,10 @@ mod tests {
             turns: vec![t1, t2, t3],
         });
         assert_eq!(a.turns[0].text, user);
-        assert_eq!(a.turns[1].irrelevant, [id(9)], "other fields are kept");
+        assert!(
+            a.turns[1].irrelevant.is_empty(),
+            "the whole re-read view (with its band) replaces the old one"
+        );
         assert!(a.turns[2].unverified);
 
         let lines = crate::render::conversation_lines(&a, 60);

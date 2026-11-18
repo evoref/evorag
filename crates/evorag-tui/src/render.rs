@@ -81,29 +81,35 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             mark(app, t),
         ));
         // 伏せ字と `[非表示]` の印 (04 §7.3)。印の範囲が本文と合わなければ、本文を出さない。
-        let hidden = app.catalog.key(MessageKey::UiMarkHidden);
         let marked = if t.unverified {
             None
+        } else if t.marks.is_empty() {
+            // 印の無いターン (ほとんど): 本文を写さずにそのまま描く。
+            Some(None)
         } else {
-            marked_text(&t.text, &t.marks, &hidden)
+            let hidden = app.catalog.key(MessageKey::UiMarkHidden);
+            marked_text(&t.text, &t.marks, &hidden).map(Some)
         };
         match marked {
             None => lines.push(Line::styled(
                 format!("  {}", app.catalog.key(MessageKey::UiMarkUnverified)),
                 Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
             )),
-            Some(Marked { text, overlay }) if t.role == Role::Assistant => {
+            Some(None) if t.role == Role::Assistant => {
+                lines.extend(crate::markdown::render(&t.text, body_w, "  "));
+            }
+            Some(None) => {
+                for l in wrap(&t.text, body_w) {
+                    lines.push(Line::from(format!("  {l}")));
+                }
+            }
+            Some(Some(Marked { text, overlay })) if t.role == Role::Assistant => {
                 lines.extend(crate::markdown::render_marked(
                     &text, body_w, "  ", &overlay,
                 ));
             }
-            Some(Marked { text, overlay }) if !overlay.is_empty() => {
+            Some(Some(Marked { text, overlay })) => {
                 lines.extend(crate::markdown::plain_marked(&text, body_w, "  ", &overlay));
-            }
-            Some(_) => {
-                for l in wrap(&t.text, body_w) {
-                    lines.push(Line::from(format!("  {l}")));
-                }
             }
         }
         if t.role == Role::Assistant {
@@ -156,6 +162,12 @@ pub struct Marked {
 /// `hidden` に置き換える。範囲が本文と合わない (始まりの順でない・重なる・本文の外・文字の途中) ときは `None`
 /// (値を出してしまわないよう、呼び手は本文を出さない)。
 pub fn marked_text(text: &str, marks: &[TurnMark], hidden: &str) -> Option<Marked> {
+    if marks.is_empty() {
+        return Some(Marked {
+            text: text.to_owned(),
+            overlay: Vec::new(),
+        });
+    }
     let mut out = String::with_capacity(text.len());
     let mut overlay = Vec::with_capacity(marks.len());
     let mut pos = 0;

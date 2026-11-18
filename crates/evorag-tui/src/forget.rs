@@ -139,9 +139,16 @@ impl App {
             return Vec::new();
         };
         let mut out = Vec::new();
+        // 本文の行の数を超えて送らない (描画の側でも窓の高さに合わせて止める)。
+        let max_scroll = self.forget_text(&f).lines().count().saturating_sub(1);
         match key {
             Key::Esc => {
                 self.mode = Mode::Chat;
+                if f.sending {
+                    // 実行は取り消せない。結果は後で知らせる。
+                    let m = self.catalog.key(MessageKey::UiForgetContinues);
+                    self.notice(m);
+                }
                 return out;
             }
             Key::Tab => f.choices_open = !f.choices_open,
@@ -149,9 +156,9 @@ impl App {
             Key::Up if f.choices_open => f.row = f.row.saturating_sub(1),
             Key::Down if f.choices_open => f.row = (f.row + 1).min(Choice::ALL.len() - 1),
             Key::Up => f.scroll = f.scroll.saturating_sub(1),
-            Key::Down => f.scroll += 1,
+            Key::Down => f.scroll = (f.scroll + 1).min(max_scroll),
             Key::PageUp => f.scroll = f.scroll.saturating_sub(10),
-            Key::PageDown => f.scroll += 10,
+            Key::PageDown => f.scroll = (f.scroll + 10).min(max_scroll),
             Key::Home => f.scroll = 0,
             Key::Char(' ') if f.choices_open && !f.sending => {
                 // 選択を変えたら、見本を求め直す (04 §7.1)。
@@ -176,6 +183,7 @@ impl App {
                             plan: hash.clone(),
                         }));
                         f.sending = true;
+                        self.forget_pending = true;
                     }
                 }
             }
@@ -185,12 +193,25 @@ impl App {
         out
     }
 
-    /// `broken/` のファイルを消すかの問い。
+    /// `broken/` の置き場所を消すかの問い。y か n (Esc) だけを受け、ほかのキーは無視する。
     pub(crate) fn on_broken_key(&mut self, key: Key) -> Vec<Action> {
-        self.mode = Mode::Chat;
         match key {
-            Key::Char('y' | 'Y') => vec![Action::Command(Command::DiscardBroken)],
+            Key::Char('y' | 'Y') => {
+                self.mode = Mode::Chat;
+                vec![Action::Command(Command::DiscardBroken)]
+            }
+            Key::Char('n' | 'N') | Key::Esc => {
+                self.mode = Mode::Chat;
+                Vec::new()
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// 後で尋ねることにした `broken/` の問いを開く (事実の一覧の窓を開いたとき)。
+    pub(crate) fn ask_pending_broken(&mut self) {
+        if let Some(n) = self.pending_broken.take() {
+            self.mode = Mode::ConfirmBroken { n };
         }
     }
 
@@ -210,6 +231,7 @@ impl App {
                 preview,
                 list,
             } => {
+                self.forget_pending = false;
                 let m = self.catalog.message(error);
                 self.notice(m.clone());
                 // 見本が古くなっていた・伏せ字にできなくなった: 新しい見本に置き換えて、もう一度 Enter を待つ。
@@ -235,21 +257,28 @@ impl App {
                 redacted,
                 journal_pending,
                 broken,
+                slow_next_turn,
             } => {
-                let kept = match &self.mode {
-                    Mode::ConfirmForget(f) => !f.options.redact,
-                    _ => false,
+                self.forget_pending = false;
+                // 確認の画面がまだ開いているか (Esc で閉じた後なら、ほかの画面を問いで上書きしない)。
+                let confirming = match &self.mode {
+                    Mode::ConfirmForget(f) => Some(!f.options.redact),
+                    _ => None,
                 };
-                self.mode = Mode::Chat;
-                let done = if kept {
+                if confirming.is_some() {
+                    self.mode = Mode::Chat;
+                }
+                let done = if confirming == Some(true) {
                     self.catalog.key(MessageKey::UiForgetDoneKept)
                 } else {
                     self.catalog
                         .with(MessageKey::UiForgetDone, &[("n", &redacted.to_string())])
                 };
                 self.notice(done.clone());
-                let slow = self.catalog.key(MessageKey::UiFactsSlowNext);
-                self.notice(slow);
+                if *slow_next_turn {
+                    let slow = self.catalog.key(MessageKey::UiFactsSlowNext);
+                    self.notice(slow);
+                }
                 if *journal_pending {
                     let m = self.catalog.key(MessageKey::CliForgetJournalPending);
                     self.notice(m);
@@ -257,19 +286,34 @@ impl App {
                 // 番号が変わるので、新しい一覧を出し、番号をそれに結び付ける。履歴と忘れた事実の番号は使えなくする。
                 self.facts.history = None;
                 self.facts.forgotten = None;
-                self.show_facts(list.clone(), Some(done));
+                match list {
+                    Some(list) => self.show_facts(list.clone(), Some(done)),
+                    None => {
+                        // 一覧を読み直せなかった: 前の番号は使えなくし、開き直すよう案内する (忘れるは済んでいる)。
+                        self.facts.list = None;
+                        let m = self.catalog.key(MessageKey::UiForgetListUnreadable);
+                        self.notice(m);
+                    }
+                }
                 if *broken > 0 {
-                    self.mode = Mode::ConfirmBroken { n: *broken };
+                    if confirming.is_some() {
+                        self.mode = Mode::ConfirmBroken { n: *broken };
+                    } else {
+                        self.pending_broken = Some(*broken);
+                        let m = self.catalog.with(
+                            MessageKey::UiForgetBrokenLater,
+                            &[("n", &broken.to_string())],
+                        );
+                        self.notice(m);
+                    }
                 }
             }
             Event::TurnsRedacted { session, turns } => {
                 if self.session.as_ref().is_some_and(|s| s.id == *session) {
                     for new in turns {
-                        // 本文と印だけを置き換える (帯と「無関係」の印は前のまま)。
+                        // 読み直したターン (本文・印・帯) に置き換える。
                         if let Some(t) = self.turns.iter_mut().find(|t| t.id == new.id) {
-                            t.text.clone_from(&new.text);
-                            t.marks.clone_from(&new.marks);
-                            t.unverified = new.unverified;
+                            *t = new.clone();
                         }
                     }
                 }
@@ -362,7 +406,7 @@ impl App {
                     }
                 }
                 let counts = [
-                    (p.history, MessageKey::UiForgetHistory),
+                    (p.history_values, MessageKey::UiForgetHistory),
                     (p.skipped_unreadable, MessageKey::UiForgetSkipped),
                     (p.unredacted_sources, MessageKey::UiForgetUnredacted),
                     (p.source_outside, MessageKey::UiForgetSourceOutside),

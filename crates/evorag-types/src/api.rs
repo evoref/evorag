@@ -168,7 +168,7 @@ pub struct ForgetPreview {
     pub other_turns: usize,
     pub other_matches: usize,
     /// まとめて忘れられる履歴の値の数 (選んでいなくても数える)。
-    pub history: usize,
+    pub history_values: usize,
     /// 伏せ字の範囲に span が重なる、ほかの事実の行 (自動では忘れない、04 §7.1 の「影響するほかの事実」)。
     pub affected: Vec<FactKey>,
     /// 根拠の範囲に値の一致が無いので伏せ字にしない出典のターンの数。
@@ -774,14 +774,17 @@ pub enum Event {
     },
     /// 忘れるの見本 (`PreviewForget` の答え)。
     ForgetPreviewInfo { preview: ForgetPreview },
-    /// 事実を忘れた (`ForgetFact`)。`list` は操作の後の一覧 (前の番号は使えなくなる)。`redacted` は伏せ字か
-    /// `[非表示]` の範囲を足したターンの数。`journal_pending` は、ジャーナルの書き直しが済んでいない (sleep-time に
-    /// 試し直す、04 §7.8)。`broken` は `broken/` に残っている壊れた DB のファイルの数 (消すかを尋ねる、04 §7.2)。
+    /// 事実を忘れた (`ForgetFact`)。`list` は操作の後の一覧 (前の番号は使えなくなる。読み直せなければ `None`:
+    /// 忘れるは済んでいる)。`redacted` は伏せ字か `[非表示]` の範囲を足したターンの数。`journal_pending` は、
+    /// ジャーナルの書き直しが済んでいない (sleep-time に試し直す、04 §7.8)。`broken` は `broken/` に残っている
+    /// 壊れた DB の置き場所 (`broken/<日時>/` のフォルダ) の数 (消すかを尋ねる、04 §7.2)。`slow_next_turn` は、
+    /// 次の応答の前に事実の表を作り直すので、始まるまで少し長くかかるか (04 §5.4)。
     FactForgotten {
-        list: FactList,
+        list: Option<FactList>,
         redacted: usize,
         journal_pending: bool,
         broken: usize,
+        slow_next_turn: bool,
     },
     /// 忘れるの見本を作れなかった・実行しなかった。見本の後に計画が変わったときは、新しい見本を持つ (04 §7.1。
     /// 利用者が見ていない範囲を伏せないため)。指した行が変わっていたときは、新しい一覧を持つ。
@@ -791,10 +794,11 @@ pub enum Event {
         list: Option<FactList>,
     },
     /// 開いているセッションのターンに、伏せ字か `[非表示]` の範囲ができた (04 §7.3)。`turns` は読み直したターン
-    /// (印の範囲を持つ)。画面は同じ ID のターンを置き換えて描き直す。
+    /// (印の範囲と帯を持つ。伏せたターンと、帯に伏せたターンを含む応答)。画面は同じ ID のターンを置き換えて
+    /// 描き直す。
     TurnsRedacted { session: Id, turns: Vec<TurnView> },
     /// 忘れるの状態が変わった (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
     ForgetState { state: ForgetState },
-    /// `broken/` のファイルを消した (`DiscardBroken` の答え)。`failed` は消せなかった数。
+    /// `broken/` の置き場所 (フォルダ) を消した (`DiscardBroken` の答え)。`failed` は消せなかった数。
     BrokenDiscarded { removed: usize, failed: usize },
 }
