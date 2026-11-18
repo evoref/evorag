@@ -278,9 +278,9 @@ mod tests {
         assert!(!ring.is_empty());
         assert!(ring.iter().all(|k| k.source() == KeySource::Embedded));
         // minisign.pub の 1 行目の ID と、2 行目から読んだ ID が同じ。
-        let text =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../minisign.pub"))
-                .expect("minisign.pub is at the repository root");
+        // ビルドのときに埋め込む (no-network の確認は別の利用者で試験を走らせ、
+        // リポジトリのファイルを読めない)。
+        let text = include_str!("../../../minisign.pub");
         let comment_id = text
             .lines()
             .next()
@@ -294,7 +294,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../minisign.next.pub"
         ));
-        assert_eq!(ring.len(), if next.exists() { 2 } else { 1 });
+        // 読めないとき (別の利用者で走らせたとき) は、次の鍵の有無を確かめない。
+        if let Ok(present) = next.try_exists() {
+            assert_eq!(ring.len(), if present { 2 } else { 1 });
+        }
     }
 
     #[test]

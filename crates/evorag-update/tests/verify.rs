@@ -574,22 +574,20 @@ y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+b
 
 /// 各リリースの `release.json` の見本 (`tests/fixtures/release/<版>/`) を今の読み手で読めること。
 /// 知らない項目を足しても読めること (12 §5.3、09 §3.6)。
+///
+/// 見本はビルドのときに埋め込む (no-network の確認は別の利用者で試験を走らせ、
+/// リポジトリのファイルを読めない)。見本を足したら [`RELEASE_FIXTURES`] にも足す。
 #[test]
 fn release_fixtures_stay_readable() {
-    let dir = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/release"
-    ));
     let mut seen = 0;
-    for entry in std::fs::read_dir(dir).expect("tests/fixtures/release") {
-        let path = entry.expect("entry").path().join("release.json");
-        let json = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let mut value: serde_json::Value = serde_json::from_slice(&json).expect("json");
+    for &(name, json) in RELEASE_FIXTURES {
+        let path = std::path::Path::new(name);
+        let mut value: serde_json::Value = serde_json::from_slice(json).expect("json");
         let version = value["version"].as_str().expect("version").to_owned();
         let k = key();
         let ring = keyring(&[&k]);
-        let sig = k.sign(&json, &comment_for(&version, &json));
-        let manifest = verify_signature(&json, &sig, &ring)
+        let sig = k.sign(json, &comment_for(&version, json));
+        let manifest = verify_signature(json, &sig, &ring)
             .and_then(|s| s.parse())
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert!(!manifest.artifacts().is_empty(), "{}", path.display());
@@ -606,5 +604,32 @@ fn release_fixtures_stay_readable() {
         assert_eq!(again, manifest);
         seen += 1;
     }
-    assert!(seen > 0, "no fixture in {}", dir.display());
+    assert!(seen > 0, "no fixture");
+}
+
+/// `tests/fixtures/release/` の見本 (フォルダの名前と `release.json` の中身)。
+const RELEASE_FIXTURES: &[(&str, &[u8])] = &[(
+    "schema-1-example",
+    include_bytes!("../../../tests/fixtures/release/schema-1-example/release.json"),
+)];
+
+/// `tests/fixtures/release/` のフォルダが、すべて [`RELEASE_FIXTURES`] にあること。
+/// フォルダを読めないとき (別の利用者で走らせたとき) は確かめない。
+#[test]
+fn every_release_fixture_is_listed() {
+    let dir = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/release"
+    ));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let name = entry.expect("entry").file_name();
+        let name = name.to_str().expect("a UTF-8 folder name");
+        assert!(
+            RELEASE_FIXTURES.iter().any(|&(n, _)| n == name),
+            "add tests/fixtures/release/{name} to RELEASE_FIXTURES"
+        );
+    }
 }
