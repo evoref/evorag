@@ -16,12 +16,8 @@ use serde::{Deserialize, Serialize};
 
 const SAMPLE: KindSpec = KindSpec::new("sample", 1);
 const APPEND: KindSpec = KindSpec {
-    name: "append",
-    current_v: 1,
     create_when_newer_present: true,
-    journaled: false,
-    derive: None,
-    monotonic: None,
+    ..KindSpec::new("append", 1)
 };
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

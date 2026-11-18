@@ -87,3 +87,60 @@ pub fn raw_corrupt_record(data_root: &Path, kind: &str, id: evorag_types::Id) {
     }
     tx.commit().expect("commit");
 }
+
+/// 閉じた DB の、種類 `kind` の副索引の項目をすべて直接消す (試験で「失った副索引」を作るため)。消した数を返す。
+pub fn raw_remove_lookups(data_root: &Path, kind: &str) -> usize {
+    use redb::ReadableTable;
+    let mut prefix = crate::key::KeyBuf::new();
+    prefix.str(kind);
+    let prefix = prefix.into_bytes();
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    let n = {
+        let mut t = tx.open_table(crate::store::LOOKUP).expect("lookup");
+        let keys: Vec<Vec<u8>> = t
+            .iter()
+            .expect("iter")
+            .map(|item| item.expect("row").0.value().to_vec())
+            .filter(|k| k.starts_with(&prefix))
+            .collect();
+        for k in &keys {
+            t.remove(k.as_slice()).expect("remove");
+        }
+        keys.len()
+    };
+    tx.commit().expect("commit");
+    n
+}
+
+/// 閉じた DB の、`from` から関係 `rel` の行 (順向きと逆向き) を直接消す (試験で「失った関係」を作るため)。消した数を
+/// 返す。
+pub fn raw_remove_links(data_root: &Path, from: evorag_types::Id, rel: &str) -> usize {
+    use redb::ReadableTable;
+
+    use crate::key::OwnedPart;
+    let reverse = format!("{}{rel}", crate::relations::REVERSE);
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    let n = {
+        let mut t = tx.open_table(crate::store::LINKS).expect("links");
+        let keys: Vec<Vec<u8>> = t
+            .iter()
+            .expect("iter")
+            .map(|item| item.expect("row").0.value().to_vec())
+            .filter(|k| {
+                matches!(
+                    crate::key::decode(k).ok().as_deref(),
+                    Some([OwnedPart::Id(a), OwnedPart::Str(r), OwnedPart::Id(b)])
+                        if (*a == from && r == rel) || (*b == from && *r == reverse)
+                )
+            })
+            .collect();
+        for k in &keys {
+            t.remove(k.as_slice()).expect("remove");
+        }
+        keys.len()
+    };
+    tx.commit().expect("commit");
+    n
+}

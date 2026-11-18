@@ -87,19 +87,27 @@ fn backup_bases(root: &Path, backups: Option<&Path>) -> Vec<(PathBuf, BackupKind
 
 /// 保持している退避の一覧 (新しい順)。`backups` を省くとデータ根の `backups/`。移行と作り直しの前の退避は、
 /// データ根の `backups/pre-op/` からも読む ([`backup_bases`])。
+///
+/// リンク (シンボリックリンク・Windows のリパースポイント) と、データ根に見えるフォルダは退避に数えない
+/// ([`purge_all_backups`] と同じ規則。消せない理由は `purge_all_backups` が返す)。
 pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
+    let guard = RootGuard::new(root);
     let mut out = Vec::new();
     for (dir, kind) in backup_bases(root, backups) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
         };
         for e in rd.filter_map(Result::ok) {
-            let file = e.path().join(DB_FILE);
+            let path = e.path();
+            if !matches!(guard.classify(&path), Candidate::Backup) {
+                continue;
+            }
+            let file = path.join(DB_FILE);
             let Ok(meta) = std::fs::metadata(&file) else {
                 continue;
             };
             out.push(BackupInfo {
-                dir: e.path(),
+                dir: path,
                 kind,
                 modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 journal_seq: journal_seq_of(&file),
@@ -108,6 +116,82 @@ pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified).then(b.dir.cmp(&a.dir)));
     out
+}
+
+/// 退避のフォルダの候補の見分け ([`list_backups`] と [`purge_all_backups`] が同じ規則を使う、FR-213)。
+enum Candidate {
+    /// 退避 (DB の写しを持つ、ふつうのフォルダ)。
+    Backup,
+    /// 退避でない (ファイル・DB の写しの無いフォルダ・調べられないもの)。触れない。
+    Other,
+    /// 退避の置き場所にあるが、消してはいけない (理由つき)。
+    Refused(String),
+}
+
+/// データ根と、退避に見えて消してはいけないフォルダを見分ける。
+struct RootGuard {
+    /// データ根 (実際のパス。調べられなければ指定のまま)。
+    root: PathBuf,
+    /// データ根の `backups/` (実際のパス。調べられなければ指定のまま)。
+    root_backups: PathBuf,
+}
+
+impl RootGuard {
+    fn new(root: &Path) -> Self {
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        Self {
+            root: real(root),
+            root_backups: real(&root.join(BACKUPS_DIR)),
+        }
+    }
+
+    /// 退避の置き場所の 1 項目を見分ける。リンクはたどらない。
+    fn classify(&self, path: &Path) -> Candidate {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return Candidate::Other;
+        };
+        if is_link(&meta) {
+            return Candidate::Refused(format!("link, not deleted: {}", path.display()));
+        }
+        if !meta.is_dir() {
+            return Candidate::Other;
+        }
+        if std::fs::symlink_metadata(path.join(DB_FILE)).is_err() {
+            return Candidate::Other;
+        }
+        let refused = || Candidate::Refused(format!("data root, not deleted: {}", path.display()));
+        // データ根の印 (ジャーナルのフォルダかロックのファイル) を持つフォルダは消さない。
+        if path.join(crate::journal::JOURNAL_DIR).exists()
+            || path.join(crate::lock::LOCK_FILE).exists()
+        {
+            return refused();
+        }
+        // データ根そのもの・その上のフォルダと、データ根の中で `backups/` の外のフォルダは消さない。
+        let Ok(real) = std::fs::canonicalize(path) else {
+            return Candidate::Other;
+        };
+        if real == self.root
+            || self.root.starts_with(&real)
+            || (real.starts_with(&self.root) && !real.starts_with(&self.root_backups))
+        {
+            return refused();
+        }
+        Candidate::Backup
+    }
+}
+
+/// シンボリックリンクか、Windows のリパースポイント (ジャンクションなど) か。
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        /// `FILE_ATTRIBUTE_REPARSE_POINT` (winnt.h)。
+        const REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
 }
 
 /// 退避のフォルダに残った作りかけのファイルか。
@@ -183,6 +267,49 @@ pub fn sweep_leftovers(root: &Path, backups: Option<&Path>) -> Vec<String> {
         }
     }
     failed
+}
+
+/// すべての退避を消した結果 ([`purge_all_backups`])。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PurgedAll {
+    /// 消した退避の数。
+    pub removed: usize,
+    /// 消せなかった退避と作りかけのファイル (理由つき)。
+    pub failed: Vec<String>,
+}
+
+/// 保持しているすべての退避 (日次・週次・移行と作り直しの前の退避。`storage.backup_dir` を指定していれば、
+/// そことデータ根の `backups/pre-op/` の両方) と、作りかけの退避を消す (`evorag backups purge`、03 §7.3・§10)。
+///
+/// 呼び手は、データ根のロック ([`DataRootLock`]) を持ってから呼ぶ (TUI など、ほかの evorag が使っていれば断る、
+/// 03 §9。データ根がまだ無ければ、使っているプロセスも無い)。退避のフォルダは、DB の写しを持つものだけを消す
+/// (利用者が置いたほかのフォルダには触れない)。リンク (シンボリックリンク・リパースポイント) はたどらずに残し、
+/// データ根に見えるフォルダ (ジャーナルのフォルダかロックのファイルを持つ・データ根そのものかその上・データ根の中の
+/// `backups/` の外) も残して、`failed` に理由を返す。消す退避が 0 個でも、作りかけの退避は消す。1 つの退避を
+/// 消せなくても、残りを消してから、消せなかったものを返す。
+pub fn purge_all_backups(root: &Path, backups: Option<&Path>) -> PurgedAll {
+    let mut out = PurgedAll {
+        failed: sweep_leftovers(root, backups),
+        ..PurgedAll::default()
+    };
+    let guard = RootGuard::new(root);
+    for (dir, _) in backup_bases(root, backups) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let path = e.path();
+            match guard.classify(&path) {
+                Candidate::Backup => match std::fs::remove_dir_all(&path) {
+                    Ok(()) => out.removed += 1,
+                    Err(e) => out.failed.push(format!("{}: {e}", path.display())),
+                },
+                Candidate::Refused(why) => out.failed.push(why),
+                Candidate::Other => {}
+            }
+        }
+    }
+    out
 }
 
 /// 置き換える DB から、戻した DB へ引き継ぐもの (03 §10)。

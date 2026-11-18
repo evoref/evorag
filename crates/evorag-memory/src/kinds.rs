@@ -205,80 +205,94 @@ pub(crate) const LOOKUP_UPDATED_AT: &str = "updated_at";
 /// どれも会話と利用者の明示の操作なので、ジャーナルにも書く (03 §6)。ジャーナルから取り込むときは、
 /// 本体から関係と副索引を作り直す。
 pub fn kinds() -> Vec<KindSpec> {
-    let append = |name, derive: DeriveFn| KindSpec {
+    // `derive` の関数と、それが作りうる関係の名前・副索引の項目 (`repair` が作り直すときに消すのはこれだけ)。
+    let append = |name, derive: DeriveFn, rels, lookups| KindSpec {
         name,
         current_v: 1,
         create_when_newer_present: true,
         journaled: true,
         derive: Some(derive),
+        derived_rels: rels,
+        derived_lookups: lookups,
         monotonic: None,
     };
     vec![
-        append(KIND_SESSION, derive_session),
+        append(KIND_SESSION, derive_session, &[], &[LOOKUP_UPDATED_AT]),
         // 改訂の番号は伏せ字のたびに上げる。取り込みと repair は、これを下げる行を当てない (03 §6、04 §7.3)。
         KindSpec {
             monotonic: Some(TURN_REV_FIELD),
-            ..append(KIND_TURN, derive_turn)
+            ..append(KIND_TURN, derive_turn, &[REL_IN_SESSION, REL_REPLY_TO], &[])
         },
-        append(KIND_SIGNAL, derive_signal),
-        append(KIND_RECALL_FEEDBACK, derive_feedback),
+        append(KIND_SIGNAL, derive_signal, &[REL_TARGET], &[]),
+        append(
+            KIND_RECALL_FEEDBACK,
+            derive_feedback,
+            &[REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET],
+            &[],
+        ),
         // 利用者の明示の操作なのでジャーナルに書く。関係も副索引も持たない (件数が少ないので全部読む)。
         KindSpec {
-            name: KIND_SETTING,
-            current_v: 1,
             create_when_newer_present: true,
             journaled: true,
-            derive: None,
-            monotonic: None,
+            ..KindSpec::new(KIND_SETTING, 1)
         },
         // 利用者が setup で確かめた (または最初の起動で記録した) 正本なので、ジャーナルに書く。
         KindSpec {
-            name: KIND_MODEL_BINDING,
-            current_v: 1,
             create_when_newer_present: true,
             journaled: true,
-            derive: None,
-            monotonic: None,
+            ..KindSpec::new(KIND_MODEL_BINDING, 1)
         },
         // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_MODEL_PROBE, 1),
-        // チャンクは作り直せる派生の記録 (05 §2.4)。関係は書くときに足す。
-        KindSpec::new(KIND_CHUNK, 1),
-        // 埋め込みは作り直せる派生の記録 (05 §2.2)。
-        KindSpec::new(KIND_EMBEDDING, 1),
-        // ノートは作り直せる派生の記録 (04 §2)。関係は書くときに足す。
-        KindSpec::new(KIND_NOTE, 1),
+        // チャンク・埋め込み・ノートは作り直せる派生の記録 (05 §2.4・§2.2、04 §2)。関係は書くときに足し、
+        // `repair` は本体から作り直す (03 §10)。
+        KindSpec {
+            derive: Some(derive_chunk),
+            derived_rels: &[REL_CHUNK_OF],
+            ..KindSpec::new(KIND_CHUNK, 1)
+        },
+        KindSpec {
+            derive: Some(derive_embedding),
+            derived_rels: &[REL_EMBEDDING_OF],
+            ..KindSpec::new(KIND_EMBEDDING, 1)
+        },
+        KindSpec {
+            derive: Some(derive_note),
+            derived_rels: &[REL_NOTE_OF],
+            ..KindSpec::new(KIND_NOTE, 1)
+        },
         // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
         // 事実は LLM で作る派生の記録 (04 §2)。ジャーナルに書かない。関係と副索引は本体から作り直せる。
         KindSpec {
-            name: crate::facts::KIND_FACT,
-            current_v: crate::facts::FACT_V,
-            create_when_newer_present: false,
-            journaled: false,
             derive: Some(crate::facts::derive_fact),
-            monotonic: None,
+            derived_rels: crate::facts::FACT_RELS,
+            derived_lookups: crate::facts::FACT_LOOKUPS,
+            ..KindSpec::new(crate::facts::KIND_FACT, crate::facts::FACT_V)
         },
         // 訂正の候補と検証済みの訂正は、字句の規則と LLM で作る派生の記録 (04 §6)。ジャーナルに書かない。関係は
         // 本体 (`turn`) から作り直せる。
         KindSpec {
-            name: crate::correction::KIND_CORRECTION,
-            current_v: crate::correction::CORRECTION_V,
-            create_when_newer_present: false,
-            journaled: false,
             derive: Some(crate::correction::derive_correction),
-            monotonic: None,
+            derived_rels: &[crate::correction::REL_CORRECTION_OF],
+            ..KindSpec::new(
+                crate::correction::KIND_CORRECTION,
+                crate::correction::CORRECTION_V,
+            )
         },
         // 事実への指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
         KindSpec {
-            name: crate::facts::KIND_FACT_DIRECTIVE,
-            current_v: crate::facts::FACT_DIRECTIVE_V,
             create_when_newer_present: true,
             journaled: true,
             derive: Some(crate::facts::derive_directive),
-            monotonic: None,
+            derived_rels: crate::facts::DIRECTIVE_RELS,
+            derived_lookups: crate::facts::DIRECTIVE_LOOKUPS,
+            ..KindSpec::new(
+                crate::facts::KIND_FACT_DIRECTIVE,
+                crate::facts::FACT_DIRECTIVE_V,
+            )
         },
     ]
 }
@@ -442,6 +456,49 @@ fn derive_feedback(e: &Envelope) -> Vec<WriteOp> {
 fn derive_signal(e: &Envelope) -> Vec<WriteOp> {
     match e.body_as::<SignalLinks>() {
         Ok(b) => vec![link(e.id, REL_TARGET, b.target)],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// チャンクの本体のうち、関係を作るのに要る項目だけ (03 §4.2 の規則 11)。
+#[derive(Deserialize)]
+struct ChunkLinks {
+    turn: Id,
+}
+
+fn derive_chunk(e: &Envelope) -> Vec<WriteOp> {
+    match e.body_as::<ChunkLinks>() {
+        Ok(b) => vec![link(e.id, REL_CHUNK_OF, b.turn)],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 埋め込みの本体のうち、関係を作るのに要る項目だけ。
+#[derive(Deserialize)]
+struct EmbeddingLinks {
+    target: Id,
+}
+
+fn derive_embedding(e: &Envelope) -> Vec<WriteOp> {
+    match e.body_as::<EmbeddingLinks>() {
+        Ok(b) => vec![link(e.id, REL_EMBEDDING_OF, b.target)],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// ノートの本体のうち、関係を作るのに要る項目だけ。
+#[derive(Deserialize)]
+struct NoteLinks {
+    exchanges: Vec<Id>,
+}
+
+fn derive_note(e: &Envelope) -> Vec<WriteOp> {
+    match e.body_as::<NoteLinks>() {
+        Ok(b) => b
+            .exchanges
+            .into_iter()
+            .map(|t| link(e.id, REL_NOTE_OF, t))
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -616,4 +673,249 @@ pub struct SignalBody {
     pub target: Id,
     /// `/bad 理由` の理由。
     pub reason: Option<String>,
+}
+
+#[cfg(test)]
+mod derived_names {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use evorag_types::{Clock, IdGen, ManualClock, Timestamp, UuidV7Gen};
+
+    use super::*;
+    use crate::write::{AssistantTurn, Writes};
+
+    /// 関係の名前と副索引の項目 (種類の名前の下の `field`) を、記録の種類ごとに集めたもの。
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Names {
+        rels: BTreeSet<String>,
+        lookups: BTreeSet<String>,
+    }
+
+    impl Names {
+        fn extend(&mut self, other: Self) {
+            self.rels.extend(other.rels);
+            self.lookups.extend(other.lookups);
+        }
+    }
+
+    /// 1 つの依頼の操作から、記録の種類ごとの名前を集める (関係の持ち主は `from`、副索引の持ち主は `id`)。
+    /// 副索引の種類の名前は、持ち主の記録の種類と同じであること。
+    fn names_by_kind(ops: &[WriteOp], kinds_of: &BTreeMap<Id, String>) -> BTreeMap<String, Names> {
+        let mut out: BTreeMap<String, Names> = BTreeMap::new();
+        for op in ops {
+            match op {
+                WriteOp::PutLink { from, rel, .. } => {
+                    let kind = kinds_of.get(from).expect("a link from a written record");
+                    out.entry(kind.clone())
+                        .or_default()
+                        .rels
+                        .insert(rel.clone());
+                }
+                WriteOp::PutLookup {
+                    kind, field, id, ..
+                } => {
+                    let owner = kinds_of.get(id).expect("a lookup of a written record");
+                    assert_eq!(kind, owner, "a lookup is filed under its record's kind");
+                    out.entry(kind.clone())
+                        .or_default()
+                        .lookups
+                        .insert(field.clone());
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn declared(spec: &KindSpec) -> Names {
+        Names {
+            rels: spec.derived_rels.iter().map(|s| (*s).to_owned()).collect(),
+            lookups: spec
+                .derived_lookups
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+        }
+    }
+
+    fn sample(ids: &dyn IdGen, kind: &str, body: &serde_json::Value) -> Envelope {
+        let mut e = Envelope::new(ids.next_id(), kind, 1, Timestamp::from_millis(0), "");
+        e.set_body(body).expect("sample body");
+        e
+    }
+
+    fn put_of(ops: &[WriteOp], id: Id) -> Envelope {
+        ops.iter()
+            .find_map(|op| match op {
+                WriteOp::Put(e) if e.id == id => Some(e.clone()),
+                _ => None,
+            })
+            .expect("the written record")
+    }
+
+    /// 応答の経路の書き込み (`Writes`) が作る記録の例と、事実・訂正・指示の本体の例 (どの項目も埋める)。依頼ごとの
+    /// 操作の列。
+    fn samples() -> Vec<Vec<WriteOp>> {
+        let clock: Arc<dyn Clock> =
+            Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+        let ids = UuidV7Gen::with_seed(clock.clone(), 3);
+        let w = Writes {
+            clock: &*clock,
+            ids: &ids,
+        };
+        let mut out = Vec::new();
+        let (session_id, ops) = w.create_session("題").expect("session");
+        let session = put_of(&ops, session_id);
+        out.push(ops);
+        let (user_id, ops) = w.user_turn(&session, "発話").expect("user turn");
+        let user = put_of(&ops, user_id);
+        out.push(ops);
+        let (answer, ops) = w
+            .assistant_turn(
+                &session,
+                &user,
+                AssistantTurn {
+                    state: TurnState::Completed,
+                    text: "応答".into(),
+                    model_key: None,
+                    generation: None,
+                    attached: Vec::new(),
+                    error: None,
+                    recall: None,
+                    obs: None,
+                },
+            )
+            .expect("assistant turn");
+        out.push(ops);
+        out.push(w.signal(SignalKind::Good, answer, None).expect("signal").1);
+        out.push(
+            w.recall_feedback(&RecallFeedbackBody {
+                op: "pin".into(),
+                answer,
+                target: user_id,
+                score: None,
+                reranker: None,
+            })
+            .expect("feedback")
+            .1,
+        );
+        let chunk = ChunkBody {
+            turn: user_id,
+            session: session_id,
+            start: 0,
+            end: 1,
+            rules: 1,
+            src_rev: None,
+        };
+        out.push(w.chunks(&[], &[chunk]).expect("chunks").1);
+        let embedding = EmbeddingBody {
+            target: user_id,
+            unit: "chunk".into(),
+            session: session_id,
+            model_key: "m".into(),
+            dim: 1,
+            key: None,
+            src_rev: None,
+        };
+        out.push(w.embedding(&embedding, &[0.0]).expect("embedding").1);
+        let note = NoteBody {
+            session: session_id,
+            exchanges: vec![user_id, answer],
+            keys: vec!["鍵".into()],
+            model_key: "m".into(),
+            rules: 1,
+            src_revs: Vec::new(),
+            forgets_seen: None,
+        };
+        out.push(w.note(&[], &[], &note).expect("note").1);
+        // 事実・訂正・指示は、本体の項目をすべて埋めた例から `derive` で作る (書き込みの経路も同じ関数
+        // (`fact_entries`・`directive_entries`・`derive_correction`) で作る)。
+        let vk = "00".repeat(16);
+        let examples = [
+            sample(
+                &ids,
+                crate::facts::KIND_FACT,
+                &serde_json::json!({
+                    "subject": "user", "attribute": "lives_in", "vk": vk,
+                    "sources": [{"turn": user_id, "rev": 0, "start": null, "end": null}],
+                }),
+            ),
+            sample(
+                &ids,
+                crate::correction::KIND_CORRECTION,
+                &serde_json::json!({"turn": user_id, "previous": answer}),
+            ),
+            sample(
+                &ids,
+                crate::facts::KIND_FACT_DIRECTIVE,
+                &serde_json::json!({
+                    "op": "forget", "subject": "user", "attribute": "lives_in", "vk": vk,
+                    "marks": ["ab"], "target": answer,
+                }),
+            ),
+        ];
+        let specs: BTreeMap<&str, KindSpec> = kinds().into_iter().map(|k| (k.name, k)).collect();
+        for e in examples {
+            let derive = specs[e.kind.as_str()].derive.expect("derive");
+            let mut ops = vec![WriteOp::Put(e.clone())];
+            ops.extend(derive(&e));
+            out.push(ops);
+        }
+        out
+    }
+
+    /// 書き込みの経路と `derive` が作る関係の名前と副索引の項目は、どれも種類の宣言 (`derived_rels`・
+    /// `derived_lookups`) に入る。`derive` は、宣言したすべての名前を作りうる (宣言と `derive` が合っている)。
+    /// `derive` の無い種類は何も宣言せず、書き込みの経路も関係と副索引を作らない。`repair` は宣言した名前の行だけを
+    /// 消して作り直すため (03 §10)。
+    #[test]
+    fn written_and_derived_names_are_declared_on_the_kind() {
+        let specs: BTreeMap<&str, KindSpec> = kinds().into_iter().map(|k| (k.name, k)).collect();
+        let mut written: BTreeMap<String, Names> = BTreeMap::new();
+        let mut derived: BTreeMap<String, Names> = BTreeMap::new();
+        for ops in samples() {
+            let kinds_of: BTreeMap<Id, String> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    WriteOp::Put(e) => Some((e.id, e.kind.clone())),
+                    _ => None,
+                })
+                .collect();
+            for (kind, names) in names_by_kind(&ops, &kinds_of) {
+                written.entry(kind).or_default().extend(names);
+            }
+            for op in &ops {
+                let WriteOp::Put(e) = op else { continue };
+                let Some(derive) = specs[e.kind.as_str()].derive else {
+                    continue;
+                };
+                for (kind, names) in names_by_kind(&derive(e), &kinds_of) {
+                    derived.entry(kind).or_default().extend(names);
+                }
+            }
+        }
+        for (name, spec) in &specs {
+            let want = declared(spec);
+            if spec.derive.is_none() {
+                assert_eq!(
+                    want,
+                    Names::default(),
+                    "{name} declares names without derive"
+                );
+                assert!(!written.contains_key(*name), "{name}: {written:?}");
+                continue;
+            }
+            if let Some(w) = written.get(*name) {
+                assert!(
+                    w.rels.is_subset(&want.rels) && w.lookups.is_subset(&want.lookups),
+                    "{name}: written {w:?}, declared {want:?}"
+                );
+            }
+            let d = derived
+                .get(*name)
+                .unwrap_or_else(|| panic!("no sample of {name}"));
+            assert_eq!(d, &want, "{name}: derive and the declaration differ");
+        }
+    }
 }

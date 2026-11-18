@@ -466,6 +466,51 @@ pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
     Ok(metas.into_iter().map(|(_, k, v)| (k, v)).collect())
 }
 
+/// 書き換えずに、読めるすべての行を連番の順に読む (`repair`、03 §10)。書きかけの末尾、チェックサムの合わない行、
+/// 新しい版の行は飛ばす。チェックサムの合わない行の数も返す。
+pub(crate) fn read_all(root: &Path) -> io::Result<(Vec<Line>, usize)> {
+    let mut lines = Vec::new();
+    let mut bad = 0;
+    for path in files(&root.join(JOURNAL_DIR))? {
+        let bytes = std::fs::read(&path)?;
+        for raw in bytes.split_inclusive(|&b| b == b'\n') {
+            if raw.last() != Some(&b'\n') {
+                continue; // 書きかけの末尾
+            }
+            match decode(trim_newline(raw)) {
+                Decoded::Line(line) => lines.push(line),
+                Decoded::Bad => bad += 1,
+                Decoded::Newer(_) => {}
+            }
+        }
+    }
+    lines.sort_by_key(|l| l.seq);
+    Ok((lines, bad))
+}
+
+/// 書き換えずに、種類 `kind` の `put` の行の単調に増える項目 `field` の値を、ID ごとに行の数だけ集める (`doctor`、
+/// 04 §7.2 の「ジャーナルの層の見つけ方」)。書きかけの末尾とチェックサムの合わない行と、値を読めない行は飛ばす。
+pub(crate) fn put_revs(
+    root: &Path,
+    kind: &'static str,
+    field: &'static str,
+) -> io::Result<BTreeMap<Id, Vec<u64>>> {
+    let monotonic: Monotonic = [(kind, field)].into_iter().collect();
+    let mut out: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
+    for path in files(&root.join(JOURNAL_DIR))? {
+        let bytes = std::fs::read(&path)?;
+        for raw in bytes.split_inclusive(|&b| b == b'\n') {
+            if raw.last() != Some(&b'\n') {
+                continue; // 書きかけの末尾
+            }
+            if let Some((id, Some(rev))) = inspect(trim_newline(raw), &monotonic).put {
+                out.entry(id).or_default().push(rev);
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl Journal {
     /// 開いて読む。`last_seq` より大きい行を返す。書きかけの末尾を切り詰め、残っている一時のファイルを消し、
     /// 削除の後始末をする。`monotonic` は、種類ごとの単調に増える項目 (集める値)。

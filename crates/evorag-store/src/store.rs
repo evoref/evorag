@@ -82,8 +82,17 @@ pub struct KindSpec {
     pub create_when_newer_present: bool,
     /// ジャーナルにも書くか (会話と明示の操作、03 §6)。
     pub journaled: bool,
-    /// ジャーナルから取り込むときに、関係と副索引を作る関数。
+    /// 記録の関係と副索引を作る関数。ジャーナルの取り込み・差し替え (`Patch`)・`repair` が使う。
+    ///
+    /// `repair` (03 §10) が記録から作り直す関係と副索引は、この関数の出力だけ。作り直すときに消すのは、
+    /// [`KindSpec::derived_rels`] と [`KindSpec::derived_lookups`] に宣言した名前の行だけなので、この関数が作る
+    /// 関係の名前と副索引の項目は、すべてそこに宣言する (宣言の無い名前の行は、新しい版が書いたものとして残す、
+    /// 03 §4.2 の規則 6・11)。`None` の種類の関係と副索引は、`repair` は消さない。
     pub derive: Option<DeriveFn>,
+    /// [`KindSpec::derive`] が作りうる関係の名前 (順向き。逆向きの `~名前` の行も含めて扱う)。
+    pub derived_rels: &'static [&'static str],
+    /// [`KindSpec::derive`] が作りうる副索引の項目 (この種類の名前の下の `field`)。
+    pub derived_lookups: &'static [&'static str],
     /// 単調に増える本体の整数の項目 (ターンの改訂の番号 `rev`、04 §7.3)。宣言した種類では、ジャーナルの取り込み
     /// (と repair) は、DB の記録のこの値を小さくする `put` の行を当てない (03 §6 の「突き合わせ」)。ジャーナルを
     /// 開くときに、この値を ID ごとに集める (04 §7.2 の「ジャーナルの層の見つけ方」)。
@@ -98,6 +107,8 @@ impl KindSpec {
             create_when_newer_present: false,
             journaled: false,
             derive: None,
+            derived_rels: &[],
+            derived_lookups: &[],
             monotonic: None,
         }
     }
@@ -188,7 +199,7 @@ pub struct PendingDeletes {
 }
 
 /// 空白で区切った ID の並びを読む。読めない語は飛ばして数える。
-fn parse_ids(v: &str) -> PendingDeletes {
+pub(crate) fn parse_ids(v: &str) -> PendingDeletes {
     let mut out = PendingDeletes::default();
     for w in v.split_whitespace() {
         match w.parse() {
@@ -336,7 +347,7 @@ pub struct Store {
     root: PathBuf,
     version: String,
     plan: FormatPlan,
-    kinds: BTreeMap<&'static str, KindSpec>,
+    pub(crate) kinds: BTreeMap<&'static str, KindSpec>,
     read_only: Option<ReadOnlyReason>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
@@ -345,7 +356,7 @@ pub struct Store {
     /// 読んだときに壊れていた記録のキー (書き込みのときに quarantine で扱う)。
     suspects: Mutex<BTreeSet<Vec<u8>>>,
     /// 書き込みの権利 (`WriteToken`) を渡したか。1 つのストアにつき 1 つだけ (02 §5)。
-    token_issued: AtomicBool,
+    pub(crate) token_issued: AtomicBool,
     /// ジャーナル (書き込みで開いたときだけ)。書き手だけが使う。
     pub(crate) journal: Mutex<Option<Journal>>,
     /// `memory.forget_key` が食い違っている (03 §3.1.1)。立っている間は、鍵を書かせない
@@ -1005,7 +1016,10 @@ impl Store {
     }
 
     /// 書き込みのトランザクション (書き込みの権利を経ない。開くときの取り込みだけで使う)。
-    fn write_internal(&self, durability: Durability) -> Result<WriteTxn<'_>, StoreError> {
+    pub(crate) fn write_internal(
+        &self,
+        durability: Durability,
+    ) -> Result<WriteTxn<'_>, StoreError> {
         let mut tx = self.db.begin_write().map_err(db)?;
         tx.set_durability(durability.into()).map_err(db)?;
         Ok(WriteTxn { store: self, tx })

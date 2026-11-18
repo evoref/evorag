@@ -34,6 +34,7 @@ mod prompt;
 pub mod rebind;
 pub mod rebuild;
 mod recall;
+pub mod repair;
 mod roles;
 mod views;
 

@@ -105,6 +105,22 @@ impl<'a> ExportView<'a> {
             .map(|v| classify(kind, id, &k, v.value())))
     }
 
+    /// `meta` の 1 つの値 (プロンプトの言語など)。無ければ `None`。
+    ///
+    /// # Errors
+    /// DB を読めないとき。
+    pub fn meta(&self, key: &str) -> Result<Option<String>, ExportError> {
+        let table = match self.tx.open_table(crate::store::META) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(db(e)),
+        };
+        Ok(table
+            .get(key.as_bytes())
+            .map_err(db)?
+            .map(|v| String::from_utf8_lossy(v.value()).into_owned()))
+    }
+
     /// 1 つの種類の記録を ID の順に読む。`f` が `false` を返したら止める。
     ///
     /// # Errors

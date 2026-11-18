@@ -1200,6 +1200,10 @@ fn run_cases(file: &str, mirror: bool) -> usize {
     passed
 }
 
+/// 統合の回帰ケース C01〜。C22 は、置き換えの連鎖の新しい側のセッションを消しても、古い側を `Superseded` の
+/// まま残し、事実の表 (`table = []`) に古い値を戻さないことを確かめる (04 §7.4、OQ-49)。
+///
+/// verifies: AC-FR-305-2 (事例 C22。新しい側を削除しても、古い値が事実の表に戻らない)
 #[test]
 fn consolidation_cases_hold_on_the_pure_core() {
     let passed = run_cases("consolidation.toml", false);
