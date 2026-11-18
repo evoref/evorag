@@ -1,0 +1,88 @@
+# Example evorag configuration (config.toml). The keys are described in docs/07-tui-config.md §4.
+# Keys you leave out take their default values. `evorag setup` writes a minimal configuration.
+# The Japanese version of this example is config.example.toml.
+#
+# Location:
+#   Windows: %LOCALAPPDATA%\evorag\config\config.toml
+#   Linux:   ~/.config/evorag/config.toml
+#   macOS:   ~/Library/Application Support/evorag/config/config.toml
+version = 1
+
+[ui]
+# Language of the screens (ja / en; en from v0.3). It can be changed at any time (takes effect from the next start).
+language = "en"
+
+[prompt]
+# Language of the system prompt (ja / en). Once recorded for a data root, it cannot be changed.
+# If you leave it out, a new data root uses the language of the screens (ui.language).
+language = "en"
+
+[llm]
+# Whether to allow servers other than the loopback address (127.0.0.1). If allowed, https is required.
+allow_remote = false
+
+[llm.chat]
+# Address of llama-server.
+url = "http://127.0.0.1:8080"
+# If llama-server was started with --api-key, write the name of the environment variable that holds the key.
+# (You can also write the key itself in api_key, but this is not recommended.)
+# api_key_env = "EVORAG_API_KEY"
+# Model name in router mode.
+# model = "qwen3-8b"
+
+[llm.chat.generation]
+temperature = 0.7
+top_p = 0.95
+# max_tokens = 1024
+# seed = 42
+
+# JSON added to reply requests, for example to turn off thinking in a thinking model (docs/06-llm.md §6).
+# [llm.chat.request_extra]
+# chat_template_kwargs = { enable_thinking = false }
+
+# JSON added to auxiliary calls (requests with structured output, such as note search keys). Turn off
+# thinking for thinking models.
+# [llm.chat.aux_request_extra]
+# chat_template_kwargs = { enable_thinking = false }
+
+# llama-servers for embeddings and the reranker (v0.2). If you leave them out, those roles are treated as
+# absent and recall degrades (earlier conversations are found by shared characters). evorag setup finds them
+# and writes them here.
+# [llm.embed]
+# url = "http://127.0.0.1:8081"
+# api_key_env = "EVORAG_API_KEY"
+# [llm.rerank]
+# url = "http://127.0.0.1:8082"
+# api_key_env = "EVORAG_API_KEY"
+
+# [[llm.chat.models]] of v0.1 (the candidates /model switched among) is not used from v0.2.
+# The reply model is recorded for the data root, and is switched with evorag setup.
+
+[storage]
+# Data root (--data-root takes precedence). If you leave it out, the default place for your OS.
+# data_root = 'D:\evorag\data'
+# Where backups are kept. If you leave it out, backups\ in the data root.
+# backup_dir = 'E:\evorag-backups'
+# Start with only a warning even in a sync folder or on a network drive (not recommended).
+allow_unsafe_location = false
+
+[memory]
+# Whether to attach earlier conversations to replies by default (can be changed per session with /sources).
+enabled = true
+# Whether to run background work (embeddings, note search keys, automatic backups). Even when it is off,
+# conversations are saved and recall works.
+sleep_time = true
+# Seconds without any action before background work starts.
+idle_seconds = 60
+# On battery: "reduce" (stop the work done ahead when input pauses, and wait five times longer for
+# background work), "normal" (no change), "stop" (stop both the work done ahead and background work).
+on_battery = "reduce"
+
+[retrieval]
+# When input pauses for about 0.5 seconds, embed and rerank the question ahead of time (text you have not
+# sent goes to the configured llama-server). If you leave it out: false when allow_remote = true, true otherwise.
+# precompute = true
+
+[context]
+# Tokens kept for generation (default 25% of n_ctx, at least 1,024).
+# reserve_for_output = 2048

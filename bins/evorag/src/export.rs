@@ -125,8 +125,8 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
         .kinds
         .iter()
         .map(|(k, n)| format!("{k} {n}"))
-        .collect::<Vec<_>>()
-        .join("、");
+        .collect::<Vec<_>>();
+    let kinds = c.join_comma(&kinds);
     println!(
         "{}",
         c.with(

@@ -884,3 +884,105 @@ unknown = 1
     );
     assert_eq!(out.status.code(), Some(4));
 }
+
+/// 漢字・仮名・全角の文字 (英語の UI に出てはいけない文字)。
+fn has_cjk(text: &str) -> bool {
+    evorag_types::has_cjk(text)
+}
+
+/// 標準出力と標準エラーをつないだ文字。
+fn all_output(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `ui.language = "en"` では、`--help` (下位の命令も)・`doctor`・`backups`・設定の誤り・llama-server に繋がらない
+/// ときの案内が英語で、日本語の文字が出ない。既定 (`ja`) の `--help` は日本語のまま。
+///
+/// verifies: AC-FR-908-1 (実行ファイルの層: 英語の UI でヘルプと CLI の出力が英語になる)
+#[test]
+fn the_cli_speaks_english_when_ui_language_is_en() {
+    let dir = TempDir::new("cli-en");
+    let en = format!(
+        "[ui]\nlanguage = \"en\"\n[llm.chat]\nurl = \"{}\"\n",
+        closed_port()
+    );
+    let check = |args: &[&str], config: &str, code: i32, want: &str| {
+        let out = evorag_with_stdin(dir.path(), config, args, "n\n");
+        let text = all_output(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        assert!(!has_cjk(&text), "{args:?}:\n{text}");
+        assert!(text.contains(want), "{args:?}: want {want:?}:\n{text}");
+    };
+    check(&["--help"], &en, 0, "Chat with a local llama-server");
+    check(&["setup", "--help"], &en, 0, "Proceed without asking");
+    check(
+        &["backups", "purge", "--help"],
+        &en,
+        0,
+        "Delete without asking",
+    );
+    check(&["rebuild", "--help"], &en, 0, "Rebuild only the indexes");
+    check(&["doctor"], &en, 0, "Data root:");
+    check(&["backups", "list"], &en, 0, "There are no backups.");
+    // llama-server に繋がらない (終了コード 3)。
+    check(&[], &en, 3, "is safe");
+    // 引数の誤りは clap の英語。
+    check(&["--no-such-flag"], &en, 2, "unexpected argument");
+    // 設定の誤り (終了コード 4) も英語。
+    check(
+        &["doctor"],
+        "[ui]\nlanguage = \"en\"\n[llm]\nallow_remote = \"yes\"\n",
+        4,
+        "The configuration file has an error",
+    );
+
+    // 既定は日本語。知らない言語は、行番号つきの設定の誤り。
+    let out = evorag_with_stdin(dir.path(), "", &["--help"], "");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("設定ファイル"),
+        "{}",
+        all_output(&out)
+    );
+    let out = evorag_with_stdin(dir.path(), "[ui]\nlanguage = \"fr\"\n", &["doctor"], "");
+    let text = all_output(&out);
+    assert_eq!(out.status.code(), Some(4), "{text}");
+    assert!(
+        text.contains("line 2") && text.contains("ui.language"),
+        "{text}"
+    );
+}
+
+/// `ui.language = "en"` では、`evorag update` のヘルプと、通信の前に断る誤り (zip でない入れ方・読めない版・
+/// 足した鍵の誤り) も英語で、日本語の文字が出ない。
+///
+/// verifies: AC-FR-908-1 (実行ファイルの層: 英語の UI で `update` のヘルプと出力が英語になる)
+#[test]
+fn update_speaks_english_when_ui_language_is_en() {
+    let dir = TempDir::new("cli-update-en");
+    let en = "version = 1\n[ui]\nlanguage = \"en\"\n";
+    let check = |args: &[&str], config: &str, code: i32, want: &str| {
+        let out = evorag_update(dir.path(), config, args);
+        let text = all_output(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        assert!(!has_cjk(&text), "{args:?}:\n{text}");
+        assert!(text.contains(want), "{args:?}: want {want:?}:\n{text}");
+    };
+    check(&["--help"], en, 0, "Update evorag");
+    check(&["apply", "--help"], en, 0, "The version to install");
+    check(&["rollback", "--help"], en, 0, "evorag.prev");
+    check(&["apply", "latest"], en, 1, "latest");
+    check(
+        &["check"],
+        "version = 1\n[ui]\nlanguage = \"en\"\n[update]\ntrusted_keys = [\"not-a-key\"]\n",
+        4,
+        "update.trusted_keys",
+    );
+    // 配布物と同じ作り方 (EVORAG_CHANNEL=zip) で試験を作ったときは、入れ方で断らない。
+    if option_env!("EVORAG_CHANNEL") != Some("zip") {
+        check(&["rollback"], en, 1, "evorag update check");
+    }
+}

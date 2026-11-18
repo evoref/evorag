@@ -337,6 +337,8 @@ message_keys! {
     UiMarkUnverified => "ui.mark.unverified",
     /// 伏せ字にしないで忘れた値の範囲を、表示するときに置き換える印 (04 §7.3)。
     UiMarkHidden => "ui.mark.hidden",
+    /// 伏せ字の範囲を表示するときの印 (UI の言語の印。本文の印はプロンプトの言語のまま、04 §7.3)。
+    UiMarkRedacted => "ui.mark.redacted",
     /// 引数: `count`。
     UiStatusForgetMismatched => "ui.status.forget_mismatched",
     UiStatusForgetJournal => "ui.status.forget_journal",
@@ -490,6 +492,7 @@ message_keys! {
     CliSetupNeedsKey => "cli.setup_needs_key",
     /// 引数: `url`、`model`、`n_ctx`、`build`。
     CliSetupFound => "cli.setup_found",
+    /// 引数: `default` (Enter で選ぶ言語。UI の言語)。
     CliSetupAskLanguage => "cli.setup_ask_language",
     /// 引数: `path`、`backup`。
     CliSetupAskOverwrite => "cli.setup_ask_overwrite",
@@ -856,6 +859,67 @@ message_keys! {
     BackupsPurgeFailed => "backups.purge_failed",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
+    /// 並べた語の区切り (`ja` は読点)。セッションの題名・点検の理由・書き出した記録の種類を並べる。
+    UiSepComma => "ui.sep.comma",
+    /// 並べた短い項目の区切り (`ja` は中黒)。事実の変化の件数・忘れるの選択を並べる。
+    UiSepDot => "ui.sep.dot",
+    /// 並べた文の区切り (`ja` は句点)。
+    UiSepSentence => "ui.sep.sentence",
+    /// 事実の行の主語と属性 (確認の画面・ほかの行の表示)。引数: `subject`、`attr`。
+    UiFactsLabel => "ui.facts.label",
+    /// `doctor` のモデルの点検の問題 (`ui.sep.sentence` で並べた理由)。引数: `issues`。
+    DoctorProbeIssues => "doctor.probe_issues",
+    /// API キーの環境変数を設定していない (`cli.llm_unauthorized` の `env`)。
+    CliEnvUnset => "cli.env_unset",
+    /// `evorag setup` が書く設定ファイルの説明 (TOML のコメント、`# ` で始める)。
+    CliSetupConfigHeader => "cli.setup.config_header",
+    CliSetupConfigPromptLanguage => "cli.setup.config_prompt_language",
+    CliSetupConfigRouterModel => "cli.setup.config_router_model",
+    CliSetupConfigApiKeyEnv => "cli.setup.config_api_key_env",
+    /// `--help` の文 (07 §5)。clap の命令に、UI の言語のカタログから当てる。
+    CliHelpAbout => "cli.help.about",
+    CliHelpDataRoot => "cli.help.data_root",
+    CliHelpConfig => "cli.help.config",
+    CliHelpSetup => "cli.help.setup",
+    CliHelpSetupUrl => "cli.help.setup_url",
+    CliHelpSetupApiKeyEnv => "cli.help.setup_api_key_env",
+    CliHelpSetupYes => "cli.help.setup_yes",
+    CliHelpDoctor => "cli.help.doctor",
+    CliHelpBackups => "cli.help.backups",
+    CliHelpBackupsList => "cli.help.backups_list",
+    CliHelpBackupsPurge => "cli.help.backups_purge",
+    CliHelpBackupsPurgeYes => "cli.help.backups_purge_yes",
+    CliHelpExport => "cli.help.export",
+    CliHelpExportOut => "cli.help.export_out",
+    CliHelpRebuild => "cli.help.rebuild",
+    CliHelpRebuildIndex => "cli.help.rebuild_index",
+    CliHelpRebuildFacts => "cli.help.rebuild_facts",
+    CliHelpRestore => "cli.help.restore",
+    CliHelpRestoreBackup => "cli.help.restore_backup",
+    CliHelpRepair => "cli.help.repair",
+    CliHelpUpdate => "cli.help.update",
+    CliHelpUpdateCheck => "cli.help.update_check",
+    CliHelpUpdateApply => "cli.help.update_apply",
+    CliHelpUpdateApplyVersion => "cli.help.update_apply_version",
+    CliHelpUpdateRollback => "cli.help.update_rollback",
+}
+
+/// 漢字・仮名・全角の文字を含むか。`ja` 以外の文言カタログの検査 (`cargo xtask i18n`) と、英語の UI の試験で
+/// 使う (英語の画面に出てはいけない文字、AC-FR-908-1)。
+pub fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{3000}'..='\u{30ff}'     // 全角の記号・ひらがな・カタカナ
+            | '\u{31f0}'..='\u{31ff}'   // カタカナの小書き
+            | '\u{3200}'..='\u{33ff}'   // 囲み文字・CJK の互換の記号
+            | '\u{3400}'..='\u{4dbf}'   // 漢字 (拡張 A)
+            | '\u{4e00}'..='\u{9fff}'   // 漢字
+            | '\u{f900}'..='\u{faff}'   // 互換漢字
+            | '\u{fe30}'..='\u{fe4f}'   // CJK の互換の形
+            | '\u{ff00}'..='\u{ffef}'   // 全角の英数・半角カナ
+            | '\u{20000}'..='\u{2fa1f}' // 漢字 (拡張 B 以降と互換の補助)
+        )
+    })
 }
 
 /// 文言キーと引数 (02 §3 の決めごと 1)。画面がカタログで訳す。
@@ -876,5 +940,20 @@ impl Message {
     pub fn arg(mut self, name: &str, value: impl Into<String>) -> Self {
         self.args.push((name.to_owned(), value.into()));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cjk_covers_kana_kanji_and_full_width_forms() {
+        for text in ["あ", "ア", "ㇰ", "㈱", "㎡", "漢", "︰", "Ａ", "、", "𠀋"] {
+            assert!(has_cjk(text), "{text}");
+        }
+        for text in ["", "ASCII", "café · → … ▶ ↑↓"] {
+            assert!(!has_cjk(text), "{text}");
+        }
     }
 }

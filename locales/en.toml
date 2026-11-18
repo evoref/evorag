@@ -1,0 +1,758 @@
+# English message catalog (docs/07-tui-config.md §6).
+# Keys match MessageKey in evorag-types and the keys of ja.toml (checked by `cargo xtask i18n`, NFR-602).
+# Tables may nest; the dotted name is the key. Values are strings only.
+
+[error.llm]
+connect = "Cannot connect to llama-server ({detail}). Check that llama-server is running and that the configured address is right."
+http = "llama-server returned an error (HTTP {status}: {detail})."
+stream_cut = "The connection dropped in the middle of the reply ({detail}). What was received has been saved. Your message is kept, so you can send it again."
+server = "llama-server returned an error while generating ({detail}). What was received has been saved."
+protocol = "llama-server returned an unexpected response ({detail})."
+
+[error.send]
+not_saved = "Your message could not be saved, so it was not sent ({detail}). It has been put back in the input box."
+
+[error.response]
+not_saved = "The reply could not be saved ({detail})."
+
+[error]
+busy = "A reply is being generated. Press Esc to stop it before sending."
+no_session = "No session is open."
+nothing_to_retry = "There is no message to regenerate a reply for."
+nothing_to_rate = "There is no reply to rate."
+model_switch_in_setup = "To switch models, close evorag and run evorag setup (/model only shows the current model)."
+model_changed = "Not sent: the llama-server model differs from the model recorded for this data root (recorded: {recorded}, now: {connected}). Your text is kept. Restart llama-server with the recorded model, or close evorag and switch with evorag setup."
+delete_failed = "Could not delete the session ({detail})."
+source_not_found = "Source [{n}] was not found (it may belong to a deleted session)."
+style_unknown_value = "\"{value}\" is not a choice for /style {item}. Choices: {choices}"
+band_not_latest = "Only a record in the band of the latest reply can be attached to regenerate."
+band_unknown = "That record is not in the band of this reply."
+feedback_not_saved = "The irrelevant mark could not be recorded. Please try again."
+mask_unavailable = "Not shown: the records could not be read, so the values to hide (private and forgotten values) could not be checked."
+
+[error.facts]
+list_outdated = "The list has been updated. The row you chose changed after the list was shown, so nothing was done. Choose again using the numbers in the new list."
+not_allowed = "That action is not available for that row (for example /private off on a row that is not private, or /memory accept on a row that is not a conflict)."
+disabled = "Fact actions are unavailable because the forget key (memory.forget_key) cannot be used (see evorag doctor for details)."
+blocked = "That value was forgotten, so it cannot be made current again. First lift its block on being learned again with /memory forgotten and /memory unblock."
+not_saved = "The fact action could not be recorded ({detail})."
+no_list = "There is no numbered list yet. Type {list} first."
+bad_number = "Number \"{n}\" is not in the list shown (facts are F1, history H1, forgotten facts X1; the letter can be left out)."
+
+[error.forget]
+busy = "Cannot forget while a reply is being generated. Wait for the reply to finish or stop it, then type /forget again."
+outdated = "Nothing was done because the records changed after the preview was shown. Check the new preview and press Enter again."
+aborted = "Forgetting was cancelled because the text could not be redacted. Neither messages nor facts were changed. Check the warning in the preview (you can also delete only the fact without redacting)."
+blocked = "Not done: with this choice the text cannot be redacted. Turn off \"Redact the source message\" in the choices to delete only the fact and leave the message as it is."
+counting = "Still counting for the preview. Press Enter when it is done."
+in_progress = "A fact is being forgotten. Wait a moment until it is done, then send again. Your text is kept."
+not_saved = "Forgetting could not be recorded ({detail}). Neither messages nor facts were changed."
+
+[response]
+interrupted = "Interrupted. What was received has been saved."
+interrupted_by_shutdown = "Interrupted because evorag is closing. What was received has been saved."
+
+[ui]
+you = "You"
+assistant = "evorag"
+thinking = "(thinking…)"
+quit_hint = "Press Ctrl+C again to quit."
+default_session_title = "New chat"
+
+[ui.mark]
+interrupted = "(interrupted)"
+failed = "(failed)"
+no_reply = "(no reply)"
+unverified = "(The text cannot be verified. It does not match what was forgotten, so it is not shown)"
+hidden = "[hidden]"
+redacted = "[redacted]"
+
+[ui.status]
+idle = "Idle"
+limited = "Some features are off (evorag doctor)"
+working = "Organizing"
+paused_battery = "Paused on battery"
+paused_low_space = "Paused: low disk space"
+recall_standard = "Recall: standard"
+recall_simple = "Recall: simple"
+recall_candidates = "Recall: candidates only"
+recall_calibrating = "Recall: candidates only (calibrating)"
+recall_failed = "Recall: candidates only → evorag setup"
+recall_rebuilding = "Recall: rebuilding {percent}%"
+generating = "Generating (Esc to stop)"
+thinking = "Thinking (Esc to stop)"
+forget_mismatched = "Unverifiable texts: {count}"
+forget_journal = "Journal rewrite pending"
+
+[ui.title]
+session = "Session: {title}"
+no_session = "(no session)"
+
+[ui.sessions]
+title = "Sessions (↑↓ to choose, Enter to open, Esc to close)"
+empty = "No sessions yet."
+
+[ui.delete]
+confirm = "Delete the session \"{title}\"? Its whole conversation will be deleted, including from the automatic backups. This cannot be undone. y to delete / n to cancel"
+
+[ui.help]
+title = "Help (Esc to close)"
+body = """
+Enter send / Shift+Enter, Alt+Enter new line / Esc stop generating / Ctrl+E external editor / Tab choose a source or a possibly related record (Enter for details; in details, a attaches it and regenerates, x marks it irrelevant) / PageUp, PageDown scroll / Ctrl+C interrupt (twice on an empty input to quit) / Ctrl+Q quit
+
+/help            this list
+/new [title]     create a session
+/sessions        list and resume sessions
+/rename <title>  rename the current session
+/delete          delete the current session (asks first)
+/retry           regenerate the last reply
+/good, /bad [reason]  rate the last reply
+/model           show the recorded and connected models (switch with evorag setup)
+/sources [on|off]  attach earlier conversations to replies (this session only)
+/memory          records and band attached to the last reply, rerank scores, reasons for degraded recall, this session's sources, and the list of facts (F1…)
+/memory accept F1    make the conflicting value the current value
+/memory history F1   replacement history of that attribute (H1…); /memory revert H1 makes it current again
+/memory forgotten    list of forgotten facts (X1…); /memory unblock X1 lifts the block on learning it again
+/private F1      keep a fact out of replies (asks first); /private off F1 undoes it
+/forget F1       forget a fact (asks first; by default redacts the source message)
+/style [item value]  default answer style (language, length, format); without a value, opens a picker (applies to all sessions)
+/quit            quit
+//...            send text that starts with / as it is"""
+
+[ui.notice]
+rated_good = "Rating (good) recorded."
+rated_bad = "Rating (bad) recorded."
+deleted = "Session deleted."
+renamed = "Session renamed to \"{title}\"."
+unreadable_turns = "This session has records that this version cannot read ({count}; written by a newer evorag). They are not shown, but they are kept."
+draft_restored = "Your unfinished text from last time has been put back in the input box."
+model_role = "{role}: recorded {recorded} / now {connected} ({status})"
+role_ready = "Connected to the {role} llama-server ({file})."
+sources_on = "Earlier conversations are attached to replies in this session (/sources off to stop)."
+sources_off = "Earlier conversations are not attached to replies in this session (/sources on to resume)."
+source_selected = "Source [{n}] selected (Enter to show, Tab for next, Esc to cancel)."
+source = "[{n}] {title} ({at})\n{excerpt}"
+no_sources = "No reply has sources or possibly related records."
+band_selected = "Possibly related record \"{title}\" selected (Enter to show, Tab for next, Esc to cancel)."
+irrelevant_marked = "Marked as irrelevant. In this version it does not change how recall decides (later versions will use it for tuning). Choose it again to undo."
+irrelevant_cleared = "Irrelevant mark removed."
+style = "Answer style: language {language}, length {length}, format {format} (/style to change)."
+calibrated = "Reranker calibration is done. Earlier conversations are now attached automatically when judged highly relevant."
+calibration_failed = "The reranker did not meet the calibration standard, so earlier conversations are shown as candidates instead of being attached automatically. You can choose another reranker with evorag setup."
+probe_issues = "Checked the {role} model: {reasons}. Auxiliary calls that need structured output (such as note search keys) are turned off. You can keep chatting (see evorag doctor for details)."
+style_changed = "Default answer style changed. It applies to all sessions. The next reply will take a little longer to start."
+
+[ui.notice.facts]
+changed = "Facts learned: {parts}"
+added = "+{n} new"
+replaced = "{n} replaced"
+contested = "{n} in conflict"
+
+[ui.facts]
+title = "Memory"
+label = "{subject} · {attr}"
+header = "Facts (made from what you said):"
+empty = "  No facts yet."
+self = "You"
+row = "  F{n} {subject} · {attr}: {value}{marks}"
+vacant = "  F{n} {subject} · {attr}: (no current value; {history} in history, see /memory history F{n})"
+rule_only = "  F{n} {subject} · {attr}: (no value; only a directive remains that makes later values of this attribute private)"
+mark_contested = " [conflict]"
+mark_planned = " [planned]"
+mark_changed = " ← changed since you last looked"
+mark_private_successors = " [private: chosen value (and later values)]"
+mark_private_value_only = " [private: chosen value]"
+mark_private_successor = " [private: value said after the directive]"
+mark_private_kept = " [private: kept when its session was deleted]"
+mark_history = " ({n} in history)"
+mark_private = " [private]"
+note_sleep_off = "  No new facts are being made (memory.sleep_time = false)."
+note_probe = "  No new facts are being made because the model check found that structured output cannot be used (evorag doctor)."
+note_key = "  Facts are turned off because the forget key (memory.forget_key) cannot be used. Fact actions are unavailable too (evorag doctor)."
+hint = "Act on a row with /forget F1, /private F1, /private off F1, /memory accept F1 or /memory history F1. The numbers are those of this list."
+history_title = "Replacement history of {subject} · {attr}:"
+history_row = "  H{n} {value} (until {at}){marks}"
+history_empty = "  No history."
+history_hint = "/memory revert H1 makes that value the current value again."
+forgotten_title = "Forgotten facts (values are not shown):"
+forgotten_row = "  X{n} {subject} · {attr} (forgotten {at}; values: {values}; {how}) Sources: {sessions}"
+forgotten_redacted = "messages redacted"
+forgotten_kept = "messages kept as they are"
+forgotten_deleted = "deleted turns: {n}"
+forgotten_empty = "  No forgotten facts."
+forgotten_hint = "/memory unblock X1 lifts the block, so the same value can be learned again."
+done_private = "Made private. The value is removed from the fact table and search keys, and hidden in the exchanges attached by recall."
+done_private_off = "No longer private."
+done_accept = "That value is now the current value."
+done_revert = "That value is the current value again."
+done_unblock = "The block on learning it again has been lifted."
+slow_next = "The next reply will take a little longer to start because the fact table is rebuilt."
+
+[ui.panel]
+hint = "↑↓, PageUp, PageDown to scroll, Esc to close"
+
+[ui.private]
+title = "Make private"
+body = """{label}
+
+This removes the value from the fact table and search keys, and replaces it with [hidden] in the exchanges attached by recall.
+- The records are not deleted (/private off undoes it).
+- It stays in the earlier conversation of the current session.
+- This only stops sending the value to llama-server; anything llama-server has already kept is not erased."""
+multi = "- This attribute holds several values, so the existing sibling values (other values of the same attribute) are not included."
+remote = "- With llm.allow_remote, the text of your messages may leave this machine in background calls."
+scope_successors = "This value and later values of the same attribute (default)"
+scope_value_only = "This value only"
+hint = "↑↓ to choose the scope, Enter to apply, Esc to cancel"
+
+[ui.private_off]
+title = "Undo private"
+body = "{label}\n\nThis removes every private directive that applies to this row."
+others = "The private mark is also removed from these rows:"
+history = "The private mark is also removed from values in history ({n}):"
+hint = "Enter to apply, Esc to cancel"
+
+[ui.forget]
+title = "Forget a fact"
+target = "Fact to forget: {label}"
+counting = "Counting…"
+samples_redact = "The source messages will be redacted (before → after):"
+samples_hide = "The messages stay as they are; the value is replaced with [hidden] in the text attached by recall (before → after):"
+sample_before = "  Before ({who}): {text}"
+sample_after = "  After: {text}"
+no_samples = "  There is no text to hide (only the fact is deleted)."
+others = "Value also found in other turns: {turns} (matches: {matches})"
+history = "Values in history that can be forgotten together: {n}"
+skipped = "Turns skipped because they could not be read: {n} (records of a newer version, etc.)"
+unredacted = "Source messages not redacted because the value was not found: {n}"
+source_outside = "Places in source messages where the value matched outside the cited span: {n} (hidden with the same choice as the reply in the same exchange)"
+whole = "Turns replaced entirely with [hidden] because the positions cannot be mapped: {n}"
+mismatched = "Turns skipped because they do not match what was forgotten: {n}"
+affected = "Other facts touched by the redaction (not forgotten automatically; to forget one, choose its row with /forget):"
+warning = "Cannot redact: {reason}\nTurn off \"Redact the source message\" in the choices to delete only the fact and leave the message as it is."
+warn_unreadable = "A message to redact cannot be read (a record of a newer version, etc.)"
+warn_stale = "The position of the fact's source does not match the current message"
+warn_value = "The value in the message does not match the recorded fact"
+warn_mismatched = "The message does not match what was forgotten before"
+kept_note = "The message stays as it is in the records, the journal and the backups. If you continue this session, it is sent to the model unchanged as part of the earlier conversation. The value is removed from the fact table and search keys, and becomes [hidden] in the text attached by recall."
+choices_folded = "Choices: {summary} (Tab to open)"
+choice_redact = "Redact the source message"
+choice_history = "Also forget the values in the replacement history"
+choice_echo = "Also hide the value in the reply of the same exchange"
+choice_others = "Also hide the value in other turns"
+promise_folded = "What is and is not promised (? to open)"
+promise = """Promised (removed right away):
+- evorag's database (the fact is retracted, messages are redacted, and records made from them are deleted; the database file is compacted at the next start)
+- The conversation journal (lines from before the redaction are rewritten)
+- The search index, the automatic backups (backups are recopied in the background) and quarantined records
+- llama-server's slot cache for replies (erasure is requested; the default setup refuses it)
+
+Not promised:
+- Exported files, OS backups and snapshots, physical erasure on SSDs
+- llama-server's logs and its in-memory prompt cache (may remain until llama-server restarts), and saved slots
+- Free space in the database file until the next start, and journal lines that could not be rewritten (reported in the status line and by evorag doctor)
+- Index segments that could not be deleted on Windows (deleted at the next start)
+- Files in broken/ that you chose to keep when asked
+- Anything done while an older version (v0.2.x) has the data open, reasons given with /bad, and session titles
+- Other facts touched by the redaction (kept until you choose to forget them), the length of a value as revealed by the length of the redaction, and what can be guessed about a value from the block on learning it again"""
+hint = "Enter to forget, Esc to cancel, Tab to open the choices, ? for what is promised, ↑↓, PageUp, PageDown, Home to scroll"
+hint_open = "↑↓ to choose, Space to toggle, Tab to close, Enter to forget, Esc to cancel"
+sending = "Forgetting…"
+done = "Forgotten. Turns redacted or [hidden]: {n}."
+done_kept = "Forgotten. The messages are kept as they are."
+broken = "broken/ has {n} folder(s) holding broken databases that were moved aside. Forgotten values may remain in them (they are not read, so they cannot be redacted). Delete them? y to delete / n (Esc) to keep"
+broken_removed = "Deleted {n} folder(s) in broken/."
+broken_failed = "Could not delete {n} folder(s) in broken/ (evorag doctor shows what remains)."
+broken_later = "broken/ has {n} folder(s) holding broken databases that were moved aside. You will be asked whether to delete them the next time you open the fact list with /memory."
+list_unreadable = "Forgotten. The fact list could not be read again, so open it again with /memory (the previous numbers can no longer be used)."
+continues = "The confirmation was closed. Forgetting continues (you will be told when it is done)."
+
+[ui.band]
+related = "Possibly related records (not used for this reply)"
+nearby = "Nearby records (not attached automatically)"
+item = "- {title} {at} \"{head}\""
+marked = " [irrelevant]"
+detail = "{title} ({at})\n{excerpt}"
+detail_source = "Source [{n}]"
+action_attach = "a  Attach this record and regenerate the last reply"
+action_irrelevant = "x  Not relevant to this question (mark as irrelevant)"
+action_irrelevant_undo = "x  Remove the irrelevant mark"
+
+[ui.role_status]
+unset = "not set"
+waiting = "waiting to connect"
+ready = "in use"
+mismatch = "not used (differs from the record)"
+
+[ui.style]
+title = "Default answer style (↑↓ item, ←→ value, Enter to apply, Esc to cancel)"
+language = "Language"
+length = "Length"
+format = "Format"
+hint = "auto: not specified (answers in the language of your message) / ja, en: always in that language / short: brief / long: detailed / plain: no headings or bullet lists / structured: organized with headings and bullet lists"
+
+[ui.error]
+unknown_command = "Unknown command: {name} (/help shows the list)"
+not_yet = "{name} is not available in this version yet."
+editor = "Could not open the external editor ({detail}). You can choose the editor with the VISUAL or EDITOR environment variable."
+
+# Separators for lists of words, items and sentences.
+[ui.sep]
+comma = ", "
+dot = ", "
+sentence = "; "
+
+[cli]
+model_mismatch = """The reply model differs from the model recorded for this data root.
+  Recorded model:  {recorded}
+  Connected model: {connected}
+Your conversation data has not been touched and is safe. Choose one of the following.
+  1. Restart llama-server with the recorded model ({recorded}).
+  2. Switch with evorag setup (switching the reply model needs nothing redone).
+  3. To just try it, use a different data root: evorag --data-root <another folder>{hint}"""
+model_mismatch_same_meta = """
+Only the file name differs; the model's values (parameter count, size, vocabulary size) are the same. It is probably the same model, so you can choose "Treat as the same model" in evorag setup."""
+model_recorded = "The reply model ({file}) has been recorded for this data root. From now on evorag will not start with a different model (switch with evorag setup)."
+model_recorded_unusual = "The reply model ({file}) has been recorded for this data root. It differs from the model used most in earlier conversations. If that is wrong, close evorag and fix it with evorag setup."
+role_recorded = "The {role} model ({file}) has been recorded for this data root."
+role_mismatch = "The {role} model differs from the model recorded for this data root, so it is not used (recorded: {recorded}, now: {connected}). Restart llama-server with the recorded model, or close evorag and switch with evorag setup. Until then evorag runs without {role}."
+role_waiting = "Cannot connect to the {role} llama-server. evorag runs without it until it connects, retrying every 30 seconds."
+router_needs_model = "The llama-server at {url} is in router mode (one URL serves several models). Write the model to use (one of {models}) in llm.chat.model in the configuration. You can also choose it with evorag setup."
+router_model = "The router at {url} cannot use the model {model} ({detail}). Check the name in llm.chat.model and the router's presets."
+config_obsolete = "The configuration key {key} is not used by this version (it is read and ignored). You can remove it (keep it if you plan to go back to v0.1)."
+llm_unreachable = "Cannot connect to llama-server ({url}): {detail}\nYour conversation data has not been touched and is safe. Start llama-server, then start evorag again. evorag setup can write the connection settings."
+llm_unauthorized = "llama-server ({url}) did not accept the API key (HTTP {status}).\nYour conversation data has not been touched and is safe. llama-server is running. Check that the environment variable named in llm.chat.api_key_env ({env}) holds the same key as llama-server's --api-key."
+data_root_in_use = "The data root ({path}) is in use by another evorag (pid {pid}).\nYour conversation data is safe. Close the evorag that was started first, then run this again."
+data_root_unusable = "Cannot use the data root: {detail}"
+config_error = "The configuration file has an error: {detail}"
+config_newer_hint = "This configuration is for a newer version of evorag. If going back to an older version stopped partway, run evorag update rollback; to move up to the newer version, run evorag update apply."
+config_ignored = "The configuration key {key} is not used by this version yet (ignored)."
+config_migrated = "The configuration file {path} was rewritten in the current format (the original is kept at {backup})."
+prompt_language_fixed = "The prompt language of this data root is fixed to {recorded}. prompt.language in the configuration is not used."
+error = "Error: {detail}"
+env_unset = "(not set)"
+unsafe_location = "The data root or the backup folder is in an unsafe place: {detail}\nData can be corrupted in sync folders or on network drives. Choose another place with --data-root or storage.data_root in the configuration. If you must use it, write storage.allow_unsafe_location = true in the configuration to get only a warning."
+location_warning = "Location warning: {detail}"
+broken = "The database file was broken, so it was moved, not deleted, to {moved_to} ({reason})."
+ask_restore = "Restore the conversations from the latest backup and the journal?"
+restored = "Restored from backup {from}. Conversations after it are added from the journal."
+rebuilt = "Derived data rebuilt (backup: {backup}, derived records removed: {removed}, lexical index entries: {docs}). Notes, embeddings and the model check are redone in the background the next time you open evorag."
+rebuilt_index = "Index rebuilt (backup: {backup}, lexical index entries: {docs}). The vector index is rebuilt from the stored embeddings the next time you open evorag."
+rebuild_failed = "Could not rebuild: {detail}"
+rebuilding_facts = "Extracting facts from the conversations again. This uses llama-server and may take a while."
+rebuilt_facts = "Facts rebuilt (backup: {backup}; {facts} facts from {utterances} messages; {old} previous facts removed; {corrections} verified corrections re-applied; {skipped} messages skipped ({filtered} short ones, greetings and the like, {too_long} too long, {mismatch} whose text does not match the records)). Directives on facts (forget, private, accept, revert) were re-applied. Derived data was then rebuilt too (derived records removed: {removed}, lexical index entries: {docs}). Notes, embeddings and the model check are redone in the background the next time you open evorag."
+rebuilt_facts_partial = "Note: {lost} messages could not be extracted and were skipped, so the rebuild is partial ({truncated} cut off at the output limit, {invalid} with output that did not fit the schema).\nNo facts were made from these messages. Check llama-server's state and logs, then run evorag rebuild --facts again to retry them."
+rebuild_facts_unreachable = "Could not rebuild the facts because llama-server ({url}) cannot be reached: {detail}\nThe facts and derived data are unchanged. Start llama-server, then run evorag rebuild --facts again."
+rebuild_facts_model_mismatch = "The facts were not rebuilt because the reply model differs from the model recorded for this data root (recorded: {recorded}, now: {connected}).\nThe facts and derived data are unchanged. Restart llama-server with the recorded model, or switch with evorag setup, then run this again."
+rebuild_facts_no_probe = "Could not rebuild the facts because there is no check result for the connected model.\nThe facts and derived data are unchanged. Start evorag once to let it check the model, then run this again."
+rebuild_facts_probe_failed = "Facts cannot be extracted with the connected model: in the model check, structured output or turning off thinking did not work.\nThe facts and derived data are unchanged."
+rebuild_facts_context_too_small = "The llama-server slot context ({n_ctx} tokens) is too small for fact extraction.\nThe facts and derived data are unchanged."
+rebuild_facts_key_unusable = "Could not rebuild the facts because the forget key (memory.forget_key) cannot be used ({detail}).\nThe facts and derived data are unchanged. Check the state with evorag doctor."
+rebuild_facts_forget_pending = "The facts were not rebuilt because re-applying forgets is not finished.\nThe facts and derived data are unchanged. Start evorag once and quit, then run this again."
+rebuild_facts_newer = "The facts were not rebuilt because this data root has {count} facts written by a newer evorag (to keep the newer records).\nThe facts and derived data are unchanged. To rebuild, run this with the newer evorag."
+rebuild_facts_rejected = "The rebuild was stopped because llama-server ({url}) refused the fact extraction request: {detail}\nThe facts and derived data are unchanged. Check llama-server's logs and settings (context length, structured output), then run evorag rebuild --facts again."
+rebuild_facts_failed = "The rebuild was stopped because fact extraction requests to llama-server ({url}) failed {attempts} times in a row (timeouts or 5xx): {detail}\nThe facts and derived data are unchanged. Check llama-server's state, then run evorag rebuild --facts again."
+rebuild_failed_after_facts = "The facts were rebuilt and replaced, but rebuilding the derived data that follows (chunks, indexes, etc.) failed: {detail}\nThe data from before the replacement is in backup {backup}. Run evorag rebuild (without --facts) again to rebuild the derived data. To go back to the previous facts, use evorag restore {backup}."
+restored_from_journal = "There is no backup, so the conversations are rebuilt from the journal alone."
+repaired = "Repaired (backup: {backup}).\n- Journal lines replayed on opening: {replayed}; records removed by deletion lines: {deletes}\n- Records restored from the journal: {restored} (lines not applied because they would lower the revision: {lower}; broken records quarantined: {quarantined}); data root values restored (such as the prompt language): {metas}; journal lines not read because of a checksum mismatch: {bad_lines}\n- Relations: {links_added} added, {links_removed} removed / secondary indexes: {lookups_added} added, {lookups_removed} removed\nThe index and backups are tidied up the next time you open evorag."
+repaired_forgets = "Forgets re-applied (turns redacted: {patched}, facts retracted: {retracted}, derived records deleted: {deleted}, turns that do not match the directives: {mismatched})."
+repair_journal_pending = "The pre-redaction lines could not be removed from the journal. This will be retried the next time you open evorag."
+repair_key_missing = "Retracting the facts that match forgotten values is on hold because the forget key (memory.forget_key) cannot be used."
+repair_failed = "Could not repair: {detail}"
+repair_failed_after_store = "{restored} records were restored from the journal and relations and secondary indexes were rebuilt (relations: {links_added} added, {links_removed} removed / secondary indexes: {lookups_added} added, {lookups_removed} removed), but the steps that follow failed: {detail}\nThe data from before the repair is in backup {backup}. Run evorag repair again to redo the remaining steps. To go back, use evorag restore {backup}."
+repair_broken_hint = "repair cannot fix a broken database file. Check the backups with evorag backups list, then restore one with evorag restore <backup folder> (conversations after the backup are added from the journal)."
+data_root_missing = "The data root ({path}) does not exist. Nothing was created. Check the location given by --data-root or storage.data_root in the configuration."
+read_only_newer_format = "This data root is in a format written by a newer evorag (writing needs format version {min_write} or later), so this version does not modify it. Nothing was changed. Run this with the newer evorag."
+read_only_migration_failed = "The data root in an older format could not be migrated to the current format, so it was opened read-only ({reason}). Nothing was changed. Check the state with evorag doctor."
+exported = "Exported {count} record(s) ({kinds}) to {path}. The configuration was copied to config.toml without API keys."
+export_skipped = "Records not exported because they could not be read: {newer} in a newer format, {corrupt} broken"
+export_not_empty = "{path} is not empty. Specify an empty folder or one that does not exist yet."
+export_refused_journal = "Not exported: the journal has {count} lines that are not yet in the database. Start evorag once and quit, then export again."
+export_refused_forget = "Not exported: re-applying forgets is not finished. Start evorag once and quit, then export again."
+compact_low_space = "Removing traces of deleted records from the database file (compact) was skipped because there is not enough free space ({free} MiB free, {need} MiB needed). Once you free up space, it is done at the next start."
+compact_failed = "Removing traces of deleted records from the database file (compact) failed ({detail}). It will be retried at the next start."
+forget_mismatched = "{count} messages do not match what was forgotten. They are not used for recall, background work or export (evorag doctor shows the count)."
+forget_key_missing = "The forget key (memory.forget_key) cannot be used, so retracting the facts that match forgotten values and recopying the facts in the backups are on hold. Redacting the messages and rewriting the journal are done (evorag doctor shows the state)."
+forget_journal_pending = "The conversation journal still has pre-redaction lines of forgotten messages (they could not be rewritten because another program has the file open). The rewrite will be retried when evorag is idle."
+setup_guide = """
+llama-server was not found (addresses tried: {tried}). No configuration file was written.
+Prepare llama-server as follows, then run evorag setup again.
+
+1. Get a llama-server build for your PC from the llama.cpp releases (https://github.com/ggml-org/llama.cpp/releases).
+2. Prepare a model in GGUF format.
+3. Start it with an API key so that it accepts connections only from your PC. For example:
+     llama-server -m <model>.gguf --host 127.0.0.1 --port 8080 -c 8192 --jinja --api-key <a long random string>
+4. Put the same string in an environment variable (for example EVORAG_API_KEY), then run:
+     evorag setup --api-key-env EVORAG_API_KEY
+   If you started it on another port, add --url http://127.0.0.1:<port>."""
+setup_needs_key = "llama-server ({url}) requires an API key. Give the name of the environment variable that holds the key with --api-key-env and run this again."
+setup_found = "Found llama-server: {url} (model {model}, n_ctx {n_ctx}, {build})"
+setup_ask_language = "Choose the language of the system prompt [ja/en] (Enter for {default}). It cannot be changed later for this data root; to change only the reply language, use /style language:"
+setup_ask_overwrite = "Rewrite the configuration file {path}? The original is kept at {backup} [y/N]:"
+setup_written = "Configuration written to {path}. You can start chatting with evorag."
+setup_unchanged = "The configuration {path} can be used as it is."
+setup_not_written = "The configuration {path} was not rewritten."
+
+[cli.facts_key]
+conflict = "the journal's key differs from the database's key, or there is more than one"
+missing = "there are directives on facts, but the key is in neither the database nor the journal"
+malformed = "the recorded key is malformed"
+read_only = "the data root was opened read-only, so the key cannot be created"
+
+[cli.setup]
+tui_running = "evorag is running (it is using this data root). Only the configuration file can be written. To change the model records, close evorag and run evorag setup again."
+role_found = "{role}: {file} is running at {url}."
+role_missing = """No llama-server for {role} was found (recommended, but evorag works without it). Example of starting one:
+  {example}"""
+embed_example = "llama-server -m <embedding model>.gguf --embedding --pooling last --host 127.0.0.1 --port 8081 --api-key <key>"
+rerank_example = "llama-server -m <reranker>.gguf --reranking --host 127.0.0.1 --port 8082 --api-key <key>"
+extra_chat = "{url} looks like a llama-server for replies (chat) (it may have been a /model candidate in v0.1). It is not used in v0.2."
+model_recorded = "The {role} model ({file}) has been recorded for this data root."
+model_diff = """The {role} model differs from the record of this data root.
+  Recorded: {recorded}
+  Now:      {connected}"""
+redo_chat = "Switching the reply model needs nothing redone."
+redo_embed = "Switching the embedding model rebuilds the vector index. The rebuild runs in the background, only while you are not using evorag. Meanwhile, answers use lexical search and reranking."
+redo_rerank = "Switching the reranker recomputes its threshold from the bundled examples."
+ask_same = "Only the file name differs; the model's values are the same. Treat it as the same model (fix only the record, without redoing anything)? [y/N]"
+ask_switch = "Switch the {role} model to the current model? [y/N]"
+switched = "Switched the {role} model ({file})."
+kept_chat = "The reply model was not switched. If left as it is, evorag will refuse to start next time. Restart llama-server with {recorded}."
+kept = "The {role} model was not switched. Until it is switched, evorag runs without {role}."
+needs_confirm = "Switching a model needs an interactive confirmation (--yes does not switch it)."
+router_found = "{url} is a llama-server in router mode (one URL serves several models). Models: {models}"
+router_checking = "  Checking the role of {model} (loading it if it is not loaded)…"
+router_choose = "Choose the model to use for {role} by number: {choices}"
+preset_example = """One llama-server can also serve all three roles (router mode). Example preset (evorag.ini):
+  version = 1
+  [chat]
+  model = <reply model>.gguf
+  [embed]
+  model = <embedding model>.gguf
+  embedding = true
+  pooling = last
+  [rerank]
+  model = <reranker>.gguf
+  reranking = true
+Example of starting it: llama-server --models-preset evorag.ini --host 127.0.0.1 --port 8080 --api-key <key>
+Then run evorag setup again; it tells the models of each role apart and writes them to the configuration."""
+calibrating = "Computing the reranker threshold from the bundled examples… {done}/{total}"
+calibrated = "Reranker threshold recorded: {threshold} (band lower bound {band}). Ranking {rank_ok}/{rank_n}, questions with overlapping words {value_ok}/{value_n}."
+calibration_failed = "The reranker did not meet the calibration standard (ranking {rank_ok}/{rank_n}, questions with overlapping words {value_ok}/{value_n}; both need 80% or more). Earlier conversations are shown as candidates instead of being attached automatically. Another reranker is recommended."
+probing = "Checking the {role} model (speed and supported features; this can take tens of seconds)…"
+# Comments in the configuration file written by evorag setup (TOML comments; each line starts with "# ").
+config_header = "# evorag configuration (written by evorag setup; the keys are described in docs/07-tui-config.md §4)"
+config_prompt_language = "# Language of the system prompt (cannot be changed later for this data root)"
+config_router_model = "# Model name in router mode (the name of the preset section)"
+config_api_key_env = "# If llama-server was started with --api-key, write the name of the environment variable that holds the key"
+
+# Text of evorag --help (the --help and --version texts and the headings added by clap stay in English).
+[cli.help]
+about = "Chat with a local llama-server, with long-term memory"
+data_root = "Data root (takes precedence over storage.data_root in the configuration)"
+config = "Configuration file"
+setup = "Find llama-server, check what it can do, and write the configuration file"
+setup_url = "Server address (if omitted, tries llm.chat.url from the configuration and 127.0.0.1:8080 and 8081)"
+setup_api_key_env = "Name of the environment variable holding the API key (when llama-server was started with --api-key)"
+setup_yes = "Proceed without asking (prompt language: the UI language unless prompt.language is set; the configuration file is rewritten)"
+doctor = "Check the configuration, connection, data root, journal and backups, without changing anything"
+backups = "Manage backups"
+backups_list = "List the backups (newest first)"
+backups_purge = "Delete all backups (daily, weekly, and those taken before migrations and rebuilds)"
+backups_purge_yes = "Delete without asking"
+export = "Export the records as JSON Lines, one file per kind (the configuration is copied without API keys)"
+export_out = "Folder to export to (empty, or not existing yet)"
+rebuild = "Rebuild derived data (chunks, notes, embeddings, indexes, model check results) from the conversations and explicit actions (backs up first)"
+rebuild_index = "Rebuild only the indexes"
+rebuild_facts = "Also extract the facts from the conversations again (uses llama-server; directives on facts and verified corrections are re-applied)"
+restore = "Restore from a backup (conversations after it are added from the journal)"
+restore_backup = "Backup folder (such as backups/daily/<date>) or the evorag.redb in it"
+repair = "Rebuild secondary indexes and relations from the records, restore records that are in the journal but not in the database, and re-apply forgets and deletions (backs up first)"
+update = "Update evorag itself (check for a new version, replace, roll back)"
+update_check = "Check whether a new version is available (changes nothing)"
+update_apply = "Download a new version, verify its signature, then replace this one (the current version is kept as evorag.prev)"
+update_apply_version = "The version to install (if omitted, the newest version)"
+update_rollback = "Go back to evorag.prev (no network access)"
+
+[cli.update]
+up_to_date = "No new version is available (the current version {current} is the newest)."
+available = "A new version is available: evorag {version} (released {date})"
+target = "Updating to: evorag {version} (released {date})"
+notes_header = "What changed:"
+notes_page = "What changed: {url}"
+llama_min_build = "This version supports llama-server build {build} or later."
+db_min_write = "Note: this version upgrades the data format to {min_write}. If you go back to the current version ({current}) after the migration, the current version can only read the data (to make it writable again, restore the backup taken before the migration)."
+added_key = "Note: the signature was verified with a key added in update.trusted_keys in the configuration (ID {key_id}). If you do not recognize it, do not update, and check the configuration."
+apply_hint = "To update, run evorag update apply."
+upgrade_first = "This version cannot be updated to directly from the current version ({current}). Run evorag update apply {upgrade_from} first."
+downloading = "Downloading {name} ({size} bytes)."
+gap_apply = "If the replacement stops partway and evorag.exe is missing from {dir}, rename evorag.new to evorag.exe if it exists, or otherwise rename evorag.prev to evorag.exe."
+gap_rollback = "If the swap stops partway and evorag.exe is missing from {dir}, rename evorag.prev to evorag.exe."
+resumed_completed = "Finished the update ({op}) that stopped partway last time."
+resumed_reverted = "Reverted the update ({op}) that stopped partway last time."
+resume_untouched = "Files left untouched because they do not match the update's files: {files}"
+resume_missing = "Files not found: {files} (the record was marked as done)"
+cleaned = "Cleaned up what was left from the last update: {files}"
+applied = """
+Updated evorag from {from} to {to}. The previous version is kept as evorag.prev (go back with evorag update rollback).
+If the data needs a migration, the first start of the new version backs it up before migrating."""
+left = "Files that could not be deleted: {files} (they are cleaned up at the next start)."
+rolled_back = "Rolled evorag back to {to} ({from} is kept as evorag.prev)."
+data_usable = "The data root can be used as is by the version you went back to."
+data_read_only = "Note: the data root is in a newer format (format {min_write} is needed to write), so the version you went back to (format {format}) starts read-only. To make it writable, restore the backup taken before the migration."
+data_unopenable = "Note: the version you went back to (format {format}) cannot open the data root (format {min_read} is needed to read). You need to restore the backup taken before the migration."
+data_unknown = "It is not known whether the version you went back to can write the data root. If the new version migrated it, you can restore the backup taken before the migration (backups/pre-op/) with evorag restore. Otherwise the old version starts read-only."
+data_backup = """
+  Backup taken before the migration: {path}
+    To restore (run with the version you went back to): evorag restore "{path}""""
+data_journal = "Conversations after the backup are added from the journal when you restore."
+data_no_backup = "No backup taken before the migration was found. The data can be used with the new version (go back to it with evorag update apply)."
+config_backup = "If the version you went back to cannot read the current configuration, you can use the copy of the configuration at {path}."
+not_zip = "This evorag was installed via {channel}, so evorag update apply and rollback cannot be used. Update it with the tool you installed it with (for cargo: cargo install --locked --git https://github.com/evoref/evorag --tag vX.Y.Z evorag). You can check for a new version with evorag update check."
+exe_name = "The running executable is named {found}. evorag update works only when it is named {expected}. Rename it back, then run this again."
+busy = "Another evorag update is running. Run this again after it finishes."
+data_root_in_use = "evorag is running (data root {path}, pid {pid}). Close evorag, then run this again."
+data_root_lock = "Cannot lock the data root {path}."
+not_newer = "The requested version {requested} is not newer than the current version {current}, so it is not installed. To go back to the previous version, use evorag update rollback."
+bad_version = "Cannot read the version {version} (example: 0.4.0)."
+cpu = "This CPU lacks a feature needed for the update's network access ({missing}). Stopped without connecting. Update manually: {url} (see \"Updating and rolling back\" in the bundled README)"
+arch = "The update's network access cannot be used on this CPU ({arch}). Update manually: {url} (see \"Updating and rolling back\" in the bundled README)"
+no_roots = "No root certificates were found. Stopped without connecting. Install the OS certificates (such as ca-certificates), or update manually: {url}"
+network = """
+Could not download from GitHub Releases: {reason}
+If you use a proxy, set the HTTPS_PROXY environment variable (only http:// and https:// proxies are supported; proxies that need authentication (such as NTLM) and SOCKS are not). Without network access, update manually: {url}"""
+rate_limited = "Hit the GitHub API rate limit. Run this again after {reset}."
+rate_limited_unknown = "Hit the GitHub API rate limit. Wait a while, then run this again."
+missing_file = "Version {version} has no {what} (the version does not exist or was withdrawn)."
+list_unreadable = "Could not read the list of releases. Try again later, or update manually: {url}"
+tampered = "The update was refused because it may have been tampered with ({reason}). The install folder was not changed."
+unusable = "Cannot update to this version ({reason}). The install folder was not changed."
+unknown_schema = "This evorag cannot read the format of this version's release.json. The install folder was not changed. Update manually: {url}"
+failed = "Could not update: {reason}"
+reverted = """
+The replacement failed, so it was reverted: {reason}
+evorag is still the previous version."""
+not_recorded = "The executable was swapped, but it could not be recorded in the state file ({reason}). The next start of evorag or the cleanup by evorag update fixes the record."
+reverted_not_recorded = "Reverted, but it could not be recorded in the state file ({reason}). evorag is still the previous version. The next start of evorag or the cleanup by evorag update fixes the record."
+foreign_plan = "An update of evorag in another folder ({dir}) stopped partway. Run evorag update apply or rollback with the evorag in that folder to finish it."
+no_prev = "There is no evorag.prev to go back to."
+prev_not_evorag = "evorag.prev does not look like an evorag executable (first line of --version: {line}). Nothing was rolled back."
+leftover = "Cannot delete {name}, a file left from the last update. Check that no other program has it open, delete or move it by hand, then run this again."
+unrelated_leftover = "The install folder has a {name} whose content differs from both evorag and evorag.prev. It was not deleted because it may be your file. Move or delete it, then run this again."
+not_writable = "Cannot write to the install folder {dir}. Nothing was changed. {advice}"
+others_can_write = "Other users can write to {path}. Nothing was changed. {advice}"
+no_state_dir = "Cannot determine the state folder (where the update's lock and record are kept) because the home folder is unknown."
+manual = """
+To recover by hand:
+  1. Exit evorag.
+  2. Run each of evorag(.exe), evorag.new, evorag.tmp, evorag.prev, evorag.prev.old and evorag.rejected in the install folder with --version to see its version. On Windows, copy a file without an extension (such as evorag.new) to another folder under the name evorag.exe before running it.
+  3. Rename the file of the version you want to use to evorag(.exe) and the file of the previous version to evorag.prev, and delete the rest.
+  4. Delete {state} (the record for rollback is deleted with it)."""
+startup_restart = "The update left from last time was settled (possibly by reverting it), so start evorag again. The running evorag differs from the evorag in the install folder, so it stopped without touching the data or the configuration."
+startup_failed = """
+Could not clean up after the last update: {reason}
+evorag starts anyway."""
+startup_failed_restart = """
+Failed while settling the update left from last time: {reason}
+The running evorag differs from the evorag in the install folder (or could not be confirmed to be the same), so it stopped without touching the data or the configuration. Start evorag again."""
+startup_kept = "Kept files in the install folder whose content differs from what the update left: {files}"
+unsupported_proxy_socks = "The SOCKS proxy in the environment variable {var} cannot be used (evorag update supports only http:// and https:// proxies). Stopped without connecting. Fix {var}, or update manually: {url}"
+unsupported_proxy_scheme = "The proxy in the environment variable {var} cannot be used (evorag update supports only proxies that start with http:// or https://; a value without a scheme is not supported either). Stopped without connecting. Fix {var}, or update manually: {url}"
+unsupported_proxy_invalid = "Cannot read the value of the environment variable {var} as a proxy URL. Stopped without connecting. Change {var} to the form http://<host>:<port>, or update manually: {url}"
+run_again = "The update ({op}) that stopped partway last time was settled (possibly by reverting it), so the running evorag differs from the evorag in the install folder. Stopped without going further. Run the same command again."
+reinstall = "To update, reinstall with this command: {command}"
+reinstall_steps = "Reinstall by running these commands in order:"
+reinstall_channel = "This evorag was installed via {channel}, so update it to evorag {version} with the tool you installed it with."
+upgrade_first_reinstall = "This version cannot be updated to directly from the current version ({current}). Install evorag {upgrade_from} first."
+owned_by_other = "{path} is owned by another user. Nothing was changed. {advice}"
+unsafe_owner = "{path} is not owned by the user running evorag. Nothing was changed. {advice}"
+advice_windows = "Reinstall into a folder that only you can write to, such as %LOCALAPPDATA%\\Programs\\evorag."
+advice_unix = "Reinstall into a folder that only you can write to, such as ~/.local/bin."
+detail = "  Detail: {detail}"
+revert_failed = "The replacement failed ({cause}), and reverting it also failed ({reason})."
+reverted_not_recorded_cause = "The replacement failed ({cause}), so it was reverted, but it could not be recorded in the state file ({reason}). evorag is still the previous version. The next start of evorag or the cleanup by evorag update fixes the record."
+
+[cli.update.op]
+open = "open"
+create = "create"
+lock = "lock"
+read = "read"
+write = "write"
+rename = "rename"
+remove = "delete"
+sync = "sync"
+other = "access"
+
+[cli.update.reason]
+exe_name = "the running executable is named {found} (it works only when named {expected})"
+busy = "another evorag update is running"
+state_unreadable = "cannot read the update's state file"
+foreign_plan = "an update in another folder ({dir}) stopped partway"
+plan_pending = "an update that stopped partway is left"
+unknown_role = "evorag(.exe) matches none of the files of the update that stopped partway"
+foreign_file = "{name} is not a file of this update, so it stopped without touching it"
+nothing_to_restore = "there is no file to restore as evorag(.exe)"
+leftover = "cannot delete {name}, a file left from the last update"
+unrelated_leftover = "the content of {name} differs from both evorag and evorag.prev"
+blocking_file = "{path}, which is not an update file, is in the way of the update"
+others_can_write = "other users can write to {path}"
+owned_by_other = "{path} is owned by another user"
+not_writable = "cannot write to the install folder {dir}"
+not_regular_file = "{name} is a symbolic link, a reparse point, or not a regular file"
+unsafe_owner = "{path} is not owned by the user running evorag"
+no_prev = "there is no evorag.prev to go back to"
+prev_not_evorag = "evorag.prev does not look like an evorag executable (first line of --version: {line})"
+prev_probe = "cannot check the version of evorag.prev ({reason})"
+changed = "{name} changed after it was checked"
+same_file = "the file to install is the same as the current evorag(.exe)"
+written_digest = "the SHA-256 of the written evorag.new does not match when read back"
+copied_digest = "the copied {name} did not match its source when read back, so the copy was deleted"
+reverted = "the replacement failed, so it was reverted ({reason})"
+not_recorded = "the swap is done, but it could not be recorded ({reason})"
+reverted_not_recorded = "reverted, but it could not be recorded ({reason})"
+revert_failed = "the replacement failed ({cause}), and reverting it also failed ({reason})"
+file = "failed to {op} {name}"
+io = "failed to {op} {path}"
+state = "could not write the state file ({reason})"
+check_version = "the first line of the new evorag's --version was \"{line}\" (expected evorag {expected})"
+probe_spawn = "could not run it with --version"
+probe_timeout = "--version did not finish within {seconds} seconds"
+probe_failed = "--version exited with a failure code ({status})"
+probe_output = "--version printed too much"
+unknown = "unknown reason"
+
+[cli.update.verify]
+signature_malformed = "the signature is not in minisign's signature format"
+legacy_signature = "the signature is in the old, non-prehashed format"
+unknown_key = "the signing key (ID {key_id}) is unknown"
+bad_signature = "the signature cannot be verified with the key (ID {key_id})"
+trusted_comment = "the signature's trusted comment does not belong to this release.json"
+unknown_schema = "cannot read the format (schema) of release.json"
+malformed = "release.json has missing or malformed fields"
+name_mismatch = "release.json is not for evorag"
+version_mismatch = "the version {found} in release.json differs from {source} ({expected})"
+source_comment = "the version in the signature's comment"
+source_tag = "the version of the tag"
+source_requested = "the requested version"
+not_newer = "version {version} is not newer than the current version {current}"
+date_too_old = "the release date {date} is older than the date of the current version {current}"
+below_upgrade_from = "cannot update directly from the current version (install {upgrade_from} first)"
+no_artifact = "there is no package for this platform ({target})"
+ambiguous_artifact = "there are {count} packages for this platform ({target})"
+too_large = "{what} exceeds {limit} bytes"
+archive = "the package"
+build_date = "this package's version has no readable release date embedded"
+archive_size = "the package is {actual} bytes, not the signed {expected} bytes"
+archive_longer = "the package arrived longer than the signed size of {size} bytes"
+archive_digest = "the SHA-256 of the package does not match"
+archive_unreadable = "cannot extract the package"
+exe_missing = "the package has no executable"
+exe_not_regular = "the executable in the package is not a regular file"
+duplicate_entries = "the package has two or more entries with the same name"
+exe_too_large = "the executable in the package exceeds {limit} bytes"
+unpacked_too_large = "the extracted package exceeds {limit} bytes"
+exe_digest = "the SHA-256 of the extracted executable does not match"
+
+[cli.update.net]
+refused = "refused a redirect to a host that is not allowed"
+too_many_redirects = "too many redirects"
+bad_redirect = "the redirect response has no destination"
+connect = "could not connect"
+timed_out = "did not finish within {seconds} seconds"
+too_large = "the response exceeded {limit} bytes"
+not_found = "not found (404)"
+status = "the server returned {status}"
+
+[doctor]
+config = "Configuration: {path} (readable)"
+llm_ok = "llama-server: can connect to {url} (model {model}, n_ctx {n_ctx}, {build})"
+llm_ng = "llama-server: cannot connect to {url} ({detail})"
+root = "Data root: {path}"
+db_missing = "Database: not yet created (made at the first start)"
+db_ok = "Database: format version {format}, last written by evorag {writer}"
+db_repair = "Database: will be repaired at the next start because of how it was last closed ({detail})"
+db_bad = "Database: cannot be opened ({detail}). At the next start it is moved to broken/ and can be restored from the backups and the journal"
+records = "  {kind}: {count}"
+problem_records = "Unreadable records: {unreadable}, broken records: {corrupt} (moved to quarantine at the next write), records of a newer version: {newer}"
+unknown_kinds = "Records of unknown kinds: {count} (written by a newer evorag; not deleted)"
+quarantine = "Records in quarantine: {count}"
+journal = "Journal: {files} files, {lines} lines (unreadable lines {bad}, lines of a newer version {newer}, partial write {partial} bytes, lines to take in at the next start {pending})"
+backups = "Backups: {count} (latest {latest})"
+backups_none = "Backups: none yet"
+probe_chat = "Model check (chat): prompt processing {prompt} tokens/s, generation {gen} tokens/s. {issues}"
+probe_no_issue = "Thinking can be turned off, and structured output works."
+probe_embed = "Model check (embed): {dims} dimensions, {ms} ms to embed one question"
+probe_rerank = "Model check (rerank): {ms} ms to rerank 6 exchanges"
+probe_failed = "Model check ({role}): failed ({detail})"
+probe_none = "Model check: none yet (done by evorag setup, or in the background after a start)"
+broken = "Broken database files: {count} ({path}, for example). You can delete them if you do not need them"
+compact_pending = "Traces of deleted records remain in the free space of the database file. They are removed at the next start (compact; skipped if there is not enough free space)"
+forget_mismatched = "Messages that do not match what was forgotten: {count} (not used for recall, background work or export)"
+forget_pending = "Re-applying forgets is not finished. Start evorag once to re-apply them"
+forget_journal_lines = "The journal still has {lines} pre-redaction lines of forgotten messages ({directives} forget directives). Start evorag once to rewrite them"
+forget_key_missing = "The forget key (memory.forget_key) cannot be used. Retracting the facts that match forgotten values and recopying the facts in the backups are on hold"
+index_ok = "Lexical index: {docs} entries ({segments} segments)"
+index_missing = "Lexical index: not yet created (made from the conversations at start)"
+index_rebuild = "Lexical index: cannot be read ({detail}). It is rebuilt from the conversations at the next start"
+probe_issues = "Problems: {issues}."
+
+[backups]
+item = "{kind}  {dir}  (journal sequence {seq})"
+none = "There are no backups."
+purge_ask = "All backups ({count}: daily, weekly, and those taken before migrations and rebuilds) will be deleted. You will no longer be able to restore from them. Delete them?"
+purge_declined = "Nothing was deleted."
+purged = "Backups deleted: {count}."
+purge_failed = "Backups deleted: {count}, but some could not be deleted: {detail}"
+
+[notice]
+low_space = "Background work such as backups has stopped because there is not enough free space ({free} MiB free, {need} MiB needed). You can keep chatting. Free up space, then restart evorag."
+
+[probe]
+thinking_not_off = "thinking cannot be turned off in auxiliary calls (check llm.chat.aux_request_extra in the configuration)"
+structured_broken = "structured output is empty or does not fit the schema"
+
+
+[ui.memory]
+header = "Memory of the last reply:"
+no_answer = "This session has no reply yet."
+nothing = "  Nothing attached and no candidates."
+attached = "  [{n}] {title} \"{head}\" attached{score}"
+band = "  Band {title} \"{head}\"{score}"
+below = "  Below {title} \"{head}\"{score}"
+score = " (difference from threshold {delta}, score {raw})"
+score_raw = " (score {raw})"
+sources = "Sources in this session:"
+source = "  [{n}] {title} \"{head}\""
+degraded_no_embed = "Degraded: embeddings are not used (no embedding server, it differs from the record, or a rebuild is running). → Set up an embedding server with evorag setup."
+degraded_embed_deadline = "Degraded: the question could not be embedded in time, so only lexical candidates were used."
+degraded_no_rerank = "Degraded: no reranker is used. → Set up a reranker server with evorag setup."
+degraded_rerank_slow = "Degraded: the reranker is not used because it is slow (per the model check). → Choose a lighter reranker with evorag setup."
+degraded_rerank_deadline = "Degraded: reranking did not finish in time, so the lexical rules chose."
+degraded_rerank_error = "Degraded: the reranker did not answer, so the lexical rules chose."
+degraded_no_threshold = "Degraded: there is no reranker threshold, so nothing was attached automatically and only candidates are shown. → Wait for calibration to finish, or use evorag setup."
+degraded_no_index = "Degraded: the index of earlier conversations could not be used. → Rebuild it with evorag rebuild --index."
+degraded_other = "Degraded: {reason}"
+
+# Display names of attributes (the fact list of `/memory`, 07 §3). Not message keys; the names match
+# the attribute list (crates/evorag-memory/attributes.toml), checked by `cargo xtask i18n`.
+[attr]
+name = "Name"
+relation = "Relationship"
+residence = "Residence"
+dietary = "Foods avoided"
+occupation = "Occupation"
+age = "Age"
+household = "Household"
+pet = "Pets"
+spoken_language = "Languages spoken"
+hometown = "Hometown"
+birthday = "Birthday"
+education = "Education"
+skill = "Skills"
+device = "Devices"
+software = "Software"
+hobby = "Hobbies"
+likes = "Likes"
+dislikes = "Dislikes"
+goal = "Goals"
+event = "Plans"

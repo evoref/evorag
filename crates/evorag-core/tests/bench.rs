@@ -165,6 +165,7 @@ fn config(root: &Path) -> CoreConfig {
         config_file: None,
         evorag_version: env!("CARGO_PKG_VERSION").into(),
         prompt_language: PromptLanguage::Ja,
+        prompt_language_explicit: true,
         generation: Generation::default(),
         request_extra: Default::default(),
         reserve_for_output: None,

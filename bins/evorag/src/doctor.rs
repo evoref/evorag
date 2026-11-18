@@ -290,7 +290,10 @@ pub fn probe_lines(c: &Catalog, role: &str, p: &ModelProbeBody) -> Vec<String> {
             let issues = if issues.is_empty() {
                 c.key(MessageKey::DoctorProbeNoIssue)
             } else {
-                issues.join("。") + "。"
+                c.with(
+                    MessageKey::DoctorProbeIssues,
+                    &[("issues", &issues.join(&c.key(MessageKey::UiSepSentence)))],
+                )
             };
             out.push(c.with(
                 MessageKey::DoctorProbeChat,

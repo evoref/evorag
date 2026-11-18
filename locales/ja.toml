@@ -33,7 +33,7 @@ mask_unavailable = "記録を読めず、伏せる値 (private・忘れた値) �
 [error.facts]
 list_outdated = "一覧が更新されました。指した行が、一覧を表示した後に変わったので、実行しませんでした。新しい一覧の番号で選び直してください。"
 not_allowed = "その行には、その操作はできません (private でない行への /private off、矛盾でない行への /memory accept など)。"
-disabled = "事実の鍵 (memory.forget_key) が使えないので、事実への操作はできません (evorag doctor で詳しく見られます)。"
+disabled = "忘れるの鍵 (memory.forget_key) が使えないので、事実への操作はできません (evorag doctor で詳しく見られます)。"
 blocked = "その値は忘れた値なので、戻せません。/memory forgotten と /memory unblock で、再び覚えない印を先に解いてください。"
 not_saved = "事実への操作を記録できませんでした ({detail})。"
 no_list = "番号の付いた一覧がまだありません。先に {list} を打ってください。"
@@ -65,6 +65,7 @@ failed = "(失敗)"
 no_reply = "(応答なし)"
 unverified = "(本文を確かめられません。忘れた内容と本文が合わないので、表示しません)"
 hidden = "[非表示]"
+redacted = "[伏せ字]"
 
 [ui.status]
 idle = "待機中"
@@ -106,7 +107,7 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /delete          今のセッションを消す (確認あり)
 /retry           直前の応答を作り直す
 /good, /bad [理由]  直前の応答を評価する
-/model [名前]    使っているモデルの表示と、設定にある候補への切り替え
+/model           記録したモデルと繋がっているモデルの表示 (切り替えは evorag setup)
 /sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
 /memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由、このセッションの出典、事実の一覧 (F1…)
 /memory accept F1    矛盾の値を今の値にする
@@ -149,6 +150,7 @@ contested = "矛盾 {n}"
 
 [ui.facts]
 title = "メモリ"
+label = "{subject}・{attr}"
 header = "事実の一覧 (利用者の発言から作ったもの):"
 empty = "  まだ事実はありません。"
 self = "あなた"
@@ -166,7 +168,7 @@ mark_history = " (履歴 {n} 件)"
 mark_private = " [private]"
 note_sleep_off = "  事実を新しく作っていません (memory.sleep_time = false)。"
 note_probe = "  モデルの点検で型縛りの出力が使えなかったので、事実を新しく作っていません (evorag doctor)。"
-note_key = "  事実の鍵 (memory.forget_key) が使えないので、事実の機能を止めています。事実への操作もできません (evorag doctor)。"
+note_key = "  忘れるの鍵 (memory.forget_key) が使えないので、事実の機能を止めています。事実への操作もできません (evorag doctor)。"
 hint = "/forget F1・/private F1・/private off F1・/memory accept F1・/memory history F1 で操作します。番号はこの一覧のものです。"
 history_title = "{subject}・{attr} の置き換えの履歴:"
 history_row = "  H{n} {value} ({at} まで){marks}"
@@ -216,8 +218,8 @@ target = "忘れる事実: {label}"
 counting = "数えています…"
 samples_redact = "出典の発話を伏せ字にします (前 → 後):"
 samples_hide = "発話はそのままで、想起で添える本文の中の値を [非表示] にします (前 → 後):"
-sample_before = "  {who} 前: {text}"
-sample_after = "        後: {text}"
+sample_before = "  前 ({who}): {text}"
+sample_after = "  後: {text}"
 no_samples = "  伏せる本文はありません (事実だけを消します)。"
 others = "ほかのターンで値が一致: {turns} 件 ({matches} 箇所)"
 history = "まとめて忘れられる履歴の値: {n} 件"
@@ -294,6 +296,12 @@ unknown_command = "知らないコマンドです: {name} (/help で一覧を表
 not_yet = "{name} は、この版ではまだ使えません。"
 editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
+# 並べた語・項目・文の区切り。
+[ui.sep]
+comma = "、"
+dot = "・"
+sentence = "。"
+
 [cli]
 model_mismatch = """応答のモデルが、このデータ根に記録したモデルと違います。
   記録したモデル: {recorded}
@@ -322,6 +330,7 @@ config_ignored = "設定のキー {key} は、この版ではまだ使いませ�
 config_migrated = "設定ファイル {path} を今の版の形に書き換えました (元のファイルは {backup} に残しました)。"
 prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
 error = "エラー: {detail}"
+env_unset = "(未設定)"
 unsafe_location = "データ根か退避先が危ない置き場所です: {detail}\n同期フォルダやネットワークの上では、データが壊れることがあります。別の場所を --data-root か設定の storage.data_root で指定してください。どうしても使うときは、設定に storage.allow_unsafe_location = true を書くと警告だけになります。"
 location_warning = "置き場所の注意: {detail}"
 broken = "データベースのファイルが壊れていたので、消さずに {moved_to} へ移しました ({reason})。"
@@ -338,7 +347,7 @@ rebuild_facts_model_mismatch = "応答のモデルが、このデータ根に記
 rebuild_facts_no_probe = "接続しているモデルの点検の結果が無いので、事実を作り直せませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動してモデルの点検を済ませてから、もう一度実行してください。"
 rebuild_facts_probe_failed = "接続しているモデルは、点検で型縛りの出力か思考を切ることが通らなかったので、事実を抽出できません。\n事実と派生データは前のまま変えていません。"
 rebuild_facts_context_too_small = "llama-server のスロットの文脈 ({n_ctx} トークン) が、事実の抽出には足りません。\n事実と派生データは前のまま変えていません。"
-rebuild_facts_key_unusable = "値の鍵 (memory.forget_key) を使えないので、事実を作り直せませんでした ({detail})。\n事実と派生データは前のまま変えていません。evorag doctor で状態を確かめてください。"
+rebuild_facts_key_unusable = "忘れるの鍵 (memory.forget_key) を使えないので、事実を作り直せませんでした ({detail})。\n事実と派生データは前のまま変えていません。evorag doctor で状態を確かめてください。"
 rebuild_facts_forget_pending = "忘れるの当て直しが済んでいないので、事実を作り直しませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動して終了してから、もう一度実行してください。"
 rebuild_facts_newer = "このデータ根には、新しい版の evorag が書いた事実が {count} 件あるので、事実を作り直しませんでした (新しい版の記録を消さずに残すため)。\n事実と派生データは前のまま変えていません。作り直すときは、新しい版の evorag で実行してください。"
 rebuild_facts_rejected = "llama-server ({url}) が事実の抽出の要求を断ったので、作り直しを止めました: {detail}\n事実と派生データは前のまま変えていません。llama-server のログと設定 (文脈の長さ・型縛りの出力) を確かめてから、もう一度 evorag rebuild --facts を実行してください。"
@@ -348,7 +357,7 @@ restored_from_journal = "退避が無いので、ジャーナルだけから会�
 repaired = "直しました (退避: {backup})。\n- 開くときにジャーナルから取り込んだ行 {replayed} 件、削除の行から消した記録 {deletes} 件\n- ジャーナルから戻した記録 {restored} 件 (改訂の番号を下げるので当てなかった行 {lower} 件、壊れていて隔離した記録 {quarantined} 件)、戻したデータ根の値 (プロンプトの言語など) {metas} 件、チェックサムが合わず読まなかったジャーナルの行 {bad_lines} 行\n- 関係: 足した {links_added} 件、消した {links_removed} 件 / 副索引: 足した {lookups_added} 件、消した {lookups_removed} 件\n索引と退避の整理は、次に evorag を開いたときに行います。"
 repaired_forgets = "忘れるを当て直しました (伏せ字にしたターン {patched} 件、取り消した事実 {retracted} 件、消した派生の記録 {deleted} 件、指示と合わないターン {mismatched} 件)。"
 repair_journal_pending = "ジャーナルから伏せ字の前の行を除けませんでした。次に evorag を開いたときに試し直します。"
-repair_key_missing = "記憶の鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しを保留しました。"
+repair_key_missing = "忘れるの鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しを保留しました。"
 repair_failed = "直せませんでした: {detail}"
 repair_failed_after_store = "ジャーナルから記録 {restored} 件を戻し、関係と副索引を作り直しました (関係: 足した {links_added} 件、消した {links_removed} 件 / 副索引: 足した {lookups_added} 件、消した {lookups_removed} 件) が、続く処理に失敗しました: {detail}\n直す前のデータは退避 {backup} にあります。もう一度 evorag repair を実行すると、続きの処理をやり直せます。前に戻したいときは evorag restore {backup} で戻せます。"
 repair_broken_hint = "repair は壊れた DB のファイルを直せません。evorag backups list で退避を確かめてから、evorag restore <退避のフォルダ> で戻してください (退避の後の会話はジャーナルから足します)。"
@@ -363,7 +372,7 @@ export_refused_forget = "忘れるの当て直しが済んでいないので、�
 compact_low_space = "空きが足りないので、消した記録の跡をデータベースのファイルから除く処理 (compact) を見送りました (空き {free} MiB、必要 {need} MiB)。空きを作ると、次の起動で行います。"
 compact_failed = "消した記録の跡をデータベースのファイルから除く処理 (compact) ができませんでした ({detail})。次の起動でやり直します。"
 forget_mismatched = "忘れた内容と本文が合わない発言が {count} 件あります。想起・裏の処理・書き出しには使いません (evorag doctor で件数を確かめられます)。"
-forget_key_missing = "記憶の鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています。発言の伏せ字とジャーナルの書き直しは済ませました (evorag doctor で確かめられます)。"
+forget_key_missing = "忘れるの鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています。発言の伏せ字とジャーナルの書き直しは済ませました (evorag doctor で確かめられます)。"
 forget_journal_pending = "忘れた発言の伏せ字にする前の行が、会話のジャーナルに残っています (ほかのプログラムがファイルを開いているため、書き直せませんでした)。手が空いたときに書き直しを試します。"
 setup_guide = """
 llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
@@ -378,7 +387,7 @@ llama-server が見つかりませんでした (探した接続先: {tried})。�
    別のポートで起動したときは --url http://127.0.0.1:<ポート> を付けます。"""
 setup_needs_key = "llama-server ({url}) は API キーを求めています。キーを入れた環境変数の名前を --api-key-env で指定して、もう一度実行してください。"
 setup_found = "llama-server を見つけました: {url} (モデル {model}、n_ctx {n_ctx}、{build})"
-setup_ask_language = "システムプロンプトの言語を選んでください。このデータ根では後から変えられません [ja/en] (Enter で ja):"
+setup_ask_language = "システムプロンプトの言語を選んでください [ja/en] (Enter で {default})。このデータ根では後から変えられません。答える言語だけを変えたいときは /style language で変えられます:"
 setup_ask_overwrite = "設定ファイル {path} を書き換えますか? 元のファイルは {backup} に残します [y/N]:"
 setup_written = "設定を {path} に書きました。evorag で会話を始められます。"
 setup_unchanged = "設定 {path} は今のままで使えます。"
@@ -431,6 +440,39 @@ calibrating = "リランカーのしきい値を、同梱の事例で求めて�
 calibrated = "リランカーのしきい値を記録しました: {threshold} (帯の下限 {band})。順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。"
 calibration_failed = "リランカーが較正の基準に届きませんでした (順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。どちらも 8 割以上が要ります)。以前の会話は自動では添えず、候補として示します。別のリランカーを勧めます。"
 probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
+# evorag setup が書く設定ファイルの説明 (TOML のコメント。各行を "# " で始める)。
+config_header = "# evorag の設定 (evorag setup が書いた。キーの説明は docs/07-tui-config.md §4)"
+config_prompt_language = "# システムプロンプトの言語 (このデータ根では後から変えられない)"
+config_router_model = "# ルーターモードのモデルの名前 (プリセットの節の名前)"
+config_api_key_env = "# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書く"
+
+# evorag --help の文 (clap が足す --help・--version の文と見出しは英語のまま)。
+[cli.help]
+about = "ローカルの llama-server と、長期のメモリを持って会話する"
+data_root = "データ根 (設定の storage.data_root より優先する)"
+config = "設定ファイル"
+setup = "llama-server を探して能力を確かめ、設定ファイルを書く"
+setup_url = "接続先 (省くと、設定の llm.chat.url と 127.0.0.1:8080・8081 を探す)"
+setup_api_key_env = "API キーを入れた環境変数の名前 (llama-server を --api-key で起動したとき)"
+setup_yes = "尋ねずに進める (プロンプトの言語は、prompt.language が無ければ UI の言語。設定ファイルは書き換える)"
+doctor = "設定・接続・データ根・ジャーナル・退避を、読むだけで点検する"
+backups = "退避の操作"
+backups_list = "退避の一覧 (新しい順)"
+backups_purge = "すべての退避 (日次・週次・移行と作り直しの前の退避) を消す"
+backups_purge_yes = "尋ねずに消す"
+export = "記録を種類ごとの JSON Lines に書き出す (設定は API キーを除いて写す)"
+export_out = "書き出すフォルダ (空か、まだ無いフォルダ)"
+rebuild = "派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)"
+rebuild_index = "索引だけを作り直す"
+rebuild_facts = "事実も会話から抽出し直す (llama-server を使う。事実への指示と検証済みの訂正は当て直す)"
+restore = "退避から戻す (その後の会話はジャーナルから足す)"
+restore_backup = "退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb"
+repair = "副索引と関係を記録から作り直し、ジャーナルにあって DB に無い記録を戻し、忘れる・削除を当て直す (先に退避する)"
+update = "本体の更新 (新しい版の確認・置き換え・巻き戻し)"
+update_check = "新しい版があるかを確かめる (何も書き換えない)"
+update_apply = "新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)"
+update_apply_version = "入れる版 (省くと、いちばん新しい版)"
+update_rollback = "evorag.prev に戻す (通信しない)"
 
 [cli.update]
 up_to_date = "新しい版はありません (今の版 {current} が最新です)。"
@@ -648,10 +690,11 @@ compact_pending = "データベースのファイルの空きの領域に、消�
 forget_mismatched = "忘れた内容と本文が合わない発言: {count} 件 (想起・裏の処理・書き出しには使いません)"
 forget_pending = "忘れるの当て直しが済んでいません。evorag を一度起動すると当て直します"
 forget_journal_lines = "ジャーナルに、忘れた発言の伏せ字にする前の行が {lines} 行残っています (忘れるの指示 {directives} 件)。evorag を一度起動すると書き直します"
-forget_key_missing = "記憶の鍵 (memory.forget_key) が使えません。忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています"
+forget_key_missing = "忘れるの鍵 (memory.forget_key) が使えません。忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
 index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"
+probe_issues = "{issues}。"
 
 [backups]
 item = "{kind}  {dir}  (ジャーナルの連番 {seq})"
