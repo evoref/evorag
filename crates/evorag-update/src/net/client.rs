@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use url::Url;
 
+use super::proxy::{self, ProxyRefused};
 use super::transport::UreqTransport;
 use super::{Fetcher, NetError, Resource, platform, policy};
 use crate::Version;
@@ -42,27 +43,47 @@ pub(crate) trait Transport {
 #[derive(Debug)]
 pub struct HttpFetcher {
     transport: UreqTransport,
+    /// 環境変数のプロキシが使えない理由 ([`Fetcher::preflight`] が断る)。
+    proxy_refused: Option<ProxyRefused>,
 }
 
 impl HttpFetcher {
-    /// User-Agent に `version` を入れる取得 (12 §7.5)。通信しない。
+    /// User-Agent に `version` を入れる取得 (12 §7.5)。通信しない。プロキシは環境変数から選ぶ
+    /// ([`super::proxy`])。
     ///
     /// 暗号の実装は最初の通信で組むので、通信の前に [`Fetcher::preflight`] を呼ぶ。
     #[must_use]
     pub fn new(version: Version) -> Self {
+        Self::with_env(version, proxy::from_env)
+    }
+
+    /// [`Self::new`] の、環境変数の読み方 `get` を受け取る形 (試験のため)。
+    pub(crate) fn with_env(version: Version, get: impl Fn(&str) -> Option<String>) -> Self {
+        let (proxy, proxy_refused) = match proxy::choose(get) {
+            Ok(p) => (p, None),
+            Err(e) => (None, Some(e)),
+        };
         Self {
-            transport: UreqTransport::new(&policy::user_agent(version)),
+            transport: UreqTransport::new(&policy::user_agent(version), proxy),
+            proxy_refused,
         }
     }
 }
 
 impl Fetcher for HttpFetcher {
     fn preflight(&self) -> Result<(), NetError> {
+        if let Some(e) = self.proxy_refused {
+            return Err(NetError::UnsupportedProxy(e));
+        }
         platform::check_cpu()?;
         platform::check_cert_roots()
     }
 
     fn fetch(&self, url: &str, resource: Resource) -> Result<Vec<u8>, NetError> {
+        // 使えないプロキシのときは、直接にも繋がない (preflight を飛ばした呼び方への備え)。
+        if let Some(e) = self.proxy_refused {
+            return Err(NetError::UnsupportedProxy(e));
+        }
         fetch_with(
             &self.transport,
             url,
@@ -364,6 +385,85 @@ mod tests {
                 reset: Some(1_795_000_000)
             })
         ));
+    }
+
+    /// 使えないプロキシ (SOCKS など) は、通信の前の確かめと取得の両方で、どの変数かを示して断る。
+    #[test]
+    fn an_unsupported_proxy_is_refused_before_any_connection() {
+        let get = |name: &str| (name == "ALL_PROXY").then(|| "socks5://127.0.0.1:1".to_owned());
+        let f = HttpFetcher::with_env(Version::new(0, 4, 0), get);
+        let expected = ProxyRefused {
+            var: "ALL_PROXY",
+            problem: proxy::ProxyProblem::Socks,
+        };
+        assert!(matches!(
+            f.preflight(),
+            Err(NetError::UnsupportedProxy(e)) if e == expected
+        ));
+        assert!(matches!(
+            f.fetch(policy::RELEASES_URL, Resource::ReleaseList),
+            Err(NetError::UnsupportedProxy(e)) if e == expected
+        ));
+        assert_eq!(
+            NetError::UnsupportedProxy(expected).exit_code(),
+            1,
+            "a refused proxy ends with 1"
+        );
+    }
+
+    /// 本文を読む途中の時間切れは、接続の失敗でなく時間切れとして扱う (12 §7.5)。
+    #[test]
+    fn a_timeout_while_reading_the_body_is_a_timeout() {
+        struct Stalls;
+        impl Read for Stalls {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "stalled"))
+            }
+        }
+        let deadline = Instant::now() + LONG;
+        assert!(matches!(
+            read_limited(Stalls, 100, deadline, LONG),
+            Err(NetError::TimedOut { limit }) if limit == LONG
+        ));
+        struct Resets;
+        impl Read for Resets {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "reset",
+                ))
+            }
+        }
+        assert!(matches!(
+            read_limited(Resets, 100, deadline, LONG),
+            Err(NetError::Connect { .. })
+        ));
+    }
+
+    /// 429 か 403 で `Retry-After` があれば、回数の制限として 1 で終わる (12 §7.5、07 §5)。
+    #[test]
+    fn retry_after_on_429_or_403_is_a_rate_limit() {
+        for status in [429, 403] {
+            let t = FakeTransport::with(vec![(
+                status,
+                Headers {
+                    retry_after: Some("60".into()),
+                    ..Headers::default()
+                },
+                Vec::new(),
+            )]);
+            let e = fetch_with(&t, START, 100, LONG).expect_err("rate limited");
+            assert!(
+                matches!(e, NetError::RateLimited { reset: Some(_) }),
+                "{status}: {e}"
+            );
+            assert_eq!(e.exit_code(), 1);
+        }
+        // 404 は無いもの (呼ぶ側が、無い版・取り下げた版として 1 で示す)。
+        let t = FakeTransport::with(vec![(404, Headers::default(), Vec::new())]);
+        let e = fetch_with(&t, START, 100, LONG).expect_err("404");
+        assert!(matches!(e, NetError::NotFound), "{e}");
+        assert_eq!(e.exit_code(), 1);
     }
 
     #[test]

@@ -716,12 +716,15 @@ fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
 }
 
 /// `evorag update …` を、状態のフォルダを試験のフォルダに向けて動かす。
+///
+/// 誤って本物の GitHub に繋がないように、プロキシを閉じたポート (`http://127.0.0.1:1`) に向け、
+/// `NO_PROXY` を消す (通信に進んでも、プロキシへの接続で失敗する)。
 fn evorag_update(dir: &Path, config: &str, args: &[&str]) -> Output {
     std::fs::write(dir.join("config.toml"), config).unwrap();
     let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
-    Command::new(exe)
-        .arg("--config")
+    let mut cmd = Command::new(exe);
+    cmd.arg("--config")
         .arg(dir.join("config.toml"))
         .arg("--data-root")
         .arg(dir.join("data"))
@@ -730,9 +733,14 @@ fn evorag_update(dir: &Path, config: &str, args: &[&str]) -> Output {
         .env("LOCALAPPDATA", dir.join("local"))
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_CONFIG_HOME", dir.join("config"))
-        .env("XDG_DATA_HOME", dir.join("share"))
-        .output()
-        .unwrap()
+        .env("XDG_DATA_HOME", dir.join("share"));
+    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        cmd.env(var, "http://127.0.0.1:1");
+    }
+    for var in ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] {
+        cmd.env_remove(var);
+    }
+    cmd.output().unwrap()
 }
 
 /// verifies: AC-FR-806-1 (入れ方が zip でない evorag では、`update apply` と `update rollback` が通信せず、
@@ -811,4 +819,68 @@ fn update_apply_refuses_an_unreadable_version() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(err.contains("latest"), "{err}");
+}
+
+/// `evorag update` は設定を移行しない (03 §12.3 の移行は TUI と、ほかのサブコマンドだけが行う)。版の
+/// 指定の先頭の `v` は省いてよい (読めない版として断らない)。
+#[test]
+fn update_never_migrates_the_config_and_accepts_a_leading_v() {
+    let dir = TempDir::new("cli-update-no-migrate");
+    // 版 0 の設定 (`version` が無い)。
+    let old = "[storage]
+allow_unsafe_location = false
+";
+    for args in [&["check"][..], &["apply", "v9.9.9"], &["rollback"]] {
+        let out = evorag_update(dir.path(), old, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(4), "{args:?}: {err}");
+        assert!(!err.contains("を読めません (例: 0.4.0)"), "{args:?}: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            old,
+            "{args:?}: the config was rewritten"
+        );
+        assert!(
+            !dir.path().join("config.toml.bak-v0").exists(),
+            "{args:?}: a migration backup was made"
+        );
+    }
+}
+
+/// この版の読めない新しい形式の設定でも、`evorag update` は更新に要るキーだけを読んで動く。足した鍵の誤りは
+/// 4 のまま。
+#[test]
+fn update_works_with_a_config_of_a_newer_format() {
+    let dir = TempDir::new("cli-update-newer-config");
+    let newer = "version = 99
+[storage]
+future_key = 1
+[future]
+x = 1
+";
+    let out = evorag_update(dir.path(), newer, &["apply", "latest"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // 設定は読めたので、版の指定を読むところまで進む (1)。
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
+    let out = evorag_update(
+        dir.path(),
+        "version = 99
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+    // 今の形式の設定の誤りは、これまでどおり 4。
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+unknown = 1
+",
+        &["check"],
+    );
+    assert_eq!(out.status.code(), Some(4));
 }

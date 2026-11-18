@@ -575,7 +575,7 @@ message_keys! {
     CliUpdateBusy => "cli.update.busy",
     /// 引数: `path`・`pid`。
     CliUpdateDataRootInUse => "cli.update.data_root_in_use",
-    /// 引数: `path`・`detail`。
+    /// 引数: `path`。
     CliUpdateDataRootLock => "cli.update.data_root_lock",
     /// 引数: `requested`・`current`。
     CliUpdateNotNewer => "cli.update.not_newer",
@@ -585,9 +585,9 @@ message_keys! {
     CliUpdateCpu => "cli.update.cpu",
     /// 引数: `arch`・`url`。
     CliUpdateArch => "cli.update.arch",
-    /// 引数: `detail`・`url`。
+    /// 引数: `url`。
     CliUpdateNoRoots => "cli.update.no_roots",
-    /// 引数: `detail`・`url`。
+    /// 引数: `reason`・`url`。
     CliUpdateNetwork => "cli.update.network",
     /// 引数: `reset`。
     CliUpdateRateLimited => "cli.update.rate_limited",
@@ -596,41 +596,189 @@ message_keys! {
     CliUpdateMissingFile => "cli.update.missing_file",
     /// 引数: `url`。
     CliUpdateListUnreadable => "cli.update.list_unreadable",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateTampered => "cli.update.tampered",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateUnusable => "cli.update.unusable",
     /// 引数: `url`。
     CliUpdateUnknownSchema => "cli.update.unknown_schema",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateFailed => "cli.update.failed",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateReverted => "cli.update.reverted",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateNotRecorded => "cli.update.not_recorded",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateRevertedNotRecorded => "cli.update.reverted_not_recorded",
     /// 引数: `dir`。
     CliUpdateForeignPlan => "cli.update.foreign_plan",
     CliUpdateNoPrev => "cli.update.no_prev",
     /// 引数: `line`。
     CliUpdatePrevNotEvorag => "cli.update.prev_not_evorag",
-    /// 引数: `name`・`detail`。
+    /// 引数: `name`。
     CliUpdateLeftover => "cli.update.leftover",
     /// 引数: `name`。
     CliUpdateUnrelatedLeftover => "cli.update.unrelated_leftover",
-    /// 引数: `dir`・`detail`。
+    /// 引数: `dir`・`advice`。
     CliUpdateNotWritable => "cli.update.not_writable",
-    /// 引数: `dir`。
+    /// 引数: `path`・`advice`。
     CliUpdateOthersCanWrite => "cli.update.others_can_write",
     CliUpdateNoStateDir => "cli.update.no_state_dir",
     /// 引数: `state`。
     CliUpdateManual => "cli.update.manual",
     CliUpdateStartupRestart => "cli.update.startup_restart",
-    /// 引数: `detail`。
+    /// 引数: `reason`。
     CliUpdateStartupFailed => "cli.update.startup_failed",
     /// 引数: `files`。
     CliUpdateStartupKept => "cli.update.startup_kept",
+    /// 引数: `var`・`url`。
+    CliUpdateUnsupportedProxy => "cli.update.unsupported_proxy",
+    /// 引数: `op`。
+    CliUpdateRunAgain => "cli.update.run_again",
+    /// 引数: `command`。
+    CliUpdateReinstall => "cli.update.reinstall",
+    CliUpdateReinstallSteps => "cli.update.reinstall_steps",
+    /// 引数: `channel`・`version`。
+    CliUpdateReinstallChannel => "cli.update.reinstall_channel",
+    /// 引数: `current`・`upgrade_from`。
+    CliUpdateUpgradeFirstReinstall => "cli.update.upgrade_first_reinstall",
+    /// 引数: `path`・`advice`。
+    CliUpdateOwnedByOther => "cli.update.owned_by_other",
+    /// 引数: `path`・`advice`。
+    CliUpdateUnsafeOwner => "cli.update.unsafe_owner",
+    CliUpdateAdviceWindows => "cli.update.advice_windows",
+    CliUpdateAdviceUnix => "cli.update.advice_unix",
+    /// 引数: `detail`。
+    CliUpdateDetail => "cli.update.detail",
+    /// 引数: `cause`・`reason`。
+    CliUpdateRevertFailed => "cli.update.revert_failed",
+    /// 引数: `cause`・`reason`。
+    CliUpdateRevertedNotRecordedCause => "cli.update.reverted_not_recorded_cause",
+    // 理由の句と操作の名前 (置き換え・検証・通信の失敗を、英語の文言を差し込まずに示す、FR-907)。
+    CliUpdateOpOpen => "cli.update.op.open",
+    CliUpdateOpCreate => "cli.update.op.create",
+    CliUpdateOpLock => "cli.update.op.lock",
+    CliUpdateOpRead => "cli.update.op.read",
+    CliUpdateOpWrite => "cli.update.op.write",
+    CliUpdateOpRename => "cli.update.op.rename",
+    CliUpdateOpRemove => "cli.update.op.remove",
+    CliUpdateOpSync => "cli.update.op.sync",
+    CliUpdateOpOther => "cli.update.op.other",
+    /// 引数: `found`・`expected`。
+    CliUpdateReasonExeName => "cli.update.reason.exe_name",
+    CliUpdateReasonBusy => "cli.update.reason.busy",
+    CliUpdateReasonStateUnreadable => "cli.update.reason.state_unreadable",
+    /// 引数: `dir`。
+    CliUpdateReasonForeignPlan => "cli.update.reason.foreign_plan",
+    CliUpdateReasonPlanPending => "cli.update.reason.plan_pending",
+    CliUpdateReasonUnknownRole => "cli.update.reason.unknown_role",
+    /// 引数: `name`。
+    CliUpdateReasonForeignFile => "cli.update.reason.foreign_file",
+    CliUpdateReasonNothingToRestore => "cli.update.reason.nothing_to_restore",
+    /// 引数: `name`。
+    CliUpdateReasonLeftover => "cli.update.reason.leftover",
+    /// 引数: `name`。
+    CliUpdateReasonUnrelatedLeftover => "cli.update.reason.unrelated_leftover",
+    /// 引数: `path`。
+    CliUpdateReasonBlockingFile => "cli.update.reason.blocking_file",
+    /// 引数: `path`。
+    CliUpdateReasonOthersCanWrite => "cli.update.reason.others_can_write",
+    /// 引数: `path`。
+    CliUpdateReasonOwnedByOther => "cli.update.reason.owned_by_other",
+    /// 引数: `dir`。
+    CliUpdateReasonNotWritable => "cli.update.reason.not_writable",
+    /// 引数: `name`。
+    CliUpdateReasonNotRegularFile => "cli.update.reason.not_regular_file",
+    /// 引数: `path`。
+    CliUpdateReasonUnsafeOwner => "cli.update.reason.unsafe_owner",
+    CliUpdateReasonNoPrev => "cli.update.reason.no_prev",
+    /// 引数: `line`。
+    CliUpdateReasonPrevNotEvorag => "cli.update.reason.prev_not_evorag",
+    /// 引数: `reason`。
+    CliUpdateReasonPrevProbe => "cli.update.reason.prev_probe",
+    /// 引数: `name`。
+    CliUpdateReasonChanged => "cli.update.reason.changed",
+    CliUpdateReasonSameFile => "cli.update.reason.same_file",
+    CliUpdateReasonWrittenDigest => "cli.update.reason.written_digest",
+    /// 引数: `name`。
+    CliUpdateReasonCopiedDigest => "cli.update.reason.copied_digest",
+    /// 引数: `reason`。
+    CliUpdateReasonReverted => "cli.update.reason.reverted",
+    /// 引数: `reason`。
+    CliUpdateReasonNotRecorded => "cli.update.reason.not_recorded",
+    /// 引数: `reason`。
+    CliUpdateReasonRevertedNotRecorded => "cli.update.reason.reverted_not_recorded",
+    /// 引数: `cause`・`reason`。
+    CliUpdateReasonRevertFailed => "cli.update.reason.revert_failed",
+    /// 引数: `name`・`op`。
+    CliUpdateReasonFile => "cli.update.reason.file",
+    /// 引数: `path`・`op`。
+    CliUpdateReasonIo => "cli.update.reason.io",
+    /// 引数: `reason`。
+    CliUpdateReasonState => "cli.update.reason.state",
+    /// 引数: `line`・`expected`。
+    CliUpdateReasonCheckVersion => "cli.update.reason.check_version",
+    CliUpdateReasonProbeSpawn => "cli.update.reason.probe_spawn",
+    /// 引数: `seconds`。
+    CliUpdateReasonProbeTimeout => "cli.update.reason.probe_timeout",
+    /// 引数: `status`。
+    CliUpdateReasonProbeFailed => "cli.update.reason.probe_failed",
+    CliUpdateReasonProbeOutput => "cli.update.reason.probe_output",
+    CliUpdateReasonUnknown => "cli.update.reason.unknown",
+    CliUpdateVerifySignatureMalformed => "cli.update.verify.signature_malformed",
+    CliUpdateVerifyLegacySignature => "cli.update.verify.legacy_signature",
+    /// 引数: `key_id`。
+    CliUpdateVerifyUnknownKey => "cli.update.verify.unknown_key",
+    /// 引数: `key_id`。
+    CliUpdateVerifyBadSignature => "cli.update.verify.bad_signature",
+    CliUpdateVerifyTrustedComment => "cli.update.verify.trusted_comment",
+    CliUpdateVerifyUnknownSchema => "cli.update.verify.unknown_schema",
+    CliUpdateVerifyMalformed => "cli.update.verify.malformed",
+    CliUpdateVerifyNameMismatch => "cli.update.verify.name_mismatch",
+    /// 引数: `found`・`source`・`expected`。
+    CliUpdateVerifyVersionMismatch => "cli.update.verify.version_mismatch",
+    CliUpdateVerifySourceComment => "cli.update.verify.source_comment",
+    CliUpdateVerifySourceTag => "cli.update.verify.source_tag",
+    CliUpdateVerifySourceRequested => "cli.update.verify.source_requested",
+    /// 引数: `version`・`current`。
+    CliUpdateVerifyNotNewer => "cli.update.verify.not_newer",
+    /// 引数: `date`・`current`。
+    CliUpdateVerifyDateTooOld => "cli.update.verify.date_too_old",
+    /// 引数: `upgrade_from`。
+    CliUpdateVerifyBelowUpgradeFrom => "cli.update.verify.below_upgrade_from",
+    /// 引数: `target`。
+    CliUpdateVerifyNoArtifact => "cli.update.verify.no_artifact",
+    /// 引数: `target`・`count`。
+    CliUpdateVerifyAmbiguousArtifact => "cli.update.verify.ambiguous_artifact",
+    /// 引数: `what`・`limit`。
+    CliUpdateVerifyTooLarge => "cli.update.verify.too_large",
+    CliUpdateVerifyArchive => "cli.update.verify.archive",
+    CliUpdateVerifyBuildDate => "cli.update.verify.build_date",
+    /// 引数: `actual`・`expected`。
+    CliUpdateVerifyArchiveSize => "cli.update.verify.archive_size",
+    /// 引数: `size`。
+    CliUpdateVerifyArchiveLonger => "cli.update.verify.archive_longer",
+    CliUpdateVerifyArchiveDigest => "cli.update.verify.archive_digest",
+    CliUpdateVerifyArchiveUnreadable => "cli.update.verify.archive_unreadable",
+    CliUpdateVerifyExeMissing => "cli.update.verify.exe_missing",
+    CliUpdateVerifyExeNotRegular => "cli.update.verify.exe_not_regular",
+    CliUpdateVerifyDuplicateEntries => "cli.update.verify.duplicate_entries",
+    /// 引数: `limit`。
+    CliUpdateVerifyExeTooLarge => "cli.update.verify.exe_too_large",
+    /// 引数: `limit`。
+    CliUpdateVerifyUnpackedTooLarge => "cli.update.verify.unpacked_too_large",
+    CliUpdateVerifyExeDigest => "cli.update.verify.exe_digest",
+    CliUpdateNetRefused => "cli.update.net.refused",
+    CliUpdateNetTooManyRedirects => "cli.update.net.too_many_redirects",
+    CliUpdateNetBadRedirect => "cli.update.net.bad_redirect",
+    CliUpdateNetConnect => "cli.update.net.connect",
+    /// 引数: `seconds`。
+    CliUpdateNetTimedOut => "cli.update.net.timed_out",
+    /// 引数: `limit`。
+    CliUpdateNetTooLarge => "cli.update.net.too_large",
+    CliUpdateNetNotFound => "cli.update.net.not_found",
+    /// 引数: `status`。
+    CliUpdateNetStatus => "cli.update.net.status",
     // `evorag doctor` と `evorag backups list` (03 §10)。
     /// 引数: `path`。
     DoctorConfig => "doctor.config",

@@ -140,6 +140,22 @@ pub struct ResumeReport {
     pub running_replaced: bool,
 }
 
+impl ResumeReport {
+    /// 試験のための結果 (evorag-update の外の試験が、続きの後の扱いを確かめるために作る)。
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub const fn for_test(op: Op, outcome: ResumeOutcome, running_replaced: bool) -> Self {
+        Self {
+            op,
+            outcome,
+            untouched: Vec::new(),
+            missing: Vec::new(),
+            left: Vec::new(),
+            running_replaced,
+        }
+    }
+}
+
 /// 名前での片付けの結果。
 #[derive(Debug, Default)]
 #[non_exhaustive]

@@ -430,6 +430,17 @@ impl Core {
         cfg: CoreConfig,
         llm: Arc<dyn LlmClient>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>, StartReport), StartError> {
+        Self::start_locked(cfg, llm, None).await
+    }
+
+    /// [`Self::start`] の、呼ぶ側が先に取ったデータ根のロック `lock` を持ったまま開く形 (起動の更新の
+    /// 片付けから、ロックを放さずにストアを開く、12 §7.3)。`lock` が `None` なら、ストアが取る。開く前に
+    /// 止めたとき (llama-server に繋がらないなど) は、`lock` を放す。
+    pub async fn start_locked(
+        cfg: CoreConfig,
+        llm: Arc<dyn LlmClient>,
+        lock: Option<evorag_store::lock::DataRootLock>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Event>, StartReport), StartError> {
         llm.health().await.map_err(StartError::LlmUnreachable)?;
         let server = llm
             .server_info()
@@ -455,14 +466,18 @@ impl Core {
 
         let mut kinds = evorag_memory::kinds();
         kinds.sort_by_key(|k| k.name);
-        let (store, mut open_report) = Store::open(OpenOptions {
+        let opts = OpenOptions {
             data_root: cfg.data_root,
             evorag_version: cfg.evorag_version,
             kinds,
             clock: cfg.clock.clone(),
             ids: cfg.ids.clone(),
             config_file: cfg.config_file,
-        })?;
+        };
+        let (store, mut open_report) = match lock {
+            Some(lock) => Store::open_locked(opts, lock)?,
+            None => Store::open(opts)?,
+        };
         if let Some(r) = store.read_only() {
             return Err(StartError::ReadOnly(format!("{r:?}")));
         }

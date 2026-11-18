@@ -142,6 +142,100 @@ pub fn load(path: &Path, migrate: bool) -> Result<Loaded, String> {
     Ok(loaded)
 }
 
+/// 古い版の設定を今の版に書き換える ([`load`] の `migrate`)。書き換えたら、元のファイルの写しを返す。
+/// TUI の起動は、更新の片付けの後にこれを呼ぶ (動いている evorag が置いてあるものと違えば、設定に触れずに
+/// 止めるため、12 §7.3)。
+pub fn migrate(path: &Path) -> Result<Option<PathBuf>, String> {
+    load(path, true).map(|l| l.migrated)
+}
+
+/// `evorag update` が読む設定 (12 §7.2)。設定を書き換えない。
+#[derive(Debug)]
+pub struct UpdateConfig {
+    pub data_root: Option<PathBuf>,
+    pub backup_dir: Option<PathBuf>,
+    /// `update.trusted_keys` (読むときに確かめた)。
+    pub trusted_keys: Vec<evorag_update::TrustedKey>,
+    /// 設定の形式の版 (`version`。書いていなければ 0。ファイルが無ければ `None`)。
+    pub version: Option<u32>,
+    /// 後の版のキー (警告する)。
+    pub ignored: Vec<String>,
+}
+
+/// `evorag update` の設定を読む。設定は書き換えない (移行しない)。
+///
+/// `config.toml` がこの版の読めない新しい形式の版 (`version` が [`CONFIG_VERSION`] より大きい) でも、
+/// 更新で古い版に戻した後や、新しい版を入れ直すときに使えるように、TOML として読めれば
+/// `storage.data_root`・`storage.backup_dir`・`update.trusted_keys` だけを読む。`update.trusted_keys` の
+/// 誤りと、ほかの設定の誤りは、これまでどおり誤りにする (終了コード 4)。
+pub fn load_for_update(path: &Path) -> Result<UpdateConfig, String> {
+    let (text, exists) = match std::fs::read_to_string(path) {
+        Ok(t) => (t, true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let at = |e: String| format!("{}: {e}", path.display());
+    match parse(&text) {
+        Ok(l) => Ok(UpdateConfig {
+            trusted_keys: l.config.trusted_keys(),
+            data_root: l.config.storage.data_root,
+            backup_dir: l.config.storage.backup_dir,
+            version: exists.then(|| l.config.version.unwrap_or(0)),
+            ignored: l.ignored,
+        }),
+        Err(e) => {
+            let Ok(table) = toml::from_str::<toml::Table>(&text) else {
+                return Err(at(e));
+            };
+            match table.get("version").and_then(toml::Value::as_integer) {
+                Some(v) if v > i64::from(CONFIG_VERSION) => {
+                    newer_for_update(&text, &table, u32::try_from(v).ok()).map_err(at)
+                }
+                _ => Err(at(e)),
+            }
+        }
+    }
+}
+
+/// 新しい形式の版の設定から、`evorag update` の使うキーだけを読む ([`load_for_update`])。
+fn newer_for_update(
+    text: &str,
+    table: &toml::Table,
+    version: Option<u32>,
+) -> Result<UpdateConfig, String> {
+    let storage = table.get("storage").and_then(toml::Value::as_table);
+    let path_of = |key: &str| -> Result<Option<PathBuf>, String> {
+        match storage.and_then(|s| s.get(key)) {
+            None => Ok(None),
+            Some(toml::Value::String(s)) => Ok(Some(PathBuf::from(s))),
+            Some(_) => Err(format!(
+                "line {}: storage.{key} must be a string",
+                line_of(text, key)
+            )),
+        }
+    };
+    let trusted_keys = match table
+        .get("update")
+        .and_then(toml::Value::as_table)
+        .and_then(|u| u.get(TRUSTED_KEYS))
+    {
+        None => Vec::new(),
+        Some(keys) => trusted_keys(keys).map_err(|e| {
+            format!(
+                "line {}: update.{TRUSTED_KEYS} {e}",
+                line_of(text, TRUSTED_KEYS)
+            )
+        })?,
+    };
+    Ok(UpdateConfig {
+        data_root: path_of("data_root")?,
+        backup_dir: path_of("backup_dir")?,
+        trusted_keys,
+        version,
+        ignored: Vec::new(),
+    })
+}
+
 pub fn parse(text: &str) -> Result<Loaded, String> {
     // toml の誤りは行と桁を含む。
     let config: Config = toml::from_str(text).map_err(|e| e.to_string().trim().to_owned())?;
@@ -666,6 +760,84 @@ url = \"http://127.0.0.1:8081\"
     }
 
     /// 配布物に同梱する設定の例が、そのまま読める (12 §5.1)。
+    /// `evorag update` は、この版の読めない新しい形式の設定でも、データ根・退避先・足した鍵だけを読んで
+    /// 動く。鍵の誤りと、ほかの設定の誤りは誤りのまま (終了コード 4)。設定は書き換えない。
+    #[test]
+    fn update_reads_only_its_keys_from_a_newer_config() {
+        let dir = evorag_store::testutil::TempDir::new("config-update-newer");
+        let path = dir.path().join("config.toml");
+        let line = include_str!("../../../minisign.pub")
+            .lines()
+            .nth(1)
+            .expect("the second line of minisign.pub");
+        let keys = format!(
+            "trusted_keys = [\"{line}\"]
+"
+        );
+        let text = format!(
+            "version = 9
+future = true
+[storage]
+data_root = \"d\"
+backup_dir = \"b\"
+new_key = 1
+[update]
+{keys}channel = \"x\"
+"
+        );
+        std::fs::write(&path, &text).unwrap();
+        assert!(load(&path, false).is_err(), "the normal reader refuses it");
+        let u = load_for_update(&path).expect("update can read it");
+        assert_eq!(u.data_root.as_deref(), Some(Path::new("d")));
+        assert_eq!(u.backup_dir.as_deref(), Some(Path::new("b")));
+        assert_eq!(u.version, Some(9));
+        assert_eq!(u.trusted_keys.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "not rewritten"
+        );
+
+        for bad in [
+            "version = 9
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+            "version = 9
+[storage]
+data_root = 1
+",
+            "version = 9
+[storage
+",
+            // 今の版の設定の誤りは、これまでどおり誤り。
+            "version = 1
+unknown = 1
+",
+            "version = 1
+[update]
+trusted_keys = [1]
+",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(load_for_update(&path).is_err(), "{bad}");
+        }
+        // 古い版 (version の無いもの) は読めて、書き換えない。
+        std::fs::write(
+            &path,
+            "[storage]
+data_root = \"d\"
+",
+        )
+        .unwrap();
+        let u = load_for_update(&path).expect("v0");
+        assert_eq!(u.version, Some(0));
+        assert!(!dir.path().join("config.toml.bak-v0").exists());
+        // ファイルが無ければ、版も無い。
+        let u = load_for_update(&dir.path().join("none.toml")).expect("missing");
+        assert_eq!(u.version, None);
+    }
+
     #[test]
     fn the_shipped_example_is_valid() {
         let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

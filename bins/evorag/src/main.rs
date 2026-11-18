@@ -615,6 +615,20 @@ pub(crate) fn data_root_in_use(
     )
 }
 
+/// 古い版の設定を書き換えたことを知らせる (03 §12.3、FR-807)。
+fn config_migrated(catalog: &Catalog, config_file: &std::path::Path, backup: &std::path::Path) {
+    eprintln!(
+        "{}",
+        catalog.with(
+            MessageKey::CliConfigMigrated,
+            &[
+                ("path", &config_file.display().to_string()),
+                ("backup", &backup.display().to_string())
+            ]
+        )
+    );
+}
+
 fn fail(catalog: &Catalog, code: u8, key: MessageKey, args: &[(&str, &str)]) -> ExitCode {
     eprintln!("{}", catalog.with(key, args).replace("\\n", "\n"));
     ExitCode::from(code)
@@ -636,24 +650,58 @@ fn main() -> ExitCode {
             &[("detail", "no home directory")],
         );
     };
-    // doctor は読むだけ (設定の移行もしない)。update も設定を書き換えない (check は何も書き換えない、
-    // rollback は戻した版が読む設定を残す)。
-    let migrate = !matches!(args.command, Some(Sub::Doctor | Sub::Update { .. }));
+    // update は設定を書き換えない (check は何も書き換えない、rollback は戻した版が読む設定を残す)。
+    // この版の読めない新しい形式の設定でも、更新に要るキーだけを読んで動く (12 §7.2)。
+    if let Some(Sub::Update { action }) = args.command {
+        let ucfg = match config::load_for_update(&config_file) {
+            Ok(u) => u,
+            Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
+        };
+        for k in &ucfg.ignored {
+            eprintln!(
+                "{}",
+                catalog.with(MessageKey::CliConfigIgnored, &[("key", k)])
+            );
+        }
+        let Some(data_root) = args
+            .data_root
+            .or(ucfg.data_root)
+            .or_else(|| places.as_ref().map(|p| p.data_root.clone()))
+        else {
+            return fail(
+                &catalog,
+                1,
+                MessageKey::CliError,
+                &[("detail", "no home directory")],
+            );
+        };
+        let action = match action {
+            UpdateAction::Check => update::Action::Check,
+            UpdateAction::Apply { version } => update::Action::Apply { version },
+            UpdateAction::Rollback => update::Action::Rollback,
+        };
+        return update::run(
+            &catalog,
+            action,
+            ucfg.trusted_keys,
+            &update::Places {
+                data_root: &data_root,
+                backup_dir: ucfg.backup_dir.as_deref(),
+                config_file: &config_file,
+                config_version: ucfg.version,
+                state_dir: places.as_ref().map(|p| p.state_dir.as_path()),
+            },
+        );
+    }
+    // doctor は読むだけ (設定の移行もしない)。TUI は、更新の片付けの後に移行する (動いている evorag が
+    // 置いてあるものと違えば、設定に触れずに止めるため、12 §7.3)。
+    let migrate = !matches!(args.command, None | Some(Sub::Doctor));
     let loaded = match config::load(&config_file, migrate) {
         Ok(l) => l,
         Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
     };
     if let Some(b) = &loaded.migrated {
-        eprintln!(
-            "{}",
-            catalog.with(
-                MessageKey::CliConfigMigrated,
-                &[
-                    ("path", &config_file.display().to_string()),
-                    ("backup", &b.display().to_string())
-                ]
-            )
-        );
+        config_migrated(&catalog, &config_file, b);
     }
     for k in &loaded.ignored {
         eprintln!(
@@ -674,25 +722,6 @@ fn main() -> ExitCode {
             &[("detail", "no home directory")],
         );
     };
-
-    if let Some(Sub::Update { action }) = args.command {
-        let action = match action {
-            UpdateAction::Check => update::Action::Check,
-            UpdateAction::Apply { version } => update::Action::Apply { version },
-            UpdateAction::Rollback => update::Action::Rollback,
-        };
-        return update::run(
-            &catalog,
-            action,
-            cfg.trusted_keys(),
-            &update::Places {
-                data_root: &data_root,
-                backup_dir: cfg.storage.backup_dir.as_deref(),
-                config_file: &config_file,
-                state_dir: places.as_ref().map(|p| p.state_dir.as_path()),
-            },
-        );
-    }
 
     let url = cfg
         .llm
@@ -956,8 +985,10 @@ fn main() -> ExitCode {
     if let Some(p) = &places {
         let _ = evorag_core::logging::init(&p.state_dir.join("logs"), clock.now().as_millis());
     }
-    // 更新の続きと片付け (12 §7.3)。データ根のロックを取ってから、ストアを開く前に行う。失敗しても起動する。
-    let update_notices = match places
+    // 更新の続きと片付け (12 §7.3)。データ根のロックを取って持ったまま、設定の移行とストアを開く前に行う。
+    // 動いている evorag が置いてあるものと違えば、設定にもデータにも触れずに止める。片付けに失敗しても起動
+    // する。取ったロックは放さずにストアを開くのに渡す。
+    let (update_notices, held_lock) = match places
         .as_ref()
         .map(|p| update::startup_cleanup(&catalog, &data_root, &p.state_dir))
     {
@@ -965,10 +996,16 @@ fn main() -> ExitCode {
             eprintln!("{m}");
             return ExitCode::from(1);
         }
-        Some(update::StartupCleanup::Continue(notices)) => notices,
-        None => Vec::new(),
+        Some(update::StartupCleanup::Continue { notices, lock }) => (notices, lock),
+        None => (Vec::new(), None),
     };
-    let mut started = rt.block_on(Core::start(make_cfg(), llm.clone()));
+    // 設定の移行 (03 §12.3)。
+    match config::migrate(&config_file) {
+        Ok(Some(b)) => config_migrated(&catalog, &config_file, &b),
+        Ok(None) => {}
+        Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
+    }
+    let mut started = rt.block_on(Core::start_locked(make_cfg(), llm.clone(), held_lock));
     // DB のファイルが壊れていたら、退避とジャーナルから戻すかを尋ねる (03 §8、FR-205)。
     if let Err(StartError::Store(OpenError::Broken { moved_to, reason })) = &started {
         eprintln!(

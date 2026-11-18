@@ -396,9 +396,9 @@ id = "AC-FR-805-1"
 requirement = "FR-805"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output", "crates/evorag-update/tests/flow.rs::apply_then_rollback_restores_the_files_and_keeps_the_data", "crates/evorag-update/tests/flow.rs::rollback_tells_how_to_restore_when_the_old_version_cannot_write"]
+tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output", "crates/evorag-update/tests/flow.rs::apply_then_rollback_restores_the_files_and_keeps_the_data", "crates/evorag-update/tests/flow.rs::rollback_tells_how_to_restore_when_the_old_version_cannot_write", "bins/evorag/src/update.rs::rollback_shows_the_pre_op_backup_and_restore_and_ends_with_0"]
 manual = ""
-note = "置き換えの核 (swap) で apply → rollback → apply の SHA-256 と記録を、更新の流れ (flow) で apply の後の rollback が evorag(.exe)・evorag.prev を SHA-256 で戻し、データ根の中身 (ロックのファイルを除く) を変えず、戻した版が書けない・開けないときに移行の前の退避のパス (無ければ無いこと) と設定の写しを示して 0 で終わることを判定する。偽の Releases と偽の --version を使う。"
+note = "置き換えの核 (swap) で apply → rollback → apply の SHA-256 と記録を、更新の流れ (flow) で apply の後の rollback が evorag(.exe)・evorag.prev を SHA-256 で戻し、データ根の中身 (ロックのファイルを除く) を変えず、戻した版が書けない・開けないときに移行の前の退避のパス (無ければ無いこと) と設定の写しを返すことを判定する。偽の Releases と偽の --version を使う。示す文言 (移行の前の退避のパスと evorag restore のコマンド) と終了コード 0 は、bin の表示の関数と終了コードを決める関数で判定する (rollback を実行ファイルで動かす試験は、zip の配布物のビルドが要るので自動では行わない)。"
 
 [[ac]]
 id = "AC-FR-805-2"
@@ -407,7 +407,7 @@ level = "Must"
 status = "test"
 tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps", "crates/evorag-update/tests/flow.rs::an_interrupted_apply_is_finished_by_the_startup_cleanup"]
 manual = ""
-note = "置き換えの核で、apply・rollback・元に戻す途中の各操作の後で止めて (試験の差し込み。同期は直前の操作に含める)、次の続きと名前での片付けの後に、evorag(.exe) が前か後の版で evorag.prev が役割どおりであることを判定する。Windows の隙間は案内の手順で戻す。更新の流れでは、置き換えの後の確かめの最中に止めて (panic で模擬)、TUI の起動の片付け (swap::startup) が続きを済ませることを判定する。子プロセスの強制終了での試験は 09 §3 の別の段で行う。"
+note = "自動で判定するもの: 置き換えの核で、apply・rollback・元に戻す途中の各操作の後で止めたことにして (試験の差し込みで、そこから後の処理をしない。同期は直前の操作に含める)、次の続き (Installation::resume。update の始める前の確かめの 4 と起動の片付けが、どちらもこれを呼ぶ) と名前での片付けの後に、evorag(.exe) が置き換えの前か後の版 (SHA-256) で、evorag.prev が役割どおりであること。Windows の隙間は、案内の手順で戻せること。更新の流れでは、置き換えの後の確かめの最中に止めて (panic で模擬)、TUI の起動の片付け (swap::startup) が続きを済ませること。自動で判定しないもの: 09 §4 の、子プロセスを実際に強制終了する試験 (プロセスの途中の停止と、OS のファイルの状態) は無い。差し込みの停止は同じ点で止まるが、プロセスの終了は模擬であり、AC の「強制終了」の全体を自動で覆うものではない。status を test のままにするのは、AC が求める状態 (前か後の版で起動でき、evorag.prev が正しい) を、各段の停止の後のファイルの状態として判定しているため。子プロセスでの試験は 09 §4 の段として別に足す。"
 
 [[ac]]
 id = "AC-FR-901-1"

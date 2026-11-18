@@ -29,6 +29,7 @@ toml = { workspace = true }
 [dev-dependencies]
 ciborium = { workspace = true }
 evorag-store = { workspace = true }
+evorag-update = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

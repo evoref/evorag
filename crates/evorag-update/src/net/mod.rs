@@ -6,22 +6,25 @@
 //!
 //! 取得したものはディスクに書かず、主記憶で扱う (12 §7.2 の apply の 2)。
 //!
-//! プロキシは ureq の扱い (`ureq::Proxy::try_from_env`) に従う。読む環境変数は、`ALL_PROXY`・
-//! `all_proxy`・`HTTPS_PROXY`・`https_proxy`・`HTTP_PROXY`・`http_proxy` の順で、最初に読める値を使う。
-//! 除く宛先は `NO_PROXY` (無ければ `no_proxy`) で、`*`・`.example.com`・`*.example.com`・`example.com` の
-//! 形を読む。Windows の WinINET の設定と PAC は読まない (ureq の `win-system-proxy` を入れない)。
-//! プロキシは HTTP の CONNECT で使い、TLS は evorag と GitHub の間で結ぶ。認証は URL に書いた Basic だけで、
-//! NTLM などには対応しない。SOCKS は使えない (ureq の `socks-proxy` を入れない)。
+//! プロキシは [`proxy`] が環境変数から選ぶ。読む環境変数は `HTTPS_PROXY`・`ALL_PROXY`・`HTTP_PROXY` の順
+//! (それぞれ大文字の名前を先に、小文字の名前を後に) で、空でない最初の値を使う。使えるのは `http://` と
+//! `https://` のプロキシだけで、最初の値が SOCKS・ほかのスキーム・読めない値なら、通信の前に断る
+//! ([`NetError::UnsupportedProxy`]。直接の接続に切り替えない)。除く宛先は `NO_PROXY` (無いか空なら
+//! `no_proxy`) で、`*` と、ドメインの末尾の一致 (先頭の点の有無を問わない) を読む。Windows の WinINET の
+//! 設定と PAC は読まない (ureq の `win-system-proxy` を入れない)。プロキシは HTTP の CONNECT で使い、TLS は
+//! evorag と GitHub の間で結ぶ。認証は URL に書いた Basic だけで、NTLM などには対応しない。
 
 mod client;
 pub mod platform;
 pub mod policy;
+pub mod proxy;
 mod transport;
 
 use std::time::Duration;
 
 pub use client::HttpFetcher;
 pub use policy::UrlRefused;
+pub use proxy::{ProxyProblem, ProxyRefused};
 
 use crate::{MAX_ARCHIVE_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES};
 
@@ -127,6 +130,9 @@ pub enum NetError {
         /// 状態のコード。
         status: u16,
     },
+    /// 環境変数のプロキシが使えない (SOCKS・ほかのスキーム・読めない値)。通信の前に断る。
+    #[error(transparent)]
+    UnsupportedProxy(ProxyRefused),
     /// 接続できない・TLS・プロキシ・読む途中の失敗。
     #[error("cannot connect: {detail}")]
     Connect {

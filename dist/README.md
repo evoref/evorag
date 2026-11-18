@@ -215,7 +215,7 @@ v0.3 から、`evorag update` で新しい版を確かめ、更新し、前の�
 - 今と同じか古い版は `apply` で入れられません。前の版に戻すのは `rollback` だけです。
 - 今の版から直接は更新できない版 (`upgrade_from`) は、先に入れる版を案内します (`evorag update apply <その版>` を先に実行します)。
 - インストール先には、自分だけが書き込めるフォルダ (Windows は `%LOCALAPPDATA%\Programs\evorag` など) を使ってください。書き込めないフォルダ (Program Files など)、ほかの利用者も書き込めるフォルダ、実行ファイルの名前を `evorag(.exe)` から変えたときは、何も変えずに断ります。
-- **cargo で入れた人** (`evorag --version` の `installed via: cargo`): `apply` と `rollback` は使えません。`evorag update check` で新しい版を確かめ、`cargo install --locked --git https://github.com/evoref/evorag --tag vX.Y.Z evorag` で入れ直します。
+- **cargo で入れた人** (`evorag --version` の `installed via: cargo`): `apply` と `rollback` は使えません。`evorag update check` で新しい版を確かめると、入れ直すコマンド (`cargo install --locked --git https://github.com/evoref/evorag --tag v<版> evorag`) を示します。先に入れる版があるときは、そのコマンドを先に示します。
 
 | 終了コード | 意味 |
 |---|---|
@@ -259,7 +259,10 @@ v0.3 から、`evorag update` で新しい版を確かめ、更新し、前の�
 - 接続先は `api.github.com` (リリースの一覧) と `github.com` (`release.json`・署名・配布物) だけで、配布物の取得は `*.githubusercontent.com` へ転送されることがあります。ほかへの転送は辿りません。
 - 送るのは evorag の版と OS の種類 (User-Agent)、取得する配布物の名前だけです。Cookie や認証の情報は送りません。
 - 本物かどうかは TLS ではなく minisign の署名で確かめます。通信の途中で書き換えられても、署名の合わない配布物は入れません。
-- **プロキシ**: 環境変数 `ALL_PROXY`・`HTTPS_PROXY`・`HTTP_PROXY` (小文字の `all_proxy`・`https_proxy`・`http_proxy` も。この順で最初に読める値) に書いたプロキシを、HTTP の CONNECT で使います。`NO_PROXY` (`no_proxy`) に書いた宛先は、プロキシを通しません。Windows の「プロキシの設定」(WinINET) と自動構成のスクリプト (PAC) は読みません。
+- **プロキシ**: 環境変数 `HTTPS_PROXY`・`ALL_PROXY`・`HTTP_PROXY` をこの順に読み (それぞれ大文字の名前を先に、小文字の `https_proxy`・`all_proxy`・`http_proxy` を後に)、空でない最初の値のプロキシを、HTTP の CONNECT で使います。
+  - 使えるのは `http://` と `https://` で始まるプロキシだけです。最初の値が `socks5://` などの SOCKS、ほかのスキーム、スキームの無い `proxy:8080`、読めない値のときは、直接には繋がずに、どの環境変数かを示して通信の前に止めます (終了コード 1)。その環境変数を直してください。
+  - `NO_PROXY` (無いか空なら `no_proxy`) に書いた宛先は、プロキシを通しません。カンマ区切りで、`github.com`・`.github.com`・`*.github.com` はどれも `github.com` とその下のホスト (`api.github.com` など) に当たります。`*` はすべての宛先です。
+  - Windows の「プロキシの設定」(WinINET) と自動構成のスクリプト (PAC) は読みません。
 
   ```powershell
   $env:HTTPS_PROXY = "http://proxy.example.com:8080"

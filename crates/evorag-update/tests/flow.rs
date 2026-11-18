@@ -259,6 +259,7 @@ impl Fx {
             data_root: &self.data,
             backup_dir: None,
             config_file: Some(&self.config),
+            config_version: Some(1),
         }
     }
 
@@ -440,7 +441,7 @@ fn check_refusals_keep_their_exit_codes() {
     // 署名が無い (取り下げた版) は 1。
     let server = Server::default();
     server.list(&[("v0.4.0", false, false)]);
-    let (json, _) = rel.signed(&k);
+    let (json, sig) = rel.signed(&k);
     server.put(policy::download_url(v("0.4.0"), "release.json"), json);
     let e = flow::check(&fx.ctx(&server, &probe, "zip")).expect_err("no signature");
     assert!(
@@ -451,6 +452,37 @@ fn check_refusals_keep_their_exit_codes() {
                 ..
             }
         ),
+        "{e}"
+    );
+    assert_eq!(e.exit_code(), 1);
+
+    // release.json が無い (404。無い版・取り下げた版) も 1。指定した版の apply も同じ。
+    let server = Server::default();
+    server.list(&[("v0.4.0", false, false)]);
+    server.put(
+        policy::download_url(v("0.4.0"), "release.json.minisig"),
+        sig,
+    );
+    let e = flow::check(&fx.ctx(&server, &probe, "zip")).expect_err("no release.json");
+    assert!(
+        matches!(
+            e,
+            FlowError::ReleaseFileMissing {
+                what: "release.json",
+                ..
+            }
+        ),
+        "{e}"
+    );
+    assert_eq!(e.exit_code(), 1);
+    let e = flow::apply(
+        &fx.ctx(&server, &probe, "zip"),
+        Some(v("0.9.0")),
+        &mut |_| {},
+    )
+    .expect_err("a version that does not exist");
+    assert!(
+        matches!(e, FlowError::ReleaseFileMissing { version, .. } if version == v("0.9.0")),
         "{e}"
     );
     assert_eq!(e.exit_code(), 1);
@@ -568,8 +600,8 @@ fn rollback_tells_how_to_restore_when_the_old_version_cannot_write() {
         assert_eq!(back.guidance.verdict, expected);
         assert_eq!(back.guidance.pre_op_backups.len(), 2);
         assert_eq!(
-            back.guidance.config_backups,
-            [fx.config.with_file_name("config.toml.bak-v0")]
+            back.guidance.config_backup,
+            Some(fx.config.with_file_name("config.toml.bak-v0"))
         );
     }
 }
@@ -735,15 +767,18 @@ fn an_archive_that_does_not_match_is_refused_with_5() {
         server.publish(&rel, &k);
         server.put(url.clone(), bytes);
         let e = refused_without_change(&fx, &server, 5);
-        assert!(
-            matches!(
+        let ok = match what {
+            // `size` より長く届いたものは、読むのを止めて大きさの不一致として 5 で断る。
+            "long" => {
+                matches!(e, FlowError::ArchiveLongerThanSigned { size } if size == rel.archive.len() as u64)
+            }
+            "short" => matches!(
                 e,
-                FlowError::Verify(
-                    UpdateError::ArchiveDigestMismatch | UpdateError::ArchiveSizeMismatch { .. }
-                ) | FlowError::ArchiveLongerThanSigned { .. }
+                FlowError::Verify(UpdateError::ArchiveSizeMismatch { .. })
             ),
-            "{what}: {e}"
-        );
+            _ => matches!(e, FlowError::Verify(UpdateError::ArchiveDigestMismatch)),
+        };
+        assert!(ok, "{what}: {e}");
         assert!(server.requested().contains(&url), "{what}");
     }
 }

@@ -12,6 +12,8 @@ publish.workspace = true
 # cargo xtask dist・verify-release が、署名の前の release.json と自分で作った配布物を、同じ規則で読む。
 # 検証を飛ばす入口なので、xtask のほかは有効にしない (cargo xtask check-deps が確かめる)。
 unverified-dist = []
+# 試験のための結果の型を作る口 (bin の evorag の試験が、表示と終了コードを確かめる)。dev 依存だけで有効にする。
+test-util = []
 
 [dependencies]
 # 置き換えのファイルの操作 (上書きしない改名・書き切り・権限、12 §7.3)。

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use evorag_store::lock::{DataRootLock, LockError};
 
+use self::data::ConfigFile;
 pub use self::data::{DataGuidance, DataVerdict};
 pub use self::releases::{ListUnreadable, latest_version};
 use crate::net::{Fetcher, NetError, Resource, policy};
@@ -56,6 +57,9 @@ pub struct Context<'a> {
     pub backup_dir: Option<&'a Path>,
     /// 設定のファイル (`config.toml.bak-v<旧版>` を探す)。
     pub config_file: Option<&'a Path>,
+    /// 今の設定のファイルの形式の版 (`version`。書いていなければ 0。ファイルが無ければ `None`)。
+    /// rollback が、これより古い版の設定の写しを示す。
+    pub config_version: Option<u32>,
 }
 
 impl std::fmt::Debug for Context<'_> {
@@ -92,6 +96,21 @@ pub struct ReleaseInfo {
 }
 
 impl ReleaseInfo {
+    /// 試験のための更新の先 (evorag-update の外の試験が、表示を確かめるために作る)。要点・下限・警告は無い。
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn for_test(version: Version, date: ReleaseDate) -> Self {
+        Self {
+            version,
+            date,
+            notes: None,
+            page_url: policy::release_page_url(version),
+            llama_server_min_build: None,
+            db_min_write_warning: None,
+            added_key: None,
+        }
+    }
+
     fn new(manifest: &Manifest, signer: Signer, current: &Build) -> Self {
         let newer = |min_write: &str| {
             let parse = |s: &str| s.parse::<evorag_store::version::Version>().ok();
@@ -137,7 +156,12 @@ pub enum Notice {
         size: u64,
     },
     /// Windows の隙間の戻し方 (12 §7.3)。インストール先のファイルを動かす前に示す。
-    GapRecovery(GapRecovery),
+    GapRecovery {
+        /// 戻し方。
+        recovery: GapRecovery,
+        /// インストール先 (正規化したフォルダ、[`Installation::dir`])。
+        dir: PathBuf,
+    },
 }
 
 /// `check` の結果 (どれも終了コード 0)。
@@ -192,6 +216,15 @@ pub struct RollbackOutcome {
     pub guidance: DataGuidance,
 }
 
+impl RollbackOutcome {
+    /// 試験のための結果 (evorag-update の外の試験が、表示を確かめるために作る)。
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub const fn for_test(to: Version, from: Version, guidance: DataGuidance) -> Self {
+        Self { to, from, guidance }
+    }
+}
+
 /// 更新の流れで断った・失敗した理由。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -205,6 +238,16 @@ pub enum FlowError {
     /// 置き換え・巻き戻し・片付けの失敗 (始める前の確かめを含む)。
     #[error(transparent)]
     Swap(#[from] SwapError),
+    /// 始める前の確かめの 4 で残った計画の続きを済ませた結果、動いている evorag が、インストール先の
+    /// `evorag(.exe)` と違うものになった ([`ResumeReport::running_replaced`])。今の版を前提に進めず、
+    /// 同じ操作をもう一度実行するよう案内する。
+    #[error(
+        "an unfinished {op} was settled and the running evorag is no longer the installed one; run the command again"
+    )]
+    RunAgain {
+        /// 続きを済ませた計画の操作。
+        op: Op,
+    },
     /// データ根をほかの evorag が使っている。
     #[error("the data root {} is in use by another evorag", path.display())]
     DataRootInUse {
@@ -266,6 +309,7 @@ impl FlowError {
             Self::Swap(e) => e.exit_code(),
             Self::Net(e) => e.exit_code(),
             Self::NotZipChannel { .. }
+            | Self::RunAgain { .. }
             | Self::NotNewerRequested { .. }
             | Self::ListUnreadable(_)
             | Self::ReleaseFileMissing { .. } => 1,
@@ -369,7 +413,7 @@ pub fn apply(
     // 8〜11: データ根のロックを取り、終わりまで持って置き換える。
     let _data_lock = lock_data_root(ctx)?;
     let next = Build::new(version, release.manifest().db_format().map(str::to_owned));
-    notify_gap(Op::Apply, notify);
+    notify_gap(Op::Apply, inst.dir(), notify);
     let mut env = Env::new(ctx.probe);
     let report = inst.apply(&exe, ctx.current, &next, &mut env)?;
     Ok(ApplyOutcome::Applied {
@@ -395,15 +439,19 @@ pub fn rollback(
     let prev = inst.identify_prev(&mut env)?;
     // 3: データの案内を、データ根のロックを持ったまま求める。
     let data_lock = lock_data_root(ctx)?;
+    let config = ctx
+        .config_file
+        .zip(ctx.config_version)
+        .map(|(path, version)| ConfigFile { path, version });
     let guidance = data::guidance(
         data_lock.as_ref(),
         ctx.data_root,
         ctx.backup_dir,
-        ctx.config_file,
+        config,
         prev.db_format(),
     );
     // 4・5: 入れ替えて、計画を済みにする。
-    notify_gap(Op::Rollback, notify);
+    notify_gap(Op::Rollback, inst.dir(), notify);
     inst.rollback(&prev, ctx.current, &mut env)?;
     drop(data_lock);
     Ok(RollbackOutcome {
@@ -425,13 +473,14 @@ fn begin(ctx: &Context<'_>, notify: &mut dyn FnMut(Notice)) -> Result<Installati
     }
     // 3: 更新のロック。
     let mut inst = Installation::open(ctx.running_exe, ctx.state_dir, Purpose::Update)?;
-    // 4: 残った計画は、データ根のロックを取ってから続きを済ませる。
+    // 4: 残った計画は、データ根のロックを取ってから続きを済ませる。動いている evorag が置いてあるものと
+    // 違うものになったら、今の版を前提に進めない。
     if let Some(plan) = inst.pending()? {
         let _data_lock = lock_data_root(ctx)?;
-        notify_gap(plan.op, notify);
+        notify_gap(plan.op, inst.dir(), notify);
         let mut env = Env::new(ctx.probe);
         if let Some(report) = inst.resume(&mut env)? {
-            notify(Notice::Resumed(report));
+            after_resume(report, notify)?;
         }
     }
     // 5: 名前で片付ける。残ったファイルを消せなければ断る。
@@ -448,10 +497,25 @@ fn begin(ctx: &Context<'_>, notify: &mut dyn FnMut(Notice)) -> Result<Installati
     Ok(inst)
 }
 
+/// 続きの結果を示す。動いている evorag が、続きの後のインストール先の `evorag(.exe)` と違えば、
+/// [`FlowError::RunAgain`] で断る (12 §7.2 の始める前の確かめの 4)。
+fn after_resume(report: ResumeReport, notify: &mut dyn FnMut(Notice)) -> Result<(), FlowError> {
+    let (op, replaced) = (report.op, report.running_replaced);
+    notify(Notice::Resumed(report));
+    if replaced {
+        Err(FlowError::RunAgain { op })
+    } else {
+        Ok(())
+    }
+}
+
 /// Windows の隙間の戻し方を示す (12 §7.3)。隙間の無い OS では示さない。
-fn notify_gap(op: Op, notify: &mut dyn FnMut(Notice)) {
+fn notify_gap(op: Op, dir: &Path, notify: &mut dyn FnMut(Notice)) {
     if cfg!(windows) {
-        notify(Notice::GapRecovery(GapRecovery::for_op(op)));
+        notify(Notice::GapRecovery {
+            recovery: GapRecovery::for_op(op),
+            dir: dir.to_path_buf(),
+        });
     }
 }
 
@@ -515,4 +579,38 @@ fn fetch_release(
         expect = expect.with_release_date(date);
     }
     Ok(verify_signature(&json, &minisig, ctx.keys)?.verify(&expect)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swap::ResumeOutcome;
+
+    fn report(running_replaced: bool) -> ResumeReport {
+        ResumeReport {
+            op: Op::Apply,
+            outcome: ResumeOutcome::Reverted { check: None },
+            untouched: Vec::new(),
+            missing: Vec::new(),
+            left: Vec::new(),
+            running_replaced,
+        }
+    }
+
+    /// 始める前の確かめの 4: 続きの後に、動いている evorag が置いてあるものと違えば、続きの結果を示して
+    /// から 1 で断る (今の版を前提に進めない)。同じなら示して進む。
+    #[test]
+    fn a_resume_that_replaced_the_running_evorag_stops_the_command() {
+        let mut shown = Vec::new();
+        let e = after_resume(report(true), &mut |n| shown.push(format!("{n:?}")))
+            .expect_err("run again");
+        assert!(matches!(e, FlowError::RunAgain { op: Op::Apply }), "{e}");
+        assert_eq!(e.exit_code(), 1);
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].starts_with("Resumed("), "{shown:?}");
+
+        let mut shown = Vec::new();
+        after_resume(report(false), &mut |n| shown.push(format!("{n:?}"))).expect("continue");
+        assert_eq!(shown.len(), 1);
+    }
 }
