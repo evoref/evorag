@@ -11,7 +11,7 @@
 | ファイル | 中身 | 仕様 |
 |---|---|---|
 | `prefilter.toml` | 前のふるい。発話を抽出に送るか | 04 §5.2 |
-| `gates.toml` | 抽出の関門 1〜8。候補を受け付けるか、どの理由で捨てるか | 04 §5.1・§5.2 |
+| `gates.toml` | 抽出の関門 1〜8 (3a を含む)。候補を受け付けるか、どの理由で捨てるか | 04 §5.1・§5.2 |
 | `consolidation.toml` | 統合と、事実への操作 (private・削除・採る・戻す・印を解く・作り直し) の筋書き | 04 §5.3・§5.4・§7.4〜§7.6 |
 | `corrections.toml` | 訂正の候補 (字句の規則) と検証の関門 | 04 §6 |
 | `forget.toml` | 忘れると伏せ字、想起での伏せ | 04 §7.1〜§7.3・§7.5 |
@@ -43,17 +43,17 @@
 
 ## gates.toml
 
-`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化 v1 の後の照合で通ったときの `evidence_normalized`、照合の形 (04 §5.6) で通ったときの `evidence_loose`)。`stored` は、受け付けたときに記録する値 (04 §5.2 の「記録する文字列」。LLM の写しではなく、発話の保存した本文の部分文字列) で、省くと `candidate.v` と同じ。受け付けた事例は、記録する値と、その値の鍵を `stored` と比べる (`candidate.v` とは比べない)。`stored_subject` は、受け付けたときに記録する主語 (`self` 以外の呼び名。根拠の範囲の中の最初の一致の本文に正規化 v1 を当てた文字列、04 §5.2 の関門 5) で、書いたときは記録する主語と完全に一致することを確かめる。
+`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化 v1 の後の照合で通ったときの `evidence_normalized`、照合の形 (04 §5.6) で通ったときの `evidence_loose`、関門 2 で `old` が根拠か発話の根拠の範囲に無く、空として扱ったときの `old_ignored`)。`stored` は、受け付けたときに記録する値 (04 §5.2 の「記録する文字列」。LLM の写しではなく、発話の保存した本文の部分文字列) で、省くと `candidate.v` と同じ。受け付けた事例は、記録する値と、その値の鍵を `stored` と比べる (`candidate.v` とは比べない)。`stored_subject` は、受け付けたときに記録する主語 (`self` 以外の呼び名。根拠の範囲の中の最初の一致の本文に正規化 v1 を当てた文字列、04 §5.2 の関門 5) で、書いたときは記録する主語と完全に一致することを確かめる。
 
-関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
+関門は 1・2・3・3a・4〜8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
 
 | `expect` | 関門 | 意味 |
 |---|---|---|
 | `unknown_attribute` | (§5.1) | 属性が一覧に無い |
 | `evidence_missing` | 1 | 根拠が、前のふるいの後の発話に (正規化 v1 でも照合の形でも) 含まれない |
 | `value_not_in_evidence` | 2 | 値が根拠に含まれない (英数字は語の境界で)。または、発話の根拠の範囲の中の値の位置を、保存した本文に戻せない |
-| `old_not_in_evidence` | 2 | `old` が根拠か、発話の根拠の範囲に含まれない |
-| `mood` | 3 | 叙法が `question` か `hypothetical` |
+| `mood` | 3 | 叙法が `question` か `hypothetical`。または、値の位置が問いの文の最後の節に掛かる (04 §5.2 の関門 3 の補い) |
+| `no_cue` | 3a | 属性が `cue = true` (v0.3 では `residence`) で、値を言った文に、その属性の手がかりの語 (`[reading]` の `<属性>_cue`) が無い |
 | `quoted` | 4 | 根拠の範囲の中の値の一致が、どれも引用の括弧の内側に 1 文字以上掛かる (属性の例外を除く) |
 | `subject_not_allowed` | 5 | 主語が `self` 以外で、属性がそれを許さない。または、呼び名が 32 文字を超える・根拠に含まれない・表で本人を表す語 (「利用者」・user) と同じ。呼び名が関門 6 に外れたときは、関門 6 の理由で捨てる |
 | `forbidden_category` | 6 | 一般カテゴリ Cc・Cf・Co・Cn・Cs の文字と、Default_Ignorable の文字 (04 §5.2 の関門 6) |
@@ -70,6 +70,8 @@
 `m = "negated"` の候補は関門を通り、統合 (§5.3 の「否定」) に渡る (`expect = "accept"`)。
 
 注: `redaction_marker` (04 §5.2、2026-11-17) の事例は G92〜G94。
+
+注: `old` が根拠に無い候補は、2026-11-18 から捨てずに受け付け、`old` を空として `count = "old_ignored"` で数える (04 §5.2 の関門 2。理由 `old_not_in_evidence` は無くなった)。
 
 ## consolidation.toml と forget.toml
 
