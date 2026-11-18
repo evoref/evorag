@@ -79,6 +79,77 @@ pub fn prepare_private_file(p: &Path) -> io::Result<()> {
     imp::prepare_private_file(p)
 }
 
+/// ロックの再試行の待ち (12 §7.3 の「ウイルス対策のロック」)。試すのは合わせて 5 回、待ちは合わせて 2 秒。
+pub const LOCK_RETRY_WAITS: [std::time::Duration; 4] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(400),
+    std::time::Duration::from_millis(600),
+    std::time::Duration::from_millis(800),
+];
+
+/// ほかのプログラム (ウイルス対策など) がファイルを掴んでいるための失敗か。Windows はアクセスの拒否・
+/// 共有の違反・ロックの違反、Unix は `EBUSY`・`ETXTBSY`。
+#[must_use]
+pub fn is_lock_error(e: &io::Error) -> bool {
+    imp::is_lock_error(e)
+}
+
+/// ロックの失敗 ([`is_lock_error`]) を、[`LOCK_RETRY_WAITS`] の間隔で 5 回まで試す (12 §7.3)。
+/// ほかの失敗はすぐ返す。
+///
+/// # Errors
+///
+/// 最後の試みの失敗か、ロックでない失敗。
+pub fn retry_locked<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for wait in LOCK_RETRY_WAITS {
+        match f() {
+            Err(e) if is_lock_error(&e) => std::thread::sleep(wait),
+            r => return r,
+        }
+    }
+    f()
+}
+
+/// `from` を `to` に改名する。`to` があれば上書きせずに失敗する (`AlreadyExists`)。Windows だけ。
+///
+/// `MoveFileExW` に `MOVEFILE_WRITE_THROUGH` だけを付ける (`MOVEFILE_REPLACE_EXISTING` を付けない)。
+/// 動いている実行ファイルの改名にも使える (12 §7.3)。再試行はしない ([`retry_locked`] で包む)。
+///
+/// # Errors
+///
+/// OS の改名の失敗。
+#[cfg(windows)]
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    imp::rename_no_replace(from, to)
+}
+
+/// シンボリックリンクかリパースポイント (Windows のジャンクションなどを含む) か。
+/// `meta` は [`std::fs::symlink_metadata`] で取ったもの。
+#[must_use]
+pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
+    imp::is_link_or_reparse_point(meta)
+}
+
+/// 新しいファイルを排他で作る (`create_new`。既にあれば `AlreadyExists`)。読み書きで開く。
+///
+/// Unix では `O_NOFOLLOW` を付け、権限を `unix_mode` にする (umask に関わらず)。Windows では
+/// `unix_mode` を使わない (権限はフォルダから継承する)。名前にシンボリックリンクがあっても、その先に
+/// 書かない (12 §7.3 の「ファイルの作り方」)。
+///
+/// # Errors
+///
+/// 作れないとき。
+pub fn create_new_file(path: &Path, unix_mode: u32) -> io::Result<std::fs::File> {
+    imp::create_new_file(path, unix_mode)
+}
+
+/// 動いているプロセスの実効の利用者の ID。Unix だけ。
+#[cfg(unix)]
+#[must_use]
+pub fn effective_uid() -> u32 {
+    imp::effective_uid()
+}
+
 #[cfg(windows)]
 mod imp {
     use std::io;
@@ -142,6 +213,38 @@ mod imp {
             wait *= 2;
             attempt += 1;
         }
+    }
+
+    pub fn is_lock_error(e: &io::Error) -> bool {
+        matches!(
+            e.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        )
+    }
+
+    pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+        let (f, t) = (wide(from)?, wide(to)?);
+        // SAFETY: 両方とも NUL で終わる UTF-16 の列で、呼び出しの間は生きている。
+        let ok = unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    pub fn create_new_file(path: &Path, _unix_mode: u32) -> io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
     }
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
@@ -232,6 +335,31 @@ mod imp {
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    pub fn is_lock_error(e: &io::Error) -> bool {
+        matches!(e.raw_os_error(), Some(libc::EBUSY | libc::ETXTBSY))
+    }
+
+    pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
+        meta.file_type().is_symlink()
+    }
+
+    pub fn create_new_file(path: &Path, unix_mode: u32) -> io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(unix_mode)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(unix_mode))?;
+        Ok(file)
+    }
+
+    pub fn effective_uid() -> u32 {
+        // SAFETY: geteuid は引数を取らず、常に成功し、プロセスの状態を変えない (POSIX)。
+        unsafe { libc::geteuid() }
     }
 
     pub fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -350,6 +478,80 @@ mod tests {
             b"y",
             "the content is kept"
         );
+    }
+
+    #[test]
+    fn retry_locked_retries_only_lock_errors() {
+        let lock = || {
+            if cfg!(windows) {
+                io::Error::from_raw_os_error(32)
+            } else {
+                io::Error::from_raw_os_error(16)
+            }
+        };
+        assert!(is_lock_error(&lock()));
+        let mut n = 0;
+        let start = std::time::Instant::now();
+        let r = retry_locked(|| {
+            n += 1;
+            if n < 3 { Err(lock()) } else { Ok(n) }
+        });
+        assert_eq!(r.unwrap(), 3);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(600));
+        let mut n = 0;
+        let r: io::Result<()> = retry_locked(|| {
+            n += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert!(r.is_err());
+        assert_eq!(n, 1, "other errors are not retried");
+    }
+
+    #[test]
+    fn create_new_file_refuses_existing_names() {
+        let dir = crate::testutil::TempDir::new("create-new");
+        let p = dir.path().join("f");
+        drop(create_new_file(&p, 0o640).unwrap());
+        assert_eq!(
+            create_new_file(&p, 0o640).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+            // 名前にあるシンボリックリンクの先には書かない。
+            let target = dir.path().join("target");
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(create_new_file(&link, 0o600).is_err());
+            assert!(!target.exists());
+            let meta = std::fs::symlink_metadata(&link).unwrap();
+            assert!(is_link_or_reparse_point(&meta));
+        }
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        assert!(!is_link_or_reparse_point(&meta));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rename_no_replace_keeps_an_existing_target() {
+        let dir = crate::testutil::TempDir::new("rename-noreplace");
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&a, b"new").unwrap();
+        std::fs::write(&b, b"old").unwrap();
+        assert_eq!(
+            rename_no_replace(&a, &b).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&b).unwrap(), b"old");
+        std::fs::remove_file(&b).unwrap();
+        rename_no_replace(&a, &b).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&b).unwrap(), b"new");
     }
 
     /// Windows: 既にあったフォルダの権限は変えない (利用者のフォルダの継承を壊さない)。

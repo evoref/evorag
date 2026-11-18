@@ -392,6 +392,24 @@ manual = ""
 note = ""
 
 [[ac]]
+id = "AC-FR-805-1"
+requirement = "FR-805"
+level = "Must"
+status = "later"
+tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output"]
+manual = ""
+note = "M3.5 の後半の前段は置き換えの核 (evorag-update の swap) だけ: apply → rollback → apply で各ファイルの SHA-256 が役割と合い、状態のファイルの記録が合うこと、記録の無い evorag.prev の版を --version で知ること。`evorag update rollback` のデータの案内 (min_write・min_read・退避のパス) と終了コード 0、データ根が変わらないことは、コマンドを入れる M3.5 の残り (取得と CLI) で判定する。"
+
+[[ac]]
+id = "AC-FR-805-2"
+requirement = "FR-805"
+level = "Must"
+status = "later"
+tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps"]
+manual = ""
+note = "置き換えの核で判定する: apply・rollback・元に戻す途中・状態のファイルの書き込みの各操作の後で止め (試験の差し込み)、次の続き (途中でもう一度止めたときを含む) と名前での片付けの後に、evorag(.exe) が前か後の版で、evorag.prev が役割どおりであること。Windows の隙間は案内の手順で戻す。子プロセスの強制終了と、TUI の起動の片付け・CLI からの続きは M3.5 の残りで判定する。"
+
+[[ac]]
 id = "AC-FR-901-1"
 requirement = "FR-901"
 level = "Must"

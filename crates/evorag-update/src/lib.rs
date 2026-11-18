@@ -59,6 +59,7 @@ mod keys;
 mod manifest;
 mod notes;
 mod signed;
+pub mod swap;
 mod version;
 
 #[cfg(feature = "unverified-dist")]
