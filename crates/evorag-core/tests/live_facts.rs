@@ -8,6 +8,8 @@
 //! - 判定は決定論 (LLM で判定しない): 答えを NFKC・小文字にして、期待する値をすべて含めば合格。答えの無い
 //!   問い (abstain) は、断った印 (`eval::judge::ABSTAIN_MARKERS`) があれば合格。
 //! - 合格の条件は、事実を答える事例 (abstain 以外) の 9 割以上 (20 件なら 18 件)。abstain は記録だけする。
+//! - 事実の正しさ (合否とは別の指標): `facts_expect`・`facts_forbid` を書いた事例は、sleep-time の後の事実の一覧
+//!   を確かめ、正しい事例の数 (`facts_correct`) を記録する (09 §5.2)。
 //! - `EVORAG_LIVE_FACTS_ONLY` (ID をカンマで区切る) を置くと、その事例だけを流す (合否は判定しない)。
 //! - 結果は `EVAL-facts.json` (`EVORAG_BENCH_OUT` か、無ければ target の試験用のフォルダ)。
 
@@ -49,6 +51,12 @@ struct Case {
     sessions: Vec<Vec<String>>,
     question: String,
     expect: Vec<Expect>,
+    /// 事実の一覧に含まれるべき行 (`"<主語>/<属性>=<値> (<状態>, <時制>)"`。別表記の並びならどれか 1 つ)。
+    #[serde(default)]
+    facts_expect: Vec<Expect>,
+    /// `Live` で残ってはならない組 (`"<主語>/<属性>=<値>"`。時制は問わない)。
+    #[serde(default)]
+    facts_forbid: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -106,6 +114,69 @@ fn cases() -> Vec<Case> {
     toml::from_str::<CaseFile>(CASES)
         .expect("tests/facts/recall-v0.3.toml is valid")
         .case
+}
+
+/// 事実の一覧の行 (`eval::facts` の形 `"<主語>/<属性>=<値> (<状態>, <時制>)"`) を、組
+/// (`<主語>/<属性>=<値>`) と状態と時制に分ける。状態の無い行 (`(vacant)` など) は `None`。
+fn fact_line(line: &str) -> Option<(&str, &str, &str)> {
+    let (head, tail) = line.rsplit_once(" (")?;
+    let (state, tense) = tail.strip_suffix(')')?.split_once(", ")?;
+    Some((head, state, tense))
+}
+
+/// 事実の判定 (09 §5.2 の「事実の正しさ」)。
+#[derive(Debug, PartialEq, Eq)]
+struct FactsVerdict {
+    /// 一覧に無かった `facts_expect` (別表記は ` | ` でつなぐ)。
+    missing: Vec<String>,
+    /// `Live` だった `facts_forbid`。
+    live_forbidden: Vec<String>,
+}
+
+impl FactsVerdict {
+    fn correct(&self) -> bool {
+        self.missing.is_empty() && self.live_forbidden.is_empty()
+    }
+}
+
+/// 事実の一覧 `facts` を、事例の `facts_expect`・`facts_forbid` で確かめる。どちらも無い事例は `None`。比べる前に、
+/// 答えの判定と同じ正規化を当てる。
+fn judge_facts(case: &Case, facts: &[String]) -> Option<FactsVerdict> {
+    if case.facts_expect.is_empty() && case.facts_forbid.is_empty() {
+        return None;
+    }
+    let n = judge::normalize;
+    let rows: Vec<(String, String, String)> = facts
+        .iter()
+        .filter_map(|l| fact_line(l))
+        .map(|(head, state, tense)| (n(head), n(state), n(tense)))
+        .collect();
+    let has = |want: &str| {
+        fact_line(want).is_some_and(|(head, state, tense)| {
+            let want = (n(head), n(state), n(tense));
+            rows.contains(&want)
+        })
+    };
+    let missing = case
+        .facts_expect
+        .iter()
+        .filter(|e| !e.alternatives().iter().any(|v| has(v)))
+        .map(|e| e.alternatives().join(" | "))
+        .collect();
+    let live = n("Live");
+    let live_forbidden = case
+        .facts_forbid
+        .iter()
+        .filter(|f| {
+            rows.iter()
+                .any(|(head, state, _)| *head == n(f) && *state == live)
+        })
+        .cloned()
+        .collect();
+    Some(FactsVerdict {
+        missing,
+        live_forbidden,
+    })
 }
 
 /// 事例のターン (`"U: "`・`"A: "`) を話し手と本文に分ける。
@@ -198,14 +269,21 @@ async fn run_case(
     core.shutdown().await;
     let (answer, sources) = turn.map_or_else(|| (String::new(), 0), |t| (t.text, t.sources));
     let verdict = judge_case(case, &answer);
+    let facts_verdict = judge_facts(case, &facts);
     println!(
-        "{} ({:?}): {} {:?} | {} | facts {:?}",
+        "{} ({:?}): {} {:?} | {} | facts {:?}{}",
         case.id,
         case.kind,
         if verdict.passed { "PASS" } else { "FAIL" },
         verdict.missing,
         answer.replace('\n', " "),
-        facts
+        facts,
+        facts_verdict.as_ref().map_or_else(String::new, |f| format!(
+            " | facts {} missing {:?} live_forbidden {:?}",
+            if f.correct() { "OK" } else { "WRONG" },
+            f.missing,
+            f.live_forbidden
+        ))
     );
     serde_json::json!({
         "id": case.id,
@@ -219,6 +297,10 @@ async fn run_case(
         "missing": verdict.missing,
         "sources": sources,
         "facts": facts,
+        "facts_checked": facts_verdict.is_some(),
+        "facts_correct": facts_verdict.as_ref().map(FactsVerdict::correct),
+        "facts_missing": facts_verdict.as_ref().map(|f| f.missing.clone()),
+        "facts_live_forbidden": facts_verdict.as_ref().map(|f| f.live_forbidden.clone()),
         "settled": settled,
         "seconds": started.elapsed().as_secs_f64(),
     })
@@ -262,8 +344,22 @@ async fn live_facts_are_recalled_in_a_new_session() {
         .filter(|r| r["passed"] == false)
         .filter_map(|r| r["id"].as_str())
         .collect();
+    // 事実の正しさ (合否には使わない、09 §5.2)。
+    let checked = results
+        .iter()
+        .filter(|r| r["facts_checked"] == true)
+        .count();
+    let wrong_facts: Vec<&str> = results
+        .iter()
+        .filter(|r| r["facts_correct"] == false)
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    let facts_correct = checked - wrong_facts.len();
     println!(
         "live facts: {facts_ok}/{facts_n} facts recalled (need {need}); abstained on {abstain_ok}/{abstain_n}; failed {failed:?}"
+    );
+    println!(
+        "live facts: stored facts correct in {facts_correct}/{checked} cases; wrong {wrong_facts:?}"
     );
     let v = serde_json::json!({
         "id": "EVAL-facts",
@@ -278,6 +374,9 @@ async fn live_facts_are_recalled_in_a_new_session() {
         "fact_needed": need,
         "abstain_cases": abstain_n,
         "abstain_passed": abstain_ok,
+        "facts_judge": "facts_expect lines are in the fact list and no facts_forbid pair is Live (after the same normalization); not part of the gate",
+        "facts_checked_cases": checked,
+        "facts_correct": facts_correct,
         "partial": only.is_some(),
         "passed": facts_ok >= need,
         "cases": results,
@@ -334,6 +433,37 @@ fn the_fact_cases_are_well_formed() {
                 }
             }
         }
+        // 事実の確かめの書式 (09 §5.2): `facts_expect` は `"<主語>/<属性>=<値> (<状態>, <時制>)"`、
+        // `facts_forbid` は `"<主語>/<属性>=<値>"`。属性は同梱の一覧にある。
+        let pair_ok = |pair: &str| {
+            pair.split_once('/')
+                .and_then(|(_, rest)| rest.split_once('='))
+                .is_some_and(|(a, v)| attrs.get(a).is_some() && !v.is_empty())
+        };
+        for e in &c.facts_expect {
+            for line in e.alternatives() {
+                let (head, state, tense) =
+                    fact_line(line).unwrap_or_else(|| panic!("{}: facts_expect `{line}`", c.id));
+                assert!(pair_ok(head), "{}: facts_expect `{line}`", c.id);
+                assert!(
+                    ["Live", "Contested", "Superseded"].contains(&state),
+                    "{}: state in `{line}`",
+                    c.id
+                );
+                assert!(
+                    ["Current", "Past", "Planned"].contains(&tense),
+                    "{}: tense in `{line}`",
+                    c.id
+                );
+            }
+        }
+        for f in &c.facts_forbid {
+            assert!(
+                pair_ok(f) && fact_line(f).is_none(),
+                "{}: facts_forbid `{f}`",
+                c.id
+            );
+        }
         // 訂正の事例は、字句の規則で訂正の候補になる発話を含む (04 §6)。
         if c.kind == Kind::Correction {
             assert!(
@@ -379,6 +509,33 @@ fn the_fact_cases_are_well_formed() {
             "no {lang:?} case in the file"
         );
     }
+}
+
+/// 事実の判定: `facts_expect` は状態と時制まで一致する行を、`facts_forbid` は `Live` の行だけを外れとする。
+#[test]
+fn stored_facts_are_judged_by_expect_and_forbid() {
+    let c = cases();
+    let f23 = c.iter().find(|c| c.id == "F23").expect("F23");
+    let good = [
+        "self/residence=名古屋 (Superseded, Current)".to_owned(),
+        "self/residence=福岡 (Live, Current)".to_owned(),
+    ];
+    assert_eq!(judge_facts(f23, &good).map(|v| v.correct()), Some(true));
+    let bad = ["self/residence=名古屋 (Live, Current)".to_owned()];
+    let v = judge_facts(f23, &bad).expect("checked");
+    assert_eq!(v.missing, ["self/residence=福岡 (Live, Current)"]);
+    assert_eq!(v.live_forbidden, ["self/residence=名古屋"]);
+    let contested = ["self/residence=福岡 (Contested, Current)".to_owned()];
+    assert!(!judge_facts(f23, &contested).expect("checked").correct());
+    let f19 = c.iter().find(|c| c.id == "F19").expect("F19");
+    let trip = ["self/event=来月、金沢へ一人旅をする (Live, Planned)".to_owned()];
+    assert_eq!(judge_facts(f19, &trip).map(|v| v.correct()), Some(true));
+    let kanazawa = ["self/residence=金沢 (Live, Planned)".to_owned()];
+    assert_eq!(
+        judge_facts(f19, &kanazawa).map(|v| v.correct()),
+        Some(false)
+    );
+    assert_eq!(fact_line("self/hobby=(vacant)"), None);
 }
 
 #[test]

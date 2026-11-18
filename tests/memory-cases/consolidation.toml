@@ -781,3 +781,21 @@ expect = { facts = [
   { s = "self", a = "residence", v = "東京", state = "Superseded", by = "福岡", sources = ["b1"] },
   { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["c1"] },
 ] }
+
+[[case]]
+id = "C37"
+title = "ほかの発話の値を old に写した言い直しも、old を空として扱い、変化の語 (今は) で今の値を置き換える"
+spec = "04 §5.2 の関門 2 (old_ignored)、§5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "名古屋に住んでいます。休日に行ける日帰り温泉を探しています。" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "名古屋", e = "名古屋に住んでいます。" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "先月、福岡に引っ越しました。今は福岡に住んでいます。近所でおいしいうどん屋を探しています。" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "福岡", e = "今は福岡に住んでいます。", old = "名古屋" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "名古屋", state = "Superseded", by = "福岡", sources = ["a1"] },
+  { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["b1"] },
+] }

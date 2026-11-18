@@ -124,11 +124,12 @@ expect = "value_not_in_evidence"
 
 [[case]]
 id = "G14"
-title = "根拠に無い old は捨てる"
+title = "根拠に無い old は、候補を捨てずに空として扱い、old_ignored で数える (束のほかの発話の値を写したもの)"
 spec = "04 §5.2 の関門 2"
 text = "うどんが好きになった"
 candidate = { s = "self", a = "likes", v = "うどん", e = "うどんが好きになった", old = "ラーメン" }
-expect = "old_not_in_evidence"
+expect = "accept"
+count = "old_ignored"
 
 # ---- 関門 3: 叙法 ----
 
@@ -953,3 +954,103 @@ spec = "04 §5.2 の関門 2"
 text = "RTX4070Tiを使っています"
 candidate = { s = "self", a = "device", v = "RTX4070", e = "RTX4070" }
 expect = "value_not_in_evidence"
+
+# ---- 関門 3 の補い (問いの文の最後の節) と関門 3a (手がかりの語) (04 §5.2、2026-11-18) ----
+
+[[case]]
+id = "G110"
+title = "旅行の行き先は、手がかりの語の無い文なので住む地域にしない"
+spec = "04 §5.2 の関門 3a"
+text = "来月、金沢へ一人旅をする予定です。二日間で回れる場所を教えてください。"
+candidate = { s = "self", a = "residence", v = "金沢", e = "金沢へ一人旅をする" }
+expect = "no_cue"
+
+[[case]]
+id = "G111"
+title = "「うちでは」の「うち」は、手がかりの語の無い文なので住む地域にしない"
+spec = "04 §5.2 の関門 3a"
+text = "うちではコタロウという柴犬を飼っています。散歩の時間はどれくらいがいいですか？"
+candidate = { s = "self", a = "residence", v = "うち", e = "うち" }
+expect = "no_cue"
+
+[[case]]
+id = "G112"
+title = "「住んでいて」のある文の住む地域は受け付ける (後ろの問いの文とは別の文)"
+spec = "04 §5.2 の関門 3・3a"
+text = "最近、仙台に住んでいて冬の寒さがこたえます。暖房を効率よく使うコツはありますか？"
+candidate = { s = "self", a = "residence", v = "仙台", e = "最近、仙台に住んでいて" }
+expect = "accept"
+
+[[case]]
+id = "G113"
+title = "英語の手がかりの語 (live) のある文の住む地域は受け付ける"
+spec = "04 §5.2 の関門 3・3a"
+lang = "en"
+text = "I live in Portland and it rains a lot here. Any tips for drying laundry indoors?"
+candidate = { s = "self", a = "residence", v = "Portland", e = "I live in Portland" }
+expect = "accept"
+
+[[case]]
+id = "G114"
+title = "相談の問いの最後の節の語句は、LLM が言い切りとしても問いとして捨てる"
+spec = "04 §5.2 の関門 3 の補い"
+lang = "en"
+text = "I live in Portland and it rains a lot here. Any tips for drying laundry indoors?"
+candidate = { s = "self", a = "hobby", v = "drying laundry", e = "drying laundry" }
+expect = "mood"
+
+[[case]]
+id = "G115"
+title = "問いの文でも、節の区切り (ですが・、) の前の値は受け付ける"
+spec = "04 §5.2 の関門 3 の補い"
+text = "趣味は将棋なんですが、おすすめは？"
+candidate = { s = "self", a = "hobby", v = "将棋", e = "趣味は将棋なんですが" }
+expect = "accept"
+
+[[case]]
+id = "G116"
+title = "「ください」だけでは問いの印にしない (呼び名の依頼は受け付ける)"
+spec = "04 §5.2 の関門 3 の補い"
+text = "これからは私のことをミナトと呼んでください。そのほうが話しやすいので。"
+candidate = { s = "self", a = "name", v = "ミナト", e = "私のことをミナトと呼んでください" }
+expect = "accept"
+
+[[case]]
+id = "G117"
+title = "「教えてください」で終わる文の最後の節の語句は、問いとして捨てる"
+spec = "04 §5.2 の関門 3 の補い"
+text = "食べ物だと担々麺が大好きです。家で作るときのコツを教えてください。"
+candidate = { s = "self", a = "hobby", v = "家で作る", e = "家で作るときのコツを教えてください" }
+expect = "mood"
+
+[[case]]
+id = "G118"
+title = "否定の候補も、問いの文の最後の節にあれば問いとして捨てる"
+spec = "04 §5.2 の関門 3 の補い"
+text = "もう大阪には住んでいないんですか？"
+candidate = { s = "self", a = "residence", v = "大阪", e = "もう大阪には住んでいないんですか", m = "negated" }
+expect = "mood"
+
+[[case]]
+id = "G119"
+title = "文末の「か」で終わる文 (句点の前) も問いの文とみなす"
+spec = "04 §5.2 の関門 3 の補い"
+text = "東京に住むのはどうですか。"
+candidate = { s = "self", a = "residence", v = "東京", e = "東京に住むのはどうですか" }
+expect = "mood"
+
+[[case]]
+id = "G120"
+title = "手がかりの語は同梱のすべての言語のものを当てる (英語の文に漢字の地名)"
+spec = "04 §5.2 の関門 3a"
+text = "I live in 大阪 with my family."
+candidate = { s = "self", a = "residence", v = "大阪", e = "I live in 大阪" }
+expect = "accept"
+
+[[case]]
+id = "G121"
+title = "手がかりの語は値の位置が掛かる文で見る (ほかの文の「住」では通さない)"
+spec = "04 §5.2 の関門 3a"
+text = "妹は札幌に住んでいます。私は来週、京都へ出張します。"
+candidate = { s = "self", a = "residence", v = "京都", e = "私は来週、京都へ出張します" }
+expect = "no_cue"

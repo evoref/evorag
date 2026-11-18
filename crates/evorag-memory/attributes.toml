@@ -3,7 +3,8 @@
 # 規則:
 # - 属性は足すだけにする。名前を変えたり、消したり、意味を変えたりしない (名前は事実の記録に残るため)。
 #   意味を変えたいときは、新しい名前の属性を足す。`other_subjects` は false → true に広げてよいが、逆はしない。
-# - `version` は、属性を足したときに上げる。
+# - `version` は、属性を足したときと、`cue` や `describe` を直したときに上げる (`cue` と `describe` は、属性の
+#   意味を変えない範囲で直してよい。処理し終えた発話は抽出し直さない、04 §5.1)。
 # - 機微な情報 (健康・病気、宗教、政治、性的指向、正確な住所) の属性は持たない。抽出のプロンプトでも、
 #   これらをほかの属性に入れないように指示する (04 §5.2)。
 #
@@ -15,8 +16,10 @@
 #   other_subjects true なら、利用者本人 (`self`) 以外の主語 (「妻」「田中さん」など) にも使える。
 #   describe       抽出のプロンプトに書く説明 (プロンプトの言語ごと)。何を入れ、何を入れないかを短く書く。
 #                  値は発話の中の続いた語句をそのまま写す (関門 2、04 §5.2) ので、例も発話の写しの形で書く。
+#   cue            true なら、値を言った文に、rules/<言語>.toml の [reading] の `<属性>_cue` の語のどれかが無い
+#                  候補を捨てる (04 §5.2 の関門 3a の `no_cue`)。省くと false。
 
-version = 1
+version = 2
 
 [[attribute]]
 name = "name"
@@ -42,6 +45,7 @@ cardinality = "single"
 max_chars = 60
 priority = 20
 other_subjects = true
+cue = true
 describe.ja = "主に住んでいる地域 (国・都道府県・市区町村まで。番地や建物名は入れない)。例: 大阪"
 describe.en = "area where the person mainly lives (country, region or city; no street address). e.g. Osaka"
 
@@ -51,8 +55,8 @@ cardinality = "multi"
 max_chars = 80
 priority = 25
 other_subjects = true
-describe.ja = "食べないもの・食べられないもの (アレルギーの食材など)。食べ物だけを書き、理由 (病気・宗教など) は入れない。例: えび"
-describe.en = "food the person does not or cannot eat (e.g. an allergen). Only the food, never the reason (illness, religion, etc.). e.g. shrimp"
+describe.ja = "食べない・食べられない食べ物。「〜は食べられません」も fact にする。理由 (病気・宗教など) は入れない。例: えび"
+describe.en = "food the person does not or cannot eat; \"I can't eat X\" is a fact. Never the reason (illness, religion, etc.). e.g. shrimp"
 
 [[attribute]]
 name = "occupation"
@@ -160,8 +164,8 @@ cardinality = "multi"
 max_chars = 80
 priority = 140
 other_subjects = true
-describe.ja = "趣味・定期的にする活動。好きな作品や食べ物は likes。例: 登山"
-describe.en = "hobbies or activities the person does regularly. Favorite works or food go to likes. e.g. hiking"
+describe.ja = "利用者が自分で、ふだん繰り返ししている活動 (名詞の形で)。動物や物の行動は入れない。好きな作品や食べ物は likes。例: 登山"
+describe.en = "an activity the person regularly does themselves, as a noun phrase. Not what an animal or thing does. Favorite works or food go to likes. e.g. hiking"
 
 [[attribute]]
 name = "likes"

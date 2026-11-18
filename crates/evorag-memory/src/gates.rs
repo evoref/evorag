@@ -1,7 +1,11 @@
 //! 抽出の関門 1〜8 と、属性の一覧の確認 (04 §5.1・§5.2)。決定論で、LLM を使わない。
 //!
-//! - 候補 (抽出の LLM の出力) を、属性の一覧 → 関門 1〜8 の順に当て、最初に外れた理由を返す。通った候補は、
-//!   統合の核に渡す形 (`Candidate`) にする。
+//! - 候補 (抽出の LLM の出力) を、属性の一覧 → 関門 1・2・3・3a・4〜8 の順に当て、最初に外れた理由を返す。
+//!   通った候補は、統合の核に渡す形 (`Candidate`) にする。
+//! - 関門 3 は、LLM の叙法に加えて、値の位置が問いの文の最後の節に掛かるかも見る (読み取りの規則の
+//!   `question_end`・`clause_break`)。関門 3a (手がかりの語、`no_cue`) は、属性の一覧で `cue = true` の属性に
+//!   だけ当てる。どちらも、値の位置が掛かる文 (訂正と同じ文の区切りの文字と改行で切る) に、同梱のすべての
+//!   言語の規則を合わせて当てる。
 //! - 関門 6・7 は `check_value`、関門 5 のうち根拠を見ない部分は `check_subject`、関門 6 だけは `check_text` として
 //!   別に呼べる (書き込みの入口がほかの経路の値と主語にも当て、事実の表が置く行に当て直す、04 §5.3・§5.4)。
 //! - 安全の規則 (関門 4・6) は、同梱のすべての言語のものを合わせて当てる。照合は NFKC と完全な case folding の
@@ -18,11 +22,12 @@ use evorag_types::Id;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::chars::{
-    grapheme_boundaries, has_mixed_script_word, in_category, is_default_ignorable, is_separator,
-    is_unspaced_letter, skeleton,
+    grapheme_boundaries, graphemes, has_mixed_script_word, in_category, is_default_ignorable,
+    is_separator, is_unspaced_letter, skeleton,
 };
+use crate::correction::{delimits, is_line_break};
 use crate::fold::{Candidate, Directives, Mood, Source, Tense};
-use crate::lexical::{Exclusions, any_outside, signals};
+use crate::lexical::{Exclusions, any_outside, find_all, signals};
 use crate::prefilter::Prefiltered;
 use crate::rules::{
     Attribute, Attributes, CommonRules, LanguageRules, all_language_rules, common_rules, fold,
@@ -70,10 +75,10 @@ pub enum GateReason {
     EvidenceMissing,
     /// 関門 2: 値が根拠に含まれない。
     ValueNotInEvidence,
-    /// 関門 2: `old` が根拠に含まれない。
-    OldNotInEvidence,
-    /// 関門 3: 叙法が問いか仮定。
+    /// 関門 3: 叙法が問いか仮定。値の位置が問いの文の最後の節にあるときも、この理由にする。
     Mood,
+    /// 関門 3a: `cue = true` の属性で、値の位置が掛かる文に、その属性の手がかりの語が無い。
+    NoCue,
     /// 関門 4: 値が、送る本文の根拠の範囲の中で、引用の括弧の内側にだけある。
     Quoted,
     /// 関門 5: 主語が `self` 以外 (本人を指す語は `self` にそろえた後) で、属性がそれを許さない。呼び名が長すぎる
@@ -109,8 +114,8 @@ impl GateReason {
         Self::UnknownAttribute,
         Self::EvidenceMissing,
         Self::ValueNotInEvidence,
-        Self::OldNotInEvidence,
         Self::Mood,
+        Self::NoCue,
         Self::Quoted,
         Self::SubjectNotAllowed,
         Self::ForbiddenCategory,
@@ -131,8 +136,8 @@ impl GateReason {
             Self::UnknownAttribute => "unknown_attribute",
             Self::EvidenceMissing => "evidence_missing",
             Self::ValueNotInEvidence => "value_not_in_evidence",
-            Self::OldNotInEvidence => "old_not_in_evidence",
             Self::Mood => "mood",
+            Self::NoCue => "no_cue",
             Self::Quoted => "quoted",
             Self::SubjectNotAllowed => "subject_not_allowed",
             Self::ForbiddenCategory => "forbidden_category",
@@ -183,7 +188,23 @@ pub struct Accepted {
     /// 統合に渡す候補 (span は保存した本文の位置)。
     pub candidate: Candidate,
     pub evidence: EvidenceMatch,
+    /// LLM の `old` が根拠にも発話の根拠の範囲にも見つからず、`old` を空として扱った (別の理由 `old_ignored`
+    /// として数える。束のほかの発話の語を写したものを置き換えの材料にしないため、04 §5.2 の関門 2)。
+    pub old_ignored: bool,
 }
+
+impl Accepted {
+    /// 通った候補について別に数える理由 (`evidence_normalized`・`evidence_loose`・`old_ignored`)。
+    pub fn counts(&self) -> impl Iterator<Item = &'static str> {
+        self.evidence
+            .count()
+            .into_iter()
+            .chain(self.old_ignored.then_some(OLD_IGNORED))
+    }
+}
+
+/// `old` を空として扱ったときに数える理由の名前 (`tests/memory-cases/README.md` の `count`)。
+const OLD_IGNORED: &str = "old_ignored";
 
 /// 安全の規則 (関門 4・6) の集まり。言語に依らない規則と、すべての言語の規則を合わせて持つ。
 #[derive(Debug, Clone)]
@@ -283,21 +304,11 @@ fn check_one<'s>(
     // 関門 1: 根拠が、前のふるいの後の発話にある (除いた行をまたがない)。
     let found = locate_evidence(utterance, &raw.evidence).ok_or(GateReason::EvidenceMissing)?;
 
-    // 関門 2: 値と `old` が根拠にあり、発話の根拠の範囲の中にもある (正規化 v1 → 照合の形、英数字は語の境界で)。
+    // 関門 2: 値が根拠にあり、発話の根拠の範囲の中にもある (正規化 v1 → 照合の形、英数字は語の境界で)。
     let e = Haystack::new(&raw.evidence);
     let value_needle = Needle::new(&raw.value);
     if e.find(&value_needle, Edges::Word).is_empty() {
         return Err(GateReason::ValueNotInEvidence);
-    }
-    let old_needle = raw
-        .old
-        .as_deref()
-        .map(Needle::new)
-        .filter(|o| !o.is_empty());
-    if let Some(o) = &old_needle
-        && e.find(o, Edges::Word).is_empty()
-    {
-        return Err(GateReason::OldNotInEvidence);
     }
     let sent = utterance.filtered.text();
     // 語の境界は、根拠の範囲の端ではなく送る本文の全体で見る (LLM が根拠を語の途中で切っても、"Annabelle" から
@@ -309,18 +320,27 @@ fn check_one<'s>(
         return Err(GateReason::ValueNotInEvidence);
     }
     // `old` は根拠の範囲の中の一致を、括弧の内側かを問わずに採る。正規化 v1 で違う一致が混じるときは、どれを
-    // 置き換えるか決められないので空とみなす (04 §5.2 の「記録する文字列」)。
-    let old = match &old_needle {
-        None => None,
+    // 置き換えるか決められないので空とみなす (04 §5.2 の「記録する文字列」)。根拠か根拠の範囲に見つからない
+    // (位置を戻せないときも) `old` は、候補を捨てずに空として扱い、`old_ignored` として数える (LLM が束のほかの
+    // 発話の値を写すことがあるため)。
+    let (old, old_ignored) = match old_needle(raw) {
+        None => (None, false),
+        Some(o) if e.find(&o, Edges::Word).is_empty() => (None, true),
         Some(o) => {
-            let texts: Vec<&str> = in_span(o)
+            let texts: Option<Vec<&str>> = in_span(&o)
                 .iter()
                 .map(|h| stored_text(utterance, h))
-                .collect::<Option<_>>()
-                .ok_or(GateReason::OldNotInEvidence)?;
-            let first = *texts.first().ok_or(GateReason::OldNotInEvidence)?;
-            let n = normalize_v1(first);
-            texts.iter().all(|t| normalize_v1(t) == n).then_some(first)
+                .collect();
+            match texts.as_deref() {
+                Some(all @ [first, ..]) => {
+                    let n = normalize_v1(first);
+                    (
+                        all.iter().all(|t| normalize_v1(t) == n).then_some(*first),
+                        false,
+                    )
+                }
+                _ => (None, true),
+            }
         }
     };
 
@@ -330,15 +350,38 @@ fn check_one<'s>(
         RawMood::Negated => Mood::Negated,
         RawMood::Question | RawMood::Hypothetical => return Err(GateReason::Mood),
     };
-
-    // 関門 4: 送る本文の、根拠の範囲の中の値の位置のうち、引用の括弧の内側に 1 文字も掛からないものがある。
-    // 括弧は送る本文の全体で組にする (根拠の外で開いた括弧も数える)。記録する値は、その最初の位置の保存した
-    // 本文 (04 §5.2 の「記録する文字列」)。
+    // 値の位置: 送る本文の、根拠の範囲の中の値の位置のうち、引用の括弧の内側に 1 文字も掛からない最初のもの
+    // (関門 4 と記録する値)。括弧は送る本文の全体で組にする (根拠の外で開いた括弧も数える)。どれも掛かるとき
+    // は、関門 3 の補いと手がかりの語を最初の位置で見て、関門 4 で捨てる。
     let regions = quotes.get_or_init(|| QuoteRegions::new(env.safety, sent));
-    let at = positions
+    let unquoted = positions
         .iter()
-        .find(|p| !regions.overlaps(&attribute.name, p))
-        .ok_or(GateReason::Quoted)?;
+        .find(|p| !regions.overlaps(&attribute.name, p));
+    let place = unquoted.unwrap_or(&positions[0]);
+    // 値の位置が掛かる文 (ふつうは 1 つ)。問いの印・節の区切り・手がかりの語は、根拠の言語で選ばず、同梱の
+    // すべての言語の規則を合わせて当てる (04 §5.2)。
+    let sentences = sentences_at(sent, place);
+    let languages = &env.safety.languages;
+    // 関門 3 の補い: 値の位置が、問いの印で終わる文の最後の節に掛かれば、問いとして捨てる (`fact` も `negated` も)。
+    if sentences
+        .iter()
+        .any(|s| in_question_clause(sent, s, place, languages))
+    {
+        return Err(GateReason::Mood);
+    }
+    // 関門 3a: `cue = true` の属性は、値の位置が掛かる文のどれかに、その属性の手がかりの語を求める。どの言語にも
+    // 語が無い属性は、いつも外れる (捨てる側に倒す)。
+    if attribute.cue
+        && !sentences
+            .iter()
+            .any(|s| has_cue(&sent[s.clone()], &attribute.name, languages))
+    {
+        return Err(GateReason::NoCue);
+    }
+
+    // 関門 4: 値の位置のうち、引用の括弧の内側に 1 文字も掛からないものがある。記録する値は、その最初の位置の
+    // 保存した本文 (04 §5.2 の「記録する文字列」)。
+    let at = unquoted.ok_or(GateReason::Quoted)?;
     let value = stored_text(utterance, at).ok_or(GateReason::ValueNotInEvidence)?;
 
     // 関門 5: 主語 (`check_subject`)。`self` 以外の呼び名は、根拠と発話の根拠の範囲の両方に含まれ、記録する
@@ -401,7 +444,106 @@ fn check_one<'s>(
     Ok(Accepted {
         candidate,
         evidence: found.kind,
+        old_ignored,
     })
+}
+
+/// LLM の `old` (正規化して空なら無いのと同じ)。
+fn old_needle(raw: &RawCandidate) -> Option<Needle> {
+    raw.old
+        .as_deref()
+        .map(Needle::new)
+        .filter(|o| !o.is_empty())
+}
+
+/// 本文 `text` の、範囲 `pos` が掛かる文の範囲 (前から順)。文は、訂正の型と同じ文の区切りの文字 (04 §6 の
+/// 「区切りの文字の判定」) の後と、改行で切る (区切りの文字は前の文に含める)。
+pub(crate) fn sentences_at(text: &str, pos: &Range<usize>) -> Vec<Range<usize>> {
+    let mut sentences: Vec<Range<usize>> = Vec::new();
+    let mut start = 0;
+    for cluster in graphemes(text) {
+        if text[cluster.clone()].chars().any(is_line_break) {
+            if start < cluster.start {
+                sentences.push(start..cluster.start);
+            }
+            start = cluster.end;
+        } else if delimits(text, &cluster) {
+            sentences.push(start..cluster.end);
+            start = cluster.end;
+        }
+    }
+    if start < text.len() {
+        sentences.push(start..text.len());
+    }
+    sentences.retain(|s| s.start < pos.end && pos.start < s.end);
+    sentences
+}
+
+/// 読み取りの規則の語を、英語は語の境界で当てるか (`lexical` と同じ、04 §5.2)。
+fn word_bounded(rules: &LanguageRules) -> bool {
+    rules.language == "en"
+}
+
+/// 規則の語 (NFKC と case folding の後の形) のどれかが本文に当たるか。生の本文 → 正規化 v1 → 照合の形
+/// (04 §5.6) の順に当てる。`bounded` なら ASCII の英数字で決めた語の境界で (英語)、でなければ部分一致で
+/// (日本語) 当てる。
+fn mentions(text: &str, words: &[String], bounded: bool) -> bool {
+    let v1 = normalize_v1(text);
+    let loose = normalize_loose(text);
+    words.iter().any(|w| {
+        !find_all(text, w, bounded).is_empty()
+            || !find_all(&v1, w, bounded).is_empty()
+            || !find_all(&loose, &normalize_loose(w), bounded).is_empty()
+    })
+}
+
+/// 関門 3a: 文 `sentence` に、属性 `attribute` の手がかりの語 (どれかの言語の `<属性>_cue`) があるか。
+fn has_cue(sentence: &str, attribute: &str, languages: &[&LanguageRules]) -> bool {
+    languages.iter().any(|r| {
+        r.reading
+            .cue(attribute)
+            .is_some_and(|words| mentions(sentence, words, word_bounded(r)))
+    })
+}
+
+/// 関門 3 の補い: 値の位置 `pos` が、文 `sentence` (本文 `text` の範囲) の最後の節に掛かり、その文が問いの印
+/// (どれかの言語の `question_end`) で終わるか。文の終わりは、正規化 v1 か照合の形で、後ろの空白と `?` 以外の
+/// 文の区切りの文字を除いて見る。値の後ろから文の終わりまでに節の区切り (どれかの言語の `clause_break`) が
+/// あれば、値は最後の節に掛からない。
+fn in_question_clause(
+    text: &str,
+    sentence: &Range<usize>,
+    pos: &Range<usize>,
+    languages: &[&LanguageRules],
+) -> bool {
+    let whole = &text[sentence.clone()];
+    let word = |c: char| c.is_ascii_alphanumeric();
+    let forms = [(normalize_v1(whole), false), (normalize_loose(whole), true)];
+    let ends_as_question = forms.iter().any(|(form, loose)| {
+        let body =
+            form.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '。' | '.' | '!'));
+        languages.iter().any(|r| {
+            r.reading.question_end.iter().any(|m| {
+                let m = if *loose {
+                    normalize_loose(m)
+                } else {
+                    m.clone()
+                };
+                body.strip_suffix(m.as_str()).is_some_and(|before| {
+                    !(word_bounded(r) && m.starts_with(word) && before.ends_with(word))
+                })
+            })
+        })
+    });
+    if !ends_as_question {
+        return false;
+    }
+    let tail = text
+        .get(pos.end.min(sentence.end)..sentence.end)
+        .unwrap_or("");
+    !languages
+        .iter()
+        .any(|r| mentions(tail, &r.reading.clause_break, word_bounded(r)))
 }
 
 /// 送る本文の範囲 `sent` の、保存した本文の部分文字列 (戻せなければ `None`)。
@@ -1049,6 +1191,27 @@ mod tests {
         }
         // 空白を除くと繋がる別の語は、文字体系の混在にしない。
         assert_eq!(check_value(&safety, attr, "Python と Rust"), Ok(()));
+    }
+
+    /// 文は訂正と同じ区切りの文字の後と改行で切り、値の位置が掛かる文をすべて返す。
+    #[test]
+    fn sentences_are_cut_after_delimiters_and_at_line_breaks() {
+        let at = |text: &str, v: &str| {
+            let p = text.find(v).expect("present");
+            sentences_at(text, &(p..p + v.len()))
+                .into_iter()
+                .map(|r| text[r].to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at("大阪です。東京は？", "東京"), ["東京は？"]);
+        assert_eq!(
+            at("v1.2 is out. I live in Oslo", "Oslo"),
+            [" I live in Oslo"]
+        );
+        assert_eq!(
+            at("住まいは大阪\n東京です", "大阪\n東京"),
+            ["住まいは大阪", "東京です"]
+        );
     }
 
     /// 語の境界は根拠の範囲の端ではなく、送る本文の全体で見る (LLM が根拠を語の途中で切ったとき)。

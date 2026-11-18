@@ -56,8 +56,23 @@ fn chars(v: &str) -> usize {
     v.chars().count()
 }
 
+/// `old` を根拠の中に求めるか (筋書きの候補は、根拠に無い `old` も書ける。関門 2 で空として扱う
+/// `old_ignored` を写すため、04 §5.2)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Old {
+    InEvidence,
+    Anywhere,
+}
+
 /// 候補の検査。`text` があれば、根拠と値の書き間違いも確かめる。
-fn check_candidate(id: &str, c: &Value, text: Option<&str>, raw_evidence: bool, raw_value: bool) {
+fn check_candidate(
+    id: &str,
+    c: &Value,
+    text: Option<&str>,
+    raw_evidence: bool,
+    raw_value: bool,
+    old_at: Old,
+) {
     req(c, "a", id);
     let subject = req(c, "s", id);
     let v = req(c, "v", id);
@@ -86,7 +101,9 @@ fn check_candidate(id: &str, c: &Value, text: Option<&str>, raw_evidence: bool, 
     }
     if raw_value {
         assert!(within(e, v), "{id}: value `{v}` is not in the evidence");
-        if let Some(old) = s(c, "old") {
+        if let Some(old) = s(c, "old")
+            && old_at == Old::InEvidence
+        {
             assert!(within(e, old), "{id}: old `{old}` is not in the evidence");
         }
     }
@@ -118,8 +135,8 @@ const GATE_REASONS: &[&str] = &[
     "unknown_attribute",
     "evidence_missing",
     "value_not_in_evidence",
-    "old_not_in_evidence",
     "mood",
+    "no_cue",
     "quoted",
     "subject_not_allowed",
     "forbidden_category",
@@ -147,7 +164,7 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
         reasons.insert(expect.to_owned());
         if let Some(count) = s(&case, "count") {
             assert!(
-                ["evidence_normalized", "evidence_loose"].contains(&count),
+                ["evidence_normalized", "evidence_loose", "old_ignored"].contains(&count),
                 "{id}: count `{count}`"
             );
             assert_eq!(
@@ -180,11 +197,9 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
             .get("candidate")
             .unwrap_or_else(|| panic!("{id}: no candidate"));
         let raw_evidence = expect != "evidence_missing" && s(&case, "count").is_none();
-        let raw_value = !matches!(
-            expect,
-            "evidence_missing" | "value_not_in_evidence" | "old_not_in_evidence"
-        ) && s(&case, "count").is_none();
-        check_candidate(&id, c, Some(text), raw_evidence, raw_value);
+        let raw_value = !matches!(expect, "evidence_missing" | "value_not_in_evidence")
+            && s(&case, "count").is_none();
+        check_candidate(&id, c, Some(text), raw_evidence, raw_value, Old::InEvidence);
         let a = req(c, "a", &id);
         let v = req(c, "v", &id);
         let attr = attrs.get(a);
@@ -304,7 +319,7 @@ fn check_scenarios(file: &str, prefix: char) -> usize {
                         .unwrap_or_else(|| panic!("{id}: candidate on unknown turn `{t}`"))
                         .2
                         .clone();
-                    check_candidate(&id, body, Some(&text), true, true);
+                    check_candidate(&id, body, Some(&text), true, true, Old::Anywhere);
                     let a = req(body, "a", &id);
                     let attr = attrs
                         .get(a)

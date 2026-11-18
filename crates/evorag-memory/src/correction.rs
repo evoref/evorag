@@ -236,13 +236,13 @@ fn canon(c: char) -> char {
 }
 
 /// 改行 (04 §5.2 の行の区切り)。
-fn is_line_break(c: char) -> bool {
+pub(crate) fn is_line_break(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}')
 }
 
 /// 元の本文の書記素 `cluster` が文の区切りか (04 §6 の「区切りの文字の判定」)。全角の `。．！？` は常に、半角の
 /// `.!?` は後ろが空白・改行・本文の終わりのときだけ区切り (小数・URL・略語で文を切らない)。
-fn delimits(text: &str, cluster: &Range<usize>) -> bool {
+pub(crate) fn delimits(text: &str, cluster: &Range<usize>) -> bool {
     match &text[cluster.clone()] {
         "。" | "．" | "！" | "？" | "｡" => true,
         "." | "!" | "?" => text[cluster.end..]

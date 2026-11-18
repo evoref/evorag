@@ -12,6 +12,13 @@
 #   expect     答えに含まれるべき値 (すべて)。各項目は文字列か、どれか 1 つでよい別表記の並び。
 #              比べる前に、答えと値の両方を NFKC・小文字にし、空白の並びを 1 つの空白にする。
 #              abstain は空にする (答えに「分からない」旨の印があれば合格。印の一覧は試験のコードにある)。
+#   facts_expect (任意) sleep-time の後の事実の一覧 (結果の `facts`、/memory の行) に含まれるべき行。各項目は
+#              "<主語>/<属性>=<値> (<状態>, <時制>)" (状態は Live / Contested / Superseded、時制は Current /
+#              Past / Planned) の文字列か、どれか 1 つでよい別表記の並び。
+#   facts_forbid (任意) Live で残ってはならない組 "<主語>/<属性>=<値>" の並び (時制は問わない。Superseded など
+#              で残るのはよい)。
+#              どちらも、答えと同じ正規化をしてから比べる。書いた事例は「事実の正しさ」(facts_correct) に数える
+#              が、合否 (expect) には使わない (09 §5.2)。答えからは見えにくい抽出の誤りを確かめる事例に書く。
 
 # --- 1 回言った事実 (日本語) ---
 
@@ -27,6 +34,7 @@ sessions = [[
 ]]
 question = "私が住んでいる街、どこだったか覚えてる？"
 expect = ["仙台"]
+facts_expect = ["self/residence=仙台 (Live, Current)"]
 
 [[case]]
 id = "F02"
@@ -40,6 +48,7 @@ sessions = [[
 ]]
 question = "私のこと、何て呼ぶことになってたっけ？"
 expect = ["ミナト"]
+facts_expect = ["self/name=ミナト (Live, Current)"]
 
 [[case]]
 id = "F03"
@@ -53,6 +62,7 @@ sessions = [[
 ]]
 question = "うちで飼っている犬の名前、覚えてる？"
 expect = ["コタロウ"]
+facts_forbid = ["self/residence=うち"]
 
 [[case]]
 id = "F04"
@@ -66,6 +76,7 @@ sessions = [[
 ]]
 question = "私が食べられない食材って何だっけ？"
 expect = ["えび"]
+facts_expect = ["self/dietary=えび (Live, Current)"]
 
 [[case]]
 id = "F05"
@@ -105,6 +116,7 @@ sessions = [[
 ]]
 question = "私が一緒に暮らしている家族は誰？"
 expect = ["妻", "息子"]
+facts_forbid = ["self/residence=近場"]
 
 [[case]]
 id = "F08"
@@ -118,6 +130,7 @@ sessions = [[
 ]]
 question = "私が勉強している外国語は何だっけ？"
 expect = ["スペイン語"]
+facts_expect = ["self/spoken_language=スペイン語 (Live, Current)"]
 
 [[case]]
 id = "F09"
@@ -144,6 +157,7 @@ sessions = [[
 ]]
 question = "私の誕生日、いつか覚えてる？"
 expect = ["7月22日"]
+facts_expect = ["self/birthday=7月22日 (Live, Current)"]
 
 [[case]]
 id = "F11"
@@ -170,6 +184,7 @@ sessions = [[
 ]]
 question = "私が持っている資格は何？"
 expect = ["簿記2級"]
+facts_expect = ["self/skill=簿記2級 (Live, Current)"]
 
 [[case]]
 id = "F13"
@@ -196,6 +211,7 @@ sessions = [[
 ]]
 question = "私がメモに使っているアプリは何だっけ？"
 expect = ["Obsidian"]
+facts_expect = ["self/software=Obsidian (Live, Current)"]
 
 [[case]]
 id = "F15"
@@ -209,6 +225,7 @@ sessions = [[
 ]]
 question = "私が週末によくしていることって何だっけ？"
 expect = ["ボルダリング"]
+facts_expect = ["self/hobby=ボルダリング (Live, Current)"]
 
 [[case]]
 id = "F16"
@@ -222,6 +239,8 @@ sessions = [[
 ]]
 question = "私の好きな食べ物、覚えてる？"
 expect = ["担々麺"]
+facts_expect = ["self/likes=担々麺 (Live, Current)"]
+facts_forbid = ["self/hobby=家で作る"]
 
 [[case]]
 id = "F17"
@@ -235,6 +254,7 @@ sessions = [[
 ]]
 question = "私が苦手なものって何だった？"
 expect = ["人混み"]
+facts_expect = ["self/dislikes=人混み (Live, Current)"]
 
 [[case]]
 id = "F18"
@@ -261,6 +281,7 @@ sessions = [[
 ]]
 question = "来月の旅行、どこへ行くって話したっけ？"
 expect = ["金沢"]
+facts_forbid = ["self/residence=金沢"]
 
 [[case]]
 id = "F20"
@@ -289,6 +310,8 @@ sessions = [[
 ]]
 question = "私が住んでいるところ、どこか覚えてる？"
 expect = ["神戸"]
+facts_expect = ["self/residence=神戸 (Live, Current)"]
+facts_forbid = ["self/residence=大阪"]
 
 [[case]]
 id = "F22"
@@ -308,6 +331,8 @@ sessions = [
 ]
 question = "私の誕生日っていつだったっけ？"
 expect = ["5月13日"]
+facts_expect = ["self/birthday=5月13日 (Live, Current)"]
+facts_forbid = ["self/birthday=5月3日"]
 
 [[case]]
 id = "F23"
@@ -327,6 +352,8 @@ sessions = [
 ]
 question = "私が今住んでいるのはどこ？"
 expect = ["福岡"]
+facts_expect = ["self/residence=福岡 (Live, Current)"]
+facts_forbid = ["self/residence=名古屋"]
 
 [[case]]
 id = "F24"
@@ -346,6 +373,7 @@ sessions = [
 ]
 question = "私の趣味を全部挙げてみて。"
 expect = ["将棋", "囲碁"]
+facts_expect = ["self/hobby=将棋 (Live, Current)", "self/hobby=囲碁 (Live, Current)"]
 
 # --- 英語 ---
 
@@ -362,6 +390,8 @@ sessions = [[
 ]]
 question = "Do you remember which city I live in?"
 expect = ["Portland"]
+facts_expect = ["self/residence=Portland (Live, Current)"]
+facts_forbid = ["self/hobby=drying laundry", "self/hobby=drying laundry indoors"]
 
 [[case]]
 id = "F26"
@@ -376,6 +406,7 @@ sessions = [[
 ]]
 question = "What's the name of my cat?"
 expect = ["Biscuit"]
+facts_forbid = ["self/hobby=scratching the sofa"]
 
 [[case]]
 id = "F27"
@@ -418,6 +449,8 @@ sessions = [[
 ]]
 question = "Which city do I live in?"
 expect = ["Boulder"]
+facts_expect = ["self/residence=Boulder (Live, Current)"]
+facts_forbid = ["self/residence=Denver"]
 
 [[case]]
 id = "F30"
@@ -432,6 +465,7 @@ sessions = [[
 ]]
 question = "Which language am I learning?"
 expect = ["Korean"]
+facts_expect = ["self/spoken_language=Korean (Live, Current)"]
 
 # --- 言っていない事実を問う (Abstain) ---
 
@@ -447,6 +481,7 @@ sessions = [[
 ]]
 question = "私自身はどこに住んでいるか、覚えてる？"
 expect = []
+facts_forbid = ["self/residence=札幌"]
 
 [[case]]
 id = "A02"
