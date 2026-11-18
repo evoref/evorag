@@ -581,7 +581,7 @@ mod tests {
         assert!(
             ja.reading
                 .cue("residence")
-                .is_some_and(|w| w.iter().any(|x| x == "住"))
+                .is_some_and(|w| w.iter().any(|x| x == "住ん"))
         );
         assert!(ja.reading.cue("hobby").is_none());
         let mut r = ja.clone();

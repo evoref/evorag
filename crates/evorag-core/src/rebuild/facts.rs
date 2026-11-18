@@ -336,7 +336,7 @@ struct Extractor<'a> {
     key: &'a ForgetKey,
     directives: &'a Directives,
     out: &'a mut FactsRebuilt,
-    gate_rejected: BTreeMap<&'static str, usize>,
+    gate_counts: BTreeMap<&'static str, usize>,
 }
 
 impl Extractor<'_> {
@@ -381,13 +381,7 @@ impl Extractor<'_> {
         let sent = items
             .iter()
             .map(|it| (it.turn, it.rev, it.text.as_str(), &it.screened));
-        crate::extraction::gate_batch(
-            self.key,
-            self.directives,
-            sent,
-            out,
-            &mut self.gate_rejected,
-        )
+        crate::extraction::gate_batch(self.key, self.directives, sent, out, &mut self.gate_counts)
     }
 
     /// 1 つの束を処理する。切れたら半分に分けて送り直し、型が合わない・切れた 1 つの発話の部分は飛ばして数える。
@@ -522,7 +516,7 @@ pub(super) async fn extract(
         key,
         directives: &directives,
         out,
-        gate_rejected: BTreeMap::new(),
+        gate_counts: BTreeMap::new(),
     };
     let mut events = Vec::new();
     for batch in &packing.batches {
@@ -532,7 +526,7 @@ pub(super) async fn extract(
         }
         events.extend(ex.batch(&sent).await.map_err(RebuildError::Extraction)?);
     }
-    let gate = std::mem::take(&mut ex.gate_rejected);
+    let gate = std::mem::take(&mut ex.gate_counts);
     tracing::info!(
         utterances = ex.out.utterances,
         requests = ex.out.requests,

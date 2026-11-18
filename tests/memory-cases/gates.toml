@@ -1054,3 +1054,70 @@ spec = "04 §5.2 の関門 3a"
 text = "妹は札幌に住んでいます。私は来週、京都へ出張します。"
 candidate = { s = "self", a = "residence", v = "京都", e = "私は来週、京都へ出張します" }
 expect = "no_cue"
+
+[[case]]
+id = "G122"
+title = "文末の「か」だけでは問いの印にしない (名前のあすか)"
+spec = "04 §5.2 の関門 3 の補い"
+text = "娘の名前はあすか"
+candidate = { s = "娘", a = "name", v = "あすか", e = "娘の名前はあすか" }
+expect = "accept"
+stored_subject = "娘"
+
+[[case]]
+id = "G123"
+title = "文末の「か」だけでは問いの印にしない (果物のすいか)"
+spec = "04 §5.2 の関門 3 の補い"
+text = "好きな果物はすいか"
+candidate = { s = "self", a = "likes", v = "すいか", e = "好きな果物はすいか" }
+expect = "accept"
+
+[[case]]
+id = "G124"
+title = "「〜とか」で終わる文は問いの文ではない"
+spec = "04 §5.2 の関門 3 の補い"
+text = "趣味は登山とか"
+candidate = { s = "self", a = "hobby", v = "登山", e = "趣味は登山とか" }
+expect = "accept"
+
+[[case]]
+id = "G125"
+title = "読点の無い節の区切り (ますが) の前の値は、問いの文でも受け付ける"
+spec = "04 §5.2 の関門 3 の補い"
+text = "東京に住んでいますがおすすめの店はありますか？"
+candidate = { s = "self", a = "residence", v = "東京", e = "東京に住んでいますが" }
+expect = "accept"
+
+[[case]]
+id = "G126"
+title = "「住友」の「住」は住まいの手がかりの語ではない"
+spec = "04 §5.2 の関門 3a"
+text = "住友商事で働いていて、大阪に出張中です"
+candidate = { s = "self", a = "residence", v = "大阪", e = "大阪に出張中です" }
+expect = "no_cue"
+
+[[case]]
+id = "G127"
+title = "「住所」の「住」は住まいの手がかりの語ではない"
+spec = "04 §5.2 の関門 3a"
+text = "住所変更の手続きで大阪の役所に行きました"
+candidate = { s = "self", a = "residence", v = "大阪", e = "住所変更の手続きで大阪の役所に行きました" }
+expect = "no_cue"
+
+[[case]]
+id = "G128"
+title = "英語の手がかりの語の活用 (residing) のある文の住む地域は受け付ける"
+spec = "04 §5.2 の関門 3a"
+lang = "en"
+text = "I'm residing in Berlin these days."
+candidate = { s = "self", a = "residence", v = "Berlin", e = "I'm residing in Berlin" }
+expect = "accept"
+
+[[case]]
+id = "G129"
+title = "照合の形で通った根拠の、根拠に無い old は、両方の理由で数える"
+spec = "04 §5.2 の関門 1・2"
+text = "うどんが好きになった"
+candidate = { s = "self", a = "likes", v = "うどん", e = "うどん が好きになった", old = "ラーメン" }
+expect = "accept"
+count = ["evidence_loose", "old_ignored"]

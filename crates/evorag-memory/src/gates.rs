@@ -27,7 +27,7 @@ use crate::chars::{
 };
 use crate::correction::{delimits, is_line_break};
 use crate::fold::{Candidate, Directives, Mood, Source, Tense};
-use crate::lexical::{Exclusions, any_outside, find_all, signals};
+use crate::lexical::{Exclusions, any_outside, find_all, signals, word_bounded};
 use crate::prefilter::Prefiltered;
 use crate::rules::{
     Attribute, Attributes, CommonRules, LanguageRules, all_language_rules, common_rules, fold,
@@ -357,7 +357,9 @@ fn check_one<'s>(
     let unquoted = positions
         .iter()
         .find(|p| !regions.overlaps(&attribute.name, p));
-    let place = unquoted.unwrap_or(&positions[0]);
+    let place = unquoted
+        .or_else(|| positions.first())
+        .ok_or(GateReason::ValueNotInEvidence)?;
     // 値の位置が掛かる文 (ふつうは 1 つ)。問いの印・節の区切り・手がかりの語は、根拠の言語で選ばず、同梱の
     // すべての言語の規則を合わせて当てる (04 §5.2)。
     let sentences = sentences_at(sent, place);
@@ -374,7 +376,7 @@ fn check_one<'s>(
     if attribute.cue
         && !sentences
             .iter()
-            .any(|s| has_cue(&sent[s.clone()], &attribute.name, languages))
+            .any(|s| has_cue(&Forms::new(&sent[s.clone()]), &attribute.name, languages))
     {
         return Err(GateReason::NoCue);
     }
@@ -479,71 +481,88 @@ pub(crate) fn sentences_at(text: &str, pos: &Range<usize>) -> Vec<Range<usize>> 
     sentences
 }
 
-/// 読み取りの規則の語を、英語は語の境界で当てるか (`lexical` と同じ、04 §5.2)。
-fn word_bounded(rules: &LanguageRules) -> bool {
-    rules.language == "en"
+/// 読み取りの規則の語を照合する本文の 3 つの形 (生の本文・正規化 v1・照合の形、04 §5.6)。文ごとに 1 回だけ作る。
+struct Forms<'t> {
+    raw: &'t str,
+    v1: String,
+    loose: String,
 }
 
-/// 規則の語 (NFKC と case folding の後の形) のどれかが本文に当たるか。生の本文 → 正規化 v1 → 照合の形
-/// (04 §5.6) の順に当てる。`bounded` なら ASCII の英数字で決めた語の境界で (英語)、でなければ部分一致で
-/// (日本語) 当てる。
-fn mentions(text: &str, words: &[String], bounded: bool) -> bool {
-    let v1 = normalize_v1(text);
-    let loose = normalize_loose(text);
-    words.iter().any(|w| {
-        !find_all(text, w, bounded).is_empty()
-            || !find_all(&v1, w, bounded).is_empty()
-            || !find_all(&loose, &normalize_loose(w), bounded).is_empty()
-    })
+impl<'t> Forms<'t> {
+    fn new(raw: &'t str) -> Self {
+        Self {
+            raw,
+            v1: normalize_v1(raw),
+            loose: normalize_loose(raw),
+        }
+    }
+
+    /// 規則の語 (NFKC と case folding の後の形) のどれかが当たるか。生の本文 → 正規化 v1 → 照合の形の順に
+    /// 当てる。`bounded` なら ASCII の英数字で決めた語の境界で (英語)、でなければ部分一致で (日本語) 当てる。
+    fn mention(&self, words: &[String], bounded: bool) -> bool {
+        words.iter().any(|w| {
+            !find_all(self.raw, w, bounded).is_empty()
+                || !find_all(&self.v1, w, bounded).is_empty()
+                || !find_all(&self.loose, &normalize_loose(w), bounded).is_empty()
+        })
+    }
+
+    /// 正規化 v1 か照合の形の末尾 (後ろの空白と、`?` 以外の文の区切りの文字を除く) が、規則の語のどれかで
+    /// 終わるか。`bounded` なら、英数字で始まる語の前が英数字でないことも求める。
+    fn ends_with_any(&self, words: &[String], bounded: bool) -> bool {
+        let word = |c: char| c.is_ascii_alphanumeric();
+        [(&self.v1, false), (&self.loose, true)]
+            .into_iter()
+            .any(|(form, loose)| {
+                let body = form
+                    .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '。' | '.' | '!'));
+                words.iter().any(|w| {
+                    let w = if loose { normalize_loose(w) } else { w.clone() };
+                    body.strip_suffix(w.as_str()).is_some_and(|before| {
+                        !(bounded && w.starts_with(word) && before.ends_with(word))
+                    })
+                })
+            })
+    }
 }
 
-/// 関門 3a: 文 `sentence` に、属性 `attribute` の手がかりの語 (どれかの言語の `<属性>_cue`) があるか。
-fn has_cue(sentence: &str, attribute: &str, languages: &[&LanguageRules]) -> bool {
+/// 規則の言語の語を、語の境界で当てるか。
+fn bounded(rules: &LanguageRules) -> bool {
+    word_bounded(&rules.language)
+}
+
+/// 関門 3a: 文に、属性 `attribute` の手がかりの語 (どれかの言語の `<属性>_cue`) があるか。
+fn has_cue(sentence: &Forms<'_>, attribute: &str, languages: &[&LanguageRules]) -> bool {
     languages.iter().any(|r| {
         r.reading
             .cue(attribute)
-            .is_some_and(|words| mentions(sentence, words, word_bounded(r)))
+            .is_some_and(|words| sentence.mention(words, bounded(r)))
     })
 }
 
 /// 関門 3 の補い: 値の位置 `pos` が、文 `sentence` (本文 `text` の範囲) の最後の節に掛かり、その文が問いの印
-/// (どれかの言語の `question_end`) で終わるか。文の終わりは、正規化 v1 か照合の形で、後ろの空白と `?` 以外の
-/// 文の区切りの文字を除いて見る。値の後ろから文の終わりまでに節の区切り (どれかの言語の `clause_break`) が
-/// あれば、値は最後の節に掛からない。
+/// (どれかの言語の `question_end`) で終わるか。値の後ろから文の終わりまでに節の区切り (どれかの言語の
+/// `clause_break`) があれば、値は最後の節に掛からない。
 fn in_question_clause(
     text: &str,
     sentence: &Range<usize>,
     pos: &Range<usize>,
     languages: &[&LanguageRules],
 ) -> bool {
-    let whole = &text[sentence.clone()];
-    let word = |c: char| c.is_ascii_alphanumeric();
-    let forms = [(normalize_v1(whole), false), (normalize_loose(whole), true)];
-    let ends_as_question = forms.iter().any(|(form, loose)| {
-        let body =
-            form.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '。' | '.' | '!'));
-        languages.iter().any(|r| {
-            r.reading.question_end.iter().any(|m| {
-                let m = if *loose {
-                    normalize_loose(m)
-                } else {
-                    m.clone()
-                };
-                body.strip_suffix(m.as_str()).is_some_and(|before| {
-                    !(word_bounded(r) && m.starts_with(word) && before.ends_with(word))
-                })
-            })
-        })
-    });
-    if !ends_as_question {
+    let whole = Forms::new(&text[sentence.clone()]);
+    if !languages
+        .iter()
+        .any(|r| whole.ends_with_any(&r.reading.question_end, bounded(r)))
+    {
         return false;
     }
-    let tail = text
-        .get(pos.end.min(sentence.end)..sentence.end)
-        .unwrap_or("");
+    let tail = Forms::new(
+        text.get(pos.end.min(sentence.end)..sentence.end)
+            .unwrap_or(""),
+    );
     !languages
         .iter()
-        .any(|r| mentions(tail, &r.reading.clause_break, word_bounded(r)))
+        .any(|r| tail.mention(&r.reading.clause_break, bounded(r)))
 }
 
 /// 送る本文の範囲 `sent` の、保存した本文の部分文字列 (戻せなければ `None`)。
@@ -1191,6 +1210,20 @@ mod tests {
         }
         // 空白を除くと繋がる別の語は、文字体系の混在にしない。
         assert_eq!(check_value(&safety, attr, "Python と Rust"), Ok(()));
+    }
+
+    /// 英語の規則だけでも、記号だけの節の区切り (`,`) が語の直後で当たり、値は最後の節に掛からない。
+    #[test]
+    fn english_rules_alone_split_clauses_at_a_comma() {
+        let en = [crate::rules::language_rules("en").expect("bundled")];
+        let in_last_clause = |text: &str| {
+            let p = text.find("Tokyo").expect("present");
+            let pos = p..p + "Tokyo".len();
+            let sentence = sentences_at(text, &pos).pop().expect("a sentence");
+            in_question_clause(text, &sentence, &pos, &en)
+        };
+        assert!(!in_last_clause("I live in Tokyo now, any tips?"));
+        assert!(in_last_clause("I live in Tokyo now any tips?"));
     }
 
     /// 文は訂正と同じ区切りの文字の後と改行で切り、値の位置が掛かる文をすべて返す。

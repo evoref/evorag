@@ -799,3 +799,21 @@ expect = { facts = [
   { s = "self", a = "residence", v = "名古屋", state = "Superseded", by = "福岡", sources = ["a1"] },
   { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["b1"] },
 ] }
+
+[[case]]
+id = "C38"
+title = "多値の属性で、ほかの発話の値を old に写した候補は、old を空として並べて足す (今の値を置き換えない)"
+spec = "04 §5.2 の関門 2 (old_ignored)、§5.3 の多値の属性"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好きです" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好きです" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "最近はうどんが好きです" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "うどん", e = "最近はうどんが好きです", old = "ラーメン" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["b1"] },
+] }

@@ -130,6 +130,22 @@ fn prefilter_cases_are_well_formed() {
     assert!(seen.len() >= 10);
 }
 
+/// 事例の `count` (文字列 1 つか、文字列の並び。無ければ空)。
+fn counts<'a>(case: &'a Value, id: &str) -> Vec<&'a str> {
+    match case.get("count") {
+        None => Vec::new(),
+        Some(Value::String(c)) => vec![c.as_str()],
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|c| {
+                c.as_str()
+                    .unwrap_or_else(|| panic!("{id}: count must be strings"))
+            })
+            .collect(),
+        Some(other) => panic!("{id}: count `{other}`"),
+    }
+}
+
 const GATE_REASONS: &[&str] = &[
     "accept",
     "unknown_attribute",
@@ -162,11 +178,14 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
         let expect = req(&case, "expect", &id);
         assert!(GATE_REASONS.contains(&expect), "{id}: expect `{expect}`");
         reasons.insert(expect.to_owned());
-        if let Some(count) = s(&case, "count") {
+        let counts = counts(&case, &id);
+        for count in &counts {
             assert!(
-                ["evidence_normalized", "evidence_loose", "old_ignored"].contains(&count),
+                ["evidence_normalized", "evidence_loose", "old_ignored"].contains(count),
                 "{id}: count `{count}`"
             );
+        }
+        if !counts.is_empty() {
             assert_eq!(
                 expect, "accept",
                 "{id}: count is only for accepted candidates"
@@ -196,9 +215,9 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
         let c = case
             .get("candidate")
             .unwrap_or_else(|| panic!("{id}: no candidate"));
-        let raw_evidence = expect != "evidence_missing" && s(&case, "count").is_none();
-        let raw_value = !matches!(expect, "evidence_missing" | "value_not_in_evidence")
-            && s(&case, "count").is_none();
+        let raw_evidence = expect != "evidence_missing" && counts.is_empty();
+        let raw_value =
+            !matches!(expect, "evidence_missing" | "value_not_in_evidence") && counts.is_empty();
         check_candidate(&id, c, Some(text), raw_evidence, raw_value, Old::InEvidence);
         let a = req(c, "a", &id);
         let v = req(c, "v", &id);

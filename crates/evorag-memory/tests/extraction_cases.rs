@@ -29,6 +29,15 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+/// 事例の `count` (文字列 1 つか、文字列の並び。無ければ空)。受け付けた候補の `Accepted::counts` と同じ順に書く。
+fn counts(case: &Value) -> Vec<&str> {
+    match case.get("count") {
+        Some(Value::String(c)) => vec![c.as_str()],
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn id_of(case: &Value) -> &str {
     s(case, "id").expect("id")
 }
@@ -177,9 +186,9 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
     match got {
         Ok(a) => {
             assert_eq!(want, "accept", "{id}: accepted, want `{want}`");
-            let counts: Vec<&str> = a.counts().collect();
-            let want_counts: Vec<&str> = s(case, "count").into_iter().collect();
-            assert_eq!(counts, want_counts, "{id}: counts ({:?})", a.evidence);
+            let got_counts: Vec<&str> = a.counts().collect();
+            let want_counts = counts(case);
+            assert_eq!(got_counts, want_counts, "{id}: counts ({:?})", a.evidence);
             let c = &a.candidate;
             let span = usize::try_from(c.source.start).expect("u32")
                 ..usize::try_from(c.source.end).expect("u32");
@@ -230,7 +239,7 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
         }
         Err(r) => {
             assert_eq!(r.as_str(), want, "{id}: rejected as `{r}`");
-            assert!(s(case, "count").is_none(), "{id}: count on a rejection");
+            assert!(counts(case).is_empty(), "{id}: count on a rejection");
             None
         }
     }
@@ -269,7 +278,7 @@ fn prefilter_cases_pass() {
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 121);
+    assert_eq!(run_gates(&[]), 129);
 }
 
 #[test]
@@ -360,7 +369,7 @@ fn negations_questions_and_hypotheticals_make_no_fact() {
 fn question_clauses_cue_words_and_ignored_old() {
     run_gates(&[
         "G14", "G110", "G111", "G112", "G113", "G114", "G115", "G116", "G117", "G118", "G119",
-        "G120", "G121",
+        "G120", "G121", "G122", "G123", "G124", "G125", "G126", "G127", "G128", "G129",
     ]);
 }
 

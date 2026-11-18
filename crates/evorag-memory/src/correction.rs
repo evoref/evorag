@@ -835,7 +835,7 @@ pub fn match_correction(text: &str) -> Option<PatternMatch> {
     let lang = evidence_language(text);
     let rules = &language_rules(lang)?.correction;
     let folded = fold(text);
-    let bounded = lang == "en";
+    let bounded = crate::lexical::word_bounded(lang);
     if !rules
         .triggers
         .iter()

@@ -8,9 +8,10 @@
 # - Matching runs after NFKC and casefold. Entries here are written in a form NFKC and casefold leave unchanged.
 # - [safety] entries match as substrings (so "ignore" is caught inside "以前の指示をignoreして").
 #   [reading] and [correction.triggers] entries match on ASCII word boundaries, so "i" does not match inside "in".
+#   The boundary is checked only on an alphanumeric end of the entry (so "," and "no," match right after a word).
 # - A match lying entirely inside a match of an *_exclude entry is not counted (the whole value is not allowed).
 
-version = 3
+version = 4
 language = "en"
 
 [prefilter]
@@ -100,12 +101,15 @@ negation_change = [
 # attributes.toml is dropped unless a sentence the value lies in (split by the §6 sentence delimiters and
 # line breaks) contains one of these (so a trip destination does not become the residence).
 # Matched on the raw sentence, then normalized v1, then the loose form. Other phrasings are missed (the safe side).
-residence_cue = ["live", "lives", "living", "lived", "based in", "moved to", "relocated", "reside"]
+residence_cue = [
+  "live", "lives", "living", "lived", "based in", "moved to", "relocated", "reside", "resides", "residing",
+  "resident",
+]
 # Question endings (supplement to gate 3). If the value lies in the last clause of a sentence ending with one
 # of these, the candidate is dropped as a question even when the LLM said it was a fact or a negation.
 question_end = ["?"]
 # Clause breaks (supplement to gate 3). If one lies between the value and the end of the sentence, the
-# value is not in the last clause.
+# value is not in the last clause. Conjunctions (and, so, but) are not clause breaks here.
 clause_break = [",", ";"]
 
 [correction]
