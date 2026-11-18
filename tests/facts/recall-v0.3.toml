@@ -1,0 +1,489 @@
+# 事実の想起の事例 (09 §5.2 の「事実の想起」、08 §2.4 の v0.3 の合格条件 (3))。
+# 会話はすべて架空で、実在の人物・個人情報・利用者の会話の実例を含まない (11 §9.7)。
+#
+# [[case]]:
+#   id         事例の ID (ファイルの中で一意)。F は事実を答える事例、A は答えの無い問い (Abstain)。
+#   lang       データ根のプロンプトの言語 (ja / en)。省くと ja。
+#   kind       fact (1 回言った事実) / correction (「〜じゃなくて〜」の訂正) / update (別のセッションで言い直した
+#              新しい値) / multi (複数のセッションで足した多値) / abstain (言っていない事実を問う)。
+#   attributes 確かめる属性 (crates/evorag-memory/attributes.toml の名前)。abstain は問うた属性。
+#   sessions   以前のセッションの並び。各セッションはターンの並び ("U: " は利用者、"A: " は応答。U から始めて交互)。
+#   question   新しいセッションで送る問い。
+#   expect     答えに含まれるべき値 (すべて)。各項目は文字列か、どれか 1 つでよい別表記の並び。
+#              比べる前に、答えと値の両方を NFKC・小文字にし、空白の並びを 1 つの空白にする。
+#              abstain は空にする (答えに「分からない」旨の印があれば合格。印の一覧は試験のコードにある)。
+
+# --- 1 回言った事実 (日本語) ---
+
+[[case]]
+id = "F01"
+kind = "fact"
+attributes = ["residence"]
+sessions = [[
+  "U: 最近、仙台に住んでいて冬の寒さがこたえます。暖房を効率よく使うコツはありますか？",
+  "A: 厚手のカーテンで窓からの冷気を防ぎ、サーキュレーターで暖かい空気を循環させると効率が上がります。",
+  "U: 加湿もしたほうがいいですか？",
+  "A: 湿度を40〜60%に保つと体感温度が上がり、乾燥も防げます。",
+]]
+question = "私が住んでいる街、どこだったか覚えてる？"
+expect = ["仙台"]
+
+[[case]]
+id = "F02"
+kind = "fact"
+attributes = ["name"]
+sessions = [[
+  "U: これからは私のことをミナトと呼んでください。そのほうが話しやすいので。",
+  "A: 承知しました、ミナトさん。これからはそうお呼びします。",
+  "U: ありがとう。今日は読書の記録の付け方を相談したいです。",
+  "A: 読んだ日付、題名、印象に残った一文を書く形が続けやすいです。",
+]]
+question = "私のこと、何て呼ぶことになってたっけ？"
+expect = ["ミナト"]
+
+[[case]]
+id = "F03"
+kind = "fact"
+attributes = ["pet"]
+sessions = [[
+  "U: うちではコタロウという柴犬を飼っています。散歩の時間はどれくらいがいいですか？",
+  "A: 柴犬は活発なので、朝晩それぞれ30分ほどの散歩がおすすめです。",
+  "U: 夏の散歩で気をつけることは？",
+  "A: アスファルトが熱くなるので、早朝か日が沈んだ後に歩かせてください。",
+]]
+question = "うちで飼っている犬の名前、覚えてる？"
+expect = ["コタロウ"]
+
+[[case]]
+id = "F04"
+kind = "fact"
+attributes = ["dietary"]
+sessions = [[
+  "U: えびのアレルギーがあるので、えびは食べられません。中華料理で頼みやすいものはありますか？",
+  "A: 麻婆豆腐、青椒肉絲、回鍋肉などは、えびを使わないことが多いです。注文のときに店に確かめると安心です。",
+  "U: 点心はどうですか？",
+  "A: 焼売や餃子にえびが入ることがあるので、具を確かめてから頼むのがおすすめです。",
+]]
+question = "私が食べられない食材って何だっけ？"
+expect = ["えび"]
+
+[[case]]
+id = "F05"
+kind = "fact"
+attributes = ["occupation"]
+sessions = [[
+  "U: 私は小学校の教員をしています。授業の準備を短くする工夫を知りたいです。",
+  "A: 単元ごとに使い回せる板書の型と、ワークシートの雛形を作っておくと準備が短くなります。",
+  "U: 学年の先生と分担するのもありですか？",
+  "A: 教科ごとに担当を決めて教材を共有すると、全体の負担が減ります。",
+]]
+question = "私の仕事、何か覚えてる？"
+expect = ["教員"]
+
+[[case]]
+id = "F06"
+kind = "fact"
+attributes = ["age"]
+sessions = [[
+  "U: 今年で34歳になりました。そろそろ健康のために運動を始めたいです。",
+  "A: まずは週に2〜3回、20分ほどの早歩きから始めると続けやすいです。",
+  "U: 筋トレも必要ですか？",
+  "A: スクワットや腕立て伏せなど、自宅でできる種目を週2回足すと効果的です。",
+]]
+question = "私の年齢、覚えてる？"
+expect = ["34"]
+
+[[case]]
+id = "F07"
+kind = "fact"
+attributes = ["household"]
+sessions = [[
+  "U: 妻と6歳の息子と3人で暮らしています。週末に家族で行ける近場の遊び場を考えています。",
+  "A: 6歳なら、アスレチックのある公園や科学館が楽しめます。お弁当を持っていくと一日過ごせます。",
+  "U: 雨の日はどうしましょう。",
+  "A: 屋内の遊び場や図書館のおはなし会、工作の教室などがおすすめです。",
+]]
+question = "私が一緒に暮らしている家族は誰？"
+expect = ["妻", "息子"]
+
+[[case]]
+id = "F08"
+kind = "fact"
+attributes = ["spoken_language"]
+sessions = [[
+  "U: 最近スペイン語を勉強し始めました。単語を覚えるいい方法はありますか？",
+  "A: 例文ごと覚えると定着しやすいです。毎日10語ずつ、声に出して復習するのがおすすめです。",
+  "U: 発音の練習はどうすればいいですか？",
+  "A: 短い音声を聞いてすぐ真似するシャドーイングが効果的です。",
+]]
+question = "私が勉強している外国語は何だっけ？"
+expect = ["スペイン語"]
+
+[[case]]
+id = "F09"
+kind = "fact"
+attributes = ["hometown"]
+sessions = [[
+  "U: 出身は高知で、高校まで向こうにいました。地元の味が恋しくなります。",
+  "A: 高知といえばかつおのたたきが有名ですね。藁焼きの香ばしさは格別です。",
+  "U: 家で作るならどうすればいいですか？",
+  "A: フライパンで表面を強火で焼き、すぐ氷水で冷やすと家庭でも作れます。",
+]]
+question = "私の出身地はどこだっけ？"
+expect = ["高知"]
+
+[[case]]
+id = "F10"
+kind = "fact"
+attributes = ["birthday"]
+sessions = [[
+  "U: 誕生日は7月22日です。毎年その日に何か新しいことを始めることにしています。",
+  "A: 素敵な習慣ですね。今年は何を始める予定ですか？",
+  "U: 楽器を始めようか迷っています。",
+  "A: ウクレレは弦が少なく、大人から始めても上達を感じやすい楽器です。",
+]]
+question = "私の誕生日、いつか覚えてる？"
+expect = ["7月22日"]
+
+[[case]]
+id = "F11"
+kind = "fact"
+attributes = ["education"]
+sessions = [[
+  "U: 大学では農学部で土壌の研究をしていました。家庭菜園の土作りについて聞きたいです。",
+  "A: 腐葉土や堆肥を混ぜて水はけと保水のバランスを整えるのが基本です。",
+  "U: 酸度の調整は必要ですか？",
+  "A: 多くの野菜は弱酸性を好むので、苦土石灰で少しずつ調整します。",
+]]
+question = "私が大学で学んでいた分野って何だった？"
+expect = [["農学", "土壌"]]
+
+[[case]]
+id = "F12"
+kind = "fact"
+attributes = ["skill"]
+sessions = [[
+  "U: 簿記2級の資格を持っています。家計簿にも複式簿記を使ってみたいです。",
+  "A: 資産と負債の科目を分けて記録すると、純資産の変化が見えるようになります。",
+  "U: 表計算ソフトで管理できますか？",
+  "A: 仕訳の表と科目ごとの集計の表を分けて作ると管理しやすいです。",
+]]
+question = "私が持っている資格は何？"
+expect = ["簿記2級"]
+
+[[case]]
+id = "F13"
+kind = "fact"
+attributes = ["device"]
+sessions = [[
+  "U: 家では ThinkPad X1 Carbon を使っています。バッテリーを長持ちさせる設定はありますか？",
+  "A: 充電の上限を80%にする設定と、画面の明るさを下げることで、電池の劣化と消費を抑えられます。",
+  "U: スリープの設定も見直したほうがいいですか？",
+  "A: 短い時間で画面を消すように設定すると、消費をさらに抑えられます。",
+]]
+question = "私が家で使っているパソコン、何だったっけ？"
+expect = ["ThinkPad"]
+
+[[case]]
+id = "F14"
+kind = "fact"
+attributes = ["software"]
+sessions = [[
+  "U: メモは全部 Obsidian で取っています。ノートの整理の仕方を相談させてください。",
+  "A: フォルダを増やしすぎず、リンクとタグでつなぐ形にすると探しやすくなります。",
+  "U: 日記もそこに書いていいですか？",
+  "A: 日付ごとのノートを作る機能を使えば、日記もまとめて管理できます。",
+]]
+question = "私がメモに使っているアプリは何だっけ？"
+expect = ["Obsidian"]
+
+[[case]]
+id = "F15"
+kind = "fact"
+attributes = ["hobby"]
+sessions = [[
+  "U: 週末はよくボルダリングに行きます。指の皮が痛くなるのはどうしたらいいですか？",
+  "A: 登った後に保湿をして、皮が厚くなりすぎたらやすりで整えると割れにくくなります。",
+  "U: 登る前のストレッチは何をすればいいですか？",
+  "A: 手首と肩、前腕を中心に、ゆっくり伸ばしてから登り始めると怪我を防げます。",
+]]
+question = "私が週末によくしていることって何だっけ？"
+expect = ["ボルダリング"]
+
+[[case]]
+id = "F16"
+kind = "fact"
+attributes = ["likes"]
+sessions = [[
+  "U: 食べ物だと担々麺が大好きです。家で作るときのコツを教えてください。",
+  "A: 練りごまとラー油を合わせたたれに、炒めた挽き肉をのせると店に近い味になります。",
+  "U: 花椒は入れたほうがいいですか？",
+  "A: 仕上げに少し振ると、しびれる辛さと香りが加わって本格的になります。",
+]]
+question = "私の好きな食べ物、覚えてる？"
+expect = ["担々麺"]
+
+[[case]]
+id = "F17"
+kind = "fact"
+attributes = ["dislikes"]
+sessions = [[
+  "U: 人混みがとても苦手で、休日の外出がつらいです。混まない過ごし方はありますか？",
+  "A: 開店直後や平日の夕方など、混む時間を外すと落ち着いて過ごせます。",
+  "U: 旅行でも同じですか？",
+  "A: 連休を避けて平日に休みを取ると、観光地も空いていることが多いです。",
+]]
+question = "私が苦手なものって何だった？"
+expect = ["人混み"]
+
+[[case]]
+id = "F18"
+kind = "fact"
+attributes = ["goal"]
+sessions = [[
+  "U: 今、気象予報士の試験に向けて勉強しています。一日の勉強時間はどれくらいが目安ですか？",
+  "A: 働きながらなら、平日1時間と週末3時間ほどを半年から1年続ける人が多いです。",
+  "U: 過去問はいつから解けばいいですか？",
+  "A: 基礎の範囲を一通り読んだら、早めに過去問に触れて出題の傾向をつかむのがおすすめです。",
+]]
+question = "私が今目指している資格の試験は何だっけ？"
+expect = ["気象予報士"]
+
+[[case]]
+id = "F19"
+kind = "fact"
+attributes = ["event"]
+sessions = [[
+  "U: 来月、金沢へ一人旅をする予定です。二日間で回れる場所を教えてください。",
+  "A: 兼六園、ひがし茶屋街、近江町市場、21世紀美術館は二日で無理なく回れます。",
+  "U: 移動は何が便利ですか？",
+  "A: 周遊バスの一日券を使うと、主な観光地を効率よく回れます。",
+]]
+question = "来月の旅行、どこへ行くって話したっけ？"
+expect = ["金沢"]
+
+[[case]]
+id = "F20"
+kind = "fact"
+attributes = ["relation"]
+sessions = [[
+  "U: 真壁さんは大学時代の友人で、来週一緒に食事をします。手土産は何がいいでしょう。",
+  "A: 相手の好みが分からなければ、日持ちする焼き菓子や季節の和菓子が無難です。",
+  "U: 予算は二千円くらいです。",
+  "A: その予算なら、少し名の知れた店の焼き菓子の詰め合わせが選べます。",
+]]
+question = "真壁さんって、私とどういう関係だったっけ？"
+expect = ["友人"]
+
+# --- 訂正・言い直し・複数のセッション (日本語) ---
+
+[[case]]
+id = "F21"
+kind = "correction"
+attributes = ["residence"]
+sessions = [[
+  "U: 大阪に住んでいます。この辺りで紅葉がきれいな場所はありますか？",
+  "A: 大阪にお住まいなんですね。箕面の滝の周辺は紅葉の名所です。",
+  "U: ごめんなさい、大阪じゃなくて神戸に住んでいます。",
+  "A: 神戸にお住まいなんですね。神戸なら再度山や六甲山の周辺で紅葉が楽しめます。",
+]]
+question = "私が住んでいるところ、どこか覚えてる？"
+expect = ["神戸"]
+
+[[case]]
+id = "F22"
+kind = "correction"
+attributes = ["birthday"]
+sessions = [
+  [
+    "U: 誕生日は5月3日です。毎年連休と重なるので、お祝いの予約が取りにくいんです。",
+    "A: 連休中は混みますね。早めに予約するか、前後の平日にお祝いするのも手です。",
+  ],
+  [
+    "U: この前の話で言い間違えました。誕生日は5月3日じゃなくて5月13日でした。",
+    "A: 5月13日なんですね。連休が明けた後なので、予約も取りやすそうです。",
+    "U: そうなんです。今年は小さなケーキを買うつもりです。",
+    "A: 好きな果物がのったケーキを選ぶと、より楽しいお祝いになりますね。",
+  ],
+]
+question = "私の誕生日っていつだったっけ？"
+expect = ["5月13日"]
+
+[[case]]
+id = "F23"
+kind = "update"
+attributes = ["residence"]
+sessions = [
+  [
+    "U: 名古屋に住んでいます。休日に行ける日帰り温泉を探しています。",
+    "A: 名古屋からなら、長島温泉や下呂温泉が日帰りで行けます。",
+  ],
+  [
+    "U: 先月、福岡に引っ越しました。今は福岡に住んでいます。近所でおいしいうどん屋を探しています。",
+    "A: 福岡はやわらかい麺のうどんが名物です。ごぼう天うどんを出す店が多いです。",
+    "U: 一人で入りやすい店がいいです。",
+    "A: カウンター席の多い店なら、一人でも気軽に入れます。",
+  ],
+]
+question = "私が今住んでいるのはどこ？"
+expect = ["福岡"]
+
+[[case]]
+id = "F24"
+kind = "multi"
+attributes = ["hobby"]
+sessions = [
+  [
+    "U: 趣味は将棋です。最近、詰将棋を毎日一問解いています。",
+    "A: 毎日続けると読みの力がつきますね。短手数の問題から始めると続けやすいです。",
+  ],
+  [
+    "U: 最近は囲碁も始めました。将棋と並ぶ趣味にしたいです。",
+    "A: 囲碁は九路盤から始めると、短い時間で一局を打てて覚えやすいです。",
+    "U: おすすめの練習方法はありますか？",
+    "A: 詰碁を毎日数問解くと、石の生き死にの感覚が身につきます。",
+  ],
+]
+question = "私の趣味を全部挙げてみて。"
+expect = ["将棋", "囲碁"]
+
+# --- 英語 ---
+
+[[case]]
+id = "F25"
+lang = "en"
+kind = "fact"
+attributes = ["residence"]
+sessions = [[
+  "U: I live in Portland and it rains a lot here. Any tips for drying laundry indoors?",
+  "A: Use a drying rack near a dehumidifier or a fan, and leave space between items so air can move.",
+  "U: How long does it usually take?",
+  "A: With good airflow, most clothes dry overnight, about eight to twelve hours.",
+]]
+question = "Do you remember which city I live in?"
+expect = ["Portland"]
+
+[[case]]
+id = "F26"
+lang = "en"
+kind = "fact"
+attributes = ["pet"]
+sessions = [[
+  "U: I have a cat named Biscuit who keeps scratching the sofa. How can I stop that?",
+  "A: Put a tall scratching post next to the sofa and reward your cat when it uses the post.",
+  "U: Should I trim the claws too?",
+  "A: Trimming the tips every couple of weeks reduces damage and is easy once your cat gets used to it.",
+]]
+question = "What's the name of my cat?"
+expect = ["Biscuit"]
+
+[[case]]
+id = "F27"
+lang = "en"
+kind = "fact"
+attributes = ["occupation"]
+sessions = [[
+  "U: I work as a dental hygienist, and my shoulders get stiff by the end of the day. Any stretches?",
+  "A: Try shoulder rolls, a doorway chest stretch, and gentle neck tilts during short breaks between patients.",
+  "U: How often should I do them?",
+  "A: A minute or two every hour is enough to keep the muscles from tightening up.",
+]]
+question = "What do I do for a living?"
+expect = ["dental hygienist"]
+
+[[case]]
+id = "F28"
+lang = "en"
+kind = "fact"
+attributes = ["dietary"]
+sessions = [[
+  "U: I'm allergic to peanuts, so I can't eat them. What snacks can I bring on a hike?",
+  "A: Dried fruit, pretzels, cheese sticks, and seed-based bars are good options without peanuts.",
+  "U: Are sunflower seeds safe?",
+  "A: Sunflower seeds are not peanuts, but check the label for cross-contact warnings.",
+]]
+question = "Which food can't I eat?"
+expect = ["peanut"]
+
+[[case]]
+id = "F29"
+lang = "en"
+kind = "correction"
+attributes = ["residence"]
+sessions = [[
+  "U: I live in Denver. What's a good day trip for the weekend?",
+  "A: So you live in Denver. Red Rocks Park and the town of Golden are both easy day trips.",
+  "U: Sorry, it's Boulder, not Denver.",
+  "A: Got it, Boulder. From there, Eldorado Canyon and the Flatirons are close by.",
+]]
+question = "Which city do I live in?"
+expect = ["Boulder"]
+
+[[case]]
+id = "F30"
+lang = "en"
+kind = "fact"
+attributes = ["spoken_language"]
+sessions = [[
+  "U: I'm learning Korean in the evenings after work. How can I practice listening?",
+  "A: Watch short videos with Korean subtitles, then rewatch them without subtitles to check what you caught.",
+  "U: Is it better to study grammar first?",
+  "A: Learn basic sentence patterns early, and pick up the rest of the grammar alongside listening.",
+]]
+question = "Which language am I learning?"
+expect = ["Korean"]
+
+# --- 言っていない事実を問う (Abstain) ---
+
+[[case]]
+id = "A01"
+kind = "abstain"
+attributes = ["residence"]
+sessions = [[
+  "U: 妹が札幌に住んでいて、冬に遊びに行く予定です。雪道で気をつけることはありますか？",
+  "A: 滑りにくい靴底の靴を選び、歩幅を小さくして足の裏全体で着地すると転びにくいです。",
+  "U: 服装はどうすればいいですか？",
+  "A: 重ね着をして、帽子と手袋で体温が逃げないようにするのがおすすめです。",
+]]
+question = "私自身はどこに住んでいるか、覚えてる？"
+expect = []
+
+[[case]]
+id = "A02"
+kind = "abstain"
+attributes = ["birthday"]
+sessions = [[
+  "U: 観葉植物のポトスを育てています。葉が黄色くなってきたのはなぜでしょう。",
+  "A: 水のやりすぎによる根腐れか、日当たりが足りないことが多いです。土が乾いてから水をあげてください。",
+  "U: 肥料はあげたほうがいいですか？",
+  "A: 春から秋の生育期に、薄めた液体肥料を月に2回ほどあげると元気になります。",
+]]
+question = "私の誕生日はいつだったっけ？"
+expect = []
+
+[[case]]
+id = "A03"
+kind = "abstain"
+attributes = ["pet"]
+sessions = [[
+  "U: 最近、写真を撮るのが楽しくて、休みの日はカメラを持って出かけています。",
+  "A: いいですね。朝や夕方の斜めの光で撮ると、写真に立体感が出ます。",
+  "U: 構図のコツはありますか？",
+  "A: 画面を縦横に三等分した線の交わる点に主役を置くと、まとまりのある構図になります。",
+]]
+question = "私が飼っているペットの名前、何だったっけ？"
+expect = []
+
+[[case]]
+id = "A04"
+lang = "en"
+kind = "abstain"
+attributes = ["likes"]
+sessions = [[
+  "U: My manager asked me to give a short talk at the team meeting. How should I prepare?",
+  "A: Pick one main message, build three supporting points, and rehearse out loud with a timer.",
+  "U: How long should the talk be?",
+  "A: For a team meeting, five to seven minutes keeps attention and leaves time for questions.",
+]]
+question = "What's my favorite food?"
+expect = []

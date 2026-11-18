@@ -1,6 +1,6 @@
 //! 開発用の作業コマンド (`cargo xtask <コマンド>`)。
 //!
-//! 仕様: 02 §4.1, 02 §4.3, 09 §6.2, 09 §7, 11 §6。
+//! 仕様: 02 §4.1, 02 §4.3, 09 §5.2, 09 §6.2, 09 §7, 11 §6。
 
 mod deps;
 mod dist;
@@ -25,8 +25,12 @@ commands:
       [--manifest-only]    only rewrite SHA256SUMS and release.json for the archives in --out
   bench [--out DIR]        benchmarks BM-101..104, 106, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
   verify-tag TAG           check a release tag before building (09 §9.2 step 4)
-  live-llm                 tests against real llama-servers (09 §3.4): chat at EVORAG_LIVE_LLM_URL,
-                           recall at EVORAG_LIVE_EMBED_URL and EVORAG_LIVE_RERANK_URL
+  live-llm [--out DIR]     tests against real llama-servers (09 §3.4): chat and the fact recall eval
+                           (09 §5.2) at EVORAG_LIVE_LLM_URL, recall at EVORAG_LIVE_EMBED_URL and
+                           EVORAG_LIVE_RERANK_URL; eval results (EVAL-*.json) to --out
+  longmemeval --data FILE  LongMemEval subset baseline (09 §5.2) at EVORAG_LIVE_LLM_URL; results to
+      [--out DIR]          docs/perf/<X.Y.Z> (default)
+      [--limit N]          only the first N questions (a smoke run; marked partial)
   verify-release DIR       check SHA256SUMS, release.json and the minisign signatures (AC-FR-801-1)
       [--pubkey FILE] [--require-signatures]";
 
@@ -43,7 +47,8 @@ fn main() -> ExitCode {
         Some("i18n") => report("i18n", i18n::run(&root)),
         Some("trace") => report("trace", trace::run(&root, &args[1..])),
         Some("bench") => bench(&root, &args[1..]),
-        Some("live-llm") => live_llm(&root),
+        Some("live-llm") => live_llm(&root, &args[1..]),
+        Some("longmemeval") => longmemeval(&root, &args[1..]),
         Some("dist") => done("dist", dist::dist(&root, &args[1..])),
         Some("verify-tag") => done("verify-tag", verify_tag::verify_tag(&root, &args[1..])),
         Some("verify-release") => done("verify-release", dist::verify_release(&root, &args[1..])),
@@ -219,8 +224,31 @@ fn bench(root: &Path, args: &[String]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// 実際の llama-server を使う試験 (09 §3.4)。接続先は EVORAG_LIVE_LLM_URL。
-fn live_llm(root: &Path) -> bool {
+/// 起動したフォルダからの絶対パス (試験は crate のフォルダで動くので、相対パスのままでは渡せない)。
+fn absolute(path: &str) -> Option<PathBuf> {
+    match std::env::current_dir() {
+        Ok(cwd) => Some(cwd.join(path)),
+        Err(e) => {
+            eprintln!("{e}");
+            None
+        }
+    }
+}
+
+/// 実際の llama-server を使う試験 (09 §3.4)。接続先は EVORAG_LIVE_LLM_URL。応答の llama-server があれば、
+/// 事実の想起の評価 (09 §5.2、`live_facts`) も流す。`--out` は評価の結果 (`EVAL-*.json`) の置き場所。
+fn live_llm(root: &Path, args: &[String]) -> bool {
+    let out = match args {
+        [] => None,
+        [flag, dir] if flag == "--out" => match absolute(dir) {
+            Some(d) => Some(d),
+            None => return false,
+        },
+        _ => {
+            eprintln!("usage: cargo xtask live-llm [--out DIR]");
+            return false;
+        }
+    };
     let chat = std::env::var_os("EVORAG_LIVE_LLM_URL").is_some();
     let recall = std::env::var_os("EVORAG_LIVE_EMBED_URL").is_some()
         && std::env::var_os("EVORAG_LIVE_RERANK_URL").is_some();
@@ -232,27 +260,94 @@ fn live_llm(root: &Path) -> bool {
         return false;
     }
     let mut ok = true;
-    for (on, test) in [(chat, "live_llm"), (recall, "live_recall")] {
+    for (on, test) in [
+        (chat, "live_llm"),
+        (chat, "live_facts"),
+        (recall, "live_recall"),
+    ] {
         if !on {
             continue;
         }
         println!("==> live-llm: {test}");
-        ok &= Command::new("cargo")
-            .current_dir(root)
-            .args([
-                "nextest",
-                "run",
-                "--locked",
-                "-p",
-                "evorag-core",
-                "--test",
-                test,
-                "--run-ignored",
-                "only",
-                "--no-capture",
-            ])
-            .status()
-            .is_ok_and(|s| s.success());
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(root).args([
+            "nextest",
+            "run",
+            "--locked",
+            "-p",
+            "evorag-core",
+            "--test",
+            test,
+            "--run-ignored",
+            "only",
+            "--no-capture",
+        ]);
+        if let Some(dir) = &out {
+            cmd.env("EVORAG_BENCH_OUT", dir);
+        }
+        ok &= cmd.status().is_ok_and(|s| s.success());
     }
     ok
+}
+
+/// LongMemEval の一部での基準値 (09 §5.2)。データ (`--data`) はリポジトリの外に置く。結果は既定で
+/// docs/perf/<X.Y.Z>/EVAL-longmemeval.json。
+fn longmemeval(root: &Path, args: &[String]) -> bool {
+    const USAGE_LME: &str = "usage: cargo xtask longmemeval --data FILE [--out DIR] [--limit N]";
+    let (mut data, mut out, mut limit) = (None, None, None);
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let Some(value) = it.next() else {
+            eprintln!("{USAGE_LME}");
+            return false;
+        };
+        match flag.as_str() {
+            "--data" => data = absolute(value),
+            "--out" => out = absolute(value),
+            "--limit" if value.parse::<usize>().is_ok() => limit = Some(value.clone()),
+            _ => {
+                eprintln!("{USAGE_LME}");
+                return false;
+            }
+        }
+    }
+    let Some(data) = data else {
+        eprintln!("{USAGE_LME}");
+        return false;
+    };
+    if std::env::var_os("EVORAG_LIVE_LLM_URL").is_none() {
+        eprintln!("longmemeval: set EVORAG_LIVE_LLM_URL (e.g. http://127.0.0.1:8080)");
+        return false;
+    }
+    let out = match out {
+        Some(o) => o,
+        None => match dist::workspace_version(root) {
+            Ok(v) => root.join("docs").join("perf").join(v),
+            Err(e) => {
+                eprintln!("longmemeval: {e}");
+                return false;
+            }
+        },
+    };
+    println!("==> longmemeval (results in {})", out.display());
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(root)
+        .args([
+            "nextest",
+            "run",
+            "--locked",
+            "-p",
+            "evorag-core",
+            "--test",
+            "longmemeval",
+            "--run-ignored",
+            "only",
+            "--no-capture",
+        ])
+        .env("EVORAG_LONGMEMEVAL_DATA", &data)
+        .env("EVORAG_BENCH_OUT", &out);
+    if let Some(n) = limit {
+        cmd.env("EVORAG_LONGMEMEVAL_LIMIT", n);
+    }
+    cmd.status().is_ok_and(|s| s.success())
 }
