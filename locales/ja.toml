@@ -520,7 +520,7 @@ arch = "この CPU ({arch}) では、更新の通信を使えません。手作�
 no_roots = "証明書のルートが見つかりません。通信せずに止めました。OS の証明書 (ca-certificates など) を入れるか、手作業で更新してください: {url}"
 network = """
 GitHub の Releases から取得できませんでした: {reason}
-プロキシを使う環境なら、環境変数 HTTPS_PROXY を設定してください (http:// か https:// のプロキシだけに対応します。認証の要るプロキシ (NTLM など) と SOCKS には対応しません)。通信できない環境では、手作業で更新してください: {url}"""
+プロキシを使う環境なら、環境変数 HTTPS_PROXY を設定してください (http:// か https:// のプロキシだけに対応します。URL に書いた Basic 認証のほかのプロキシの認証 (NTLM など) と SOCKS には対応しません)。通信できない環境では、手作業で更新してください: {url}"""
 rate_limited = "GitHub の API の呼び出しの回数の制限に当たりました。{reset} 以降に、もう一度実行してください。"
 rate_limited_unknown = "GitHub の API の呼び出しの回数の制限に当たりました。しばらく待ってから、もう一度実行してください。"
 missing_file = "版 {version} の {what} がありません (無い版か、取り下げた版です)。"

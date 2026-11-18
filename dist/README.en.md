@@ -348,7 +348,7 @@ The database from before the restore is copied to `backups/pre-op/`, as before a
 - The supported operating systems are Windows 11 (x86_64) and Linux (x86_64). macOS will be released once a real machine is available for testing.
 - Japanese input has been tested with the combinations listed in 1. On the legacy Windows console (conhost), the display may be garbled.
 - Rewordings that share no characters at all become candidates through closeness of meaning, but often do not reach the reranker threshold and are not attached (they may appear as "possibly related records").
-- There is no automatic update. evorag updates only when you run `evorag update`, and proxies that need authentication (such as NTLM) are not supported (see 6).
+- There is no automatic update. evorag updates only when you run `evorag update`, and proxy authentication other than Basic in the URL (such as NTLM) is not supported (see 6).
 - Compatibility of the data format is promised from v0.5. Until then, too, a new version migrates the data of the previous version automatically and backs up before migrating.
 - When the configuration file is rewritten (migrating an older version's configuration, or rewriting by `setup`), comments may be lost. The original file is kept as `config.toml.bak-*`.
 - The external editor is started by splitting the value of `VISUAL` or `EDITOR` at spaces (for an editor whose path contains spaces, give a short path or a place that needs no quotes).
