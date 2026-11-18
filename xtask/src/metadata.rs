@@ -130,6 +130,35 @@ impl Tree<'_> {
     }
 }
 
+/// `package` の依存の木 (normal と build) で、名前が `krate` の package に有効な機能の集まり (版ごとに
+/// まとめず、すべての版の和)。木に無ければ空。
+pub fn enabled_features(
+    package: &str,
+    target: &str,
+    krate: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut cmd = cargo();
+    cmd.args([
+        "tree", "--locked", "--prefix", "none", "--format", "{p}|{f}",
+    ]);
+    cmd.args(["--target", target, "-e", "normal,build", "-p", package]);
+    let out = run(cmd, "tree")?;
+    Ok(parse_features(&String::from_utf8_lossy(&out), krate))
+}
+
+/// `cargo tree --prefix none --format {p}|{f}` の出力から、`krate` の機能を集める。
+/// 行の例: `reqwest v0.13.5|json,stream`、`rustls v0.23.46|std,tls12 (*)`。
+fn parse_features(text: &str, krate: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| line.split_once('|'))
+        .filter(|(p, _)| p.split_whitespace().next() == Some(krate))
+        // 2 回目からの出現は、末尾に ` (*)` が付く。
+        .map(|(_, f)| f.trim_end().trim_end_matches("(*)"))
+        .flat_map(|f| f.split(',').map(str::trim).filter(|f| !f.is_empty()))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// `cargo tree --prefix depth --format {p}` の出力を読む。
 /// 行の例: `0evorag-types v0.0.0 (E:\...)`、`1serde v1.0.229`、`2memchr v2.8.3 (*)`。
 fn parse_tree(text: &str, stop_at: &[&str]) -> BTreeSet<Pkg> {
@@ -197,6 +226,20 @@ mod tests {
 ";
         let set = parse_tree(text, &["member"]);
         assert_eq!(names(&set), ["also", "kept", "member", "root"]);
+    }
+
+    #[test]
+    fn parse_features_collects_the_features_of_one_crate() {
+        let text = "evorag v0.2.0 (/x)|
+reqwest v0.13.5|json,stream
+reqwest-other v1.0.0|__rustls
+reqwest v0.13.5|json,stream (*)
+reqwest v0.13.5|json (*)
+url v2.5.8|default,std
+";
+        let f = parse_features(text, "reqwest");
+        assert_eq!(f.into_iter().collect::<Vec<_>>(), ["json", "stream"]);
+        assert!(parse_features(text, "ureq").is_empty());
     }
 
     #[test]

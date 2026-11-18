@@ -683,7 +683,13 @@ fn version_shows_the_build_and_how_it_was_installed() {
         text.starts_with(&format!("evorag {}", env!("CARGO_PKG_VERSION"))),
         "{text}"
     );
-    for label in ["commit: ", "target: ", "rustc: ", "installed via: "] {
+    for label in [
+        "commit: ",
+        "target: ",
+        "rustc: ",
+        "installed via: ",
+        "db format: ",
+    ] {
         assert!(text.contains(label), "{label} in {text}");
     }
 }
@@ -707,4 +713,174 @@ fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
     let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--index", "--facts"], "");
     assert_ne!(out.status.code(), Some(0));
     assert!(!pre.exists());
+}
+
+/// `evorag update …` を、状態のフォルダを試験のフォルダに向けて動かす。
+///
+/// 誤って本物の GitHub に繋がないように、プロキシを閉じたポート (`http://127.0.0.1:1`) に向け、
+/// `NO_PROXY` を消す (通信に進んでも、プロキシへの接続で失敗する)。
+fn evorag_update(dir: &Path, config: &str, args: &[&str]) -> Output {
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let mut cmd = Command::new(exe);
+    cmd.arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--data-root")
+        .arg(dir.join("data"))
+        .arg("update")
+        .args(args)
+        .env("LOCALAPPDATA", dir.join("local"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_DATA_HOME", dir.join("share"));
+    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        cmd.env(var, "http://127.0.0.1:1");
+    }
+    for var in ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] {
+        cmd.env_remove(var);
+    }
+    cmd.output().unwrap()
+}
+
+/// verifies: AC-FR-806-1 (入れ方が zip でない evorag では、`update apply` と `update rollback` が通信せず、
+/// インストール先を変えずに断り、その管理の仕組みでの更新を案内する)
+#[test]
+fn update_apply_and_rollback_refuse_a_non_zip_build() {
+    // 配布物と同じ作り方 (EVORAG_CHANNEL=zip) で試験を作ったときは、この試験の前提に合わない。
+    if option_env!("EVORAG_CHANNEL") == Some("zip") {
+        return;
+    }
+    let dir = TempDir::new("cli-update-channel");
+    let exe = std::path::PathBuf::from(
+        std::env::var_os("NEXTEST_BIN_EXE_evorag")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into()),
+    );
+    let install = exe.parent().unwrap();
+    let names = |d: &Path| -> Vec<std::ffi::OsString> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with("evorag."))
+            .collect();
+        v.sort();
+        v
+    };
+    let before = names(install);
+    for args in [&["apply"][..], &["apply", "9.9.9"], &["rollback"]] {
+        let out = evorag_update(
+            dir.path(),
+            "version = 1
+",
+            args,
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(
+            err.contains("evorag update apply と rollback は使えません"),
+            "{err}"
+        );
+        assert!(err.contains("evorag update check"), "{err}");
+    }
+    assert_eq!(names(install), before, "the install folder changed");
+    for d in ["local", "state", "data"] {
+        assert!(!dir.path().join(d).exists(), "{d} was created");
+    }
+}
+
+/// `update.trusted_keys` の誤りは、設定の誤りとして通信の前に 4 で止める (07 §5)。
+#[test]
+fn update_with_a_bad_trusted_key_exits_with_4() {
+    let dir = TempDir::new("cli-update-keys");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+}
+
+/// 版として読めない指定は、通信の前に 1 で断る。
+#[test]
+fn update_apply_refuses_an_unreadable_version() {
+    let dir = TempDir::new("cli-update-version");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+",
+        &["apply", "latest"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
+}
+
+/// `evorag update` は設定を移行しない (03 §12.3 の移行は TUI と、ほかのサブコマンドだけが行う)。版の
+/// 指定の先頭の `v` は省いてよい (読めない版として断らない)。
+#[test]
+fn update_never_migrates_the_config_and_accepts_a_leading_v() {
+    let dir = TempDir::new("cli-update-no-migrate");
+    // 版 0 の設定 (`version` が無い)。
+    let old = "[storage]
+allow_unsafe_location = false
+";
+    for args in [&["check"][..], &["apply", "v9.9.9"], &["rollback"]] {
+        let out = evorag_update(dir.path(), old, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(4), "{args:?}: {err}");
+        assert!(!err.contains("を読めません (例: 0.4.0)"), "{args:?}: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            old,
+            "{args:?}: the config was rewritten"
+        );
+        assert!(
+            !dir.path().join("config.toml.bak-v0").exists(),
+            "{args:?}: a migration backup was made"
+        );
+    }
+}
+
+/// この版の読めない新しい形式の設定でも、`evorag update` は更新に要るキーだけを読んで動く。足した鍵の誤りは
+/// 4 のまま。
+#[test]
+fn update_works_with_a_config_of_a_newer_format() {
+    let dir = TempDir::new("cli-update-newer-config");
+    let newer = "version = 99
+[storage]
+future_key = 1
+[future]
+x = 1
+";
+    let out = evorag_update(dir.path(), newer, &["apply", "latest"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // 設定は読めたので、版の指定を読むところまで進む (1)。
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
+    let out = evorag_update(
+        dir.path(),
+        "version = 99
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+    // 今の形式の設定の誤りは、これまでどおり 4。
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+unknown = 1
+",
+        &["check"],
+    );
+    assert_eq!(out.status.code(), Some(4));
 }

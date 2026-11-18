@@ -148,6 +148,7 @@ evorag は、手元の llama-server (llama.cpp) だけで動く、チャット�
 | `evorag restore <退避>` | 退避から戻し、その後の会話をジャーナルから足す |
 | `evorag rebuild [--index]` | 派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を会話から作り直す。実行の前に退避する。`--index` は索引だけ |
 | `evorag export <フォルダ>` | 記録を JSON Lines に書き出す (設定は API キーを除いて写す) |
+| `evorag update check` / `apply [版]` / `rollback` | 新しい版の確認・更新・巻き戻し ([6](#6-更新と巻き戻し)) |
 | `evorag --version` | 版と作りの情報 |
 
 共通のオプション: `--data-root <パス>` (データの置き場所を変える)、`--config <パス>`。
@@ -158,7 +159,7 @@ evorag は、手元の llama-server (llama.cpp) だけで動く、チャット�
 |---|---|---|
 | 設定 | `%LOCALAPPDATA%\evorag\config\config.toml` | `~/.config/evorag/config.toml` |
 | データ根 (会話の DB・ジャーナル・索引・退避) | `%LOCALAPPDATA%\evorag\data\` | `~/.local/share/evorag/` |
-| 入力欄の下書き・ログ (7 日分。会話の本文・API キーは書かない) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` |
+| 入力欄の下書き・ログ (7 日分。会話の本文・API キーは書かない)・更新の記録 (`update/`) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` |
 
 Linux は `XDG_CONFIG_HOME`・`XDG_DATA_HOME`・`XDG_STATE_HOME` があればそれを使います。
 
@@ -169,9 +170,19 @@ Linux は `XDG_CONFIG_HOME`・`XDG_DATA_HOME`・`XDG_STATE_HOME` があればそ
 
 ## 6. 更新と巻き戻し
 
-自動の更新はありません (v0.3 で入ります)。次の手順で手作業で更新します。evorag が外へ通信するのは、設定した llama-server だけです。
+v0.3 から、`evorag update` で新しい版を確かめ、更新し、前の版に戻せます。evorag が外へ通信するのは、設定した llama-server と、`evorag update check`・`evorag update apply` を打ったときの GitHub だけです。起動のときや定期の自動の確認はしません (`evorag update rollback` は通信しません)。
+
+| コマンド | 内容 |
+|---|---|
+| `evorag update check` | 新しい版があれば、その版・リリースの日付・変更の要点を示す。何も書き換えない |
+| `evorag update apply [版]` | 配布物を取得し、署名を確かめてから実行ファイルを置き換える。今の実行ファイルは `evorag.prev` に残す。版を省くと、いちばん新しい版にする |
+| `evorag update rollback` | `evorag.prev` に戻す。戻した版でデータを使えるかを示す |
+
+`evorag update` を使えないとき (CPU の機能や証明書のルートが無い、通信できない、`release.json` の形式を読めない、など) は、[6.6](#66-手作業で更新する) の手作業の手順で更新します。
 
 ### 6.1 配布物を確かめる
+
+手作業で入れるとき・更新するときは、取得した配布物が本物かを確かめます (`evorag update` は同じことを自動で行います)。
 
 1. ハッシュを確かめます。表示された値が `SHA256SUMS` の行と同じなら、ファイルは壊れていません。
 
@@ -191,36 +202,103 @@ Linux は `XDG_CONFIG_HOME`・`XDG_DATA_HOME`・`XDG_STATE_HOME` があればそ
 
    `Signature and comment signature verified` と表示されれば本物です。`release.json` の署名の trusted comment には、版と `release.json` の SHA-256 が入っています。
 
-### 6.2 更新する
+### 6.2 evorag update で更新する
 
-1. 新しい版の配布物を取得して確かめます (6.1)。
+1. `evorag update check` で、新しい版があるかを確かめます。版・リリースの日付・変更の要点を示します (何も書き換えません)。
+2. **evorag を閉じます** (データ根を使っている evorag があると、`apply` は終了コード 2 で断ります)。
+3. `evorag update apply` を実行します。版を指定するときは `evorag update apply 0.4.0` のように書きます。
+   - 署名つきの `release.json` を取得し、本体に埋め込んだ鍵で署名を確かめてから、配布物を取得し、大きさと SHA-256 を確かめます。合わなければ何も変えずに断ります (改ざんを疑うときは終了コード 5)。
+   - 新しい実行ファイルを置いた後に、`--version` で動くことを確かめます。動かなければ元に戻します。
+   - 今の実行ファイルは `evorag.prev` に残します (巻き戻しに使うので消さないでください)。
+4. 新しい版を起動します。データの形式を変える版では、最初の起動で自動で退避してから移行します。移行に失敗したときは、元のデータのまま読むだけで起動し、`evorag update rollback` を案内します。
+
+- 今と同じか古い版は `apply` で入れられません。前の版に戻すのは `rollback` だけです。
+- 今の版から直接は更新できない版 (`upgrade_from`) は、先に入れる版を案内します (`evorag update apply <その版>` を先に実行します)。
+- インストール先には、自分だけが書き込めるフォルダ (Windows は `%LOCALAPPDATA%\Programs\evorag` など) を使ってください。書き込めないフォルダ (Program Files など)、ほかの利用者も書き込めるフォルダ、実行ファイルの名前を `evorag(.exe)` から変えたときは、何も変えずに断ります。
+- **cargo で入れた人** (`evorag --version` の `installed via: cargo`): `apply` と `rollback` は使えません。`evorag update check` で新しい版を確かめると、入れ直すコマンド (`cargo install --locked --git https://github.com/evoref/evorag --tag v<版> evorag`) を示します。先に入れる版があるときは、そのコマンドを先に示します。
+
+| 終了コード | 意味 |
+|---|---|
+| 0 | 済んだ (新しい版が無いときも 0) |
+| 1 | 断った・失敗した (通信できない、回数の制限、使えない版、インストール先の条件、置き換えの後の確かめに通らず元に戻した、など) |
+| 2 | evorag が動いている (データ根を使っている) |
+| 4 | 設定 `update.trusted_keys` の誤り |
+| 5 | 改ざんを疑うので断った (署名が通らない、版やタグが合わない、配布物の大きさ・SHA-256 が合わない、など) |
+
+### 6.3 巻き戻す (evorag update rollback)
+
+1. evorag を閉じます。
+2. `evorag update rollback` を実行します。`evorag.prev` を `evorag(.exe)` に戻し、今の版を `evorag.prev` に残します (もう一度 `rollback` すると、また入れ替わります)。
+3. 戻した版でデータを使えるかを示します。
+   - 新しい版でデータを移行した後なら、古い版はデータを **読むだけで** 起動するか、開けないことがあります (新しい版のデータを壊さないため)。そのときは、移行の前の退避 (`backups/pre-op/`) のパスと、戻すコマンド (`evorag restore <退避>`。戻した版で実行します) を示します。退避の後に話した会話は、ジャーナルから足します。
+   - 戻さなければ、データは新しい版でなら書けます (`evorag update apply` で新しい版に戻れます)。
+   - 設定ファイルを移行したときの写し (`config.toml.bak-v<旧版>`) があれば、そのパスも示します。
+
+- v0.2 で使ったデータ根を v0.1.2 で開いても、セッションは開けます。ただし **v0.1.2 で消したセッションの、v0.2 が作ったもの (チャンク・ノート・埋め込み・索引) と、それを含む退避は、v0.2 で開き直すまで残ります** (v0.1.2 はそれらを知らないため)。v0.2 で開き直すと、DB・索引・退避から消します。
+
+### 6.4 途中で止まったとき
+
+置き換えの途中で強制終了や電源断があっても、次の `evorag update apply`・`rollback` か、次の evorag の起動が、状態のファイル (状態のフォルダの `update/state.json`) に従って続きを済ませるか、元に戻します。
+
+**Windows の隙間**: Windows では、動いている `evorag.exe` を改名してから新しいファイルを置くので、その一瞬だけ `evorag.exe` が無くなります。そこで止まって `evorag.exe` が無いときは、次のように戻してから起動します (`apply`・`rollback` も始める前に同じことを示します)。
+
+- `apply` の途中: `evorag.new` があればそれを、無ければ `evorag.prev` を `evorag.exe` に改名します。
+- `rollback` の途中: `evorag.prev` を `evorag.exe` に改名します。
+
+どちらの戻し方でも、次の `evorag update` の操作か evorag の起動が、残りを整えます。
+
+**手で戻す手順** (状態のファイルが読めない、置くファイルが見分けられない、と表示されたとき):
+
+1. evorag を終了します。
+2. インストール先の `evorag(.exe)`・`evorag.new`・`evorag.tmp`・`evorag.prev`・`evorag.prev.old`・`evorag.rejected` を、それぞれ `--version` を付けて動かし、版を確かめます (Windows で拡張子の無いファイルは、`evorag.exe` という名前の写しを別のフォルダに作って動かします)。
+3. 使いたい版のファイルを `evorag(.exe)` に、前の版のファイルを `evorag.prev` に改名し、残りを消します。
+4. 状態のフォルダの `update/state.json` を消します (Windows は `%LOCALAPPDATA%\evorag\state\update\state.json`、Linux は `~/.local/state/evorag/update/state.json`)。巻き戻しの記録が無くなるので、次の `rollback` は一般の案内になります。
+
+### 6.5 通信とプロキシ
+
+- 接続先は `api.github.com` (リリースの一覧) と `github.com` (`release.json`・署名・配布物) だけで、配布物の取得は `*.githubusercontent.com` へ転送されることがあります。ほかへの転送は辿りません。
+- 送るのは evorag の版と OS の種類 (User-Agent)、取得する配布物の名前だけです。Cookie や認証の情報は送りません。
+- 本物かどうかは TLS ではなく minisign の署名で確かめます。通信の途中で書き換えられても、署名の合わない配布物は入れません。
+- **プロキシ**: 環境変数 `HTTPS_PROXY`・`ALL_PROXY`・`HTTP_PROXY` をこの順に読み (それぞれ大文字の名前を先に、小文字の `https_proxy`・`all_proxy`・`http_proxy` を後に)、空でない最初の値のプロキシを、HTTP の CONNECT で使います。
+  - 使えるのは `http://` と `https://` で始まるプロキシだけです。最初の値が `socks5://` などの SOCKS、ほかのスキーム、スキームの無い `proxy:8080`、読めない値のときは、直接には繋がずに、どの環境変数かを示して通信の前に止めます (終了コード 1)。その環境変数を直してください。
+  - `NO_PROXY` (無いか空なら `no_proxy`) に書いた宛先は、プロキシを通しません。カンマ区切りで、`github.com`・`.github.com`・`*.github.com` はどれも `github.com` とその下のホスト (`api.github.com` など) に当たります。`*` はすべての宛先です。
+  - Windows の「プロキシの設定」(WinINET) と自動構成のスクリプト (PAC) は読みません。
+
+  ```powershell
+  $env:HTTPS_PROXY = "http://proxy.example.com:8080"
+  evorag update check
+  ```
+
+- 認証の要るプロキシは、URL に書いた Basic 認証 (`http://user:pass@proxy:8080`) だけに対応します。**NTLM などの認証には対応しません**。そのときは、手作業で更新します (6.6)。
+- GitHub の API の匿名の呼び出しには回数の制限 (1 時間に 60 回) があります。当たったときは、制限が解ける時刻を示して終わります。
+- Linux では、OS の証明書 (`ca-certificates` など) が要ります。見つからないときは通信せずに止めます。
+
+### 6.6 手作業で更新する
+
+`evorag update` を使えないとき (通信できない環境、認証の要るプロキシ、CPU の機能や証明書のルートが無い、など) の手順です。
+
+1. 別の PC などで [Releases](https://github.com/evoref/evorag/releases) から新しい版の配布物と `SHA256SUMS`・`SHA256SUMS.minisig`・`release.json`・`release.json.minisig` を取得し、確かめます (6.1)。
 2. evorag を終了します。
 3. 今の実行ファイル (`evorag.exe` / `evorag`) を `evorag.prev` に改名し、新しいものを置きます (`evorag.prev` は巻き戻しに使うので消さないでください)。
 4. 新しい版を起動します。データの形式を変える版では、起動時に自動で退避してから移行します (リリースノートに書きます)。
 
-### 6.3 v0.1 から更新する人へ
+手作業で巻き戻すときは、evorag を終了し、今の実行ファイルを消して `evorag.prev` を元の名前に戻します。データを移行した後なら、6.3 と同じく、移行の前の退避から戻します。
+
+```powershell
+evorag backups list
+evorag restore "<データ根>\backups\pre-op\<日時>"
+```
+
+### 6.7 v0.1 から更新する人へ
 
 - **応答のモデルを記録します**: 最初の起動で、繋がっている応答のモデルをデータ根に記録します。以後、記録と違うモデルの llama-server で起動すると、画面を開かずに違いと取れる手 (記録したモデルで起動し直す、`evorag setup` で切り替える、別のデータ根で試す) を示して終わります (終了コード 6)。
 - **`/model` は表示だけになりました**: モデルの切り替えは `evorag setup` で行います。設定の `[[llm.chat.models]]` は読んで無視し、一度だけ知らせます (v0.1 に戻す予定がなければ消してかまいません)。
 - **埋め込みとリランカー**: `evorag setup` をもう一度実行すると、8081・8082 の llama-server を見つけて設定に書きます。v0.1 の会話の埋め込みは、更新の後に裏の処理で作ります (会話の量によっては時間がかかります。その間は状態の行に「想起: 作り直し中 N%」と出て、作ってある分と文字の重なりで探します)。
 - **送る前の入力**: 入力が止まったときに先に探す処理で、送っていない入力が手元の llama-server に出ます (4.4)。切るときは `retrieval.precompute = false`。
 - **索引を作り直します**: v0.1 の語彙の索引は使わず、最初の起動で作り直します (会話のデータは変わりません)。
+- v0.1・v0.2 には `evorag update` がありません。v0.3 へは手作業で更新します (6.6)。
 
-### 6.4 巻き戻す
-
-1. evorag を終了し、今の実行ファイルを消して `evorag.prev` を元の名前に戻します。
-2. 新しい版でデータを移行した後なら、古い版はデータを **読むだけで** 起動します (新しい版のデータを壊さないため)。書き込める状態に戻すには、移行の前の退避から戻します。
-
-   ```powershell
-   evorag backups list
-   evorag restore "<データ根>\backups\pre-op\<日時>"
-   ```
-
-   退避の後に話した会話は、ジャーナルから足します。
-
-- v0.2 で使ったデータ根を v0.1.2 で開いても、セッションは開けます。ただし **v0.1.2 で消したセッションの、v0.2 が作ったもの (チャンク・ノート・埋め込み・索引) と、それを含む退避は、v0.2 で開き直すまで残ります** (v0.1.2 はそれらを知らないため)。v0.2 で開き直すと、DB・索引・退避から消します。
-
-### 6.5 退避から戻す
+### 6.8 退避から戻す
 
 データベースを古い状態に戻したいとき (誤った操作の後など) は、evorag を終了してから:
 
@@ -238,6 +316,8 @@ evorag restore "<データ根>\backups\daily\<日付>"
 - **「記録と違うモデル」で起動しない (終了コード 6)**: 記録したモデルで llama-server を起動し直すか、`evorag setup` で切り替えます (埋め込みのモデルを変えると全件を作り直し、リランカーを変えるとしきい値を求め直します)。
 - **想起: 簡易 / 候補だけ**: `/memory` と `/model` で理由を見て、`evorag setup` で埋め込みとリランカーを設定します。リランカーの較正は、繋いだ後に裏で行います (1 分ほど)。
 - **「データ根を使えません」**: 別の evorag が同じデータ根を使っています。終了してからやり直します。
+- **`evorag update` が通信できない**: プロキシを使う環境なら `HTTPS_PROXY` を設定します ([6.5](#65-通信とプロキシ))。それでも通信できないときは、手作業で更新します ([6.6](#66-手作業で更新する))。
+- **更新の途中で止まって `evorag.exe` が無い**: [6.4](#64-途中で止まったとき) の戻し方で戻します。
 - **応答が始まるまで長い**: 思考するモデルは、考えている間「考えています」と表示します。思考を切るには `config.toml` に次を書きます (補助の呼び出しには `[llm.chat.aux_request_extra]` に同じものを書きます)。
 
   ```toml
@@ -253,7 +333,7 @@ evorag restore "<データ根>\backups\daily\<日付>"
 - 対応する OS は Windows 11 (x86_64) と Linux (x86_64) です。macOS は実機を確保したときに出します。
 - 日本語入力は 1 に書いた組み合わせで確かめています。Windows の従来のコンソール (conhost) では表示が崩れることがあります。
 - 文字をまったく共有しない言い換えは、意味の近さで候補には入りますが、リランカーの値がしきい値に届かず、添えないことが多いです (「関係しそうな記録」に出ることもあります)。
-- 自動の更新はありません (6 を参照)。
+- 自動の更新はありません。更新は `evorag update` を打ったときだけで、認証の要るプロキシ (NTLM など) には対応しません (6 を参照)。
 - データの形式の互換は v0.5 から約束します。それまでの版でも、新しい版は前の版のデータを自動で移行し、移行の前に退避します。
 - 設定ファイルを書き換えるとき (古い版の設定の移行、`setup` の書き換え)、コメントが失われることがあります。元のファイルは `config.toml.bak-*` に残します。
 - 外部のエディタは、`VISUAL`・`EDITOR` の値を空白で区切って起動します (パスに空白を含むエディタは、短いパスか引用符の要らない場所を指定してください)。

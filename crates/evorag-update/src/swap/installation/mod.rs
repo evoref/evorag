@@ -33,12 +33,14 @@ use converge::Entry;
 /// 呼ぶ側は、データ根のロック (03 §9) を先に取って持っていること (片付けの間に、ほかの evorag が
 /// 起動しないように)。`running_exe` は [`std::env::current_exe`] の結果を渡す。
 ///
-/// [`Startup::Resumed`] の [`ResumeReport::running_replaced`] が真なら、呼ぶ側はデータの移行の前に止まり、
-/// evorag をもう一度起動するよう利用者に示す (動いているのは、置いてあるのと違う版のため)。
+/// [`Startup::Resumed`] の [`ResumeReport::running_replaced`] か、[`Startup::ResumeFailed`] の
+/// `running_replaced` が真なら、呼ぶ側はデータの移行の前に止まり、evorag をもう一度起動するよう利用者に
+/// 示す (動いているのは、置いてあるのと違う版のため)。
 ///
 /// # Errors
 ///
-/// 計画が読めない・別のフォルダのもの・役割に当たらないなど ([`Installation::resume`])。
+/// インストール先を開けない ([`Installation::open`])、計画が無いときの名前での片付けの失敗
+/// ([`Installation::cleanup_by_name`])。計画の続きの失敗は [`Startup::ResumeFailed`] で返す。
 pub fn startup(
     running_exe: &Path,
     state_dir: &Path,
@@ -48,9 +50,26 @@ pub fn startup(
         Err(SwapError::Busy) => return Ok(Startup::Busy),
         r => r?,
     };
-    match inst.resume(env)? {
-        Some(report) => Ok(Startup::Resumed(report)),
-        None => Ok(Startup::Cleaned(inst.cleanup_by_name(Strictness::Lenient)?)),
+    inst.startup(env)
+}
+
+/// 動いている実行ファイルの名前が `evorag(.exe)` であることを確かめる (12 §7.2 の始める前の確かめの 1)。
+/// ロックを取らず、何も変えない。名前の比べ方は [`Installation::open`] と同じ。
+///
+/// # Errors
+///
+/// 名前が違う ([`SwapError::ExeName`])、パスを正規化できない。
+pub fn check_exe_name(running_exe: &Path) -> Result<(), SwapError> {
+    let running_path =
+        canonical_exe_path(running_exe).map_err(SwapError::io(FileOp::Open, running_exe))?;
+    let name = running_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if is_exe_name(&name) {
+        Ok(())
+    } else {
+        Err(SwapError::ExeName { found: name })
     }
 }
 
@@ -184,11 +203,38 @@ impl Installation {
         self.check_plan_dir(&plan)?;
         // ファイルを動かす前に、動いているイメージの SHA-256 を求めておく (Windows と macOS は名前の上の
         // ファイルから求めるため、動かした後では別のファイルを読む)。
-        let running = self.running_digest();
+        self.running_digest();
         let mut report = self.converge(plan, st.done, env)?;
-        report.running_replaced =
-            running.is_none_or(|r| self.inspect(FileName::Exe).ok() != Some(Entry::File(r)));
+        report.running_replaced = self.running_replaced();
         Ok(Some(report))
+    }
+
+    /// 起動の片付けの本体 ([`startup`])。計画があれば続きを進め、無ければ名前で片付ける
+    /// ([`Strictness::Lenient`])。
+    ///
+    /// 続きが途中で失敗したときは、その時点の `evorag(.exe)` を動いているイメージと比べて
+    /// [`Startup::ResumeFailed`] で返す (例: 元に戻す途中で `evorag(.exe)` を `current` にした後、
+    /// `evorag.prev` を置けない・計画を済みにできないとき、動いている `next` は置いてあるものと違う)。
+    pub(in crate::swap) fn startup(&mut self, env: &mut Env<'_>) -> Result<Startup, SwapError> {
+        match self.resume(env) {
+            Ok(Some(report)) => Ok(Startup::Resumed(report)),
+            Ok(None) => Ok(Startup::Cleaned(self.cleanup_by_name(Strictness::Lenient)?)),
+            Err(error) => Ok(Startup::ResumeFailed {
+                running_replaced: self.running_replaced(),
+                error,
+            }),
+        }
+    }
+
+    /// 動いているイメージが、今の `evorag(.exe)` と違うか (SHA-256 で比べる)。どちらかを求められない
+    /// ときも真 (同じだと確かめられないため)。
+    ///
+    /// 動いているイメージの SHA-256 は、初めて求めたときのものを使う ([`Self::running_digest`])。続きは
+    /// ファイルを動かす前に求めるので、続きの後 (失敗したときを含む) に呼んでも、動かす前のものと比べる。
+    fn running_replaced(&self) -> bool {
+        let installed = self.inspect(FileName::Exe).ok();
+        self.running_digest()
+            .is_none_or(|r| installed != Some(Entry::File(r)))
     }
 
     /// 計画が無いときに、名前で片付ける (12 §7.3)。`evorag(.exe)` が無ければ何もしない。

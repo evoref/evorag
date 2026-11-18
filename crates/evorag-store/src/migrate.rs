@@ -199,7 +199,7 @@ fn is_complete_db(path: &Path) -> bool {
 }
 
 /// 移行と compact の跡のファイルで、残っているもの (無ければ `None`)。
-pub(crate) fn leftover(root: &Path) -> Option<&'static str> {
+pub fn leftover(root: &Path) -> Option<&'static str> {
     [
         MIGRATING_FILE,
         PRE_MIGRATION_FILE,

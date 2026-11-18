@@ -570,10 +570,52 @@ impl Store {
         Self::open_with(opts, FormatPlan::current())
     }
 
+    /// 呼ぶ側が先に取ったデータ根のロック `lock` を持ったまま開く (起動の更新の片付けから、ロックを放さずに
+    /// 続けるため、12 §7.3)。
+    ///
+    /// # Panics
+    ///
+    /// `lock` が `opts.data_root` のロックでないとき、debug のビルドでは panic する (呼ぶ側の誤り)。release の
+    /// ビルドでは、ログに残し、渡されたロックを放して `opts.data_root` のロックを取り直す。
+    pub fn open_locked(
+        opts: OpenOptions,
+        lock: DataRootLock,
+    ) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(opts, FormatPlan::current(), Some(lock))
+    }
+
     /// 書く形式と移行を指定して開く (移行の試験のため)。
     pub fn open_with(opts: OpenOptions, plan: FormatPlan) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(opts, plan, None)
+    }
+
+    fn open_inner(
+        opts: OpenOptions,
+        plan: FormatPlan,
+        held: Option<DataRootLock>,
+    ) -> Result<(Self, OpenReport), OpenError> {
         fsutil::create_private_dir(&opts.data_root)?;
-        let lock = DataRootLock::acquire(&opts.data_root)?;
+        let wanted = opts.data_root.join(crate::lock::LOCK_FILE);
+        let lock = match held {
+            Some(l) if l.path() == wanted => l,
+            other => {
+                if let Some(l) = &other {
+                    debug_assert!(
+                        l.path() == wanted,
+                        "the held lock {} is for another data root than {}",
+                        l.path().display(),
+                        opts.data_root.display()
+                    );
+                    // パスは利用者の名前を含みうるので、ログには出さない (NFR-502)。
+                    tracing::warn!(
+                        "the data root lock given to Store::open_locked is for another root; \
+                         releasing it and taking the lock of the data root being opened"
+                    );
+                }
+                drop(other);
+                DataRootLock::acquire(&opts.data_root)?
+            }
+        };
         migrate::recover(&opts.data_root)?;
         crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;
         let mut database = match open_db(&opts.data_root) {
@@ -1646,6 +1688,62 @@ mod tests {
     #[derive(serde::Serialize)]
     struct Body {
         text: String,
+    }
+
+    fn locked_opts(root: &Path) -> OpenOptions {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_767_614_400_000)));
+        OpenOptions {
+            data_root: root.to_path_buf(),
+            evorag_version: "0.0.5".into(),
+            kinds: vec![KindSpec::new("sample", 1)],
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock, 2)),
+            config_file: None,
+        }
+    }
+
+    /// 先に取ったデータ根のロックを、放さずにそのまま持って開く (起動の更新の片付けの後、12 §7.3)。
+    #[test]
+    fn open_locked_keeps_the_lock_it_is_given() {
+        let dir = TempDir::new("store-open-locked");
+        let held = DataRootLock::acquire(dir.path()).unwrap();
+        let (store, _) = Store::open_locked(locked_opts(dir.path()), held).unwrap();
+        assert!(matches!(
+            DataRootLock::acquire(dir.path()),
+            Err(LockError::InUse { .. })
+        ));
+        drop(store);
+        assert!(DataRootLock::acquire(dir.path()).is_ok());
+    }
+
+    /// 別のデータ根のロックを渡すのは呼ぶ側の誤りなので、debug のビルドでは panic する。
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "is for another data root")]
+    fn open_locked_with_the_lock_of_another_root_panics_in_debug_builds() {
+        let dir = TempDir::new("store-open-locked-debug");
+        let other = TempDir::new("store-open-locked-debug-other");
+        let foreign = DataRootLock::acquire(other.path()).unwrap();
+        let _ = Store::open_locked(locked_opts(dir.path()), foreign);
+    }
+
+    /// release のビルドでは、別のデータ根のロックを放して取り直す。
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn open_locked_retakes_the_lock_of_another_root_in_release_builds() {
+        let dir = TempDir::new("store-open-locked-release");
+        let other = TempDir::new("store-open-locked-release-other");
+        let foreign = DataRootLock::acquire(other.path()).unwrap();
+        let (store, _) = Store::open_locked(locked_opts(dir.path()), foreign).unwrap();
+        assert!(
+            DataRootLock::acquire(other.path()).is_ok(),
+            "the foreign lock was released"
+        );
+        assert!(matches!(
+            DataRootLock::acquire(dir.path()),
+            Err(LockError::InUse { .. })
+        ));
+        drop(store);
     }
 
     /// 退避の整理は、作りかけの退避を作り終えるまで待ってから一覧を作る。削除より前に写し始め、整理の job を

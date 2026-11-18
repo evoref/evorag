@@ -2,7 +2,7 @@
 
 use crate::{Sha256Digest, Version};
 
-use super::super::error::CheckFailure;
+use super::super::error::{CheckFailure, SwapError};
 use super::super::names::{FileName, Op};
 
 /// 何のために開くか。
@@ -140,6 +140,22 @@ pub struct ResumeReport {
     pub running_replaced: bool,
 }
 
+impl ResumeReport {
+    /// 試験のための結果 (evorag-update の外の試験が、続きの後の扱いを確かめるために作る)。
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub const fn for_test(op: Op, outcome: ResumeOutcome, running_replaced: bool) -> Self {
+        Self {
+            op,
+            outcome,
+            untouched: Vec::new(),
+            missing: Vec::new(),
+            left: Vec::new(),
+            running_replaced,
+        }
+    }
+}
+
 /// 名前での片付けの結果。
 #[derive(Debug, Default)]
 #[non_exhaustive]
@@ -167,4 +183,13 @@ pub enum Startup {
     Resumed(ResumeReport),
     /// 計画が無いので、名前で片付けた。
     Cleaned(CleanupReport),
+    /// 計画の続きが途中で失敗した (計画は残る。次の機会に続ける)。
+    ResumeFailed {
+        /// 失敗の理由。
+        error: SwapError,
+        /// 動いているイメージが、失敗した時点の `evorag(.exe)` と違う (SHA-256 で比べる。求められない
+        /// ときも真)。真のとき、呼ぶ側は [`ResumeReport::running_replaced`] と同じく、データの移行の前に
+        /// 止まり、evorag をもう一度起動するよう利用者に示すこと。
+        running_replaced: bool,
+    },
 }

@@ -21,7 +21,23 @@ pub struct Policy {
     pub tree_only_in: Vec<OnlyIn>,
     #[serde(default)]
     pub direct_allow: Vec<DirectAllow>,
+    #[serde(default)]
+    pub features_forbidden: Vec<FeaturesForbidden>,
     pub layers: Layers,
+}
+
+/// 配布物の依存の木で、ある crate に有効にしてはいけない機能 (S-06 §6.1: evorag-llm の reqwest に TLS が
+/// 混ざらないこと。`tree_only_in` は crate ごとの木を見るので、配布物の中で機能がまとまることは見えない)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeaturesForbidden {
+    pub rule: String,
+    #[serde(rename = "crate")]
+    pub krate: String,
+    /// 有効なら違反にする機能の名前。末尾が `*` なら、その前までで始まる名前すべて。
+    pub features: Vec<String>,
+    /// 人が読むための理由。
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +169,7 @@ pub fn run(policy: &Policy, manifest_path: Option<&Path>) -> Result<Vec<String>,
 
         if manifest_path.is_none() {
             check_tree_only_in(policy, &members, target, &mut errors)?;
+            check_features_forbidden(policy, target, &mut errors)?;
         }
     }
 
@@ -237,6 +254,38 @@ fn check_tree_only_in(
         }
     }
     Ok(())
+}
+
+/// 配布物の木で、`features_forbidden` の機能が有効になっていないこと。
+fn check_features_forbidden(
+    policy: &Policy,
+    target: &str,
+    errors: &mut Vec<String>,
+) -> Result<(), String> {
+    for rule in &policy.features_forbidden {
+        let enabled = metadata::enabled_features(DIST_BIN, target, &rule.krate)?;
+        errors.extend(forbidden_features(rule, &enabled).into_iter().map(|f| {
+            format!(
+                "{}: `{}` has the feature `{f}` in `{DIST_BIN}` on {target} ({})",
+                rule.rule, rule.krate, rule.reason
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// `enabled` のうち、`rule` が禁じる機能。
+fn forbidden_features<'a>(rule: &FeaturesForbidden, enabled: &'a BTreeSet<String>) -> Vec<&'a str> {
+    enabled
+        .iter()
+        .filter(|f| {
+            rule.features.iter().any(|p| match p.strip_suffix('*') {
+                Some(prefix) => f.starts_with(prefix),
+                None => *f == p,
+            })
+        })
+        .map(String::as_str)
+        .collect()
 }
 
 /// workspace の crate ごとの直接の依存 (宣言のとおり、dev も含む) の名前。
@@ -418,6 +467,30 @@ mod tests {
             "dependencies": deps, "features": features,
             "manifest_path": format!("/nonexistent/{name}/Cargo.toml"),
         })
+    }
+
+    #[test]
+    fn forbidden_features_match_names_and_prefixes() {
+        let rule = FeaturesForbidden {
+            rule: "R3".into(),
+            krate: "reqwest".into(),
+            features: vec!["__rustls*".into(), "native-tls".into()],
+            reason: "x".into(),
+        };
+        let enabled: BTreeSet<String> = [
+            "json",
+            "__rustls",
+            "__rustls-ring",
+            "native-tls",
+            "native-tls-alpn",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            forbidden_features(&rule, &enabled),
+            ["__rustls", "__rustls-ring", "native-tls"]
+        );
     }
 
     #[test]
