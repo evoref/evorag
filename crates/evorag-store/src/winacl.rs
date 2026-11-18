@@ -19,6 +19,7 @@ const OBJECT_INHERIT_ACE: u32 = 0x1;
 const CONTAINER_INHERIT_ACE: u32 = 0x2;
 const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 const SE_FILE_OBJECT: u32 = 1;
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
 const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const ACL_SIZE_INFORMATION: u32 = 2;
@@ -27,6 +28,32 @@ const INHERIT_ONLY_ACE: u8 = 0x08;
 /// `WELL_KNOWN_SID_TYPE` の WinLocalSystemSid と WinBuiltinAdministratorsSid。
 const WIN_LOCAL_SYSTEM_SID: u32 = 22;
 const WIN_BUILTIN_ADMINISTRATORS_SID: u32 = 26;
+/// 書き込みの類の権限 (12 §7.3 の「インストール先の確かめ」): FILE_WRITE_DATA (ADD_FILE)・
+/// FILE_APPEND_DATA (ADD_SUBDIRECTORY)・FILE_DELETE_CHILD・DELETE・WRITE_DAC・WRITE_OWNER・
+/// GENERIC_WRITE・GENERIC_ALL。
+const WRITE_RIGHTS: u32 = 0x0000_0002
+    | 0x0000_0004
+    | 0x0000_0040
+    | 0x0001_0000
+    | 0x0004_0000
+    | 0x0008_0000
+    | 0x4000_0000
+    | 0x1000_0000;
+/// 「許す」の ACE の型のうち、SID が mask の直後にあるもの (ACCESS_ALLOWED と ACCESS_ALLOWED_CALLBACK)。
+const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
+/// 「許す」の ACE の型のうち、オブジェクトの ACE (SID の位置が変わる。ACCESS_ALLOWED_OBJECT と
+/// ACCESS_ALLOWED_CALLBACK_OBJECT)。
+const ACCESS_ALLOWED_OBJECT_ACE_TYPES: [u8; 2] = [5, 11];
+/// TrustedInstaller (`NT SERVICE\TrustedInstaller`) の SID:
+/// S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464。
+const TRUSTED_INSTALLER_SUBAUTHORITIES: [u32; 6] = [
+    80,
+    956_008_885,
+    3_418_522_649,
+    1_831_038_044,
+    1_853_292_631,
+    2_271_478_464,
+];
 /// SECURITY_MAX_SID_SIZE。
 const MAX_SID: usize = 68;
 const FILE_PERSISTENT_ACLS: u32 = 0x8;
@@ -153,10 +180,6 @@ fn user() -> io::Result<&'static UserSid> {
     }
 }
 
-// SAFETY: SID の入れ物は作った後に書き換えない。読むだけなのでスレッドをまたいでよい。
-unsafe impl Sync for UserSid {}
-unsafe impl Send for UserSid {}
-
 /// よく知られた SID (SYSTEM・Administrators)。
 struct WellKnown {
     buf: [u32; MAX_SID / 4],
@@ -193,10 +216,6 @@ struct Allowed {
     system: WellKnown,
     admins: WellKnown,
 }
-
-// SAFETY: 作った後に書き換えない。読むだけ。
-unsafe impl Sync for Allowed {}
-unsafe impl Send for Allowed {}
 
 fn allowed() -> io::Result<(&'static UserSid, &'static Allowed)> {
     static ALLOWED: OnceLock<Result<Allowed, i32>> = OnceLock::new();
@@ -306,6 +325,176 @@ pub fn restrict(path: &[u16], dir: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// TrustedInstaller の SID (SID の構造: 版 1・下位の数 6・権威 5・下位の値)。
+fn trusted_installer() -> [u32; 8] {
+    let [a, b, c, d, e, f] = TRUSTED_INSTALLER_SUBAUTHORITIES;
+    [
+        u32::from_ne_bytes([1, 6, 0, 0]),
+        u32::from_ne_bytes([0, 0, 0, 5]),
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+    ]
+}
+
+/// CREATOR OWNER (S-1-3-0) と CREATOR GROUP (S-1-3-1) の SID (継承した先では作った者に置き換わる)。
+fn creator(sub_authority: u32) -> [u32; 3] {
+    [
+        u32::from_ne_bytes([1, 1, 0, 0]),
+        u32::from_ne_bytes([0, 0, 0, 3]),
+        sub_authority,
+    ]
+}
+
+/// `path` の DACL が、今の利用者・SYSTEM・Administrators・TrustedInstaller のほかの相手に、書き込みの類の
+/// 権限 ([`WRITE_RIGHTS`]) を許すか。DACL が無ければ (誰でも使える) 真。「拒む」の ACE は見ない (許す相手を
+/// 狭めるだけ)。
+///
+/// 継承だけの ACE (このものには効かない) は、ファイルへ継承するもの (`OBJECT_INHERIT_ACE`) だけを見る。
+/// フォルダの中に新しく作るファイル (`evorag.new`・`evorag.tmp`・`evorag.probe`) に効くため (同じ
+/// ボリュームの中の改名ではセキュリティ記述子が変わらず、改名したファイルは継承し直さない)。相手が
+/// CREATOR OWNER・CREATOR GROUP なら作った者に置き換わるので許す。フォルダへだけ継承するものは見ない。
+pub fn grants_write_to_others(path: &[u16]) -> io::Result<bool> {
+    let (user, others) = allowed()?;
+    let installer = trusted_installer();
+    let installer_sid: Psid = installer.as_ptr().cast_mut().cast();
+    let (creator_owner, creator_group) = (creator(0), creator(1));
+    let creator_sids: [Psid; 2] = [
+        creator_owner.as_ptr().cast_mut().cast(),
+        creator_group.as_ptr().cast_mut().cast(),
+    ];
+    let mut dacl: *mut c_void = std::ptr::null_mut();
+    let mut sd: *mut c_void = std::ptr::null_mut();
+    // SAFETY: path は NUL で終わる UTF-16。出力のポインタはすべて有効。
+    let r = unsafe {
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r as i32));
+    }
+    let result = (|| {
+        if dacl.is_null() {
+            return Ok(true); // DACL が無い = 誰でも使える。
+        }
+        let mut info = AclSizeInformation::default();
+        // SAFETY: dacl と sd は GetNamedSecurityInfoW が返したもので、LocalFree の前まで有効。ACE は
+        // GetAce が返した、ACL の中を指すポインタ。
+        unsafe {
+            if GetAclInformation(
+                dacl,
+                (&raw mut info).cast(),
+                std::mem::size_of::<AclSizeInformation>() as u32,
+                ACL_SIZE_INFORMATION,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            for index in 0..info.ace_count {
+                let mut ace: *mut c_void = std::ptr::null_mut();
+                if GetAce(dacl, index, &mut ace) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // ACE_HEADER (型 1・flags 1・大きさ 2) + mask (4) + SidStart。
+                let kind = *ace.cast::<u8>();
+                let ace_flags = *ace.cast::<u8>().add(1);
+                let inherit_only = ace_flags & INHERIT_ONLY_ACE != 0;
+                if inherit_only && u32::from(ace_flags) & OBJECT_INHERIT_ACE == 0 {
+                    continue; // フォルダへだけ継承する。このものにも中のファイルにも効かない。
+                }
+                let mask = ace.cast::<u8>().add(4).cast::<u32>().read_unaligned();
+                if mask & WRITE_RIGHTS == 0 {
+                    continue;
+                }
+                if ACCESS_ALLOWED_OBJECT_ACE_TYPES.contains(&kind) {
+                    return Ok(true); // 相手を読み分けない (ファイルには使われない形)。安全な側に倒す。
+                }
+                if kind != ACCESS_ALLOWED_ACE_TYPE && kind != ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
+                    continue; // 拒む・監査の ACE。
+                }
+                let sid = ace.cast::<u8>().add(8).cast::<c_void>();
+                let known = [
+                    user.sid(),
+                    others.system.sid(),
+                    others.admins.sid(),
+                    installer_sid,
+                ];
+                let is_known = known.iter().any(|&k| EqualSid(sid, k) != 0)
+                    || (inherit_only && creator_sids.iter().any(|&k| EqualSid(sid, k) != 0));
+                if !is_known {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    })();
+    // SAFETY: GetNamedSecurityInfoW が割り当てた記述子を 1 回だけ解放する。
+    unsafe { LocalFree(sd) };
+    result
+}
+
+/// 持ち主として許す相手か: 今の利用者・SYSTEM・Administrators・TrustedInstaller。
+///
+/// # Safety
+///
+/// `sid` は有効な SID を指すこと。
+unsafe fn is_allowed_owner(sid: Psid) -> io::Result<bool> {
+    let (user, others) = allowed()?;
+    let installer = trusted_installer();
+    let known: [Psid; 4] = [
+        user.sid(),
+        others.system.sid(),
+        others.admins.sid(),
+        installer.as_ptr().cast_mut().cast(),
+    ];
+    // SAFETY: known はどれも有効な SID を指す。sid は呼ぶ側が保証する。
+    Ok(known.iter().any(|&k| unsafe { EqualSid(sid, k) } != 0))
+}
+
+/// `path` の持ち主が、今の利用者・SYSTEM・Administrators・TrustedInstaller のどれかか。持ち主は DACL を
+/// 書き換えられる (OWNER RIGHTS の ACE で狭めていなければ `WRITE_DAC` を暗に持つ) ので、インストール先の
+/// 確かめで見る。持ち主が無ければ偽。
+pub fn owner_is_allowed(path: &[u16]) -> io::Result<bool> {
+    let mut owner: Psid = std::ptr::null_mut();
+    let mut sd: *mut c_void = std::ptr::null_mut();
+    // SAFETY: path は NUL で終わる UTF-16。出力のポインタはすべて有効。
+    let r = unsafe {
+        GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r as i32));
+    }
+    let result = if owner.is_null() {
+        Ok(false)
+    } else {
+        // SAFETY: owner は GetNamedSecurityInfoW が返した記述子の中を指し、LocalFree の前まで有効。
+        unsafe { is_allowed_owner(owner) }
+    };
+    // SAFETY: GetNamedSecurityInfoW が割り当てた記述子を 1 回だけ解放する。
+    unsafe { LocalFree(sd) };
+    result
+}
+
 /// ほかの一般の利用者が使えないか: 効く ACE (継承だけのものを除く) がすべて「許す」で、相手が
 /// 今の利用者・SYSTEM・Administrators のどれかで、今の利用者にはすべての権限を許すものがある。
 /// 試験のため。
@@ -376,4 +565,42 @@ pub fn is_owner_only(path: &[u16]) -> io::Result<bool> {
     // SAFETY: GetNamedSecurityInfoW が割り当てた記述子を 1 回だけ解放する。
     unsafe { LocalFree(sd) };
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `WELL_KNOWN_SID_TYPE` の WinWorldSid (Everyone) と WinBuiltinUsersSid (Users)。
+    const WIN_WORLD_SID: u32 = 1;
+    const WIN_BUILTIN_USERS_SID: u32 = 27;
+
+    /// 持ち主として許すのは、今の利用者・SYSTEM・Administrators・TrustedInstaller だけ。
+    #[test]
+    fn only_the_user_system_administrators_and_trusted_installer_are_allowed_owners() {
+        let (user, others) = allowed().unwrap();
+        let installer = trusted_installer();
+        let users = WellKnown::new(WIN_BUILTIN_USERS_SID).unwrap();
+        let everyone = WellKnown::new(WIN_WORLD_SID).unwrap();
+        let creator_owner = creator(0);
+        let allowed_sids: [Psid; 4] = [
+            user.sid(),
+            others.system.sid(),
+            others.admins.sid(),
+            installer.as_ptr().cast_mut().cast(),
+        ];
+        let refused_sids: [Psid; 3] = [
+            users.sid(),
+            everyone.sid(),
+            creator_owner.as_ptr().cast_mut().cast(),
+        ];
+        for sid in allowed_sids {
+            // SAFETY: どれも有効な SID を指す。
+            assert!(unsafe { is_allowed_owner(sid) }.unwrap());
+        }
+        for sid in refused_sids {
+            // SAFETY: どれも有効な SID を指す。
+            assert!(!unsafe { is_allowed_owner(sid) }.unwrap());
+        }
+    }
 }

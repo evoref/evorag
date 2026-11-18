@@ -730,6 +730,7 @@ version = "0.2.0"
 dependencies = [
  "blake2",
  "ed25519-compact",
+ "evorag-store",
  "flate2",
  "minisign-verify",
  "serde",
