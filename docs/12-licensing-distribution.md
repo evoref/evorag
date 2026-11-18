@@ -195,8 +195,9 @@
 8. **書く**: ここからデータ根のロックを取り、終わりまで持つ (置き換えの途中で evorag が起動しないように)。取れなければ断る。インストール先の `evorag.new` を §7.3 の「ファイルの作り方」で書いて書き切る。閉じてから開き直し、SHA-256 が `exe_sha256` と合うことを確かめ直す (検証と置き換えの間の差し替えと、書き込みの誤りを防ぐ)。これが §7.3 の apply の手順 1。
 9. 状態のファイルに計画を書いてから (段 1)、§7.3 の手順 2 から置き換える。今の実行ファイルは `evorag.prev` として残す。
 10. **置き換えの後の確かめ**: 新しいファイルを `evorag(.exe)` に置いた直後 (前の `evorag.prev` を消す・上書きする前、§7.3) に、新しい `evorag(.exe)` を絶対パスで `--version` を付けて動かす。
-    - 標準出力の 1 行目が `evorag <version>` (07 §5) と同じであることを確かめる。読むのは 4 KiB まで。
+    - 標準出力の 1 行目が `evorag <version>` (07 §5) と同じで、終了コードが 0 であることを確かめる。読むのは 4 KiB まで。出力が 4 KiB を超えたら、子のプロセスを止めて合わないものとする。
     - 30 秒で終わらなければ、子のプロセスを止め、終わるのを待ってから元に戻す。
+    - 起動の失敗のうち、書いたばかりのファイルを開いている間の失敗 (Linux の `ETXTBSY`) は、ウイルス対策のロック (§7.3) と同じく再試行する。
     - 合わない・動かない・時間切れのときは、§7.3 の失敗のときと同じく元に戻し (戻す新しいファイルは `evorag.rejected` にする)、理由を示して 1 で終わる。
     - `--version` は通信せず、データ根・設定・`update/` に触れず、片付けもしない。
 11. 状態のファイルの計画を済みにする。
@@ -208,7 +209,7 @@
 1. `evorag.prev` が無ければ断る。
 2. **戻す先を確かめる**:
    - 状態のファイルの最後に済んだ操作 (`done`) が読めて、その `current` の SHA-256 が `evorag.prev` と合えば、その版と DB の形式の版を使う。
-   - 記録が無い・読めない・合わない (手作業で置いた、§7.1) ときは、`evorag.prev` を apply の 10 と同じ規則 (絶対パス、4 KiB、30 秒) で `--version` を付けて動かす。1 行目が `evorag <版>` でなければ断る。DB の形式の版は、`db format:` の行 (07 §5) があればそれを、無ければ v0.3 が持つ過去の版の表 (0.1.x は `0.1`、0.2.x は `0.2`) から決め、どちらも無ければ分からないとする。
+   - 記録が無い・読めない・合わない (手作業で置いた、§7.1) ときは、`evorag.prev` を apply の 10 と同じ規則 (絶対パス、4 KiB、30 秒、終了コード 0) で `--version` を付けて動かす。Windows では、拡張子の無い名前を動かす前に `<名前>.exe` (例: `evorag.prev.exe`) があれば断る (OS がそちらを先に動かすため)。1 行目が `evorag <版>` でなければ断る。DB の形式の版は、`db format:` の行 (07 §5) があればそれを、無ければ v0.3 が持つ過去の版の表 (0.1.x は `0.1`、0.2.x は `0.2`) から決め、どちらも無ければ分からないとする。
 3. **データの案内を求める** (入れ替えの前に求め、入れ替えの後に示す): データ根があれば、そのロックを取り (取れなければ断る)、終わりまで持つ。DB を読むだけで開いて `format.min_read` と `format.min_write` (03 §3.1.1) を読み、戻す版の DB の形式の版と比べる。
    - `min_write` 以上: 戻した版でそのまま使える。
    - `min_read` 以上で `min_write` 未満: 戻した版は読むだけで起動する (03 §4 の規則 6)。書けるようにするには、移行の前の退避から戻す。
@@ -221,7 +222,7 @@
 
 **状態のファイル** (状態のフォルダの `update/state.json`):
 - JSON で、所有者だけの権限で作る (NFR-503)。一時名に書いて書き切り、改名で置く。最上位に形式の版 `schema` (`1`) を持ち、知らない項目は無視する。
-- **計画** (`plan`): apply と rollback が、§7.3 の手順 1 を済ませてから書き (段 1)、段を進めるたびに書き直す。項目は次のとおり。
+- **計画** (`plan`): apply と rollback が、§7.3 の手順 1 を済ませてから書き (段 1)、段を進めるたびに書き直す。ただし、Windows の隙間 (§7.3) の 2 つの改名の間では書かず、2 つめの改名の後に書く (apply は段 2 から 4 へ、rollback は段 1 から 3 へ進む)。Windows の apply の段 2 は、前回の `evorag.prev` が無く、することが無くても書く。続きは役割を SHA-256 で見分けるので、段が飛んでも誤らない。項目は次のとおり。
   - `op`: `apply` か `rollback`。
   - `dir`: インストール先のフォルダ (正規化したパス)。
   - `stage`: 済んだ手順の番号 (§7.3 の表の番号。1 から数える)。
@@ -246,15 +247,15 @@
 
 | OS | 手順 |
 |---|---|
-| Windows | 1. 新しいファイルを同じフォルダの `evorag.new` に書いて書き切る (§7.2 の apply の 8)。<br>2. 前回の `evorag.prev` があれば、`evorag.prev.old` に改名する (消さない)。<br>3. 動いている実行ファイル (apply を実行している自分自身) を `evorag.prev` に改名する。<br>4. 間を空けずに、`evorag.new` を `evorag.exe` に改名する。<br>5. 置き換えの後の確かめ (§7.2 の apply の 10)。<br>6. 済んだら `evorag.prev.old` を消す。<br>改名は上書きしない `MoveFileExW` (`MOVEFILE_WRITE_THROUGH`) で行う。<br>途中で失敗したら (5 の確かめに通らないときを含む)、計画を元に戻す途中 (`reverting`) にしてから、逆の順に改名して元に戻す: `evorag.exe` に置いた新しいファイルを `evorag.rejected` に、`evorag.prev` を `evorag.exe` に、`evorag.prev.old` を `evorag.prev` に戻し、`evorag.rejected` と `evorag.new` を消す |
-| Linux | 1. 新しいファイルを `evorag.new` に書いて書き切る (§7.2 の apply の 8)。<br>2. 今の `evorag` の写しを `evorag.tmp` に書いて書き切る。<br>3. `rename` で `evorag.new` を `evorag` の上に置き、フォルダを同期する。<br>4. 置き換えの後の確かめ (§7.2 の apply の 10)。通らなければ、計画を `reverting` にしてから、`rename` で `evorag.tmp` を `evorag` の上に戻し (新しいファイルはここで消える)、フォルダを同期する。<br>5. `rename` で `evorag.tmp` を `evorag.prev` に置き (前回の `evorag.prev` を上書きする)、フォルダを同期する。<br>自分自身は改名しない (どの段で落ちても `evorag` がある)。動いている実行ファイルへ書き込むと失敗するので、上書きはしない |
+| Windows | 1. 新しいファイルを同じフォルダの `evorag.new` に書いて書き切る (§7.2 の apply の 8)。<br>2. 前回の `evorag.prev` があれば、`evorag.prev.old` に改名する (消さない)。<br>3. 動いている実行ファイル (apply を実行している自分自身) を `evorag.prev` に改名する。<br>4. 間を空けずに、`evorag.new` を `evorag.exe` に改名する。<br>5. 置き換えの後の確かめ (§7.2 の apply の 10)。<br>6. 済んだら `evorag.prev.old` を消す。<br>改名は上書きしない `MoveFileExW` (`MOVEFILE_WRITE_THROUGH`) で行う。<br>途中で失敗したら (5 の確かめに通らないときを含む)、計画を元に戻す途中 (`reverting`) にしてから、逆の順に改名して元に戻す: `evorag.exe` に置いた新しいファイルを `evorag.rejected` に、`evorag.prev` を `evorag.exe` に、`evorag.prev.old` を `evorag.prev` に戻し、`evorag.rejected` と `evorag.new` を消す。<br>4 の改名に失敗したときは、隙間を短くするため、先に `evorag.prev` を `evorag.exe` に戻してから `reverting` を書き、残りを戻す。<br>6 で消せなければ残し、名前での片付けに回す (元に戻さない) |
+| Linux | 1. 新しいファイルを `evorag.new` に書いて書き切る (§7.2 の apply の 8)。<br>2. 今の `evorag` の写しを `evorag.tmp` に書いて書き切る。<br>3. `rename` で `evorag.new` を `evorag` の上に置き、フォルダを同期する。<br>4. 置き換えの後の確かめ (§7.2 の apply の 10)。通らなければ、計画を `reverting` にしてから、`rename` で `evorag.tmp` を `evorag` の上に戻し (新しいファイルはここで消える)、フォルダを同期する。<br>5. `rename` で `evorag.tmp` を `evorag.prev` に置き (前回の `evorag.prev` を上書きする)、フォルダを同期する。<br>途中で失敗したら (4 の確かめに通らない、5 の改名や状態のファイルの書き込みに失敗する、を含む)、計画を `reverting` にしてから元に戻す。<br>自分自身は改名しない (どの段で落ちても `evorag` がある)。動いている実行ファイルへ書き込むと失敗するので、上書きはしない |
 | macOS | Linux と同じ (上書きすると署名の不一致で強制終了されることがあるため)。v0.6 の macOS 版のときに S-07 と同じ試験をする |
 
 **rollback の入れ替え**:
 
 | OS | 手順 |
 |---|---|
-| Windows | 1. `evorag.prev` の SHA-256 を求める (読むだけ。§7.2 の rollback の 2 と同じファイルであることを確かめる)。<br>2. 動いている実行ファイル (自分自身) を `evorag.tmp` に改名する。<br>3. 間を空けずに、`evorag.prev` を `evorag.exe` に改名する。<br>4. `evorag.tmp` を `evorag.prev` に改名する。<br>改名は apply と同じ。途中で失敗したら、`reverting` にしてから逆の順に改名して元に戻す |
+| Windows | 1. `evorag.prev` の SHA-256 を求める (読むだけ。§7.2 の rollback の 2 と同じファイルであることを確かめる)。<br>2. 動いている実行ファイル (自分自身) を `evorag.tmp` に改名する。<br>3. 間を空けずに、`evorag.prev` を `evorag.exe` に改名する。<br>4. `evorag.tmp` を `evorag.prev` に改名する。<br>改名は apply と同じ。途中で失敗したら、`reverting` にしてから逆の順に改名して元に戻す。3 の改名に失敗したときは、先に `evorag.tmp` を `evorag.exe` に戻してから `reverting` を書く |
 | Linux | 1. 今の `evorag` の写しを `evorag.tmp` に書いて書き切る。<br>2. `rename` で `evorag.prev` を `evorag` の上に置く。<br>3. `rename` で `evorag.tmp` を `evorag.prev` に置き、フォルダを同期する。<br>どの段で落ちても `evorag` がある |
 | macOS | Linux と同じ |
 
@@ -262,19 +263,22 @@
   - 動いている実行ファイルの上には、`MoveFileExW(MOVEFILE_REPLACE_EXISTING)` でも POSIX の意味の改名 (`FileRenameInfoEx`) でも置けない (アクセスの拒否)。
   - exFAT は POSIX の意味の改名を持たない。
   - 自分を改名してから置く手順だけが、NTFS と exFAT の両方で動く。
-- **Windows の隙間**: apply の手順 3 と 4 の間、rollback の手順 2 と 3 の間、apply を元に戻すときの「`evorag.exe` を `evorag.rejected` に」と「`evorag.prev` を `evorag.exe` に」の間は、`evorag.exe` が無い。
+- **Windows の隙間**: `evorag.exe` を改名で空けてから、ほかのファイルを `evorag.exe` に置くまでの間は、`evorag.exe` が無い。apply の手順 3 と 4 の間、rollback の手順 2 と 3 の間、元に戻すときと続き (下の「続きと片付け」) の同じ形の 2 つの改名の間がこれに当たる。
   - その間に強制終了や電源断が当たると、起動できない。Windows では無くせない。
-  - 2 つの改名の間には、ほかの処理 (書き込み・同期・表示) を入れない。
+  - 2 つの改名の間には、ほかの処理 (書き込み・同期・表示・ロックの再試行の待ち) を入れない。
+  - 置くファイルがロックされていないことは、1 つめの改名の前に確かめる (削除の権限で、共有なしに開いて閉じる。ロックならウイルス対策のロックの再試行をする)。2 つめの改名は 1 回だけ試し、失敗したらすぐ元に戻す (元に戻す改名は再試行する)。
   - 戻し方を、同梱の README (§7.1) と、`evorag update apply`・`rollback` が始める前の表示に書く。
     - apply: 「`evorag.exe` が無いときは、`evorag.new` があればそれを、無ければ `evorag.prev` を `evorag.exe` に改名してください」。
     - rollback: 「`evorag.exe` が無いときは、`evorag.prev` を `evorag.exe` に改名してください」。
   - どちらの戻し方でも、次の `update` の操作か起動の片付けが、状態のファイルに従って残りを整える。
-- **ファイルの作り方**: `evorag.new`・`evorag.tmp`・書き込めるかを試すファイル (`evorag.probe`) は、同じ名前のファイルがあれば先に消してから、排他の作成 (`create_new`。Unix では `O_NOFOLLOW` も付ける) で作る。Unix では、新しいファイルの権限を、今の `evorag` の権限から group と other の書き込みを除いたものにする。
+- **ファイルの作り方**: `evorag.new`・`evorag.tmp`・書き込めるかを試すファイル (`evorag.probe`) は、同じ名前のファイルがあれば先に消してから、排他の作成 (`create_new`。Unix では `O_NOFOLLOW` も付ける) で作る。Unix では、新しいファイルの権限を、今の `evorag` の権限から group と other の書き込みと、setuid・setgid・sticky を除いたものにする (`& 0o755`)。
 - **インストール先の確かめ** (apply と rollback の前):
   - 書き込めないとき (Program Files など) は、何も変えずに理由を示して断る。先に `evorag.probe` を作って消せるかで確かめる。
-  - `evorag(.exe)` がシンボリックリンク・リパースポイントなら断る。
+  - `evorag(.exe)` がシンボリックリンク・名前の代理のリパースポイント (ジャンクションなど。`IsReparseTagNameSurrogate`) なら断る。ほかのリパースポイント (OneDrive のクラウドのファイルなど) は通常のファイルとして扱う。
   - Unix では、インストール先のフォルダか `evorag` が、動いている利用者のものでない、または group か other が書ける (sticky の無いフォルダ) なら断る。root で動いていて、インストール先のフォルダの持ち主が root でなければ断る (`sudo` で他人の置き場所を書き換えないため)。
-- **ウイルス対策のロック**: ウイルス対策のソフトがロックしている (共有の違反・アクセスの拒否・ロックの違反) 間は、5 回まで再試行する。
+  - Unix では、役割のファイル (`evorag.new`・`evorag.tmp`・`evorag.prev`・`evorag.prev.old`・`evorag.rejected`) も、動いている利用者のもので、シンボリックリンクでないものだけを役割に当てる。当たらないものは、動かさず (`--version` を含む)、置かない (sticky のフォルダに他人が置いたファイルを実行しないため)。
+  - Windows では、インストール先のフォルダの DACL が、動いている利用者・SYSTEM・Administrators・TrustedInstaller 以外に、書き込みの権限 (ファイルの作成・追記・子の削除・削除・権限や所有者の変更、汎用の書き込み・すべて) を許していれば断る (他の利用者が `evorag.prev` などを置けないように)。継承専用の項目は、フォルダそのものには当てない。`%LOCALAPPDATA%\Programs\evorag` など、自分だけが書けるフォルダへ移すよう案内する。
+- **ウイルス対策のロック**: ウイルス対策のソフトがロックしている (共有の違反・アクセスの拒否・ロックの違反。Unix では `EBUSY`・`ETXTBSY`) 間は、5 回まで再試行する。隙間の 2 つめの改名だけは再試行しない (上の「Windows の隙間」)。
   - 待ちは 200・400・600・800 ms (合わせて 2 秒)。
   - それでも失敗したら、元に戻して理由を示す。起動できる状態は保つ (S-07)。
 - **更新のロック**: apply・rollback と、TUI の起動の片付けは、状態のフォルダの `update/lock` に OS のロック (03 §9 と同じ `File::try_lock`) を取ってから行い、終わるまで持つ。取れなければ、apply・rollback は断り、起動の片付けは行わずに進む。`update/` のフォルダとファイルは所有者だけの権限で作る (NFR-503)。
@@ -283,15 +287,21 @@
     - ファイルの名前ではなく、SHA-256 で役割 (`current`・`next`・`old_prev`、§7.2 の「状態のファイル」) を見分ける。調べるのは、計画の `dir` の `evorag(.exe)`・`evorag.new`・`evorag.tmp`・`evorag.prev`・`evorag.prev.old`・`evorag.rejected` だけ。
     - 計画が `reverting` なら、元に戻す向きに進める (`current` を `evorag(.exe)` に、`old_prev` を `evorag.prev` に戻し、`next` は消す)。
     - `evorag(.exe)` が `next` なら、残りの段を進めて終える (`current` を `evorag.prev` に置き、apply なら `old_prev` を消す)。apply で置き換えの後の確かめが済んでいなければ、確かめてから進める (続きを進めているのが `next` 自身なら、済んだものとする)。確かめに通らなければ `reverting` にして元に戻す。
+      - 続きを進めているのが `next` 自身かは、動いている実行ファイルの SHA-256 で決める。Linux では `/proc/self/exe` (動いている像そのもの) から、ほかの OS ではインストール先を開いたときに動いている実行ファイルのパス (シンボリックリンクを解いた後) から求める。
     - `evorag(.exe)` が無い (Windows の隙間) なら、`next` を `evorag(.exe)` に置いてから、同じように終える。`next` が見つからなければ、`current` を置いて元に戻す。
-    - `evorag(.exe)` が `current` なら、元に戻す (`old_prev` を `evorag.prev` に戻し、`evorag.tmp` のうち役割に当たらないものを消す)。操作はやり直さない (利用者がもう一度打つ)。
-    - 役割に当たらないファイルには触れず、理由を示す (利用者が置いたものかもしれないため)。ただし、計画が置き換えの前 (段 1) で止まっているときに限り、役割に当たらない `evorag.new` は消してよい。
-    - `evorag(.exe)` がどの役割にも当たらないときは、何も動かさず、計画を残し、理由と「手で戻す手順」を示す (apply・rollback は 1 で終わる)。
+    - `evorag(.exe)` が `current` なら、元に戻す (`old_prev` を `evorag.prev` に戻す)。操作はやり直さない (利用者がもう一度打つ)。
+    - Unix では、続きと元に戻すときも `evorag` を改名で外さない。`evorag` の中身がほかの名前で要るときは、写しを作ってから上から置く (どの段で落ちても `evorag` がある)。
+    - 役割に当たらないファイルには触れず、理由を示す (利用者が置いたものかもしれないため)。ただし、次の 2 つは消してよい: 計画が段 1 で止まっているときの `evorag.new`、続きを始めたときに `evorag(.exe)` が `current` で、元に戻す向きに進めるときの `evorag.tmp` (書きかけの写し)。
+    - `evorag.prev` に置く役割のファイルがどこにも無ければ (利用者が消したなど)、`evorag.prev` を無いままにして計画を済みにし、無いことを示す。
+    - `evorag(.exe)` がどの役割にも当たらないとき、`evorag(.exe)` に置けるものが `next` にも `current` にも無いとき、置く先に役割に当たらないファイルがあるときは、何も動かさず、計画を残し、理由と「手で戻す手順」を示す (apply・rollback は 1 で終わる)。
+    - 置き換えは済んだのに計画を済みにできなかったときは、置き換えが済んだことと、記録を書けなかったことを分けて示す (1 で終わる。次の起動の片付けが整える)。
     - 終えたら計画を済みにし (元に戻したときは計画を消し)、何をしたかを示す。
   - 計画が無ければ、名前で片付ける。
-    - `evorag.prev` が無く `evorag.prev.old` か `evorag.tmp` があれば、それを `evorag.prev` に戻す。
-    - 余った `evorag.new`・`evorag.tmp`・`evorag.prev.old`・`evorag.rejected`・`evorag.probe` は消す。消せなければ (ロック)、起動の片付けでは次の機会に回し、apply・rollback は断る (§7.2)。
-- **手で戻す手順** (状態のファイルが読めない、役割に当たらないとき。README にも書く):
+    - `evorag(.exe)` が無ければ、何もしない (Windows の隙間の後。README の戻し方か、「手で戻す手順」に任せる)。
+    - `evorag.prev` が無く `evorag.prev.old` か `evorag.tmp` があれば、それを `evorag.prev` に戻す。両方あれば `evorag.prev.old` を戻す (改名だけで作られ、書きかけが無いため。Unix の `evorag.tmp` は写しで、書きかけのことがある)。
+    - 余った `evorag.new`・`evorag.prev.old`・`evorag.rejected`・`evorag.probe` は消す。余った `evorag.tmp` は、中身 (SHA-256) が `evorag(.exe)` か `evorag.prev` と同じときだけ消し、違えば残して示す (計画を書いた状態のフォルダと違う環境で起動したときに、前の版の唯一の写しを消さないため)。
+    - 消せない・残したファイルがあれば、起動の片付けでは次の機会に回し、apply・rollback は断る (§7.2)。
+- **手で戻す手順** (状態のファイルが読めない、役割に当たらない、置く先がふさがれているとき。README にも書く):
   1. evorag を終了する。
   2. インストール先の `evorag(.exe)`・`evorag.new`・`evorag.tmp`・`evorag.prev`・`evorag.prev.old`・`evorag.rejected` を、それぞれ `--version` で動かして版を確かめる。
   3. 使いたい版のファイルを `evorag(.exe)` に、前の版のファイルを `evorag.prev` に改名し、残りを消す。

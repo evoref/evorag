@@ -60,7 +60,7 @@ flowchart TB
 |---|---|---|---|
 | `evorag-types` | ID、時刻、エラー、文言キー、コアの API の命令・イベント・照会の型 | serde | v0.1 |
 | `evorag-llm` | llama-server のクライアント (chat・embed・rerank・tokenize・props・slots) | reqwest (TLS なし)、serde_json | v0.1 |
-| `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック、伏せ字の純粋な核 (04 §7.2) | redb、ciborium、xxhash-rust、sha2・unicode-segmentation (伏せ字の核、v0.3) | v0.1 |
+| `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック、伏せ字の純粋な核 (04 §7.2)、ファイルの操作の道具 (`fsutil`。上書きしない改名・ロックの再試行。`evorag-update` も使う) | redb、ciborium、xxhash-rust、sha2・unicode-segmentation (伏せ字の核、v0.3) | v0.1 |
 | `evorag-index` | 語彙の索引とベクトルの索引、セグメントの形式と入れ替え | memmap2、rayon、arc-swap | v0.1 (語彙) / v0.2 (ベクトル) |
 | `evorag-memory` | メモリの書き込み・統合・読み出し、事実の入口、訂正の検証 | toml、unicode-normalization、unicase (値の鍵の case folding、04 §5.6)、sha2 (値の鍵の HMAC。HMAC は sha2 の上に組む) | v0.1 (ターンとセッション) / v0.2〜v0.3 |
 | `evorag-retrieval` | 問いの準備、候補の収集と順位付け、文脈の組み立て | unicode-normalization | v0.1 |
