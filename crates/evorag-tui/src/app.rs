@@ -332,8 +332,10 @@ impl App {
         let subject = self.subject_label(&g.group.subject);
         let attr = self.catalog.attribute(&g.attr.name);
         match r {
-            FactRow::Value { value, .. } => format!("{subject}・{attr}: {value}"),
-            _ => format!("{subject}・{attr}"),
+            FactRow::Value { value, .. } => {
+                format!("{}: {value}", self.catalog.fact_label(&subject, &attr))
+            }
+            _ => self.catalog.fact_label(&subject, &attr),
         }
     }
 
@@ -481,16 +483,14 @@ impl App {
             } else {
                 MessageKey::UiFactsForgottenKept
             });
-            let mut sessions = f.sessions.join("、");
+            let mut sessions = f.sessions.clone();
             if f.deleted_turns > 0 {
-                if !sessions.is_empty() {
-                    sessions.push('、');
-                }
-                sessions.push_str(&c.with(
+                sessions.push(c.with(
                     MessageKey::UiFactsForgottenDeleted,
                     &[("n", &f.deleted_turns.to_string())],
                 ));
             }
+            let sessions = c.join_comma(&sessions);
             let at = evorag_core::localtime::datetime(f.at.as_millis());
             lines.push(c.with(
                 MessageKey::UiFactsForgottenRow,
@@ -692,9 +692,11 @@ impl App {
                             })
                             .map(|(hg, h)| {
                                 format!(
-                                    "{}・{}: {}",
-                                    self.subject_label(&hg.group.subject),
-                                    self.catalog.attribute(&hg.attr.name),
+                                    "{}: {}",
+                                    self.catalog.fact_label(
+                                        &self.subject_label(&hg.group.subject),
+                                        &self.catalog.attribute(&hg.attr.name)
+                                    ),
                                     h.value
                                 )
                             })
@@ -1143,7 +1145,10 @@ impl App {
                 self.status.limited = true;
                 let m = self.catalog.with(
                     MessageKey::UiProbeIssues,
-                    &[("role", &role), ("reasons", &reasons.join("、"))],
+                    &[
+                        ("role", &role),
+                        ("reasons", &self.catalog.join_comma(&reasons)),
+                    ],
                 );
                 self.notice(m);
             }
@@ -1163,9 +1168,10 @@ impl App {
                 .map(|(k, n)| self.catalog.with(k, &[("n", &n.to_string())]))
                 .collect();
                 if !parts.is_empty() {
+                    let parts = parts.join(&self.catalog.key(MessageKey::UiSepDot));
                     let m = self
                         .catalog
-                        .with(MessageKey::UiFactsChanged, &[("parts", &parts.join("・"))]);
+                        .with(MessageKey::UiFactsChanged, &[("parts", &parts)]);
                     self.notice(m);
                 }
             }
@@ -2944,7 +2950,10 @@ mod tests {
             preview: forget_preview(target.clone(), defaults, "h1"),
         });
         let text = a.forget_text(confirm(&a));
-        assert!(text.contains("前: 私は大阪に住んでいます"), "{text}");
+        assert!(
+            text.contains("前 (あなた): 私は大阪に住んでいます"),
+            "{text}"
+        );
         assert!(text.contains("後: 私は[伏せ字]に住んでいます"), "{text}");
         assert!(
             text.contains("2 件 (3 箇所)") && text.contains("1 件"),
@@ -3230,9 +3239,422 @@ mod tests {
                     range: 1..9,
                     kind: TurnMarkKind::Hidden,
                 }],
-                "[非表示]"
+                &a.catalog
             )
             .is_none()
         );
+    }
+
+    /// 伏せ字の範囲は、UI の言語の印で表示する。ja のデータ根 (本文の印は `[伏せ字]`) を英語の UI で描くと
+    /// `[redacted]` になり、日本語の文字が出ない。保存した本文は変えない (04 §7.3)。
+    ///
+    /// verifies: AC-FR-908-1 (画面の層: 伏せ字の印も UI の言語で出す)
+    #[test]
+    fn redacted_ranges_are_shown_with_the_marker_of_the_ui_language() {
+        let mut a = App::new(Catalog::load("en"), Status::default());
+        let text = "I live in [伏せ字] now";
+        let at = text.find('[').unwrap();
+        let mut t = turn(1, Role::User, TurnStatus::Confirmed, None);
+        t.text = text.into();
+        t.marks = vec![TurnMark {
+            range: at..at + "[伏せ字]".len(),
+            kind: TurnMarkKind::Redacted,
+        }];
+        let mut r = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        r.text = "[伏せ字], noted.".into();
+        r.marks = vec![TurnMark {
+            range: 0.."[伏せ字]".len(),
+            kind: TurnMarkKind::Redacted,
+        }];
+        a.turns = vec![t, r];
+        let lines = crate::render::conversation_lines(&a, 60);
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(all.contains("I live in [redacted] now"), "{all}");
+        assert!(all.contains("[redacted], noted."), "{all}");
+        assert!(!evorag_types::has_cjk(&all), "{all}");
+        assert_eq!(a.turns[0].text, text, "the stored text is unchanged");
+        // 同じ言語なら、本文の印と同じ表示。
+        a.catalog = Catalog::load("ja");
+        let lines = crate::render::conversation_lines(&a, 60);
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(all.contains("I live in [伏せ字] now"), "{all}");
+    }
+
+    /// 描いた画面の文字 (全角の文字の次の桁の空白も含めて、そのまま)。
+    fn drawn(a: &App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(160, 60)).unwrap();
+        term.draw(|f| crate::render::draw(a, f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    /// 描いた画面と、窓の本文 (スクロールの外も) と、通知の欄に、日本語が無い。
+    fn assert_english(a: &App, label: &str) {
+        let screen = drawn(a);
+        assert!(!evorag_types::has_cjk(&screen), "{label}:\n{screen}");
+        let body = match &a.mode {
+            Mode::Panel { title, body, .. } => format!("{title}\n{body}"),
+            Mode::ConfirmForget(fc) => a.forget_text(fc),
+            Mode::Detail { title, body, .. } => format!("{title}\n{body}"),
+            _ => String::new(),
+        };
+        assert!(!evorag_types::has_cjk(&body), "{label}:\n{body}");
+        for n in &a.notices {
+            assert!(!evorag_types::has_cjk(n), "{label}: notice {n}");
+        }
+    }
+
+    /// 英語のカタログ (`ui.language = "en"`) で、主な画面と窓 (会話・状態の行・ヘルプ・セッションの一覧・
+    /// 削除の確認・答え方・出典の詳細・メモリ・事実の一覧・履歴・忘れた事実・private とその解除・忘れるの確認・
+    /// broken/ の確認) を描くと、日本語の文字が 1 つも出ない。利用者のデータ (題名・本文・値) は ASCII にする。
+    ///
+    /// verifies: AC-FR-908-1 (画面の層: `ui.language = "en"` で全画面が英語になる)
+    #[test]
+    fn every_screen_is_english_with_the_english_catalog() {
+        use evorag_types::api::{
+            BandItem, ForgetState, MemoryItem, MemoryPlace, MemoryReport, MemorySource,
+        };
+        use evorag_types::{Message, Timestamp};
+
+        let mut a = App::new(
+            Catalog::load("en"),
+            Status {
+                endpoint: "127.0.0.1:8080".into(),
+                model: "qwen".into(),
+                n_ctx: 8192,
+                limited: true,
+                recall: Some(RecallState::CandidatesOnly {
+                    calibrating: true,
+                    failed: false,
+                }),
+                background: Some(BackgroundState::Working),
+                remote_llm: true,
+                forget: Some(ForgetState {
+                    mismatched: 2,
+                    journal_pending: true,
+                    key_missing: true,
+                }),
+            },
+        );
+        assert_english(&a, "empty");
+
+        // 会話: 発話・応答・中断・失敗・応答なし・帯・[hidden] の印・確かめられない本文。
+        let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        answer.text = "Osaka, I think.".into();
+        answer.sources = 1;
+        answer.band = vec![BandItem {
+            target: id(20),
+            title: "plants".into(),
+            at: Timestamp::from_millis(0),
+            head: "watering".into(),
+        }];
+        answer.irrelevant = vec![id(20)];
+        answer.marks = vec![TurnMark {
+            range: 0.."Osaka".len(),
+            kind: TurnMarkKind::Hidden,
+        }];
+        let mut cut = turn(4, Role::Assistant, TurnStatus::Interrupted, Some(id(3)));
+        cut.text = "partial".into();
+        let failed = turn(6, Role::Assistant, TurnStatus::Failed, Some(id(5)));
+        let mut unverified = turn(7, Role::User, TurnStatus::Confirmed, None);
+        unverified.unverified = true;
+        let pending = turn(8, Role::User, TurnStatus::Pending, None);
+        a.on_event(Event::SessionOpened {
+            session: SessionView {
+                title: "trip".into(),
+                ..session()
+            },
+            turns: vec![
+                turn(1, Role::User, TurnStatus::Confirmed, None),
+                answer,
+                turn(3, Role::User, TurnStatus::Confirmed, None),
+                cut,
+                turn(5, Role::User, TurnStatus::Confirmed, None),
+                failed,
+                unverified,
+                pending,
+            ],
+            unreadable: 1,
+        });
+        a.on_event(Event::ProbeIssues {
+            role: "chat".into(),
+            thinking_not_off: true,
+            structured_broken: true,
+        });
+        a.on_event(Event::FactsChanged {
+            added: 1,
+            replaced: 2,
+            contested: 1,
+        });
+        a.on_event(Event::Rejected {
+            error: Message::new(MessageKey::LlmHttp)
+                .arg("status", "503")
+                .arg("detail", "busy"),
+        });
+        assert_english(&a, "conversation");
+        let screen = drawn(&a);
+        for want in [
+            "Session: trip",
+            "(no reply)",
+            "(interrupted)",
+            "[hidden]",
+            "Organizing",
+        ] {
+            assert!(screen.contains(want), "{want}:\n{screen}");
+        }
+        for state in [
+            RecallState::Standard,
+            RecallState::Simple,
+            RecallState::Rebuilding { percent: 40 },
+            RecallState::CandidatesOnly {
+                calibrating: false,
+                failed: true,
+            },
+        ] {
+            a.status.recall = Some(state);
+            assert_english(&a, &format!("status {state:?}"));
+        }
+        for state in [
+            BackgroundState::PausedBattery,
+            BackgroundState::PausedLowSpace,
+        ] {
+            a.status.background = Some(state);
+            assert_english(&a, &format!("status {state:?}"));
+        }
+        type_text(&mut a, "/nope");
+        a.on_key(Key::Enter { newline: false });
+        assert_english(&a, "unknown command");
+
+        run(&mut a, "/help");
+        assert_eq!(a.mode, Mode::Help);
+        assert_english(&a, "help");
+        assert!(drawn(&a).contains("Help (Esc to close)"));
+
+        a.mode = Mode::Chat;
+        a.show_sessions(vec![session()]);
+        assert_english(&a, "sessions");
+        a.show_sessions(Vec::new());
+        assert_english(&a, "no sessions");
+
+        run(&mut a, "/delete");
+        assert_eq!(a.mode, Mode::ConfirmDelete);
+        assert_english(&a, "delete");
+
+        run(&mut a, "/style");
+        a.on_event(Event::StyleInfo {
+            values: ["en".into(), "short".into(), "plain".into()],
+            changed: false,
+        });
+        assert!(matches!(a.mode, Mode::Style { .. }), "{:?}", a.mode);
+        assert_english(&a, "style");
+
+        a.mode = Mode::Chat;
+        a.on_event(Event::SourceDetail {
+            n: 1,
+            answer: id(2),
+            target: id(20),
+            irrelevant: true,
+            title: "plants".into(),
+            at: Timestamp::from_millis(0),
+            lines: vec![
+                (Role::User, "how often?".into()),
+                (Role::Assistant, "weekly".into()),
+            ],
+        });
+        assert!(matches!(a.mode, Mode::Detail { .. }), "{:?}", a.mode);
+        assert_english(&a, "source detail");
+
+        a.mode = Mode::Chat;
+        let item = |place, n, score, delta| MemoryItem {
+            target: id(20),
+            place,
+            n,
+            title: "plants".into(),
+            head: "watering".into(),
+            score_milli: score,
+            delta_milli: delta,
+        };
+        let report = MemoryReport {
+            answer: Some(id(2)),
+            items: vec![
+                item(MemoryPlace::Attached, Some(1), Some(4200), Some(1200)),
+                item(MemoryPlace::Band, None, Some(2600), Some(-400)),
+                item(MemoryPlace::Below, None, Some(-5000), None),
+            ],
+            degraded: [
+                "no_embed",
+                "embed_deadline",
+                "no_rerank",
+                "rerank_slow",
+                "rerank_deadline",
+                "rerank_error",
+                "no_threshold",
+                "no_index",
+                "mystery",
+            ]
+            .map(String::from)
+            .to_vec(),
+            recall: RecallState::Simple,
+            sources: vec![MemorySource {
+                n: 1,
+                title: "plants".into(),
+                head: "watering".into(),
+            }],
+        };
+        let memory = a.memory_text(&report);
+        assert!(!evorag_types::has_cjk(&memory), "{memory}");
+
+        // 事実の一覧 (値は ASCII に置き換える)、履歴、忘れた事実。
+        let mut list = sample_list();
+        for (g, values) in list.groups.iter_mut().zip([
+            &["Osaka", "Tokyo"][..],
+            &["shrimp", "crab"][..],
+            &[][..],
+            &[][..],
+        ]) {
+            for (r, v) in g.rows.iter_mut().zip(values) {
+                if let FactRow::Value { value, .. } = r {
+                    *value = (*v).to_owned();
+                }
+            }
+            for h in &mut g.private_history {
+                h.value = "octopus".into();
+            }
+        }
+        run(&mut a, "/memory");
+        a.on_event(Event::MemoryInfo {
+            report: report.clone(),
+        });
+        a.on_event(Event::FactsInfo { list: list.clone() });
+        assert!(matches!(a.mode, Mode::Panel { .. }), "{:?}", a.mode);
+        assert_english(&a, "facts");
+        for note in [
+            FactsUnavailable::SleepTimeOff,
+            FactsUnavailable::StoppedByProbe,
+            FactsUnavailable::KeyUnavailable,
+        ] {
+            let text = a.facts_text(
+                &FactList {
+                    groups: Vec::new(),
+                    note: Some(note),
+                },
+                Some(&list),
+            );
+            assert!(!evorag_types::has_cjk(&text), "{text}");
+        }
+        let history = a.history_text(&FactHistory {
+            group: fgroup("residence"),
+            attr: AttrInfo {
+                name: "residence".into(),
+                multi: false,
+            },
+            items: vec![FactHistoryRow {
+                key: fkey("residence", 'e', FactStatus::Superseded),
+                value: "Kyoto".into(),
+                superseded_at: Timestamp::from_millis(0),
+                private: true,
+            }],
+        });
+        assert!(!evorag_types::has_cjk(&history), "{history}");
+        let forgotten = a.forgotten_text(&[ForgottenFact {
+            target: ForgottenRef { directive: id(70) },
+            subject: FactSubject::Named("wife".into()),
+            attr: AttrInfo {
+                name: "hobby".into(),
+                multi: true,
+            },
+            at: Timestamp::from_millis(0),
+            values: 2,
+            redacted: true,
+            sessions: vec!["trip".into(), "work".into()],
+            deleted_turns: 1,
+        }]);
+        assert!(!evorag_types::has_cjk(&forgotten), "{forgotten}");
+
+        run(&mut a, "/private 1");
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivate { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_english(&a, "private");
+        if let Mode::ConfirmPrivate { multi, .. } = &mut a.mode {
+            *multi = true;
+        }
+        assert_english(&a, "private (multi)");
+        run(&mut a, "/private off 3");
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivateOff { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_english(&a, "private off");
+
+        // 忘れるの確認: 数えている間・見本・選択と約束を開いたところ・伏せ字にできないとき。
+        run(&mut a, "/forget 1");
+        assert_english(&a, "forget (counting)");
+        let target = fkey("residence", 'a', FactStatus::Live);
+        let mut preview = ForgetPreview {
+            target: target.clone(),
+            options: ForgetOptions::default(),
+            samples: vec![ForgetSample {
+                turn: id(1),
+                role: Role::User,
+                before: "I live in Osaka".into(),
+                after: "I live in [redacted]".into(),
+            }],
+            other_turns: 2,
+            other_matches: 3,
+            history_values: 1,
+            affected: vec![fkey("dietary", 'd', FactStatus::Live)],
+            unredacted_sources: 1,
+            source_outside: 1,
+            whole_turns: 1,
+            mismatched_turns: 1,
+            skipped_unreadable: 1,
+            plan: Ok(ForgetPlanHash::new("h1".into())),
+        };
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: preview.clone(),
+        });
+        assert_english(&a, "forget (preview)");
+        a.on_key(Key::Tab);
+        a.on_key(Key::Char('?'));
+        assert_english(&a, "forget (choices and promise open)");
+        for warning in [
+            ForgetWarning::UnreadableTurn,
+            ForgetWarning::StaleSource,
+            ForgetWarning::ValueMismatch,
+            ForgetWarning::MismatchedTurn,
+        ] {
+            if let Mode::ConfirmForget(fc) = &a.mode {
+                preview.options = fc.options;
+            }
+            preview.plan = Err(warning);
+            a.on_event(Event::ForgetPreviewInfo {
+                preview: preview.clone(),
+            });
+            assert_english(&a, &format!("forget ({warning:?})"));
+        }
+
+        a.mode = Mode::ConfirmBroken { n: 2 };
+        assert_english(&a, "broken");
     }
 }

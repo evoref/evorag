@@ -222,32 +222,40 @@ fn yes_no(prompt: &str) -> bool {
     matches!(ask(prompt).as_str(), "y" | "Y" | "yes")
 }
 
-/// 新しく書く設定ファイルの中身 (説明つき)。
+/// 新しく書く設定ファイルの中身 (説明つき。説明は UI の言語で書く)。
 /// `chat_model` と `aux` の名前は、ルーターモードのモデルの名前 (06 §2)。
 fn template(
+    c: &Catalog,
     url: &str,
     chat_model: Option<&str>,
     api_key_env: Option<&str>,
     language: Option<&str>,
     aux: &[(&str, &str, Option<&str>)],
 ) -> String {
-    let mut s = String::from(
-        "# evorag の設定 (evorag setup が書いた。キーの説明は docs/07-tui-config.md §4)\nversion = 1\n",
+    let comment = |k: MessageKey| c.key(k);
+    let mut s = format!(
+        "{}\nversion = 1\n",
+        comment(MessageKey::CliSetupConfigHeader)
     );
     if let Some(l) = language {
         s.push_str(&format!(
-            "\n[prompt]\n# システムプロンプトの言語 (このデータ根では後から変えられない)\nlanguage = \"{l}\"\n"
+            "\n[prompt]\n{}\nlanguage = \"{l}\"\n",
+            comment(MessageKey::CliSetupConfigPromptLanguage)
         ));
     }
     s.push_str(&format!("\n[llm.chat]\nurl = \"{url}\"\n"));
     if let Some(m) = chat_model {
         s.push_str(&format!(
-            "# ルーターモードのモデルの名前 (プリセットの節の名前)\nmodel = \"{m}\"\n"
+            "{}\nmodel = \"{m}\"\n",
+            comment(MessageKey::CliSetupConfigRouterModel)
         ));
     }
     match api_key_env {
         Some(v) => s.push_str(&format!("api_key_env = \"{v}\"\n")),
-        None => s.push_str("# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書く\n# api_key_env = \"EVORAG_API_KEY\"\n"),
+        None => s.push_str(&format!(
+            "{}\n# api_key_env = \"EVORAG_API_KEY\"\n",
+            comment(MessageKey::CliSetupConfigApiKeyEnv)
+        )),
     }
     for (role, u, m) in aux {
         s.push_str(&format!("\n[llm.{role}]\nurl = \"{u}\"\n"));
@@ -513,15 +521,21 @@ pub fn run(
         .map(|f| (f.role, f.url.as_str(), f.model.as_deref()))
         .collect();
 
-    // プロンプトの言語: 設定に無く、データ根にも記録が無ければ尋ねる (07 §6.1)。
+    // プロンプトの言語: 設定に無く、データ根にも記録が無ければ尋ねる (07 §6.1)。既定の選択肢は UI の言語。
+    let default_language = c.language().as_str();
     let language = if cfg.prompt.language.is_some() || language_recorded(data_root) {
         None
     } else if args.yes {
-        Some("ja")
+        Some(default_language)
     } else {
         loop {
-            match ask(&c.key(MessageKey::CliSetupAskLanguage)).as_str() {
-                "" | "ja" => break Some("ja"),
+            let question = c.with(
+                MessageKey::CliSetupAskLanguage,
+                &[("default", default_language)],
+            );
+            match ask(&question).as_str() {
+                "" => break Some(default_language),
+                "ja" => break Some("ja"),
                 "en" => break Some("en"),
                 _ => {}
             }
@@ -534,6 +548,7 @@ pub fn run(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_private(
             config_file,
             &template(
+                c,
                 &url,
                 chat.model.as_deref(),
                 args.api_key_env.as_deref(),
@@ -785,7 +800,8 @@ mod tests {
 
     #[test]
     fn the_template_is_a_valid_config() {
-        let t = template("http://127.0.0.1:8080", None, None, Some("ja"), &[]);
+        let ja = Catalog::load("ja");
+        let t = template(&ja, "http://127.0.0.1:8080", None, None, Some("ja"), &[]);
         let l = crate::config::parse(&t).unwrap();
         assert_eq!(
             l.config.llm.chat.url.as_deref(),
@@ -793,6 +809,7 @@ mod tests {
         );
         assert_eq!(l.config.prompt.language.as_deref(), Some("ja"));
         let t = template(
+            &ja,
             "http://127.0.0.1:8081",
             None,
             Some("K"),
@@ -806,11 +823,31 @@ mod tests {
         assert!(l.config.role("rerank").is_none());
     }
 
+    /// 英語の UI では、設定ファイルの説明も英語で書く (AC-FR-908-1)。
+    #[test]
+    fn the_template_is_commented_in_the_ui_language() {
+        let en = Catalog::load("en");
+        let t = template(
+            &en,
+            "http://127.0.0.1:8080",
+            Some("m"),
+            None,
+            Some("en"),
+            &[],
+        );
+        assert!(!evorag_types::has_cjk(&t), "{t}");
+        let l = crate::config::parse(&t).unwrap();
+        assert_eq!(l.config.prompt.language.as_deref(), Some("en"));
+        assert_eq!(l.config.llm.chat.model.as_deref(), Some("m"));
+        assert!(l.config.llm.chat.api_key_env.is_none());
+    }
+
     /// verifies: AC-FR-511-2 (ルーターのモデルの名前を、役割ごとに設定に書く)
     #[test]
     fn a_router_is_written_with_a_model_name_per_role() {
         let r = "http://127.0.0.1:8080";
         let t = template(
+            &Catalog::load("ja"),
             r,
             Some("chat"),
             None,

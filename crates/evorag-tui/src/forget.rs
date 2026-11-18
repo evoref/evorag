@@ -356,7 +356,8 @@ impl App {
                 FactSubject::User => self.catalog.key(MessageKey::UiFactsSelf),
                 FactSubject::Named(n) => n.clone(),
             };
-            format!("{subject}・{}", self.catalog.attribute(&key.attribute))
+            self.catalog
+                .fact_label(&subject, &self.catalog.attribute(&key.attribute))
         })
     }
 
@@ -451,7 +452,7 @@ impl App {
             let summary = if summary.is_empty() {
                 "-".to_owned()
             } else {
-                summary.join("・")
+                summary.join(&c.key(MessageKey::UiSepDot))
             };
             lines.push(c.with(MessageKey::UiForgetChoicesFolded, &[("summary", &summary)]));
         }

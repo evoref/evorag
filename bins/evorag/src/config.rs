@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use evorag_tui::catalog::Language;
 use serde::Deserialize;
 
 /// 設定の形式の版 (03 §12.3)。
@@ -103,6 +104,54 @@ fn line_of(text: &str, key: &str) -> usize {
     text.lines()
         .position(|l| l.trim_start().starts_with(key))
         .map_or(0, |i| i + 1)
+}
+
+/// 表の見出しの行 (`[name]`・`[[name]]`。後ろのコメントは許す) なら、表の名前。
+fn table_header(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('[')?;
+    let (rest, close) = match rest.strip_prefix('[') {
+        Some(r) => (r, "]]"),
+        None => (rest, "]"),
+    };
+    let end = rest.find(close)?;
+    let after = rest[end + close.len()..].trim_start();
+    (after.is_empty() || after.starts_with('#')).then(|| rest[..end].trim())
+}
+
+/// 表 `table` のキー `key` の行。`[table]` の下の `key = …`、`table.key = …`、インラインの表
+/// (`table = { key = … }`) の行を探す。見つからなければ `line_of` と同じく、キーの名前で始まる最初の行。
+fn line_of_in(text: &str, table: &str, key: &str) -> usize {
+    // `k = …` の `=` の後ろ (k の後に `=` が無ければ `None`)。
+    let value_of = |l: &str, k: &str| -> Option<String> {
+        let rest = l.strip_prefix(k)?.trim_start();
+        rest.strip_prefix('=').map(|v| v.trim_start().to_owned())
+    };
+    let dotted = format!("{table}.{key}");
+    let mut current = String::new();
+    for (i, l) in text.lines().enumerate() {
+        let l = l.trim();
+        if let Some(name) = table_header(l) {
+            current = name.to_owned();
+            continue;
+        }
+        let found = if current == table {
+            value_of(l, key).is_some()
+        } else if current.is_empty() {
+            value_of(l, &dotted).is_some()
+                || value_of(l, table).is_some_and(|v| {
+                    v.starts_with('{')
+                        && v[1..]
+                            .split(',')
+                            .any(|item| value_of(item.trim(), key).is_some())
+                })
+        } else {
+            false
+        };
+        if found {
+            return i + 1;
+        }
+    }
+    line_of(text, key)
 }
 
 /// 読む。ファイルが無ければ既定の設定 (setup で作る、07 §5)。
@@ -289,7 +338,15 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     {
         return Err(format!(
             "line {}: prompt.language must be \"ja\" or \"en\"",
-            line_of(text, "language")
+            line_of_in(text, "prompt", "language")
+        ));
+    }
+    if let Some(l) = &config.ui.language
+        && Language::parse(l).is_none()
+    {
+        return Err(format!(
+            "line {}: ui.language must be \"ja\" or \"en\"",
+            line_of_in(text, "ui", "language")
         ));
     }
     let mut ignored = Vec::new();
@@ -416,6 +473,34 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// UI の言語 (`ui.language`、07 §6)。書かなければ `ja`。値は読むときに確かめた。
+    pub fn ui_language(&self) -> Language {
+        self.ui
+            .language
+            .as_deref()
+            .and_then(Language::parse)
+            .unwrap_or_default()
+    }
+
+    /// 新しいデータ根に記録するプロンプトの言語 (07 §6.1)。設定の `prompt.language` が無ければ、UI の言語。
+    /// データ根に記録があれば、コアは記録した言語で動く (この値は使わない)。
+    pub fn prompt_language(&self) -> evorag_core::PromptLanguage {
+        use evorag_core::PromptLanguage;
+        self.prompt
+            .language
+            .as_deref()
+            .and_then(PromptLanguage::parse)
+            .unwrap_or(match self.ui_language() {
+                Language::Ja => PromptLanguage::Ja,
+                Language::En => PromptLanguage::En,
+            })
+    }
+
+    /// `prompt.language` を設定に書いたか (書いた値が記録と違うときだけ知らせる、07 §6.1)。
+    pub fn prompt_language_explicit(&self) -> bool {
+        self.prompt.language.is_some()
+    }
+
     /// 裏の処理の設定 (`memory.sleep_time`・`idle_seconds`・`on_battery`、07 §4.2)。値は読むときに確かめた。
     pub fn sleep(&self) -> evorag_core::SleepConfig {
         let d = evorag_core::SleepConfig::default();
@@ -454,6 +539,21 @@ impl Config {
             .and_then(toml::Value::as_bool)
             .unwrap_or(true)
     }
+}
+
+/// 引数を読む前に、`--help` と誤りの文言に使う UI の言語を決める。設定ファイルを読むだけで (移行しない)、
+/// 読めない・知らない値のときは `ja` (誤りは、後の本当の読み込みが行番号つきで知らせる)。
+pub fn early_ui_language(path: &Path) -> Language {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        .and_then(|t| {
+            t.get("ui")?
+                .get("language")?
+                .as_str()
+                .and_then(Language::parse)
+        })
+        .unwrap_or_default()
 }
 
 /// 既定の置き場所 (03 §2.1)。
@@ -740,6 +840,53 @@ trusted_keys = [\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"]
         assert!(e.contains("line 1"), "{e}");
     }
 
+    /// UI の言語は ja と en (v0.3)。知らない値は、その行の番号つきの誤り。prompt.language の行と取り違えない。
+    #[test]
+    fn ui_language_takes_ja_and_en_and_reports_the_line_of_other_values() {
+        assert_eq!(parse("").unwrap().config.ui_language(), Language::Ja);
+        let en = parse("[ui]\nlanguage = \"en\"\n").unwrap().config;
+        assert_eq!(en.ui_language(), Language::En);
+        assert_eq!(
+            parse("ui.language = \"ja\"\n")
+                .unwrap()
+                .config
+                .ui_language(),
+            Language::Ja
+        );
+        let e = parse("[prompt]\nlanguage = \"ja\"\n\n[ui]\nlanguage = \"fr\"\n").unwrap_err();
+        assert!(e.contains("line 5") && e.contains("ui.language"), "{e}");
+        let e = parse("[ui]\nlanguage = \"en\"\n[prompt]\nlanguage = \"de\"\n").unwrap_err();
+        assert!(e.contains("line 4") && e.contains("prompt.language"), "{e}");
+        let e = parse("[ui]\nlanguage = 1\n").unwrap_err();
+        assert!(e.contains("line 2"), "{e}");
+        // 見出しの後ろのコメント・インラインの表・点でつないだキー。
+        let e = parse("[prompt]\nlanguage = \"ja\"\n[ui] # 画面\nlanguage = \"fr\"\n").unwrap_err();
+        assert!(e.contains("line 4"), "{e}");
+        let e = parse("prompt = { language = \"ja\" }\nui = { language = \"fr\" }\n").unwrap_err();
+        assert!(e.contains("line 2") && e.contains("ui.language"), "{e}");
+        let e = parse("prompt.language = \"ja\"\nui.language = \"fr\"\n").unwrap_err();
+        assert!(e.contains("line 2"), "{e}");
+    }
+
+    /// 引数を読む前の言語: 読めない・無い・知らない値は ja。
+    #[test]
+    fn the_early_ui_language_falls_back_to_ja() {
+        let dir = std::env::temp_dir().join(format!("evorag-early-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        assert_eq!(early_ui_language(&path), Language::Ja, "missing file");
+        for (text, want) in [
+            ("[ui]\nlanguage = \"en\"\n", Language::En),
+            ("[ui]\nlanguage = \"en\"\nunknown_key = 1\n", Language::En),
+            ("[ui]\nlanguage = \"fr\"\n", Language::Ja),
+            ("[ui\nlanguage = \"en\"\n", Language::Ja),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(early_ui_language(&path), want, "{text}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// verifies: AC-FR-807-1
     #[test]
     fn an_old_config_is_backed_up_and_rewritten() {
@@ -905,12 +1052,34 @@ data_root = \"d\"
         assert!(newer_config(&dir.path().join("none.toml")).is_none());
     }
 
-    /// 配布物に同梱する設定の例が、そのまま読める (12 §5.1)。
+    /// 配布物に同梱する設定の例 (日本語と英語) が、そのまま読める (12 §5.1)。英語の例の説明に日本語は無い。
     #[test]
-    fn the_shipped_example_is_valid() {
-        let text = include_str!("../../../dist/config.example.toml");
-        let l = parse(text).unwrap();
-        assert!(l.ignored.is_empty(), "{:?}", l.ignored);
-        assert_eq!(l.config.version, Some(CONFIG_VERSION));
+    fn the_shipped_examples_are_valid() {
+        let ja = include_str!("../../../dist/config.example.toml");
+        let en = include_str!("../../../dist/config.example.en.toml");
+        for text in [ja, en] {
+            let l = parse(text).unwrap();
+            assert!(l.ignored.is_empty(), "{:?}", l.ignored);
+            assert_eq!(l.config.version, Some(CONFIG_VERSION));
+        }
+        assert!(!evorag_types::has_cjk(en), "{en}");
+        assert_eq!(parse(en).unwrap().config.ui_language(), Language::En);
+        // 同じキーを、同じ順に書く (説明の言語だけが違う)。
+        let keys = |text: &str| -> Vec<String> {
+            let name = |s: &str| {
+                !s.is_empty()
+                    && s.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.[]".contains(&b)
+                    })
+            };
+            text.lines()
+                .map(|l| l.trim().trim_start_matches("# "))
+                .filter_map(|l| {
+                    let k = l.split(" = ").next().unwrap_or(l);
+                    (name(k) && (l.starts_with('[') || l.contains(" = "))).then(|| k.to_owned())
+                })
+                .collect()
+        };
+        assert_eq!(keys(en), keys(ja));
     }
 }

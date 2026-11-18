@@ -9,17 +9,18 @@ mod export;
 mod setup;
 mod update;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, LazyLock};
 
-use clap::Parser;
+use clap::{FromArgMatches, Parser};
 use evorag_core::{Core, CoreConfig, PromptLanguage, StartError};
 use evorag_llm::{Endpoint, Generation, HttpClient, RetryPolicy};
 use evorag_store::lock::LockError;
 use evorag_store::{OpenError, ReadOnlyReason};
 use evorag_tui::app::{App, Status};
-use evorag_tui::catalog::Catalog;
+use evorag_tui::catalog::{Catalog, Language};
 use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
@@ -43,17 +44,14 @@ db format: {}",
     )
 });
 
+// `--help` の文は、UI の言語のカタログから当てる (`localized_command`、07 §5・§6)。ここには書かない。
 #[derive(Parser)]
-#[command(
-    name = "evorag",
-    version = VERSION.as_str(),
-    about = "Chat with a local llama-server, with long-term memory"
-)]
+#[command(name = "evorag", version = VERSION.as_str())]
 struct Args {
-    /// データ根 (設定の storage.data_root より優先する)
+    // データ根 (設定の storage.data_root より優先する)
     #[arg(long, value_name = "PATH", global = true)]
     data_root: Option<PathBuf>,
-    /// 設定ファイル
+    // 設定ファイル
     #[arg(long, value_name = "PATH", global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -62,47 +60,47 @@ struct Args {
 
 #[derive(clap::Subcommand)]
 enum Sub {
-    /// llama-server を探して能力を確かめ、設定ファイルを書く
+    // llama-server を探して能力を確かめ、設定ファイルを書く
     Setup {
-        /// 接続先 (省くと、設定の llm.chat.url と 127.0.0.1:8080・8081 を探す)
+        // 接続先 (省くと、設定の llm.chat.url と 127.0.0.1:8080・8081 を探す)
         #[arg(long)]
         url: Option<String>,
-        /// API キーを入れた環境変数の名前 (llama-server を --api-key で起動したとき)
+        // API キーを入れた環境変数の名前 (llama-server を --api-key で起動したとき)
         #[arg(long, value_name = "NAME")]
         api_key_env: Option<String>,
-        /// 尋ねずに進める (プロンプトの言語は ja、設定ファイルは書き換える)
+        // 尋ねずに進める (プロンプトの言語は UI の言語、設定ファイルは書き換える)
         #[arg(long)]
         yes: bool,
     },
-    /// 設定・接続・データ根・ジャーナル・退避を、読むだけで点検する
+    // 設定・接続・データ根・ジャーナル・退避を、読むだけで点検する
     Doctor,
-    /// 退避の操作
+    // 退避の操作
     Backups {
         #[command(subcommand)]
         action: BackupsAction,
     },
-    /// 記録を種類ごとの JSON Lines に書き出す (設定は API キーを除いて写す)
+    // 記録を種類ごとの JSON Lines に書き出す (設定は API キーを除いて写す)
     Export {
-        /// 書き出すフォルダ (空か、まだ無いフォルダ)
+        // 書き出すフォルダ (空か、まだ無いフォルダ)
         out: PathBuf,
     },
-    /// 派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)
+    // 派生データを、会話と明示の操作から作り直す (先に退避する)
     Rebuild {
-        /// 索引だけを作り直す
+        // 索引だけを作り直す
         #[arg(long, conflicts_with = "facts")]
         index: bool,
-        /// 事実も会話から抽出し直す (llama-server を使う。事実への指示と検証済みの訂正は当て直す)
+        // 事実も会話から抽出し直す
         #[arg(long)]
         facts: bool,
     },
-    /// 退避から戻す (その後の会話はジャーナルから足す)
+    // 退避から戻す (その後の会話はジャーナルから足す)
     Restore {
-        /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
+        // 退避のフォルダか、その中の evorag.redb
         backup: PathBuf,
     },
-    /// 副索引と関係を記録から作り直し、ジャーナルにあって DB に無い記録を戻し、忘れる・削除を当て直す (先に退避する)
+    // 副索引と関係を作り直し、ジャーナルから記録を戻し、忘れる・削除を当て直す (先に退避する)
     Repair,
-    /// 本体の更新 (新しい版の確認・置き換え・巻き戻し)
+    // 本体の更新 (新しい版の確認・置き換え・巻き戻し)
     Update {
         #[command(subcommand)]
         action: UpdateAction,
@@ -111,27 +109,99 @@ enum Sub {
 
 #[derive(clap::Subcommand)]
 enum UpdateAction {
-    /// 新しい版があるかを確かめる (何も書き換えない)
+    // 新しい版があるかを確かめる (何も書き換えない)
     Check,
-    /// 新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)
+    // 新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)
     Apply {
-        /// 入れる版 (省くと、いちばん新しい版)
+        // 入れる版 (省くと、いちばん新しい版)
         version: Option<String>,
     },
-    /// evorag.prev に戻す (通信しない)
+    // evorag.prev に戻す (通信しない)
     Rollback,
 }
 
 #[derive(clap::Subcommand)]
 enum BackupsAction {
-    /// 退避の一覧 (新しい順)
+    // 退避の一覧 (新しい順)
     List,
-    /// すべての退避 (日次・週次・移行と作り直しの前の退避) を消す
+    // すべての退避を消す
     Purge {
-        /// 尋ねずに消す
+        // 尋ねずに消す
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// 引数の命令に、UI の言語の `--help` の文を当てる (07 §5・§6)。clap が足す `--help`・`--version` の文と
+/// 見出しは clap の英語のまま。
+fn localized_command(c: &Catalog) -> clap::Command {
+    use clap::CommandFactory;
+    let h = |k: MessageKey| c.key(k);
+    Args::command()
+        .about(h(MessageKey::CliHelpAbout))
+        .mut_arg("data_root", |a| a.help(h(MessageKey::CliHelpDataRoot)))
+        .mut_arg("config", |a| a.help(h(MessageKey::CliHelpConfig)))
+        .mut_subcommand("setup", |s| {
+            s.about(h(MessageKey::CliHelpSetup))
+                .mut_arg("url", |a| a.help(h(MessageKey::CliHelpSetupUrl)))
+                .mut_arg("api_key_env", |a| {
+                    a.help(h(MessageKey::CliHelpSetupApiKeyEnv))
+                })
+                .mut_arg("yes", |a| a.help(h(MessageKey::CliHelpSetupYes)))
+        })
+        .mut_subcommand("doctor", |s| s.about(h(MessageKey::CliHelpDoctor)))
+        .mut_subcommand("backups", |s| {
+            s.about(h(MessageKey::CliHelpBackups))
+                .mut_subcommand("list", |s| s.about(h(MessageKey::CliHelpBackupsList)))
+                .mut_subcommand("purge", |s| {
+                    s.about(h(MessageKey::CliHelpBackupsPurge))
+                        .mut_arg("yes", |a| a.help(h(MessageKey::CliHelpBackupsPurgeYes)))
+                })
+        })
+        .mut_subcommand("export", |s| {
+            s.about(h(MessageKey::CliHelpExport))
+                .mut_arg("out", |a| a.help(h(MessageKey::CliHelpExportOut)))
+        })
+        .mut_subcommand("rebuild", |s| {
+            s.about(h(MessageKey::CliHelpRebuild))
+                .mut_arg("index", |a| a.help(h(MessageKey::CliHelpRebuildIndex)))
+                .mut_arg("facts", |a| a.help(h(MessageKey::CliHelpRebuildFacts)))
+        })
+        .mut_subcommand("restore", |s| {
+            s.about(h(MessageKey::CliHelpRestore))
+                .mut_arg("backup", |a| a.help(h(MessageKey::CliHelpRestoreBackup)))
+        })
+        .mut_subcommand("repair", |s| s.about(h(MessageKey::CliHelpRepair)))
+        .mut_subcommand("update", |s| {
+            s.about(h(MessageKey::CliHelpUpdate))
+                .mut_subcommand("check", |s| s.about(h(MessageKey::CliHelpUpdateCheck)))
+                .mut_subcommand("apply", |s| {
+                    s.about(h(MessageKey::CliHelpUpdateApply))
+                        .mut_arg("version", |a| {
+                            a.help(h(MessageKey::CliHelpUpdateApplyVersion))
+                        })
+                })
+                .mut_subcommand("rollback", |s| {
+                    s.about(h(MessageKey::CliHelpUpdateRollback))
+                })
+        })
+}
+
+/// 引数を読む前に、`--config <PATH>`・`--config=<PATH>` を探す (`--help` を UI の言語で出すため)。
+fn config_arg(args: &[OsString]) -> Option<PathBuf> {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--" {
+            break;
+        }
+        if a == "--config" {
+            return it.next().map(PathBuf::from);
+        }
+        if let Some(p) = a.to_str().and_then(|s| s.strip_prefix("--config=")) {
+            return Some(PathBuf::from(p));
+        }
+    }
+    None
 }
 
 /// `rebuild` の作り直す範囲。
@@ -160,7 +230,8 @@ fn llm_setup_failure(
     Some(match e {
         LlmError::Http { status, .. } if *status == 401 || *status == 403 => {
             // llama-server は動いているが、API キーが違う・設定されていない。
-            let env = api_key_env.unwrap_or("(未設定)");
+            let unset = catalog.key(MessageKey::CliEnvUnset);
+            let env = api_key_env.unwrap_or(&unset);
             fail(
                 catalog,
                 3,
@@ -635,9 +706,20 @@ fn fail(catalog: &Catalog, code: u8, key: MessageKey, args: &[(&str, &str)]) -> 
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    let catalog = Catalog::load("ja");
+    let raw: Vec<OsString> = std::env::args_os().collect();
     let places = config::default_places();
+    // `--help` と引数・設定の誤りは、設定を読む前に出すので、設定ファイルの ui.language だけを先に読む。
+    let early = config_arg(&raw)
+        .or_else(|| places.as_ref().map(|p| p.config_file.clone()))
+        .map_or_else(Language::default, |p| config::early_ui_language(&p));
+    let catalog = Catalog::new(early);
+    let args = match localized_command(&catalog)
+        .try_get_matches_from(&raw)
+        .and_then(|m| Args::from_arg_matches(&m))
+    {
+        Ok(a) => a,
+        Err(e) => e.exit(),
+    };
     let Some(config_file) = args
         .config
         .clone()
@@ -730,6 +812,7 @@ fn main() -> ExitCode {
         );
     }
     let cfg = loaded.config;
+    let catalog = Catalog::new(cfg.ui_language());
     let Some(data_root) = args
         .data_root
         .or(cfg.storage.data_root.clone())
@@ -790,12 +873,8 @@ fn main() -> ExitCode {
     }
     generation.max_tokens = g.max_tokens;
     generation.seed = g.seed;
-    let prompt_language = cfg
-        .prompt
-        .language
-        .as_deref()
-        .and_then(PromptLanguage::parse)
-        .unwrap_or(PromptLanguage::Ja);
+    // 設定に無ければ UI の言語 (新しいデータ根で setup を通らずに起動したとき、07 §6.1)。
+    let prompt_language = cfg.prompt_language();
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -983,6 +1062,7 @@ fn main() -> ExitCode {
         config_file: Some(config_file.clone()),
         evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_language,
+        prompt_language_explicit: cfg.prompt_language_explicit(),
         generation: generation.clone(),
         request_extra: request_extra.clone(),
         reserve_for_output: cfg.context.reserve_for_output,
@@ -1255,5 +1335,151 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// すべての引数と下位の命令に、どの言語でも `--help` の文がある。英語の文に日本語が混じらない。
+    ///
+    /// verifies: AC-FR-908-1 (ヘルプの層: `--help` の文を UI の言語のカタログから当てる)
+    #[test]
+    fn every_argument_and_subcommand_has_help_in_every_language() {
+        fn check(cmd: &clap::Command, lang: Language, path: &str, bad: &mut Vec<String>) {
+            let about = cmd.get_about().map(ToString::to_string).unwrap_or_default();
+            if about.is_empty() || (lang == Language::En && evorag_types::has_cjk(&about)) {
+                bad.push(format!("{path}: about {about:?}"));
+            }
+            for a in cmd.get_arguments() {
+                let id = a.get_id().as_str();
+                if matches!(id, "help" | "version") {
+                    continue;
+                }
+                let help = a.get_help().map(ToString::to_string).unwrap_or_default();
+                if help.is_empty() || (lang == Language::En && evorag_types::has_cjk(&help)) {
+                    bad.push(format!("{path} {id}: help {help:?}"));
+                }
+            }
+            for s in cmd.get_subcommands() {
+                if s.get_name() != "help" {
+                    check(s, lang, &format!("{path} {}", s.get_name()), bad);
+                }
+            }
+        }
+        for lang in Language::ALL {
+            let mut cmd = localized_command(&Catalog::new(lang));
+            cmd.build();
+            let mut bad = Vec::new();
+            check(&cmd, lang, "evorag", &mut bad);
+            assert!(bad.is_empty(), "{}: {bad:#?}", lang.as_str());
+        }
+        let en = localized_command(&Catalog::new(Language::En))
+            .render_long_help()
+            .to_string();
+        assert!(en.contains("Chat with a local llama-server"), "{en}");
+    }
+
+    /// 設定に prompt.language が無く、データ根にも記録が無いとき、最初の起動は尋ねずに UI の言語を記録する。
+    /// 記録した後は、設定を変えても記録した言語で動き、明示した prompt.language が記録と違うときだけ知らせる
+    /// (07 §6.1)。
+    #[test]
+    fn a_fresh_data_root_records_the_ui_language_as_the_prompt_language() {
+        use evorag_types::{SystemClock, UuidV7Gen};
+        let start = |root: &std::path::Path, config: &str| {
+            let cfg = config::parse(config).unwrap().config;
+            let clock: Arc<dyn evorag_types::Clock> = Arc::new(SystemClock);
+            let core_cfg = CoreConfig {
+                data_root: root.to_path_buf(),
+                config_file: None,
+                evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
+                prompt_language: cfg.prompt_language(),
+                prompt_language_explicit: cfg.prompt_language_explicit(),
+                generation: Generation::default(),
+                request_extra: Default::default(),
+                reserve_for_output: None,
+                backup_dir: None,
+                allow_unsafe_location: true,
+                probe: evorag_core::Probe::system(),
+                model_name: "test".into(),
+                ignored_config: Vec::new(),
+                embed: None,
+                rerank: None,
+                aux_request_extra: Default::default(),
+                probe_models: false,
+                sleep: evorag_core::SleepConfig::immediate(),
+                memory_enabled: true,
+                precompute: false,
+                clock: clock.clone(),
+                ids: Arc::new(UuidV7Gen::new(clock)),
+            };
+            let llm = evorag_llm::replay::ReplayClient::from_json(
+                r#"{"props": {"build_info": "b1-test", "model_path": "/m/test.gguf", "total_slots": 1,
+                              "default_generation_settings": {"n_ctx": 8192}},
+                    "models": {"data": [{"id": "test", "meta": {"n_params": 1, "size": 2, "n_vocab": 3}}]},
+                    "chats": []}"#,
+            )
+            .unwrap();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (core, _events, report) = Core::start(core_cfg, Arc::new(llm)).await.unwrap();
+                core.shutdown().await;
+                (report.prompt_language, report.prompt_language_mismatch)
+            })
+        };
+        let en = "[ui]\nlanguage = \"en\"\n";
+        assert_eq!(
+            config::parse(en).unwrap().config.prompt_language(),
+            PromptLanguage::En
+        );
+        assert_eq!(
+            config::parse("").unwrap().config.prompt_language(),
+            PromptLanguage::Ja
+        );
+        assert_eq!(
+            config::parse("[ui]\nlanguage = \"en\"\n[prompt]\nlanguage = \"ja\"\n")
+                .unwrap()
+                .config
+                .prompt_language(),
+            PromptLanguage::Ja,
+            "prompt.language wins"
+        );
+
+        let dir = evorag_store::testutil::TempDir::new("cli-prompt-lang");
+        let root = dir.path().join("data");
+        assert_eq!(start(&root, en), (PromptLanguage::En, false));
+        // 記録した後は、UI の言語を変えても en のまま。UI の言語からの既定は、記録と違っても知らせない。
+        assert_eq!(
+            start(&root, "[ui]\nlanguage = \"ja\"\n"),
+            (PromptLanguage::En, false)
+        );
+        // 設定に明示した prompt.language が記録と違うときだけ知らせる (記録した en のまま動く)。
+        assert_eq!(
+            start(&root, "[prompt]\nlanguage = \"ja\"\n"),
+            (PromptLanguage::En, true)
+        );
+        assert_eq!(
+            start(&root, "[prompt]\nlanguage = \"en\"\n"),
+            (PromptLanguage::En, false)
+        );
+    }
+
+    #[test]
+    fn the_config_path_is_found_before_parsing() {
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            config_arg(&args(&["evorag", "doctor", "--config", "a.toml"])),
+            Some(PathBuf::from("a.toml"))
+        );
+        assert_eq!(
+            config_arg(&args(&["evorag", "--config=b.toml", "--help"])),
+            Some(PathBuf::from("b.toml"))
+        );
+        assert_eq!(config_arg(&args(&["evorag", "--", "--config", "c"])), None);
+        assert_eq!(config_arg(&args(&["evorag", "--config"])), None);
     }
 }

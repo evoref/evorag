@@ -3,8 +3,8 @@
 //! 仕様: 12 §5 (配布物・署名・`release.json`)、12 §7.4、09 §9.2 (リリース手順)。
 //!
 //! - `dist`: release でビルドし (入れ方は `zip`、リリースの日付を `EVORAG_RELEASE_DATE` で埋め込む。
-//!   Windows は C ランタイムを静的にリンク)、実行ファイル・`README.md` (利用者向け)・`LICENSE`・
-//!   `NOTICE`・`THIRD-PARTY-NOTICES.md` (`cargo about`)・`config.example.toml` を 1 つのフォルダに
+//!   Windows は C ランタイムを静的にリンク)、実行ファイル・`README.md` と `README.en.md` (利用者向け)・`LICENSE`・
+//!   `NOTICE`・`THIRD-PARTY-NOTICES.md` (`cargo about`)・`config.example.toml` と `config.example.en.toml` を 1 つのフォルダに
 //!   まとめて圧縮し、`SHA256SUMS` と `release.json` (schema 1) を書く。署名は人間が手元で行う
 //!   (秘密鍵を CI に置かない)。署名の命令の例を最後に示す。
 //! - `release.json` の `exe_sha256` は、できた配布物を evorag-update の読み手 (本体の更新と同じもの) で
@@ -24,6 +24,18 @@ use evorag_update::{
     ReleaseDate, Sha256Digest, TrustedKey, Version, sanitize_for_display, trusted_comment,
     verify_signature,
 };
+
+/// 実行ファイルと `THIRD-PARTY-NOTICES.md` のほかに配布物に入れるファイル (リポジトリの中の場所、配布物の中の
+/// 名前、12 §5.1)。利用者向けの README と設定の例は、日本語 (`README.md`・`config.example.toml`) と英語
+/// (`README.en.md`・`config.example.en.toml`)。
+const BUNDLED: &[(&str, &str)] = &[
+    ("dist/README.md", "README.md"),
+    ("dist/README.en.md", "README.en.md"),
+    ("dist/config.example.toml", "config.example.toml"),
+    ("dist/config.example.en.toml", "config.example.en.toml"),
+    ("LICENSE", "LICENSE"),
+    ("NOTICE", "NOTICE"),
+];
 
 /// 配布する実行ファイルの大きさの上限 (NFR-204: 30 MB)。
 const MAX_EXE_BYTES: u64 = 30 * 1024 * 1024;
@@ -484,13 +496,9 @@ pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("{}: {e}", from.display()))
     };
     copy(built, exe)?;
-    copy(root.join("dist").join("README.md"), "README.md")?;
-    copy(
-        root.join("dist").join("config.example.toml"),
-        "config.example.toml",
-    )?;
-    copy(root.join("LICENSE"), "LICENSE")?;
-    copy(root.join("NOTICE"), "NOTICE")?;
+    for (from, to) in BUNDLED {
+        copy(root.join(from), to)?;
+    }
     // 依存のライセンスの表示 (12 §2)。
     run(Command::new("cargo")
         .current_dir(root)
@@ -696,6 +704,39 @@ mod tests {
     use std::io::{Cursor, Write};
 
     use super::*;
+
+    /// 利用者向けの README は日本語と英語の両方を同梱し、英語版は日本語版と同じ節の組み立て (見出しの深さの並び)
+    /// を持つ (12 §5.1、M3.6)。
+    #[test]
+    fn both_user_readmes_are_bundled_with_the_same_outline() {
+        let names: Vec<&str> = BUNDLED.iter().map(|(_, to)| *to).collect();
+        for want in [
+            "README.md",
+            "README.en.md",
+            "config.example.toml",
+            "config.example.en.toml",
+            "LICENSE",
+            "NOTICE",
+        ] {
+            assert!(names.contains(&want), "{want} is bundled: {names:?}");
+        }
+        let outline = |text: &str| -> Vec<usize> {
+            let mut fenced = false;
+            text.lines()
+                .filter(|l| {
+                    if l.starts_with("```") {
+                        fenced = !fenced;
+                    }
+                    !fenced && l.starts_with('#')
+                })
+                .map(|l| l.chars().take_while(|c| *c == '#').count())
+                .collect()
+        };
+        let ja = outline(include_str!("../../dist/README.md"));
+        let en = outline(include_str!("../../dist/README.en.md"));
+        assert!(!ja.is_empty());
+        assert_eq!(en, ja, "the English README follows the Japanese outline");
+    }
 
     #[test]
     fn sums_are_read_strictly() {

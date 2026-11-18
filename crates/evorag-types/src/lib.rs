@@ -8,5 +8,5 @@ mod message;
 mod time;
 
 pub use id::{Id, IdGen, ParseIdError, UuidV7Gen};
-pub use message::{Message, MessageKey};
+pub use message::{Message, MessageKey, has_cjk};
 pub use time::{Clock, ManualClock, SystemClock, Timestamp};

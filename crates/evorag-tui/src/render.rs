@@ -13,6 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
+use crate::catalog::Catalog;
 
 const MAX_INPUT_ROWS: u16 = 6;
 
@@ -87,8 +88,7 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             // 印の無いターン (ほとんど): 本文を写さずにそのまま描く。
             Some(None)
         } else {
-            let hidden = app.catalog.key(MessageKey::UiMarkHidden);
-            marked_text(&t.text, &t.marks, &hidden).map(Some)
+            marked_text(&t.text, &t.marks, &app.catalog).map(Some)
         };
         match marked {
             None => lines.push(Line::styled(
@@ -158,16 +158,19 @@ pub struct Marked {
     pub overlay: Vec<(std::ops::Range<usize>, Style)>,
 }
 
-/// 印を当てた表示の本文と、その中の印の範囲と装飾 (04 §7.3)。伏せ字の範囲は本文のまま、`[非表示]` の範囲は
-/// `hidden` に置き換える。範囲が本文と合わない (始まりの順でない・重なる・本文の外・文字の途中) ときは `None`
+/// 印を当てた表示の本文と、その中の印の範囲と装飾 (04 §7.3)。伏せ字の範囲 (本文ではプロンプトの言語の印) は
+/// UI の言語の印 (`ui.mark.redacted`) に、`[非表示]` の範囲は `ui.mark.hidden` に置き換えて表示する (保存した
+/// 本文は変えない)。範囲が本文と合わない (始まりの順でない・重なる・本文の外・文字の途中) ときは `None`
 /// (値を出してしまわないよう、呼び手は本文を出さない)。
-pub fn marked_text(text: &str, marks: &[TurnMark], hidden: &str) -> Option<Marked> {
+pub fn marked_text(text: &str, marks: &[TurnMark], catalog: &Catalog) -> Option<Marked> {
     if marks.is_empty() {
         return Some(Marked {
             text: text.to_owned(),
             overlay: Vec::new(),
         });
     }
+    let hidden = catalog.key(MessageKey::UiMarkHidden);
+    let redacted = catalog.key(MessageKey::UiMarkRedacted);
     let mut out = String::with_capacity(text.len());
     let mut overlay = Vec::with_capacity(marks.len());
     let mut pos = 0;
@@ -185,11 +188,11 @@ pub fn marked_text(text: &str, marks: &[TurnMark], hidden: &str) -> Option<Marke
         let start = out.len();
         let style = match m.kind {
             TurnMarkKind::Redacted => {
-                out.push_str(&text[r.clone()]);
+                out.push_str(&redacted);
                 redacted_style()
             }
             TurnMarkKind::Hidden => {
-                out.push_str(hidden);
+                out.push_str(&hidden);
                 hidden_style()
             }
         };

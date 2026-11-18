@@ -62,8 +62,11 @@ pub struct CoreConfig {
     /// `config.toml` (移行の前の退避に含める、03 §7.2)。
     pub config_file: Option<PathBuf>,
     pub evorag_version: String,
-    /// 設定 `prompt.language`。データ根に記録が無いときだけ使う (07 §6.1)。
+    /// 設定 `prompt.language` (書いていなければ UI の言語)。データ根に記録が無いときだけ使う (07 §6.1)。
     pub prompt_language: PromptLanguage,
+    /// `prompt_language` を設定に明示したか。明示した値が記録と違うときだけ知らせる (UI の言語からの既定では
+    /// 知らせない、07 §6.1)。
+    pub prompt_language_explicit: bool,
     pub generation: Generation,
     /// 設定 `llm.chat.request_extra` (07 §4.2)。思考を切る `chat_template_kwargs` など。
     pub request_extra: evorag_llm::RequestExtra,
@@ -193,7 +196,7 @@ pub struct StartReport {
     pub server: ServerInfo,
     pub store: evorag_store::OpenReport,
     pub prompt_language: PromptLanguage,
-    /// 設定の `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
+    /// 設定に明示した `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
     pub prompt_language_mismatch: bool,
     /// 置き場所の注意 (FAT / exFAT、または設定で許した危ない置き場所)。
     pub location_warnings: Vec<String>,
@@ -745,7 +748,8 @@ impl Core {
             server,
             store: open_report,
             prompt_language: language,
-            prompt_language_mismatch: language != cfg.prompt_language,
+            prompt_language_mismatch: cfg.prompt_language_explicit
+                && language != cfg.prompt_language,
             location_warnings,
             chat_model_recorded,
             ignored_config,

@@ -108,6 +108,7 @@ fn config_as(root: &Path, seed: u64, clock: Arc<ManualClock>, version: &str) -> 
         config_file: None,
         evorag_version: version.into(),
         prompt_language: PromptLanguage::Ja,
+        prompt_language_explicit: true,
         generation: Generation::default(),
         request_extra: Default::default(),
         reserve_for_output: None,
