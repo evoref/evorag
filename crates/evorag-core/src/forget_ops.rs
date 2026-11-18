@@ -330,7 +330,7 @@ impl Drop for Forgetting {
 /// `ForgetFact`: 忘れる (04 §7.1〜§7.3)。結果は `FactForgotten` か `ForgetRejected` で知らせる。
 ///
 /// 命令の待ち行列の中で (task を出す前に) 忘れるの途中の印を立てる。印が立っている間は、発話・作り直し・先に
-/// 済ませる処理を始めない (書く直前の計画と生成が入れ違わないため)。
+/// 済ませる処理を始めない (書く直前の計画と生成が入れ違わないため)。印は、結果を知らせる前に下ろす。
 pub(crate) fn run(
     inner: &Arc<Inner>,
     target: FactKey,
@@ -351,6 +351,9 @@ pub(crate) fn run(
             Some(plan.as_str().to_owned()),
         )
         .await;
+        // 結果を知らせる前に印を下ろす (知らせを受けた画面がすぐに送った発話を断らないため)。書き込みと索引から
+        // 除くのは済んでいるので、この後に始まる生成は、伏せた後の本文と、作り直す事実の表で送る。
+        drop(guard);
         match executed {
             forgets::Executed::Done {
                 turns,
@@ -359,9 +362,7 @@ pub(crate) fn run(
             } => {
                 let shown =
                     crate::current_session(&worker).map(|s| (s, reread(&worker, s, &turns)));
-                // 知らせ終えてから印を下ろす (次の発話は、伏せた後の本文と事実の表で送る)。
                 announce(&worker, shown, turns.len(), journal_pending);
-                drop(guard);
                 erase_slots(&worker).await;
             }
             forgets::Executed::Changed { preview, hash } => {

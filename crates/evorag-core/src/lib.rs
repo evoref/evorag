@@ -1968,6 +1968,15 @@ async fn delete(inner: &Arc<Inner>) {
     extraction::touch(inner);
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
+    // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。知らせる前に `background` に
+    // 載せる (知らせを受けてから裏の処理を待つ呼び手が、この task を見落とさないため)。
+    let worker = inner.clone();
+    let erase = tokio::spawn(async move { forget_ops::erase_slots(&worker).await });
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(erase);
     emit(inner, Event::SessionDeleted { id: sid });
     // 整理の鍵は task の中で取る (長い整理の後ろで、次の命令を待たせない)。終了の処理は、この task を
     // `background` で待つ。
@@ -1981,12 +1990,11 @@ async fn delete(inner: &Arc<Inner>) {
         };
         run_cleanup_job(&worker, &job, indexes_done).await;
     });
-    // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。
-    let worker = inner.clone();
-    let erase = tokio::spawn(async move { forget_ops::erase_slots(&worker).await });
-    let mut bg = inner.background.lock().unwrap_or_else(|e| e.into_inner());
-    bg.push(task);
-    bg.push(erase);
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(task);
 }
 
 /// 消した ID を、語彙の索引と、今と前の世代のすべてのベクトルの索引から除く (04 §7.7 の 2)。呼び手は
