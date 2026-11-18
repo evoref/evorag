@@ -1552,6 +1552,39 @@ mod windows {
         t
     }
 
+    /// 削除の共有なしで開いたまま、[`Held::release`] まで持つ (断る試験の向け。決まった時間で放すと、
+    /// 遅い CI では確かめの前に放してしまうため)。
+    struct Held {
+        release: mpsc::Sender<()>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl Held {
+        fn release(self) {
+            let _ = self.release.send(());
+            self.thread.join().expect("join");
+        }
+    }
+
+    fn hold_until_released(path: PathBuf) -> Held {
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            const FILE_SHARE_READ: u32 = 1;
+            const FILE_SHARE_WRITE: u32 = 2;
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)
+                .expect("open without delete sharing");
+            held_tx.send(()).expect("send");
+            let _ = release_rx.recv();
+            drop(f);
+        });
+        held_rx.recv().expect("held");
+        Held { release, thread }
+    }
+
     #[test]
     fn a_lock_shorter_than_the_retries_is_waited_out() {
         let fx = Fixture::new(Some(OLD_PREV));
@@ -1566,8 +1599,9 @@ mod windows {
     #[test]
     fn a_lock_longer_than_the_retries_reverts_and_keeps_the_old_prev() {
         let fx = Fixture::new(Some(OLD_PREV));
-        let t = hold(fx.path(FileName::Exe), Duration::from_secs(5));
+        let t = hold_until_released(fx.path(FileName::Exe));
         let r = run(&fx, Method::TwoStep, Scenario::ApplyWithPrev, None);
+        t.release();
         assert!(
             matches!(
                 r,
@@ -1584,7 +1618,6 @@ mod windows {
         assert!(!fx.path(FileName::PrevOld).exists());
         assert!(!fx.path(FileName::New).exists());
         assert!(!fx.has_plan());
-        t.join().expect("join");
     }
 
     /// 消せない残りのファイルがあれば、apply・rollback の前の片付けは断り、起動の片付けは残す。
@@ -1592,7 +1625,7 @@ mod windows {
     fn a_locked_leftover_refuses_updates_but_not_startup() {
         let fx = Fixture::new(None);
         put(fx.path(FileName::New), b"x").expect("write");
-        let t = hold(fx.path(FileName::New), Duration::from_secs(5));
+        let t = hold_until_released(fx.path(FileName::New));
         let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
         assert!(matches!(
             inst.cleanup_by_name(Strictness::Strict),
@@ -1603,7 +1636,7 @@ mod windows {
         ));
         let report = inst.cleanup_by_name(Strictness::Lenient).expect("lenient");
         assert_eq!(report.left, vec![FileName::New]);
-        t.join().expect("join");
+        t.release();
     }
     /// 12 §7.3 (Windows の隙間の前に、置くファイルが掴まれていないかを確かめる。掴まれたままなら
     /// evorag.exe を空けずに元に戻す)
@@ -1621,7 +1654,7 @@ mod windows {
             if e == Event::StateSaved {
                 saved += 1;
                 if saved == 2 {
-                    holder = Some(hold(new.clone(), Duration::from_millis(3500)));
+                    holder = Some(hold_until_released(new.clone()));
                 }
             }
             false
@@ -1635,7 +1668,7 @@ mod windows {
             &build(NEXT),
             &mut env,
         );
-        holder.expect("held").join().expect("join");
+        holder.expect("held").release();
         assert!(
             matches!(
                 r,
@@ -1658,9 +1691,9 @@ mod windows {
         let mut env = Env::new(&probe);
         let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
         let prev = inst.identify_prev(&mut env).expect("prev");
-        let t = hold(fx.path(FileName::Prev), Duration::from_millis(3500));
+        let t = hold_until_released(fx.path(FileName::Prev));
         let r = inst.rollback(&prev, &build(CURRENT), &mut env);
-        t.join().expect("join");
+        t.release();
         assert!(
             matches!(
                 r,
