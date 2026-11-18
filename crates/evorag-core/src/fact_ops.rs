@@ -342,10 +342,17 @@ fn plan(
                 return Ok(Plan::NotAllowed);
             }
             // 忘れた値は戻さない (04 §7.5 の「再び覚えない印と訂正・戻す」)。
-            if snap
-                .dirs
-                .is_blocked(&block_mark(ctx.key, &h.subject, &h.attribute, &h.vk))
-            {
+            // 値の鍵の印と照合の鍵の印の両方で引く (04 §7.6)。
+            let value = find_row(&snap.set, target).and_then(|f| f.value.clone());
+            let blocked = match value.as_deref() {
+                Some(v) => snap
+                    .dirs
+                    .blocks_value(ctx.key, &h.subject, &h.attribute, &h.vk, v),
+                None => snap
+                    .dirs
+                    .is_blocked(&block_mark(ctx.key, &h.subject, &h.attribute, &h.vk)),
+            };
+            if blocked {
                 return Ok(Plan::Blocked);
             }
             // 同じ値がすでに今の値なら、戻すものが無い。

@@ -30,7 +30,10 @@ use crate::lexical::{evidence_language, find_all};
 use crate::prefilter::{MODE_CHAT, Prefiltered};
 use crate::read::MemoryError;
 use crate::rules::{MAX_VALUE_CHARS, fold, language_rules};
-use crate::value_key::{Edges, ForgetKey, Hit, Mapped, NORM_V1, ValueKey, normalize_v1, value_key};
+use crate::value_key::{
+    Edges, ForgetKey, Hit, Mapped, NORM_V1, Needle, ValueKey, normalize_loose, normalize_v1,
+    value_key,
+};
 
 /// 訂正の候補と検証済みの訂正 (04 §6、03 §3.3、v0.3)。作り直せる派生の記録なので、ジャーナルに書かない。
 pub const KIND_CORRECTION: &str = "correction";
@@ -921,9 +924,31 @@ pub struct VerifyContext<'a> {
     pub safety: &'a Safety<'a>,
 }
 
-/// `needle` が `hay` に含まれるか (関門 2 と同じ照合: 正規化の後、英数字は語の境界で)。
+/// `needle` が `hay` に含まれるか (関門 2 と同じ照合: 正規化 v1 → 照合の形、英数字は語の境界で)。
 fn contains(hay: &str, needle: &str) -> bool {
-    !hits_in(Mapped::new(hay).as_ref(), needle).is_empty()
+    !hits_in(hay, needle).is_empty()
+}
+
+/// 本文 (`view` の元の本文) の `needle` の一致を、正規化 v1 の位置で返す。正規化 v1 で 1 つも当たらないときだけ
+/// 照合の形 (04 §5.6) で探し、その一致を正規化 v1 の位置に直す (穴の位置と比べるため)。直せない一致は採らない。
+fn hits_v1_then_loose(view: &View, text: &str, needle: &Needle) -> Vec<Hit> {
+    let hits = view.mapped.find(&needle.v1, Edges::Word);
+    if !hits.is_empty() {
+        return hits;
+    }
+    let Some(loose) = Mapped::loose(text) else {
+        return Vec::new();
+    };
+    loose
+        .find(&needle.loose, Edges::Word)
+        .into_iter()
+        .filter_map(|h| {
+            Some(Hit {
+                out: view.mapped.out_of_source(&h.source)?,
+                source: h.source,
+            })
+        })
+        .collect()
 }
 
 /// 新しい値の穴 `h` の中で、値が固定の部分に接する端にある一致 (04 §6 の「値の位置」)。
@@ -946,6 +971,25 @@ fn placed_old<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
     hits.iter().find(|x| x.out == hole)
 }
 
+/// 訂正の記録の値 (`values`) の照合の鍵と、記録した値の鍵 (`recorded`、16 進) の並び。
+pub(crate) fn value_keys_of(
+    key: &ForgetKey,
+    values: [Option<&str>; 2],
+    recorded: [Option<&str>; 2],
+) -> Vec<ValueKey> {
+    recorded
+        .into_iter()
+        .flatten()
+        .filter_map(ValueKey::from_hex)
+        .chain(
+            values
+                .into_iter()
+                .flatten()
+                .map(|v| crate::value_key::loose_key(key, v)),
+        )
+        .collect()
+}
+
 /// 検証の関門を順に当てる (04 §6 の「関門」)。通れば検証済みの訂正を返す。
 ///
 /// 1. 訂正である: `new` が (正規化の後に) 空でない。
@@ -956,11 +1000,14 @@ fn placed_old<'h>(v: &View, h: &HoleAt, hits: &'h [Hit]) -> Option<&'h Hit> {
 /// 4. 古い値: 直前の応答・同じセッションのそれより前の利用者の発話・今の値のどれかにあり、関門 6 と 200 文字の
 ///    上限に通る。
 /// 5. 向き: 根拠の範囲に候補の型を当て直した最初の一致で、新しい値が `{new}` の穴の、固定の部分に接する端に
-///    ある (その位置が括弧の内側なら、ほかの検査より先に `quoted`)。古い値と新しい値の値の鍵が違う。古い値が
-///    `{old}` の穴 (型にあれば) の全体と一致する。値の一致の語の境界は、前のふるいの後の本文の全体で見る。
+///    ある (その位置が括弧の内側なら、ほかの検査より先に `quoted`)。古い値が `{old}` の穴 (型にあれば) の全体と
+///    一致する。記録する古い値と新しい値が、値の鍵か照合の形で違う。値の一致の語の境界は、前のふるいの後の本文の
+///    全体で見る。
 ///
-/// 出典は、新しい値の保存した本文の範囲にする (戻せなければ 2 の理由で落とす)。古い値の穴のある型では、古い値の
-/// 範囲も持つ (置き換えた事実の出典に足す、04 §5.3 の「終えた発言の出典」)。
+/// 照合はどれも、生の本文 → 正規化 v1 → 照合の形 (04 §5.6) の順に行う。記録する新しい値と古い値は、穴の位置で
+/// 一致した保存した本文の部分文字列にする (値の鍵もそこから作る)。古い値の穴の無い型では、古い値は LLM の出力の
+/// まま。出典は、新しい値の保存した本文の範囲にする (戻せなければ 2 の理由で落とす)。古い値の穴のある型では、
+/// 古い値の範囲も持つ (置き換えた事実の出典に足す、04 §5.3 の「終えた発言の出典」)。
 ///
 /// # Errors
 ///
@@ -1013,7 +1060,7 @@ pub fn verify(
     let region = view.region_of(&found.sent);
     let m = first_match(&pattern, &view, region).ok_or(Rejection::Direction)?;
     let new_hole = m.hole(Side::New).ok_or(Rejection::Direction)?;
-    let new_hits = view.mapped.find(&new_n, Edges::Word);
+    let new_hits = hits_v1_then_loose(&view, sent, &Needle::new(&out.new));
     let new_hit = placed_new(&view, new_hole, &new_hits).ok_or(Rejection::Direction)?;
     // 置いた新しい値が括弧の内側に掛かるか、型の固定の部分が括弧の内側にあれば、引用の中の訂正とみなす
     // (新しい値を閉じ括弧の外まで伸ばして、引用の中の他人の訂正を当てないため)。
@@ -1024,13 +1071,9 @@ pub fn verify(
     if anchor_quoted || regions.overlaps("", &new_hit.source) {
         return Err(Rejection::Quoted);
     }
-    let (old_vk, new_vk) = (value_key(ctx.key, &out.old), value_key(ctx.key, &out.new));
-    if old_vk == new_vk {
-        return Err(Rejection::Direction);
-    }
     let old_hit = match m.hole(Side::Old) {
         Some(h) => {
-            let old_hits = view.mapped.find(&old_n, Edges::Word);
+            let old_hits = hits_v1_then_loose(&view, sent, &Needle::new(&out.old));
             Some(
                 placed_old(&view, h, &old_hits)
                     .ok_or(Rejection::Direction)?
@@ -1040,27 +1083,37 @@ pub fn verify(
         None => None,
     };
 
-    let to_source = |hit: &Hit| -> Option<Source> {
+    // 記録する値は、穴の位置で一致した保存した本文の部分文字列 (04 §6 の「訂正の型の使い方」)。
+    let stored = |hit: &Hit| -> Option<(Source, &str)> {
         let stored = ctx.utterance.filtered.to_stored(hit.source.clone())?;
-        Some(Source {
+        let text = ctx.utterance.text.get(stored.clone())?;
+        let source = Source {
             turn: ctx.utterance.turn,
             start: u32::try_from(stored.start).ok()?,
             end: u32::try_from(stored.end).ok()?,
             rev: ctx.utterance.rev,
-        })
+        };
+        Some((source, text))
     };
-    let source = to_source(new_hit).ok_or(Rejection::NewNotInUtterance)?;
-    let old_source = match &old_hit {
-        Some(h) => Some(to_source(h).ok_or(Rejection::Direction)?),
-        None => None,
+    let (source, new_value) = stored(new_hit).ok_or(Rejection::NewNotInUtterance)?;
+    let (old_source, old_value) = match &old_hit {
+        Some(h) => {
+            let (s, v) = stored(h).ok_or(Rejection::Direction)?;
+            (Some(s), v)
+        }
+        None => (None, out.old.as_str()),
     };
+    let (old_vk, new_vk) = (value_key(ctx.key, old_value), value_key(ctx.key, new_value));
+    if old_vk == new_vk || normalize_loose(old_value) == normalize_loose(new_value) {
+        return Err(Rejection::Direction);
+    }
     Ok(VerifiedCorrection::assume_verified(
         source,
         old_source,
         out.target,
-        out.old.clone(),
+        old_value.to_owned(),
         old_vk,
-        out.new.clone(),
+        new_value.to_owned(),
         new_vk,
     ))
 }
@@ -1275,6 +1328,16 @@ pub struct CorrectionBody {
 }
 
 impl CorrectionBody {
+    /// 検証済みの記録の、古い値と新しい値の値の鍵と照合の鍵 (04 §5.6。忘れた値の訂正を消すときに `vks` と比べる、
+    /// 04 §7.5 の「忘れると訂正」)。値の無い記録は空。
+    pub fn value_keys(&self, key: &ForgetKey) -> Vec<ValueKey> {
+        value_keys_of(
+            key,
+            [self.old.as_deref(), self.new.as_deref()],
+            [self.old_vk.as_deref(), self.new_vk.as_deref()],
+        )
+    }
+
     /// 見つけたばかりの候補の本体。
     pub fn candidate(turn: Id, rev: u32, previous: Option<Id>, m: &PatternMatch) -> Self {
         Self {
@@ -1456,7 +1519,7 @@ pub fn candidate_ops(
 /// 番号が候補の `rev` と違う (ターンが無いものを含む) なら、結果の代わりに `stale_source` を書く (04 §6 の
 /// 「検証の時機」)。記録が無い・もう検証した・新しい `v` や知らない段階の記録なら `None` (書き換えない)。
 ///
-/// 検証済みの結果の古い値か新しい値の値の鍵が、忘れるの指示の `vks` のどれかと同じなら、値の項目を null にして
+/// 検証済みの結果の古い値か新しい値の値の鍵か照合の鍵 (`key` で作る) が、忘れるの指示の `vks` のどれかと同じなら、値の項目を null にして
 /// `forgotten` で落とす (04 §6 の「検証の時機」)。
 ///
 /// 書いた結果を返す (`stale_source`・`forgotten` に替えたときは、それ)。
@@ -1468,6 +1531,7 @@ pub fn checked_op(
     id: Id,
     verdict: Verdict,
     now: Timestamp,
+    key: &ForgetKey,
 ) -> Result<Option<(WriteOp, Verdict)>, MemoryError> {
     let Some(Read::Ok(mut env)) = tx.get(KIND_CORRECTION, id)? else {
         return Ok(None);
@@ -1488,7 +1552,7 @@ pub fn checked_op(
     let verdict = if current != Some(body.rev) {
         Verdict::Unverifiable(Unverifiable::StaleSource)
     } else if let Verdict::Verified(v) = &verdict
-        && crate::forget::ForgetScope::load(tx)?.forgets_value(v.old_vk(), v.new_vk())
+        && crate::forget::ForgetScope::load(tx)?.forgets_correction(key, v)
     {
         Verdict::Unverifiable(Unverifiable::Forgotten)
     } else {
@@ -2247,6 +2311,7 @@ mod tests {
             first,
             Verdict::Verified(v.clone()),
             now,
+            &KEY,
         )
         .expect("op")
         .expect("unchecked");
@@ -2257,6 +2322,7 @@ mod tests {
             second,
             Verdict::Unverifiable(Unverifiable::InvalidOutput),
             now,
+            &KEY,
         )
         .expect("op")
         .expect("unchecked");
@@ -2267,7 +2333,8 @@ mod tests {
                 &store.read().expect("read"),
                 first,
                 Verdict::Rejected(Rejection::Direction),
-                now
+                now,
+                &KEY
             )
             .expect("op")
             .is_none()
@@ -2302,6 +2369,7 @@ mod tests {
             id,
             Verdict::Rejected(Rejection::Direction),
             now,
+            &KEY,
         )
         .expect("op")
         .expect("unchecked");

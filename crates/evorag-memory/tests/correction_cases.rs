@@ -184,19 +184,25 @@ fn run_case(case: &Value) -> Option<&'static str> {
     match verify(&candidate, &out, &ctx) {
         Ok(v) => {
             assert_eq!(want, "verified", "{id}: verified, want `{want}`");
+            // 記録する値は穴の位置の発話の本文 (`stored`。省いた項目は `llm` と同じ)。
+            let stored = case.get("stored");
+            let want_new = stored.and_then(|x| s(x, "new")).unwrap_or(&out.new);
+            let want_old = stored.and_then(|x| s(x, "old")).unwrap_or(&out.old);
             let span = v.source().start as usize..v.source().end as usize;
             assert_eq!(
-                normalize_v1(&text[span]),
-                normalize_v1(&out.new),
+                &text[span], want_new,
                 "{id}: the source is the new value's span"
             );
+            assert_eq!(v.new_value(), want_new, "{id}: new");
+            assert_eq!(v.new_vk(), &value_key(&key, want_new), "{id}");
             assert_eq!(v.source().turn, turn, "{id}");
             assert_eq!(v.target(), out.target, "{id}");
-            assert_eq!(v.old_vk(), &value_key(&key, &out.old), "{id}");
+            assert_eq!(v.old_value(), want_old, "{id}: old");
+            assert_eq!(v.old_vk(), &value_key(&key, want_old), "{id}");
             match (v.old_source(), &m.dir_old) {
                 (Some(o), Some(_)) => assert_eq!(
-                    normalize_v1(&text[o.start as usize..o.end as usize]),
-                    normalize_v1(&out.old),
+                    &text[o.start as usize..o.end as usize],
+                    want_old,
                     "{id}: the old value's span"
                 ),
                 (None, None) => {}
@@ -283,7 +289,7 @@ fn correction_cases_pass() {
             *outcomes.entry(o).or_default() += 1;
         }
     }
-    assert_eq!(cases.len(), 26);
+    assert_eq!(cases.len(), 29);
     for r in Rejection::ALL {
         assert!(outcomes.contains_key(r.as_str()), "no case for `{r}`");
     }

@@ -3,7 +3,8 @@
 //!
 //! 伏せる範囲は、往復 (利用者の発話と、それへの応答) ごとに決める。
 //! - private の事実: 出典 (改訂の番号が今のターンと合うもの) がその往復にあれば、往復のすべてのターンで、
-//!   値の鍵の正規化 (04 §5.6) の後に値と一致する範囲 (英数字は語の境界で)。出典の根拠の範囲の中に一致が
+//!   値の鍵の正規化 v1 (04 §5.6) の後に値と一致する範囲と、照合の形でそれと重ならずに一致する範囲 (英数字は
+//!   語の境界で)。出典の根拠の範囲の中に一致が
 //!   見つからないときは、根拠の範囲の全体を伏せる (安全の側に倒す)。
 //! - 伏せ字にしないで忘れた事実: 忘れるの指示の `hidden` の範囲。指示は書き換えないので、その指示より後の忘れるの
 //!   伏せ字で今の本文の位置に写す (04 §7.3 の「位置の写し直し」、[`TurnForgets`])。
@@ -19,7 +20,7 @@ use crate::facts::load_facts;
 use crate::fold::{FactSet, FactState, Source};
 use crate::forget::TurnForgets;
 use crate::read::MemoryError;
-use crate::value_key::{Edges, Mapped, normalize_v1};
+use crate::value_key::{Edges, Haystack, Needle, Placed, Widen};
 
 /// `[非表示]` の印 (プロンプトの言語で選ぶ、04 §7.5)。
 #[must_use]
@@ -52,10 +53,10 @@ pub struct TurnText<'a> {
     pub text: &'a str,
 }
 
-/// private の値 1 つ (正規化した値と出典)。
+/// private の値 1 つ (正規化 v1 の形と照合の形と、出典)。
 #[derive(Debug, Clone)]
 struct PrivateValue {
-    norm: String,
+    forms: Needle,
     sources: Vec<Source>,
 }
 
@@ -78,9 +79,9 @@ impl Masker {
             .iter()
             .filter(|f| f.private && f.state != FactState::Retracted)
             .filter_map(|f| {
-                let norm = normalize_v1(f.value.as_deref()?);
-                (!norm.is_empty()).then(|| PrivateValue {
-                    norm,
+                let forms = Needle::new(f.value.as_deref()?);
+                (!forms.is_empty()).then(|| PrivateValue {
+                    forms,
                     sources: f.sources.iter().copied().collect(),
                 })
             })
@@ -153,13 +154,12 @@ impl Masker {
             .map(|r| widen(t.text, r))
             .collect();
         let current = |s: &Source| exchange.iter().any(|x| x.id == s.turn && x.rev == s.rev);
-        let mut mapped: Option<Option<Mapped>> = None;
+        let hay = Haystack::new(t.text);
         for pv in &self.private {
             if !pv.sources.iter().any(current) {
                 continue;
             }
-            let m = mapped.get_or_insert_with(|| Mapped::new(t.text));
-            let hits = value_hits(m.as_ref(), t.text, &pv.norm);
+            let hits = value_hits(&hay, &pv.forms);
             for s in pv
                 .sources
                 .iter()
@@ -187,14 +187,13 @@ impl Masker {
     }
 }
 
-/// 本文 `text` の中で、正規化した値 `norm` に一致する範囲 (元の本文の位置)。文字の展開の途中に端が来る一致は、
-/// その書記素まで広げる。位置の対応表を作れない本文 (`mapped` が `None`) で、正規化した本文に値が含まれるときは、
-/// 位置を戻せないので本文の全体を返す (伏せる側に倒す)。
-fn value_hits(mapped: Option<&Mapped>, text: &str, norm: &str) -> Vec<Range<usize>> {
-    match mapped {
-        Some(m) => m.find_widened(norm, Edges::Word),
-        None if normalize_v1(text).contains(norm) => std::iter::once(0..text.len()).collect(),
-        None => Vec::new(),
+/// 本文 `hay` の中で、値 `forms` に一致する範囲 (元の本文の位置)。正規化 v1 の一致を先に採り、照合の形 (04 §5.6)
+/// では、それと重ならない一致を足す。文字の展開の途中に端が来る一致は、その書記素まで広げる。位置の対応表を
+/// 作れない本文で、正規化した本文に値が含まれるときは、位置を戻せないので本文の全体を返す (伏せる側に倒す)。
+fn value_hits(hay: &Haystack<'_>, forms: &Needle) -> Vec<Range<usize>> {
+    match hay.find_all(forms, Edges::Word, Widen::ToGraphemes) {
+        Placed::Ranges(r) => r,
+        Placed::Unplaceable => std::iter::once(0..hay.text().len()).collect(),
     }
 }
 
@@ -370,12 +369,11 @@ mod tests {
             text,
         }];
         assert_eq!(m.mask(&t, "[非表示]"), ["[非表示]見本の社員です"]);
-        // 位置の対応表が無いとき。
-        let whole = "見本の株";
-        let hits = value_hits(None, whole, "株");
-        assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].start, hits[0].end), (0, whole.len()));
-        assert!(value_hits(None, "見本の会社", "株").is_empty());
+        // 照合の形の一致も伏せる (空白を挟んだ写し)。正規化 v1 の一致と重なる一致は足さない。
+        let spaced = "誕生日は7 月 22 日、7月22日です";
+        let hits = value_hits(&Haystack::new(spaced), &Needle::new("7月22日"));
+        let got: Vec<&str> = hits.iter().map(|r| &spaced[r.clone()]).collect();
+        assert_eq!(got, ["7 月 22 日", "7月22日"]);
     }
 
     #[test]

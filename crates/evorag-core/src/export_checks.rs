@@ -201,7 +201,11 @@ impl Prepared {
             true
         })
         .ok()?;
-        let mut pending = false;
+        // 戻した・修復した・古い版で開いたデータ根 (`forget.recheck` が立っている) は、起動して当て直すまで、
+        // 当て直しの済んでいない忘れるがあるとみなす (照合の鍵だけで印に当たる事実は、HMAC の鍵が無いと見分け
+        // られないため、04 §7.6、03 §11)。
+        let mut pending =
+            view.meta(meta::FORGET_RECHECK).ok()?.as_deref() == Some(meta::FORGET_RECHECK_SET);
         let mut excluded = BTreeSet::new();
         let forgets = TurnForgets::from_directives(bodies.clone());
         for t in forgets.turns() {

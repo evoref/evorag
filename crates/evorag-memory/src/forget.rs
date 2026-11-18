@@ -32,7 +32,8 @@ use crate::facts::{
     load_facts,
 };
 use crate::fold::{
-    Directive, DirectiveKind, Fact, FactSet, FactState, Source, refresh_private, retract,
+    Directive, DirectiveKind, Fact, FactSet, FactState, Source, VerifiedCorrection,
+    refresh_private, retract,
 };
 use crate::kinds::{
     ChunkBody, EmbeddingBody, JOB_FORGET_BACKUPS, JOB_PURGE_INDEXES, JobBody, KIND_CHUNK,
@@ -44,7 +45,8 @@ use crate::note::note_matches;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
 use crate::value_key::{
-    BlockMark, Edges, ForgetKey, Mapped, NORM_V1, ValueKey, block_mark, normalize_v1, value_key,
+    BlockMark, Edges, ForgetKey, Haystack, NORM_V1, Needle as Forms, Placed, ValueKey, Widen,
+    block_mark, loose_key, value_key,
 };
 use crate::view::{find_row, row_key};
 
@@ -314,19 +316,6 @@ fn snap(e: &Envelope) -> Option<TurnSnap> {
     })
 }
 
-/// 本文の対応表 `mapped` の中で、正規化した値 `needle` に一致する範囲 (広げる前の、元の本文の書記素の境界の範囲。
-/// 英数字は語の境界で、04 §5.2 の関門 2 と同じ照合)。位置の対応表を作れなければ空。
-fn value_matches(mapped: Option<&Mapped>, needle: &str) -> Vec<Range<usize>> {
-    match mapped {
-        Some(m) if !needle.is_empty() => m
-            .find(needle, Edges::Word)
-            .into_iter()
-            .map(|h| h.source)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// 本文の全体で、忘れる値を探した結果 ([`whole_matches`])。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Found {
@@ -345,48 +334,49 @@ impl Found {
     }
 }
 
-/// 本文の全体で、忘れる値のどれかに一致する範囲 (04 §7.1 の「同じ往復の応答」「ほかのターン」)。
-fn whole_matches(key: &ForgetKey, text: &str, needles: &[Needle]) -> Found {
-    let Some(mapped) = Mapped::new(text) else {
-        let norm = normalize_v1(text);
-        return if needles
-            .iter()
-            .any(|n| !n.norm.is_empty() && norm.contains(&n.norm))
-        {
-            Found::Unplaceable
-        } else {
-            Found::Ranges(Vec::new())
-        };
-    };
+/// 本文の全体で、忘れる値のどれかに一致する範囲 (04 §7.1 の「同じ往復の応答」「ほかのターン」)。値ごとに、正規化
+/// v1 の一致を先に採り、照合の形ではそれと重ならない一致を足す (04 §7.3)。
+fn whole_matches(keys: &ForgetKeys, text: &str, needles: &[Needle]) -> Found {
+    let hay = Haystack::new(text);
     let mut out = Vec::new();
+    let mut unplaceable = false;
     for n in needles {
-        for h in value_matches(Some(&mapped), &n.norm) {
-            if !checked(key, text, &h, &n.vk) {
-                return Found::Mismatch;
+        match hay.find_all(&n.forms, Edges::Word, Widen::No) {
+            Placed::Ranges(hits) => {
+                for h in hits {
+                    if !keys.checked(text, &h) {
+                        return Found::Mismatch;
+                    }
+                    out.push(widen_to_graphemes(text, h));
+                }
             }
-            out.push(widen_to_graphemes(text, h));
+            Placed::Unplaceable => unplaceable = true,
         }
+    }
+    if unplaceable {
+        return Found::Unplaceable;
     }
     Found::Ranges(out)
 }
 
-/// 本文に、正規化した値が (位置を戻せなくても) 含まれるか。
-fn holds_value(text: &str, needle: &str) -> bool {
-    !needle.is_empty()
-        && Mapped::new(text).map_or_else(
-            || normalize_v1(text).contains(needle),
-            |m| !m.find_widened(needle, Edges::Word).is_empty(),
-        )
+/// 本文に、忘れる値が (位置を戻せなくても) 含まれるか (正規化 v1 か照合の形で)。
+fn holds_value(text: &str, needle: &Forms) -> bool {
+    match Haystack::new(text).find_all(needle, Edges::Word, Widen::ToGraphemes) {
+        Placed::Ranges(r) => !r.is_empty(),
+        Placed::Unplaceable => true,
+    }
 }
 
 /// 本文の範囲の並び。
 type Ranges = Vec<Range<usize>>;
 
-/// 忘れる値 1 つ (値の鍵と、照合する正規化した値)。
+/// 忘れる値 1 つ (値の鍵と、照合する形)。
 #[derive(Debug, Clone)]
 struct Needle {
     vk: ValueKey,
-    norm: String,
+    /// 照合の鍵 (04 §5.6)。
+    lk: ValueKey,
+    forms: Forms,
 }
 
 /// 伏せるターン 1 つの範囲 (広げた後、今の本文の位置)。
@@ -396,40 +386,70 @@ struct Target {
     ranges: Vec<Range<usize>>,
 }
 
-/// 範囲が値の鍵の検査を通るか (04 §7.3。広げる前の範囲で確かめる)。
-fn checked(key: &ForgetKey, text: &str, r: &Range<usize>, vk: &ValueKey) -> bool {
-    text.get(r.clone())
-        .is_some_and(|s| value_key(key, s) == *vk)
+/// 忘れる値の鍵 (値の鍵と照合の鍵) と、HMAC の鍵。伏せる範囲の検査に使う。
+struct ForgetKeys<'a> {
+    key: &'a ForgetKey,
+    keys: BTreeSet<ValueKey>,
 }
 
-/// 忘れる事実 (04 §7.1): 指した事実と同じ (主語, 属性) で、値の鍵が `vks` のどれかと同じ、`Retracted` でない
-/// 事実。`vks` は指した値の鍵と、履歴もまとめるときは `Superseded` の値の鍵 (`Contested` は含めない)。
-/// 当て直しの取り消し (再び覚えない印に当たる事実) と同じ集合になる。
+impl ForgetKeys<'_> {
+    /// 範囲の文字列の値の鍵か照合の鍵が、忘れる値の鍵のどれかと同じか (04 §7.3。広げる前の範囲で確かめる)。
+    fn checked(&self, text: &str, r: &Range<usize>) -> bool {
+        text.get(r.clone()).is_some_and(|s| {
+            self.keys.contains(&value_key(self.key, s))
+                || self.keys.contains(&loose_key(self.key, s))
+        })
+    }
+}
+
+/// 事実の値の照合の鍵 (値の無い事実は `None`)。
+fn fact_loose_key(key: &ForgetKey, f: &Fact) -> Option<ValueKey> {
+    f.value.as_deref().map(|v| loose_key(key, v))
+}
+
+/// 忘れる事実 (04 §7.1): 指した事実と同じ (主語, 属性) で、値の鍵か照合の鍵 (04 §5.6) が `vks` のどれかと同じ、
+/// `Retracted` でない事実。`vks` は指した値と、履歴もまとめるときは `Superseded` の値 (`Contested` は含めない)
+/// の、値の鍵と照合の鍵。当て直しの取り消し (再び覚えない印に、値の鍵か照合の鍵で当たる事実) と同じ集合になる。
 fn forgotten_facts(
     set: &FactSet,
+    key: &ForgetKey,
     target: &Fact,
     history: bool,
 ) -> (BTreeSet<Id>, BTreeSet<ValueKey>, usize) {
     let same = |f: &&Fact| f.subject == target.subject && f.attribute == target.attribute;
     let target_vk = target.vk.expect("value rows have a value key");
-    let superseded: BTreeSet<ValueKey> = set
+    let superseded: Vec<&Fact> = set
         .facts
         .iter()
         .filter(same)
         .filter(|f| matches!(f.state, FactState::Superseded { .. }))
-        .filter_map(|f| f.vk)
-        .filter(|v| *v != target_vk)
+        .filter(|f| f.vk.is_some_and(|v| v != target_vk))
         .collect();
-    let history_count = superseded.len();
-    let mut vks = BTreeSet::from([target_vk]);
+    let history_count = superseded
+        .iter()
+        .filter_map(|f| f.vk)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let mut seeds = vec![target];
     if history {
-        vks.extend(superseded);
+        seeds.extend(superseded);
     }
+    let vks: BTreeSet<ValueKey> = seeds
+        .iter()
+        .flat_map(|f| [f.vk, fact_loose_key(key, f)])
+        .flatten()
+        .collect();
     let ids = set
         .facts
         .iter()
         .filter(same)
-        .filter(|f| f.state != FactState::Retracted && f.vk.is_some_and(|v| vks.contains(&v)))
+        .filter(|f| {
+            f.state != FactState::Retracted
+                && [f.vk, fact_loose_key(key, f)]
+                    .into_iter()
+                    .flatten()
+                    .any(|v| vks.contains(&v))
+        })
         .map(|f| f.id)
         .collect();
     (ids, vks, history_count)
@@ -452,7 +472,7 @@ pub(crate) fn forget_in_core(
         .find(|f| f.id == target)
         .expect("the target fact")
         .clone();
-    let (ids, vks, _) = forgotten_facts(set, &fact, history);
+    let (ids, vks, _) = forgotten_facts(set, key, &fact, history);
     retract(set, &ids, attributes);
     let marks = vks
         .iter()
@@ -548,36 +568,51 @@ fn quarantined_of(tx: &ReadTxn<'_>, turns: &BTreeSet<Id>) -> Result<Vec<Id>, Mem
     Ok(out)
 }
 
-/// 検証済みの訂正のうち、古い値か新しい値の値の鍵が `vks` のどれかと同じもの (04 §7.5 の「忘れると訂正」)。
+/// 検証済みの訂正のうち、古い値か新しい値の値の鍵か照合の鍵 (04 §5.6) が `vks` のどれかと同じもの (04 §7.5 の
+/// 「忘れると訂正」)。
 fn corrections_with_values(
     tx: &ReadTxn<'_>,
+    key: &ForgetKey,
     vks: &BTreeSet<ValueKey>,
 ) -> Result<Vec<Id>, MemoryError> {
-    #[derive(Deserialize)]
-    struct Vks {
-        #[serde(default)]
-        old_vk: Option<String>,
-        #[serde(default)]
-        new_vk: Option<String>,
-    }
     let mut out = Vec::new();
     if vks.is_empty() {
         return Ok(out);
     }
     tx.for_each(KIND_CORRECTION, |r| {
         if let Read::Ok(e) = r
-            && let Ok(b) = e.body_as::<Vks>()
-            && [b.old_vk, b.new_vk]
-                .iter()
-                .flatten()
-                .filter_map(|h| ValueKey::from_hex(h))
-                .any(|v| vks.contains(&v))
+            && let Ok(b) = e.body_as::<CorrectionValues>()
+            && b.keys(key).iter().any(|v| vks.contains(v))
         {
             out.push(e.id);
         }
         true
     })?;
     Ok(out)
+}
+
+/// 訂正の記録の値の項目 (検証済みのもの。ほかは空)。
+#[derive(Deserialize)]
+struct CorrectionValues {
+    #[serde(default)]
+    old: Option<String>,
+    #[serde(default)]
+    new: Option<String>,
+    #[serde(default)]
+    old_vk: Option<String>,
+    #[serde(default)]
+    new_vk: Option<String>,
+}
+
+impl CorrectionValues {
+    /// 古い値と新しい値の、値の鍵と照合の鍵 (04 §5.6)。
+    fn keys(&self, key: &ForgetKey) -> Vec<ValueKey> {
+        crate::correction::value_keys_of(
+            key,
+            [self.old.as_deref(), self.new.as_deref()],
+            [self.old_vk.as_deref(), self.new_vk.as_deref()],
+        )
+    }
 }
 
 fn job(
@@ -655,9 +690,10 @@ pub fn plan_forget(
         return Ok(Err(ForgetAbort::NotAValue));
     }
     let fact = fact.clone();
-    let (forgotten, vks, history_count) = forgotten_facts(&before.set, &fact, options.history);
+    let (forgotten, vks, history_count) =
+        forgotten_facts(&before.set, env.key, &fact, options.history);
     let needles: Vec<Needle> = {
-        let mut by_vk: BTreeMap<ValueKey, String> = BTreeMap::new();
+        let mut by_vk: BTreeMap<ValueKey, (Forms, ValueKey)> = BTreeMap::new();
         for f in before
             .set
             .facts
@@ -665,13 +701,24 @@ pub fn plan_forget(
             .filter(|f| forgotten.contains(&f.id))
         {
             if let (Some(vk), Some(v)) = (f.vk, f.value.as_deref()) {
-                by_vk.entry(vk).or_insert_with(|| normalize_v1(v));
+                by_vk
+                    .entry(vk)
+                    .or_insert_with(|| (Forms::new(v), loose_key(env.key, v)));
             }
         }
         by_vk
             .into_iter()
-            .map(|(vk, norm)| Needle { vk, norm })
+            .map(|(vk, (forms, lk))| Needle { vk, lk, forms })
             .collect()
+    };
+    // 範囲の検査に使う鍵: 指示の `vks` と、忘れる事実の値の値の鍵・照合の鍵。
+    let keys = ForgetKeys {
+        key: env.key,
+        keys: vks
+            .iter()
+            .copied()
+            .chain(needles.iter().flat_map(|n| [n.vk, n.lk]))
+            .collect(),
     };
     let mut preview = ForgetPreview {
         history: history_count,
@@ -708,13 +755,10 @@ pub fn plan_forget(
         };
         let mut ranges = Vec::new();
         let mut usable = true;
-        let mapped = Mapped::new(&snap.text);
+        let hay = Haystack::new(&snap.text);
         for (s, vk) in spans {
             let vk = *vk;
-            let needle = needles
-                .iter()
-                .find(|n| n.vk == vk)
-                .map_or("", |n| n.norm.as_str());
+            let needle = needles.iter().find(|n| n.vk == vk).map(|n| &n.forms);
             let span = s.start as usize..s.end as usize;
             if s.rev != snap.rev || snap.text.get(span.clone()).is_none() {
                 if options.redact {
@@ -727,10 +771,14 @@ pub fn plan_forget(
                 usable = false;
                 break;
             }
-            let hits: Vec<Range<usize>> = value_matches(mapped.as_ref(), needle)
-                .into_iter()
-                .filter(|h| span.start <= h.start && h.end <= span.end)
-                .collect();
+            let hits: Vec<Range<usize>> =
+                match needle.map(|n| hay.find_all(n, Edges::Word, Widen::No)) {
+                    Some(Placed::Ranges(all)) => all
+                        .into_iter()
+                        .filter(|h| span.start <= h.start && h.end <= span.end)
+                        .collect(),
+                    Some(Placed::Unplaceable) | None => Vec::new(),
+                };
             if hits.is_empty() {
                 if !options.redact {
                     // 伏せ字にしないときは、根拠の範囲の全体を `[非表示]` にする (private と同じ、04 §7.5)。
@@ -738,7 +786,7 @@ pub fn plan_forget(
                     continue;
                 }
                 let within = &snap.text[span];
-                if holds_value(within, needle)
+                if needle.is_some_and(|n| holds_value(within, n))
                     || crate::mask::REDACTION_MARKERS
                         .iter()
                         .any(|m| within.contains(m))
@@ -755,7 +803,7 @@ pub fn plan_forget(
                 continue;
             }
             for h in hits {
-                if !checked(env.key, &snap.text, &h, &vk) {
+                if !keys.checked(&snap.text, &h) {
                     if options.redact {
                         return Ok(Err(ForgetAbort::ValueMismatch(turn)));
                     }
@@ -768,7 +816,7 @@ pub fn plan_forget(
             continue;
         }
         // 根拠の範囲の外の一致 (同じ往復の応答と同じ選択で伏せる)。
-        match whole_matches(env.key, &snap.text, &needles) {
+        match whole_matches(&keys, &snap.text, &needles) {
             Found::Ranges(all) => {
                 let outside: Vec<Range<usize>> = all
                     .into_iter()
@@ -811,7 +859,7 @@ pub fn plan_forget(
         if !options.echo {
             continue;
         }
-        let ranges = match whole_matches(env.key, &snap.text, &needles) {
+        let ranges = match whole_matches(&keys, &snap.text, &needles) {
             Found::Ranges(r) => r,
             Found::Mismatch | Found::Unplaceable if options.redact => {
                 return Ok(Err(ForgetAbort::ValueMismatch(answer)));
@@ -837,7 +885,7 @@ pub fn plan_forget(
                 }
                 match snap(&e) {
                     Some(s) if s.role == "user" || s.role == "assistant" => {
-                        let found = whole_matches(env.key, &s.text, &needles);
+                        let found = whole_matches(&keys, &s.text, &needles);
                         if found.hit() {
                             others.push((e.id, s, found));
                         }
@@ -1000,7 +1048,7 @@ pub fn plan_forget(
             purge.add(KIND_CORRECTION, c);
         }
     }
-    for c in corrections_with_values(tx, &vks)? {
+    for c in corrections_with_values(tx, env.key, &vks)? {
         purge.add(KIND_CORRECTION, c);
     }
     // 隔離の記録: 伏せ字にするターン・消す派生の記録・取り消す事実のもの (隔離した原文に値が残るため、04 §7.2)。
@@ -1444,10 +1492,16 @@ impl ForgetScope {
         Ok(out)
     }
 
-    /// 訂正の古い値か新しい値が、忘れた値のどれかか。
+    /// 検証済みの訂正の古い値か新しい値の、値の鍵か照合の鍵 (04 §5.6) が、忘れた値の鍵のどれかか (04 §6 の
+    /// 「検証の時機」)。
     #[must_use]
-    pub fn forgets_value(&self, old: &ValueKey, new: &ValueKey) -> bool {
-        self.vks.contains(old) || self.vks.contains(new)
+    pub fn forgets_correction(&self, key: &ForgetKey, c: &VerifiedCorrection) -> bool {
+        [c.old_vk(), c.new_vk()]
+            .into_iter()
+            .any(|v| self.vks.contains(v))
+            || [c.old_value(), c.new_value()]
+                .into_iter()
+                .any(|v| self.vks.contains(&loose_key(key, v)))
     }
 }
 
@@ -1587,11 +1641,16 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
         if f.state == FactState::Retracted {
             continue;
         }
-        let Some(vk) = f.vk else { continue };
-        if let Some(d) = active.get(&block_mark(env.key, &f.subject, &f.attribute, &vk)) {
-            hit.insert(f.id);
-            touched.insert(*d);
-        }
+        // 値の鍵の印と照合の鍵の印の両方で引く (04 §7.2 の 2)。
+        let Some(d) = [f.vk, fact_loose_key(env.key, f)]
+            .into_iter()
+            .flatten()
+            .find_map(|vk| active.get(&block_mark(env.key, &f.subject, &f.attribute, &vk)))
+        else {
+            continue;
+        };
+        hit.insert(f.id);
+        touched.insert(*d);
     }
     let retraction = retract(&mut set, &hit, env.attributes);
     for (directive, b) in &bodies {
@@ -1719,7 +1778,7 @@ pub fn replay_forgets(tx: &ReadTxn<'_>, env: &ForgetEnv<'_>) -> Result<Replay, M
     for (directive, b) in &bodies {
         let vks: BTreeSet<ValueKey> = b.vks.iter().filter_map(|h| ValueKey::from_hex(h)).collect();
         let n = purge.records.len();
-        for c in corrections_with_values(tx, &vks)? {
+        for c in corrections_with_values(tx, env.key, &vks)? {
             purge.add(KIND_CORRECTION, c);
         }
         attribute_to(&purge, n, &[*directive], &mut touched);
@@ -2215,7 +2274,7 @@ mod tests {
         let c_u2 = correction(&env, u2, 0);
         let checked = {
             let tx = env.store.read().expect("read");
-            checked_op(&tx, c_u2, verified(&env, u2, "大阪", "東京"), NOW)
+            checked_op(&tx, c_u2, verified(&env, u2, "大阪", "東京"), NOW, &env.key)
                 .expect("read")
                 .expect("an op")
         };
@@ -2299,7 +2358,7 @@ mod tests {
         let c_u3 = correction(&env, u3, 0);
         let (op, verdict) = {
             let tx = env.store.read().expect("read");
-            checked_op(&tx, c_u3, verified(&env, u3, "大阪", "京都"), NOW)
+            checked_op(&tx, c_u3, verified(&env, u3, "大阪", "京都"), NOW, &env.key)
                 .expect("read")
                 .expect("an op")
         };
@@ -2808,5 +2867,36 @@ mod tests {
         };
         assert!(m.excluded(&stale));
         assert_eq!(m.mask(&[stale], "[非表示]"), ["[非表示]"]);
+    }
+
+    /// 検証済みの訂正の古い値か新しい値が、忘れた値と照合の形で同じなら「忘れた値」とみなす (04 §6 の
+    /// 「検証の時機」)。
+    #[test]
+    fn corrections_are_checked_against_both_keys() {
+        let key = ForgetKey::from_bytes([3; 32]);
+        let scope = ForgetScope {
+            turns: BTreeSet::new(),
+            vks: BTreeSet::from([value_key(&key, "7月22日")]),
+        };
+        let source = Source {
+            turn: Id::from_bytes([1; 16]),
+            start: 0,
+            end: 1,
+            rev: 0,
+        };
+        let c = |old: &str, new: &str| {
+            VerifiedCorrection::assume_verified(
+                source,
+                None,
+                CorrectionTarget::Fact,
+                old.into(),
+                value_key(&key, old),
+                new.into(),
+                value_key(&key, new),
+            )
+        };
+        assert!(scope.forgets_correction(&key, &c("7 月 22 日", "8月1日")));
+        assert!(scope.forgets_correction(&key, &c("8月1日", "7月22日")));
+        assert!(!scope.forgets_correction(&key, &c("8月1日", "8月2日")));
     }
 }

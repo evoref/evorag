@@ -102,7 +102,10 @@ pub use table::{
     FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
     table_head, table_rows, table_version,
 };
-pub use value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, normalize_v1, value_key};
+pub use value_key::{
+    BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, loose_key, normalize_loose, normalize_v1,
+    value_key,
+};
 pub use view::{
     fact_history, fact_list, find_row, private_info, row_key, rule_only, subject_name, subject_of,
 };

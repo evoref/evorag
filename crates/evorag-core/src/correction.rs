@@ -365,7 +365,7 @@ async fn save(inner: &Arc<Inner>, id: Id, verdict: Verdict) -> Option<Option<(Ve
             let key = w.facts_key.key()?;
             let now = w.clock.now();
             let tx = w.store.read().ok()?;
-            let Some((op, written)) = checked_op(&tx, id, verdict, now).ok()? else {
+            let Some((op, written)) = checked_op(&tx, id, verdict, now, key).ok()? else {
                 return Some((Vec::new(), None, Report::default()));
             };
             let mut ops = vec![op];

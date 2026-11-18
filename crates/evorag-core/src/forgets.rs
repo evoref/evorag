@@ -22,7 +22,7 @@ use evorag_memory::{
     ForgetEnv, ForgetOptions, ForgetPreview, JOB_FORGET_BACKUPS, JobBody, KIND_CHUNK,
     KIND_CORRECTION, KIND_EMBEDDING, KIND_FACT, KIND_FACT_DIRECTIVE, KIND_JOB, KIND_NOTE,
     KIND_TURN, NoteBody, OP_FORGET, PlanHash, TurnBody, TurnForgets, TurnRole, ValueKey,
-    attributes, block_mark, hidden_marker, journal_cuts, load_directives, plan_forget,
+    attributes, block_mark, hidden_marker, journal_cuts, load_directives, loose_key, plan_forget,
     redaction_marker, replay_forgets, turn_rev_checked,
 };
 use evorag_store::forget::{Redaction, TurnOutcome, apply_to_turn};
@@ -730,7 +730,8 @@ struct RecopyRules {
     /// 指示の記録が形として正しくない伏せ字のターン (写しから記録だけを除く)。
     drop_turns: BTreeSet<Id>,
     candidates: Vec<LookupProbe>,
-    /// この ID 以上の記録を持つ退避は飛ばさない (副索引で引けない訂正・ノートを除きうるため)。
+    /// この ID 以上の記録を持つ退避は飛ばさない (副索引で引けない訂正・ノートと、照合の鍵だけで印に当たる事実を
+    /// 除きうるため。値を忘れた指示の job では最小の ID にして、記録のある退避をすべて調べる)。
     scan_from: Option<Id>,
     dirs: Directives,
     /// すべての忘れるの指示の `vks`。
@@ -793,6 +794,17 @@ impl RecopyRules {
         }
         // 訂正とノートは副索引で引けないので、job の指示より後の記録を持つ退避は飛ばさない。
         let scan_from = directives.iter().copied().min();
+        // 事実は照合の鍵 (04 §5.6) でも印に当たる (「7月22日」を忘れたときの「7 月 22 日」)。照合の鍵で当たる事実の
+        // 値の鍵は `vks` に無く、副索引 (`candidates`) では引けないので、値を忘れた指示の job があれば、記録のある
+        // 退避は飛ばさずにすべて調べる (安全の側。変えるものが無ければ書き直さない)。
+        let forgets_values = bodies
+            .iter()
+            .any(|(id, b)| directives.contains(id) && !b.vks.is_empty());
+        let scan_from = if forgets_values {
+            Some(Id::from_bytes([0; 16]))
+        } else {
+            scan_from
+        };
         let read_turn = |t: Id| -> Option<TurnBody> {
             match r.get(KIND_TURN, t).ok()?? {
                 Read::Ok(e) => e.body_as::<TurnBody>().ok(),
@@ -867,12 +879,15 @@ impl RecopyRules {
                 let Some(key) = &self.key else {
                     return false;
                 };
+                // 値の鍵の印と照合の鍵の印の両方で引く (当て直しの取り消しと同じ、04 §7.2)。
                 e.body_as::<FactBody>().is_ok_and(|b| {
                     b.state != "retracted"
                         && b.vk
                             .as_deref()
                             .and_then(ValueKey::from_hex)
-                            .is_some_and(|vk| {
+                            .into_iter()
+                            .chain(b.value.as_deref().map(|v| loose_key(key, v)))
+                            .any(|vk| {
                                 self.dirs.is_blocked(&block_mark(
                                     key,
                                     &b.subject,
@@ -886,11 +901,15 @@ impl RecopyRules {
             KIND_CORRECTION => e.body_as::<CorrectionBody>().is_ok_and(|b| {
                 self.turns.contains_key(&b.turn)
                     || self.drop_turns.contains(&b.turn)
-                    || [b.old_vk.as_deref(), b.new_vk.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(ValueKey::from_hex)
-                        .any(|v| self.vks.contains(&v))
+                    || match &self.key {
+                        // 値の鍵と照合の鍵の両方で比べる (当て直しの訂正の消し方と同じ、04 §7.5)。
+                        Some(key) => b.value_keys(key).iter().any(|v| self.vks.contains(v)),
+                        None => [b.old_vk.as_deref(), b.new_vk.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .filter_map(ValueKey::from_hex)
+                            .any(|v| self.vks.contains(&v)),
+                    }
                     || self
                         .unredacted
                         .iter()
