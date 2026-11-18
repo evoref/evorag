@@ -18,11 +18,11 @@ const POLL: Duration = Duration::from_millis(20);
 
 /// 実行ファイルを `--version` で動かす。試験では偽物に差し替える。
 pub trait VersionProbe {
-    /// `exe` (絶対パス) を `--version` を付けて動かし、標準出力の先頭 ([`PROBE_MAX_OUTPUT`] まで) を返す。
+    /// `exe` (絶対パス) を `--version` を付けて動かし、標準出力 ([`PROBE_MAX_OUTPUT`] まで) を返す。
     ///
     /// # Errors
     ///
-    /// 動かせない、時間切れ、失敗の終了コードで終わった。
+    /// 動かせない、時間切れ、失敗の終了コードで終わった、標準出力が [`PROBE_MAX_OUTPUT`] を超えた。
     fn run_version(&self, exe: &Path) -> Result<String, ProbeError>;
 }
 
@@ -39,6 +39,9 @@ pub enum ProbeError {
     /// 失敗の終了コードで終わった。
     #[error("it exited with {0}")]
     Failed(std::process::ExitStatus),
+    /// 標準出力が [`PROBE_MAX_OUTPUT`] を超えた (止めて、終わるのを待った)。
+    #[error("it printed more than {PROBE_MAX_OUTPUT} bytes")]
+    TooMuchOutput,
 }
 
 /// 子のプロセスで `--version` を動かす。標準出力は一時のフォルダのファイルに受け (スレッドを使わず、
@@ -91,31 +94,48 @@ impl VersionProbe for ProcessProbe {
 }
 
 fn run(exe: &Path, out: &std::fs::File, timeout: Duration) -> Result<(), ProbeError> {
-    let stdout = out.try_clone().map_err(ProbeError::Spawn)?;
-    let mut child = Command::new(exe)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(ProbeError::Spawn)?;
+    // Linux では、書き切ったばかりの実行ファイルを、ほかのスレッドの fork が書き込みで開いたままのことが
+    // ある (ETXTBSY)。ロックの失敗として試し直す。
+    let mut child = evorag_store::fsutil::retry_locked(|| {
+        Command::new(exe)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(Stdio::null())
+            .spawn()
+    })
+    .map_err(ProbeError::Spawn)?;
+    let too_much = || out.metadata().map(|m| m.len() > PROBE_MAX_OUTPUT);
     let start = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().map_err(ProbeError::Spawn)? {
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(ProbeError::Failed(status))
-            };
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break match too_much() {
+                    Ok(true) => Err(ProbeError::TooMuchOutput),
+                    Ok(false) if status.success() => Ok(()),
+                    Ok(false) => Err(ProbeError::Failed(status)),
+                    Err(e) => Err(ProbeError::Spawn(e)),
+                };
+            }
+            Ok(None) => {}
+            Err(e) => break Err(ProbeError::Spawn(e)),
+        }
+        match too_much() {
+            Ok(false) => {}
+            Ok(true) => break Err(ProbeError::TooMuchOutput),
+            Err(e) => break Err(ProbeError::Spawn(e)),
         }
         if start.elapsed() >= timeout {
-            // 止めてから、終わるのを待つ (12 §7.2 の apply の 10)。
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ProbeError::TimedOut(timeout));
+            break Err(ProbeError::TimedOut(timeout));
         }
         std::thread::sleep(POLL);
+    };
+    if result.is_err() {
+        // 止めてから、終わるのを待つ (12 §7.2 の apply の 10)。終わっていれば何もしない。
+        let _ = child.kill();
+        let _ = child.wait();
     }
+    result
 }
 
 /// 子の標準出力を受けるファイルを、一時のフォルダに排他で作る。
@@ -209,16 +229,40 @@ mod tests {
         assert_eq!(first_line(&out), "evorag --version");
     }
 
+    /// 標準出力が上限を超えたら、止めて失敗とする (終わるのを待たない)。
     #[test]
-    fn the_process_probe_caps_the_output() {
+    fn the_process_probe_stops_output_over_the_cap() {
         let dir = evorag_store::testutil::TempDir::new("probe-cap");
         let exe = script(
             dir.path(),
             "i=0; while [ $i -lt 2000 ]; do echo 0123456789; i=$((i+1)); done",
             "for /L %%i in (1,1,2000) do @echo 0123456789",
         );
-        let out = ProcessProbe::new().run_version(&exe).expect("runs");
-        assert_eq!(out.len() as u64, PROBE_MAX_OUTPUT);
+        let r = ProcessProbe::new().run_version(&exe);
+        assert!(matches!(r, Err(ProbeError::TooMuchOutput)), "{r:?}");
+        // 出し続けるものも、時間切れを待たずに止める。
+        let sub = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::create_dir_all(&p).expect("mkdir");
+            p
+        };
+        let endless = script(
+            &sub("endless"),
+            "while true; do echo 0123456789; done",
+            "for /L %%i in (0,0,1) do @echo 0123456789",
+        );
+        let start = Instant::now();
+        let r = ProcessProbe::new().run_version(&endless);
+        assert!(matches!(r, Err(ProbeError::TooMuchOutput)), "{r:?}");
+        assert!(start.elapsed() < Duration::from_secs(20));
+        // 上限ちょうどまでは通す。
+        let exact = script(
+            &sub("exact"),
+            r"printf 'evorag 0.4.0\n'; head -c 4083 /dev/zero | tr '\0' x",
+            "echo evorag 0.4.0",
+        );
+        let out = ProcessProbe::new().run_version(&exact).expect("runs");
+        assert_eq!(first_line(&out), "evorag 0.4.0");
     }
 
     #[test]

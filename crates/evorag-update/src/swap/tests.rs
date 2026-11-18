@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use evorag_store::testutil::TempDir;
 
-use super::installation::{Build, Env, Event, Installation, Purpose, ResumeOutcome, Strictness};
+use super::env::{Env, Event};
+use super::installation::{Build, Installation, Purpose, ResumeOutcome, Strictness};
 use super::names::{EXE_NAME, FileName, GapRecovery, Method, Op};
 use super::probe::{ProbeError, VersionProbe};
 use super::{CheckFailure, Failure, SwapError};
@@ -82,7 +83,9 @@ struct Fixture {
 impl Fixture {
     fn new(prev: Option<&str>) -> Self {
         let root = TempDir::new("swap");
-        std::fs::create_dir_all(root.path().join("install")).expect("mkdir");
+        // インストール先は今の利用者だけが書ける (Windows: 保護した DACL。継承する一時フォルダの権限に
+        // よらず、インストール先の確かめに通るように)。
+        evorag_store::fsutil::create_private_dir(&root.path().join("install")).expect("mkdir");
         let fx = Self { root };
         std::fs::write(fx.path(FileName::Exe), exe(CURRENT)).expect("write exe");
         if let Some(p) = prev {
@@ -650,6 +653,118 @@ fn leftovers_are_cleaned_up_by_name_without_a_plan() {
     );
 }
 
+/// 残った evorag.tmp は、中身が evorag(.exe) か evorag.prev と同じときだけ消す。違えば残し、apply・
+/// rollback の前の片付けは断り、起動の片付けは報告する。evorag.prev.old と evorag.tmp の両方があれば
+/// evorag.prev.old を evorag.prev に戻す。
+#[test]
+fn an_unrelated_tmp_is_kept_and_blocks_updates() {
+    let fx = Fixture::new(None);
+    std::fs::write(fx.path(FileName::PrevOld), exe(OLD_PREV)).expect("write");
+    std::fs::write(fx.path(FileName::Tmp), b"someone else's file").expect("write");
+    let before = fx.listing();
+    let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+    assert!(matches!(
+        inst.cleanup_by_name(Strictness::Strict),
+        Err(SwapError::UnrelatedLeftover {
+            name: FileName::Tmp
+        })
+    ));
+    assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)), "restored");
+    let report = inst.cleanup_by_name(Strictness::Lenient).expect("lenient");
+    assert_eq!(report.kept, vec![FileName::Tmp]);
+    assert_eq!(
+        std::fs::read(fx.path(FileName::Tmp)).expect("kept"),
+        before
+            .iter()
+            .find(|(n, _)| n == "evorag.tmp")
+            .map(|(_, b)| b.clone())
+            .expect("tmp")
+    );
+    // apply・rollback は自分で片付けを行い、断る (インストール先は変わらない)。
+    let after_cleanup = fx.listing();
+    let probe = FakeProbe::default();
+    let mut env = Env::new(&probe);
+    assert!(matches!(
+        inst.apply_bytes(
+            &exe(NEXT),
+            sha(NEXT),
+            &build(CURRENT),
+            &build(NEXT),
+            &mut env
+        ),
+        Err(SwapError::UnrelatedLeftover { .. })
+    ));
+    assert_eq!(fx.listing(), after_cleanup);
+    // evorag.prev と同じ中身なら消す。
+    std::fs::write(fx.path(FileName::Tmp), exe(OLD_PREV)).expect("write");
+    let report = inst.cleanup_by_name(Strictness::Strict).expect("strict");
+    assert_eq!(report.removed, vec![FileName::Tmp]);
+}
+
+/// apply・rollback は、呼ぶ側が始める前の確かめを飛ばしても、自分で片付けとインストール先の確かめを行う。
+#[test]
+fn apply_runs_the_prechecks_itself() {
+    let fx = Fixture::new(Some(OLD_PREV));
+    std::fs::write(fx.path(FileName::Probe), b"x").expect("write");
+    std::fs::write(fx.path(FileName::Rejected), b"x").expect("write");
+    run(&fx, Method::HOST, Scenario::ApplyWithPrev, None).expect("apply");
+    assert_consistent(&fx, Scenario::ApplyWithPrev, "prechecked");
+}
+
+/// 計画の続きで、置く先に役割に当たらないファイルがあるか、`evorag(.exe)` に置けるものが無いときは、
+/// 何も動かさず、計画を残し、手で戻す手順を示す。
+#[test]
+fn a_foreign_file_at_a_target_moves_nothing() {
+    // 元に戻す向き: 前回の evorag.prev は evorag.prev.old にあり、evorag.prev に利用者のファイルがある。
+    let fx = Fixture::new(Some(OLD_PREV));
+    crashed_after_plan(&fx);
+    std::fs::rename(fx.path(FileName::Prev), fx.path(FileName::PrevOld)).expect("mv");
+    std::fs::write(fx.path(FileName::Prev), b"user file").expect("write");
+    assert_refused_untouched(&fx, |e| {
+        matches!(
+            e,
+            SwapError::ForeignFile {
+                name: FileName::Prev
+            }
+        )
+    });
+    // 進める向き: evorag.exe が無く、evorag.new を置けるが、evorag.prev に利用者のファイルがある
+    // (先に evorag.exe を置いてしまわない)。
+    let fx = Fixture::new(Some(OLD_PREV));
+    crashed_after_plan(&fx);
+    std::fs::rename(fx.path(FileName::Exe), fx.path(FileName::Tmp)).expect("mv");
+    std::fs::write(fx.path(FileName::Prev), b"user file").expect("write");
+    assert_refused_untouched(&fx, |e| {
+        matches!(
+            e,
+            SwapError::ForeignFile {
+                name: FileName::Prev
+            }
+        )
+    });
+    // evorag.exe に置けるものが無い。
+    let fx = Fixture::new(Some(OLD_PREV));
+    crashed_after_plan(&fx);
+    std::fs::remove_file(fx.path(FileName::Exe)).expect("rm");
+    std::fs::remove_file(fx.path(FileName::New)).expect("rm");
+    assert_refused_untouched(&fx, |e| matches!(e, SwapError::NothingToRestore));
+}
+
+#[track_caller]
+fn assert_refused_untouched(fx: &Fixture, expected: impl Fn(&SwapError) -> bool) {
+    let before = fx.listing();
+    let plan_before = fx.state_json();
+    let probe = FakeProbe::default();
+    let mut env = Env::new(&probe);
+    let mut inst = fx.open(Method::HOST, Purpose::Startup).expect("open");
+    let e = inst.resume(&mut env).expect_err("refused");
+    assert!(expected(&e), "{e:?}");
+    assert!(e.needs_manual_recovery(), "{e:?}");
+    assert_eq!(fx.listing(), before);
+    assert_eq!(fx.state_json(), plan_before);
+    assert_eq!(probe.calls.get(), 0);
+}
+
 #[test]
 fn the_update_lock_is_exclusive() {
     let fx = Fixture::new(None);
@@ -676,6 +791,24 @@ fn the_running_exe_must_be_named_evorag() {
         Err(SwapError::ExeName { .. })
     ));
     Installation::open(&other, &fx.state_dir(), Purpose::Startup).expect("startup accepts it");
+    // パスは正規化してから見る (`..` を含むパスでも、同じインストール先になる)。
+    let roundabout = fx.dir().join("..").join("install").join(EXE_NAME);
+    let inst = Installation::open(&roundabout, &fx.state_dir(), Purpose::Update).expect("open");
+    assert_eq!(
+        inst.dir(),
+        std::fs::canonicalize(fx.dir())
+            .map(|p| {
+                let s = p.to_string_lossy().into_owned();
+                PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+            })
+            .expect("canonical")
+    );
+    drop(inst);
+    // Windows と macOS は大文字と小文字を区別しない。
+    if cfg!(any(windows, target_os = "macos")) {
+        let upper = fx.dir().join(EXE_NAME.to_ascii_uppercase());
+        Installation::open(&upper, &fx.state_dir(), Purpose::Update).expect("case-insensitive");
+    }
 }
 
 #[test]
@@ -803,7 +936,19 @@ fn a_reparse_point_exe_is_refused() {
     }
     let meta = std::fs::symlink_metadata(fx.path(FileName::Exe)).expect("meta");
     assert!(evorag_store::fsutil::is_link_or_reparse_point(&meta));
-    let inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+    assert_link_exe_is_refused(&fx);
+}
+
+/// `evorag(.exe)` がリンクのとき: 動いている実行ファイルのパスは正規化する (リンクの先の名前になる) ので
+/// apply・rollback は開けず、同じフォルダのほかの名前から開いても、インストール先の確かめが断る。
+fn assert_link_exe_is_refused(fx: &Fixture) {
+    assert!(matches!(
+        fx.open(Method::HOST, Purpose::Update),
+        Err(SwapError::ExeName { .. })
+    ));
+    let other = fx.dir().join("evorag-other");
+    std::fs::write(&other, b"x").expect("write");
+    let inst = Installation::open(&other, &fx.state_dir(), Purpose::Startup).expect("open");
     assert!(matches!(
         inst.check_install_dir(),
         Err(SwapError::NotRegularFile {
@@ -824,11 +969,7 @@ mod unix {
         let real = fx.root.path().join("real-evorag");
         std::fs::rename(fx.path(FileName::Exe), &real).expect("mv");
         std::os::unix::fs::symlink(&real, fx.path(FileName::Exe)).expect("symlink");
-        let inst = fx.open(Method::HOST, Purpose::Update).expect("open");
-        assert!(matches!(
-            inst.check_install_dir(),
-            Err(SwapError::NotRegularFile { .. })
-        ));
+        assert_link_exe_is_refused(&fx);
     }
 
     #[test]
@@ -862,22 +1003,31 @@ mod unix {
         ));
     }
 
-    /// 新しいファイルの権限は、今の evorag から group と other の書き込みを除いたもの。名前に置いた
-    /// シンボリックリンクの先には書かない。
+    /// 新しいファイルの権限は、今の evorag の権限 (group と other の書き込みを除く) に合わせる。名前に
+    /// 置いたシンボリックリンクの先には書かない。リンクの `evorag.tmp` は役割に当たらないので、apply の
+    /// 前の片付けが断る。
     #[test]
-    fn new_files_drop_group_and_other_write_and_do_not_follow_symlinks() {
+    fn new_files_keep_the_exe_mode_and_do_not_follow_symlinks() {
         let fx = Fixture::new(None);
         std::fs::set_permissions(
             fx.path(FileName::Exe),
-            std::fs::Permissions::from_mode(0o775),
+            std::fs::Permissions::from_mode(0o750),
         )
         .expect("chmod");
         let outside = fx.root.path().join("outside");
-        std::fs::write(&outside, b"keep").expect("write");
-        std::os::unix::fs::symlink(&outside, fx.path(FileName::New)).expect("symlink");
+        std::fs::write(&outside, exe(CURRENT)).expect("write");
         std::os::unix::fs::symlink(&outside, fx.path(FileName::Tmp)).expect("symlink");
+        assert!(matches!(
+            run(&fx, Method::HOST, Scenario::ApplyFresh, None),
+            Err(SwapError::UnrelatedLeftover {
+                name: FileName::Tmp
+            })
+        ));
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        std::fs::remove_file(fx.path(FileName::Tmp)).expect("rm");
+        std::os::unix::fs::symlink(&outside, fx.path(FileName::New)).expect("symlink");
         run(&fx, Method::HOST, Scenario::ApplyFresh, None).expect("apply");
-        assert_eq!(std::fs::read(&outside).expect("read"), b"keep");
+        assert_eq!(std::fs::read(&outside).expect("read"), exe(CURRENT));
         let mode = |n| {
             std::fs::metadata(fx.path(n))
                 .expect("meta")
@@ -885,8 +1035,121 @@ mod unix {
                 .mode()
                 & 0o777
         };
-        assert_eq!(mode(FileName::Exe), 0o755);
-        assert_eq!(mode(FileName::Prev), 0o755);
+        assert_eq!(mode(FileName::Exe), 0o750);
+        assert_eq!(mode(FileName::Prev), 0o750);
+    }
+
+    /// 12 §7.3 (Unix: シンボリックリンクと、ほかの利用者の役割のファイルは、役割に当たらない
+    /// ものとして扱い、動かさず、`--version` で動かさない)
+    #[test]
+    fn symlinked_or_foreign_owned_role_files_match_no_role() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        crashed_after_plan(&fx);
+        // 段 1 の evorag.new を、同じ中身のファイルへのシンボリックリンクにする。
+        let outside = fx.root.path().join("outside-new");
+        std::fs::write(&outside, exe(NEXT)).expect("write");
+        std::fs::remove_file(fx.path(FileName::New)).expect("rm");
+        std::os::unix::fs::symlink(&outside, fx.path(FileName::New)).expect("symlink");
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+        let report = inst.resume(&mut env).expect("resume").expect("a plan");
+        assert_eq!(report.untouched, vec![FileName::New]);
+        assert!(
+            std::fs::symlink_metadata(fx.path(FileName::New))
+                .expect("kept")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&outside).expect("read"), exe(NEXT));
+        // リンクの evorag.prev は、版を知るために動かさない。
+        std::fs::remove_file(fx.path(FileName::Prev)).expect("rm");
+        let target = fx.root.path().join("outside-prev");
+        std::fs::write(&target, exe(OLD_PREV)).expect("write");
+        std::os::unix::fs::symlink(&target, fx.path(FileName::Prev)).expect("symlink");
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        assert!(matches!(
+            inst.identify_prev(&mut env),
+            Err(SwapError::NotRegularFile {
+                name: FileName::Prev
+            })
+        ));
+        assert_eq!(probe.calls.get(), 0);
+        // ほかの利用者の evorag.prev も同じ (持ち主を変えられるのは root だけ)。
+        if evorag_store::fsutil::effective_uid() != 0 {
+            eprintln!("skipped the foreign-owner case: not root");
+            return;
+        }
+        std::fs::remove_file(fx.path(FileName::Prev)).expect("rm");
+        std::fs::write(fx.path(FileName::Prev), exe(OLD_PREV)).expect("write");
+        std::os::unix::fs::chown(fx.path(FileName::Prev), Some(1), None).expect("chown");
+        assert!(matches!(
+            inst.identify_prev(&mut env),
+            Err(SwapError::NotRegularFile {
+                name: FileName::Prev
+            })
+        ));
+        assert_eq!(probe.calls.get(), 0);
+    }
+
+    /// Linux・macOS の rollback で計画を書けなければ、写した evorag.tmp を消す。
+    #[test]
+    fn a_rollback_that_cannot_write_its_plan_removes_the_copy() {
+        if evorag_store::fsutil::effective_uid() == 0 {
+            eprintln!("skipped: root can write anywhere");
+            return;
+        }
+        let fx = Fixture::new(Some(OLD_PREV));
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+        let prev = inst.identify_prev(&mut env).expect("prev");
+        let update = fx.state_dir().join("update");
+        std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        let r = inst.rollback(&prev, &build(CURRENT), &mut env);
+        std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        assert!(matches!(r, Err(SwapError::Io { .. })), "{r:?}");
+        assert!(!fx.path(FileName::Tmp).exists());
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)));
+        assert!(!fx.has_plan());
+    }
+
+    /// 入れ替えが済んだ後に計画を済みにできなければ、そう示し、次の続きが済ませる。
+    #[test]
+    fn a_swap_that_cannot_be_recorded_says_so_and_converges_later() {
+        if evorag_store::fsutil::effective_uid() == 0 {
+            eprintln!("skipped: root can write anywhere");
+            return;
+        }
+        let fx = Fixture::new(Some(OLD_PREV));
+        let update = fx.state_dir().join("update");
+        let probe = FakeProbe::default();
+        let mut hook = |e| {
+            if e == Event::Renamed(FileName::Tmp, FileName::Prev) {
+                std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o500))
+                    .expect("chmod");
+            }
+            false
+        };
+        let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+        let mut inst = fx.open(Method::HOST, Purpose::Update).expect("open");
+        let r = inst.apply_bytes(
+            &exe(NEXT),
+            sha(NEXT),
+            &build(CURRENT),
+            &build(NEXT),
+            &mut env,
+        );
+        std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let e = r.expect_err("not recorded");
+        assert!(matches!(e, SwapError::NotRecorded(_)), "{e:?}");
+        assert_eq!(e.exit_code(), 1);
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(NEXT)));
+        drop(inst);
+        recover(&fx, Method::HOST, ProbeMode::Honest, None).expect("recover");
+        assert_consistent(&fx, Scenario::ApplyWithPrev, "recorded later");
     }
 }
 
@@ -971,5 +1234,292 @@ mod windows {
         let report = inst.cleanup_by_name(Strictness::Lenient).expect("lenient");
         assert_eq!(report.left, vec![FileName::New]);
         t.join().expect("join");
+    }
+    /// 12 §7.3 (Windows の隙間の前に、置くファイルが掴まれていないかを確かめる。掴まれたままなら
+    /// evorag.exe を空けずに元に戻す)
+    #[test]
+    fn a_locked_file_to_place_is_refused_before_the_gap() {
+        // apply: 段 2 を書いた後に、evorag.new を掴む。
+        let fx = Fixture::new(Some(OLD_PREV));
+        let probe = FakeProbe::default();
+        let new = fx.path(FileName::New);
+        let mut saved = 0;
+        let mut holder = None;
+        let mut events = Vec::new();
+        let mut hook = |e| {
+            events.push(e);
+            if e == Event::StateSaved {
+                saved += 1;
+                if saved == 2 {
+                    holder = Some(hold(new.clone(), Duration::from_millis(3500)));
+                }
+            }
+            false
+        };
+        let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+        let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        let r = inst.apply_bytes(
+            &exe(NEXT),
+            sha(NEXT),
+            &build(CURRENT),
+            &build(NEXT),
+            &mut env,
+        );
+        holder.expect("held").join().expect("join");
+        assert!(
+            matches!(
+                r,
+                Err(SwapError::Reverted(Failure::File {
+                    op: FileOp::Open,
+                    name: FileName::New,
+                    ..
+                }))
+            ),
+            "{r:?}"
+        );
+        assert!(!events.contains(&Event::Renamed(FileName::Exe, FileName::Prev)));
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)));
+        assert!(!fx.has_plan());
+
+        // rollback: evorag.prev を掴む。
+        let fx = Fixture::new(Some(OLD_PREV));
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        let prev = inst.identify_prev(&mut env).expect("prev");
+        let t = hold(fx.path(FileName::Prev), Duration::from_millis(3500));
+        let r = inst.rollback(&prev, &build(CURRENT), &mut env);
+        t.join().expect("join");
+        assert!(
+            matches!(
+                r,
+                Err(SwapError::Reverted(Failure::File {
+                    op: FileOp::Open,
+                    name: FileName::Prev,
+                    ..
+                }))
+            ),
+            "{r:?}"
+        );
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)));
+        assert!(!fx.has_plan());
+    }
+
+    /// 12 §7.3 (隙間の 2 つ目の改名は 1 回だけ試し、失敗したら、まず自分を evorag.exe に戻して
+    /// から reverting を書き、残りを戻す。2 つの改名の間に状態を書かない)
+    #[test]
+    fn a_failed_second_rename_puts_the_exe_back_first() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let probe = FakeProbe::default();
+        let new = fx.path(FileName::New);
+        let mut holder = None;
+        let mut events = Vec::new();
+        let mut hook = |e| {
+            events.push(e);
+            if e == Event::Renamed(FileName::Exe, FileName::Prev) && holder.is_none() {
+                holder = Some(hold(new.clone(), Duration::from_millis(1000)));
+            }
+            false
+        };
+        let mut env = Env::new(&probe).with_crash_hook(&mut hook);
+        let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        let r = inst.apply_bytes(
+            &exe(NEXT),
+            sha(NEXT),
+            &build(CURRENT),
+            &build(NEXT),
+            &mut env,
+        );
+        holder.expect("held").join().expect("join");
+        assert!(
+            matches!(
+                r,
+                Err(SwapError::Reverted(Failure::File {
+                    op: FileOp::Rename,
+                    name: FileName::New,
+                    ..
+                }))
+            ),
+            "{r:?}"
+        );
+        let gap = events
+            .iter()
+            .position(|&e| e == Event::Renamed(FileName::Exe, FileName::Prev))
+            .expect("gap");
+        assert_eq!(
+            events[gap + 1..gap + 3],
+            [
+                Event::Renamed(FileName::Prev, FileName::Exe),
+                Event::StateWritten
+            ],
+            "{events:?}"
+        );
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(CURRENT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(OLD_PREV)));
+        assert!(!fx.has_plan());
+    }
+
+    /// 12 §7.3 (Windows: ほかの利用者が書き込めるインストール先は断る。TrustedInstaller と、
+    /// 継承だけの CREATOR OWNER は許す)
+    #[test]
+    fn an_install_folder_writable_by_other_users_is_refused() {
+        const TRUSTED_INSTALLER: &str =
+            "*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        let fx = Fixture::new(Some(OLD_PREV));
+        let inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        inst.check_install_dir().expect("owner-only folder");
+        let icacls = |args: &[&str]| {
+            std::process::Command::new("icacls")
+                .arg(fx.dir())
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        assert!(icacls(&["/grant", &format!("{TRUSTED_INSTALLER}:(F)")]));
+        // CREATOR OWNER (S-1-3-0) の継承だけの ACE は、フォルダ自身に効かない。
+        assert!(icacls(&["/grant", "*S-1-3-0:(OI)(CI)(IO)(F)"]));
+        inst.check_install_dir()
+            .expect("TrustedInstaller and inherit-only ACEs are accepted");
+        // Users (S-1-5-32-545) に書き込みを許す。
+        assert!(icacls(&["/grant", "*S-1-5-32-545:(W)"]));
+        let before = fx.listing();
+        assert!(matches!(
+            inst.check_install_dir(),
+            Err(SwapError::WritableByOtherUsers { .. })
+        ));
+        drop(inst);
+        assert!(matches!(
+            run(&fx, Method::TwoStep, Scenario::ApplyWithPrev, None),
+            Err(SwapError::WritableByOtherUsers { .. })
+        ));
+        assert_eq!(fx.listing(), before);
+        assert!(!fx.has_plan());
+    }
+
+    /// 12 §7.3 (Windows: 中に作るファイルへ継承する ACE で、ほかの利用者に書き込みを許すインストール先も
+    /// 断る。evorag.new などが、その権限を継承するため)
+    #[test]
+    fn an_install_folder_whose_new_files_others_can_write_is_refused() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let ok = std::process::Command::new("icacls")
+            .arg(fx.dir())
+            .args(["/grant", "*S-1-5-32-545:(OI)(IO)(M)"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "icacls");
+        let before = fx.listing();
+        assert!(matches!(
+            run(&fx, Method::TwoStep, Scenario::ApplyWithPrev, None),
+            Err(SwapError::WritableByOtherUsers { .. })
+        ));
+        assert_eq!(fx.listing(), before);
+        assert!(!fx.has_plan());
+    }
+
+    /// 12 §7.2 (Windows: `evorag.prev.exe` があれば、`evorag.prev` を動かさずに断る)
+    #[test]
+    fn an_exe_shadowing_evorag_prev_is_refused() {
+        let fx = Fixture::new(Some(OLD_PREV));
+        let shadow = fx.dir().join("evorag.prev.exe");
+        std::fs::write(&shadow, exe(NEXT)).expect("write");
+        let probe = FakeProbe::default();
+        let mut env = Env::new(&probe);
+        let inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        match inst.identify_prev(&mut env) {
+            Err(SwapError::BlockingFile { path }) => {
+                assert_eq!(path.file_name(), shadow.file_name());
+            }
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(probe.calls.get(), 0);
+    }
+
+    /// 落とすと子のプロセスを止める。
+    struct Running(std::process::Child);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// 12 §7.3 (Windows: 動いている evorag.exe を改名して置き換え、元に戻すときは動いている
+    /// イメージを evorag.exe に戻せる。動いているイメージ (evorag.prev.old) は消せないので、再試行の後に
+    /// 残し、次の片付けで消す)
+    #[test]
+    fn a_running_exe_is_swapped_and_its_image_is_removed_later() {
+        let ping = Path::new(r"C:\Windows\System32\PING.EXE");
+        if !ping.is_file() {
+            eprintln!("skipped: no PING.EXE");
+            return;
+        }
+        let fx = Fixture::new(None);
+        std::fs::copy(ping, fx.path(FileName::Exe)).expect("copy");
+        let image = fx.digest(FileName::Exe).expect("image");
+        // ループバックだけに送る。最後に止める。
+        let child = std::process::Command::new(fx.path(FileName::Exe))
+            .args(["-n", "60", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start the copy of PING.EXE");
+        let mut running = Running(child);
+        // 動き出すのを待つ (イメージが写像されるまで)。
+        std::thread::sleep(Duration::from_millis(300));
+        let apply = |version: &str, mode: ProbeMode| {
+            let probe = FakeProbe::with(mode);
+            let mut env = Env::new(&probe);
+            let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+            inst.apply_bytes(
+                &exe(version),
+                sha(version),
+                &build(CURRENT),
+                &build(version),
+                &mut env,
+            )
+        };
+        // 1. 確かめに通らない: 動いている evorag.exe を evorag.prev に改名して置き、元に戻すときは、
+        //    動いているイメージを evorag.exe に戻す (隙間の前の確かめが、動いているイメージを開ける)。
+        let r = apply(NEXT, ProbeMode::Wrong);
+        assert!(
+            matches!(r, Err(SwapError::Reverted(Failure::Check(_)))),
+            "{r:?}"
+        );
+        assert_eq!(fx.digest(FileName::Exe), Some(image));
+        assert!(!fx.path(FileName::Rejected).exists());
+        // 2. 置き換える: 動いているものは evorag.prev になる。
+        let report = apply(NEXT, ProbeMode::Honest).expect("apply while running");
+        assert!(report.left.is_empty());
+        assert_eq!(fx.digest(FileName::Exe), Some(sha(NEXT)));
+        assert_eq!(fx.digest(FileName::Prev), Some(image));
+        // 3. もう一度置き換える: 動いているイメージ (前回の evorag.prev) は evorag.prev.old に改名でき、
+        //    消せないので残す。
+        let report = apply("0.5.0", ProbeMode::Honest).expect("apply again");
+        assert_eq!(report.left, vec![FileName::PrevOld]);
+        assert_eq!(fx.digest(FileName::Exe), Some(sha("0.5.0")));
+        assert_eq!(fx.digest(FileName::Prev), Some(sha(NEXT)));
+        assert_eq!(fx.digest(FileName::PrevOld), Some(image));
+        let mut inst = fx.open(Method::TwoStep, Purpose::Update).expect("open");
+        assert!(matches!(
+            inst.cleanup_by_name(Strictness::Strict),
+            Err(SwapError::Leftover {
+                name: FileName::PrevOld,
+                ..
+            })
+        ));
+        let report = inst.cleanup_by_name(Strictness::Lenient).expect("lenient");
+        assert_eq!(report.left, vec![FileName::PrevOld]);
+        // 止めた後の片付けで消える。
+        let _ = running.0.kill();
+        let _ = running.0.wait();
+        let report = inst.cleanup_by_name(Strictness::Strict).expect("strict");
+        assert_eq!(report.removed, vec![FileName::PrevOld]);
+        assert!(!fx.path(FileName::PrevOld).exists());
     }
 }

@@ -9,6 +9,12 @@ use super::probe::ProbeError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FileOp {
+    /// 開く (Windows の隙間の前に、置くファイルを掴まれていないか確かめるときを含む)。
+    Open,
+    /// 作る。
+    Create,
+    /// ロックを取る。
+    Lock,
     /// 読む・SHA-256 を求める。
     Read,
     /// 作って書く。
@@ -24,6 +30,9 @@ pub enum FileOp {
 impl std::fmt::Display for FileOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Open => "open",
+            Self::Create => "create",
+            Self::Lock => "lock",
             Self::Read => "read",
             Self::Write => "write",
             Self::Rename => "rename",
@@ -71,6 +80,9 @@ pub enum Failure {
     /// 置き換えの後の確かめに通らなかった。
     #[error("the new evorag failed the --version check: {0}")]
     Check(#[source] CheckFailure),
+    /// そのほかの失敗。
+    #[error("{0}")]
+    Other(#[source] Box<SwapError>),
 }
 
 /// 置き換え・巻き戻し・片付けの失敗。どれも 07 §5 の終了コード 1。
@@ -125,6 +137,32 @@ pub enum SwapError {
         #[source]
         source: std::io::Error,
     },
+    /// 残った `evorag.tmp` が、`evorag(.exe)` とも `evorag.prev` とも中身が違う。消さずに残した
+    /// (利用者のファイルかもしれないため)。apply・rollback の前の片付けでは断る (12 §7.3)。
+    #[error(
+        "the leftover {name} matches neither {} nor evorag.prev and was kept; move or delete it",
+        FileName::Exe
+    )]
+    UnrelatedLeftover {
+        /// ファイル。
+        name: FileName,
+    },
+    /// 置き換えのファイルではないファイルが、操作を妨げる (Windows: 拡張子の無い名前を動かすと、
+    /// `CreateProcess` が代わりに動かす `<名前>.exe`)。触れずに止めた。
+    #[error("{} is not a file of this update and blocks it; move or delete it", path.display())]
+    BlockingFile {
+        /// ファイル。
+        path: PathBuf,
+    },
+    /// Windows: インストール先のフォルダに、ほかの利用者が書き込める (12 §7.3 の「インストール先の確かめ」)。
+    #[error(
+        "other users can write the install folder {}; move evorag to a folder only you can write, such as %LOCALAPPDATA%\\Programs\\evorag",
+        dir.display()
+    )]
+    WritableByOtherUsers {
+        /// インストール先。
+        dir: PathBuf,
+    },
     /// インストール先に書き込めない。
     #[error("the install folder {} is not writable: {source}", dir.display())]
     NotWritable {
@@ -175,6 +213,10 @@ pub enum SwapError {
     /// 置き換えに失敗し、元に戻した (起動できる状態)。
     #[error("the update failed and was undone: {0}")]
     Reverted(#[source] Failure),
+    /// ファイルの入れ替えは済んだが、状態のファイルに済んだことを書けなかった。次の起動の片付けか
+    /// `update` が、計画に従って済ませる。
+    #[error("the files were swapped, but recording it failed: {0}")]
+    NotRecorded(#[source] Box<SwapError>),
     /// 置き換えに失敗し、元に戻すのにも失敗した。計画を残した (次の update と起動の片付けが続ける)。
     #[error("the update failed ({cause}) and could not be undone: {revert}")]
     RevertFailed {
@@ -194,19 +236,19 @@ pub enum SwapError {
         #[source]
         source: std::io::Error,
     },
-    /// インストール先・状態のフォルダ・状態のファイルの操作の失敗。
-    #[error("cannot {what} {}: {source}", path.display())]
+    /// インストール先・状態のフォルダ・状態のファイルの操作の失敗 (名前のある役割のファイルは [`Self::File`])。
+    #[error("cannot {op} {}: {source}", path.display())]
     Io {
         /// 操作。
-        what: &'static str,
+        op: FileOp,
         /// パス。
         path: PathBuf,
         /// OS の失敗。
         #[source]
         source: std::io::Error,
     },
-    /// 試験が差し込んだ強制終了 (そこで止まり、後の処理をしない)。
-    #[doc(hidden)]
+    /// 試験が差し込んだ強制終了 (そこで止まり、後の処理をしない)。試験のビルドだけにある。
+    #[cfg(test)]
     #[error("stopped by a test")]
     Crashed,
 }
@@ -225,6 +267,7 @@ impl SwapError {
             self,
             Self::StateUnreadable { .. }
                 | Self::UnknownRole
+                | Self::ForeignFile { .. }
                 | Self::NothingToRestore
                 | Self::RevertFailed { .. }
         )
@@ -234,11 +277,55 @@ impl SwapError {
         move |source| Self::File { op, name, source }
     }
 
+    pub(crate) fn io(op: FileOp, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self {
+        let path = path.to_path_buf();
+        move |source| Self::Io { op, path, source }
+    }
+
+    /// 試験が差し込んだ強制終了か (試験のビルドでないときは常に偽)。
+    pub(crate) const fn is_crash(&self) -> bool {
+        #[cfg(test)]
+        {
+            matches!(self, Self::Crashed)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
     /// 元に戻す原因にする。
     pub(crate) fn into_failure(self) -> Failure {
         match self {
             Self::File { op, name, source } => Failure::File { op, name, source },
-            other => Failure::State(Box::new(other)),
+            // 状態のフォルダ・状態のファイルの操作の失敗。
+            Self::Io { .. } => Failure::State(Box::new(self)),
+            Self::ExeName { .. }
+            | Self::Busy
+            | Self::StateUnreadable { .. }
+            | Self::ForeignPlan { .. }
+            | Self::PlanPending
+            | Self::UnknownRole
+            | Self::ForeignFile { .. }
+            | Self::NothingToRestore
+            | Self::Leftover { .. }
+            | Self::UnrelatedLeftover { .. }
+            | Self::BlockingFile { .. }
+            | Self::WritableByOtherUsers { .. }
+            | Self::NotWritable { .. }
+            | Self::NotRegularFile { .. }
+            | Self::UnsafeOwnership { .. }
+            | Self::NoPrev
+            | Self::PrevNotEvorag { .. }
+            | Self::PrevProbe(_)
+            | Self::Changed { .. }
+            | Self::SameFile
+            | Self::WrittenDigestMismatch
+            | Self::Reverted(_)
+            | Self::NotRecorded(_)
+            | Self::RevertFailed { .. } => Failure::Other(Box::new(self)),
+            #[cfg(test)]
+            Self::Crashed => Failure::Other(Box::new(self)),
         }
     }
 }

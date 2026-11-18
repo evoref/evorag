@@ -128,31 +128,29 @@ pub(crate) fn write(
     done: Option<&Plan>,
     before_rename: impl FnOnce() -> Result<(), super::SwapError>,
 ) -> Result<(), super::SwapError> {
-    use super::SwapError;
-    let io = |what: &'static str, path: &Path| {
-        let path = path.to_path_buf();
-        move |source| SwapError::Io { what, path, source }
-    };
+    use super::{FileOp, SwapError};
+    let io = SwapError::io;
     let body = serde_json::to_vec_pretty(&Stored {
         schema: STATE_SCHEMA,
         plan,
         done,
     })
     .expect("the state serializes to JSON");
-    match std::fs::remove_file(&paths.temp) {
+    match evorag_store::fsutil::retry_locked(|| std::fs::remove_file(&paths.temp)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(io("remove", &paths.temp)(e));
+            return Err(io(FileOp::Remove, &paths.temp)(e));
         }
         _ => {}
     }
     let mut file = evorag_store::fsutil::create_new_file(&paths.temp, 0o600)
-        .map_err(io("create", &paths.temp))?;
-    file.write_all(&body).map_err(io("write", &paths.temp))?;
-    file.sync_all().map_err(io("sync", &paths.temp))?;
+        .map_err(io(FileOp::Create, &paths.temp))?;
+    file.write_all(&body)
+        .map_err(io(FileOp::Write, &paths.temp))?;
+    file.sync_all().map_err(io(FileOp::Sync, &paths.temp))?;
     drop(file);
     before_rename()?;
     evorag_store::fsutil::rename_durable(&paths.temp, &paths.file)
-        .map_err(io("rename", &paths.file))?;
+        .map_err(io(FileOp::Rename, &paths.file))?;
     Ok(())
 }
 

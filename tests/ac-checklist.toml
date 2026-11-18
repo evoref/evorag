@@ -407,7 +407,7 @@ level = "Must"
 status = "later"
 tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps"]
 manual = ""
-note = "置き換えの核で判定する: apply・rollback・元に戻す途中・状態のファイルの書き込みの各操作の後で止め (試験の差し込み)、次の続き (途中でもう一度止めたときを含む) と名前での片付けの後に、evorag(.exe) が前か後の版で、evorag.prev が役割どおりであること。Windows の隙間は案内の手順で戻す。子プロセスの強制終了と、TUI の起動の片付け・CLI からの続きは M3.5 の残りで判定する。"
+note = "置き換えの核で判定する: apply・rollback・元に戻す途中の各改名・写し・削除・新しいファイルの書き切り・状態のファイルの書き込みの後で止め (試験の差し込み。フォルダとファイルの同期は直前の操作に含め、同期の点は別に模擬しない)、次の続き (途中でもう一度止めたときを含む) と名前での片付けの後に、evorag(.exe) が前か後の版で、evorag.prev が役割どおりであること。Windows の隙間は案内の手順で戻す。子プロセスの強制終了と、TUI の起動の片付け・CLI からの続きは M3.5 の残りで判定する。"
 
 [[ac]]
 id = "AC-FR-901-1"

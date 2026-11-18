@@ -123,11 +123,23 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     imp::rename_no_replace(from, to)
 }
 
-/// シンボリックリンクかリパースポイント (Windows のジャンクションなどを含む) か。
+/// リンクか: シンボリックリンクと、Windows の名前の代理のリパースポイント (ジャンクションなど、
+/// タグに `IsReparseTagNameSurrogate` の 0x2000_0000 が立つもの)。名前の代理でないリパースポイント
+/// (OneDrive のクラウドのファイルなど) は通常のファイルとして扱う (12 §7.3)。
 /// `meta` は [`std::fs::symlink_metadata`] で取ったもの。
 #[must_use]
 pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
     imp::is_link_or_reparse_point(meta)
+}
+
+/// 読むためにファイルを開く。Unix では `O_NOFOLLOW` を付け、名前がシンボリックリンクなら失敗する
+/// (確かめた後に差し替えられたリンクの先を読まないため)。
+///
+/// # Errors
+///
+/// 開けないとき。
+pub fn open_nofollow(path: &Path) -> io::Result<std::fs::File> {
+    imp::open_nofollow(path)
 }
 
 /// 新しいファイルを排他で作る (`create_new`。既にあれば `AlreadyExists`)。読み書きで開く。
@@ -141,6 +153,33 @@ pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
 /// 作れないとき。
 pub fn create_new_file(path: &Path, unix_mode: u32) -> io::Result<std::fs::File> {
     imp::create_new_file(path, unix_mode)
+}
+
+/// ほかのプログラムがファイルを開いていないかを、削除の権限 (`DELETE`) と共有なし (`share_mode(0)`) で
+/// 開いて、すぐ閉じて確かめる。Windows だけ。再試行はしない ([`retry_locked`] で包む)。
+///
+/// 自分を改名してから置く置き換えで、`evorag.exe` を空ける前に、置くファイルを掴まれていないことを
+/// 確かめるために使う (12 §7.3 の「Windows の隙間」)。
+///
+/// # Errors
+///
+/// 開けないとき (ほかが開いていれば共有の違反)。
+#[cfg(windows)]
+pub fn check_not_open(path: &Path) -> io::Result<()> {
+    imp::check_not_open(path)
+}
+
+/// インストール先のフォルダに、今の利用者・SYSTEM・Administrators・TrustedInstaller のほかの相手へ
+/// 書き込みの類の権限を許す ACE があるか。Windows だけ。ACL を持たない置き場所・ネットワークの置き場所
+/// ([`acl_applicable`] が偽) では偽 (確かめられない)。継承だけの ACE は、中のファイルへ継承するもの
+/// (`OBJECT_INHERIT_ACE`) だけを見る (相手が CREATOR OWNER・CREATOR GROUP なら許す)。
+///
+/// # Errors
+///
+/// DACL を読めないとき。
+#[cfg(windows)]
+pub fn writable_by_others(dir: &Path) -> io::Result<bool> {
+    imp::writable_by_others(dir)
 }
 
 /// 動いているプロセスの実効の利用者の ID。Unix だけ。
@@ -202,11 +241,7 @@ mod imp {
                 Ok(v) => return Ok(v),
                 Err(e) => e,
             };
-            let transient = matches!(
-                e.raw_os_error(),
-                Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
-            );
-            if !transient || attempt == 7 {
+            if !is_lock_error(&e) || attempt == 7 {
                 return Err(e);
             }
             std::thread::sleep(wait);
@@ -234,9 +269,32 @@ mod imp {
     }
 
     pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        // std の is_symlink は、名前の代理のリパースポイント (タグの 0x2000_0000 が立つもの: シンボリック
+        // リンク・ジャンクションなど) で真になる。OneDrive のクラウドのファイルなどほかのリパースポイントは
+        // 通常のファイルとして扱う。
+        meta.file_type().is_symlink()
+    }
+
+    pub fn open_nofollow(path: &Path) -> io::Result<std::fs::File> {
+        std::fs::File::open(path)
+    }
+
+    pub fn check_not_open(path: &Path) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(0)
+            .open(path)
+            .map(drop)
+    }
+
+    pub fn writable_by_others(dir: &Path) -> io::Result<bool> {
+        let w = wide(dir)?;
+        if !crate::winacl::applicable(&w) {
+            return Ok(false);
+        }
+        crate::winacl::grants_write_to_others(&w)
     }
 
     pub fn create_new_file(path: &Path, _unix_mode: u32) -> io::Result<std::fs::File> {
@@ -343,6 +401,13 @@ mod imp {
 
     pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
         meta.file_type().is_symlink()
+    }
+
+    pub fn open_nofollow(path: &Path) -> io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
     }
 
     pub fn create_new_file(path: &Path, unix_mode: u32) -> io::Result<std::fs::File> {
@@ -562,5 +627,72 @@ mod tests {
         let before = is_private(dir.path()).unwrap();
         create_private_dir(dir.path()).unwrap();
         assert_eq!(is_private(dir.path()).unwrap(), before);
+    }
+
+    /// Windows: ほかが開いている (削除の共有なし) と、開けない。閉じれば開ける。
+    #[cfg(windows)]
+    #[test]
+    fn check_not_open_sees_other_handles() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = crate::testutil::TempDir::new("not-open");
+        let p = dir.path().join("f");
+        std::fs::write(&p, b"x").unwrap();
+        check_not_open(&p).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(&p)
+            .unwrap();
+        assert!(is_lock_error(&check_not_open(&p).unwrap_err()));
+        drop(held);
+        check_not_open(&p).unwrap();
+    }
+
+    /// Windows: 保護した DACL のフォルダは、ほかの利用者が書けない。Users に書き込みを許すと書ける。
+    /// TrustedInstaller と、継承だけの ACE は数えない。
+    #[cfg(windows)]
+    #[test]
+    fn writable_by_others_reads_the_dacl() {
+        let dir = crate::testutil::TempDir::new("writable-by-others");
+        if !acl_applicable(dir.path()).unwrap() {
+            eprintln!("skipped: the temp folder is on a volume without ACLs");
+            return;
+        }
+        let d = dir.path().join("install");
+        create_private_dir(&d).unwrap();
+        assert!(!writable_by_others(&d).unwrap());
+        let icacls = |arg: &str| {
+            std::process::Command::new("icacls")
+                .arg(&d)
+                .args(["/grant", arg])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(icacls(
+            "*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464:(F)"
+        ));
+        assert!(icacls("*S-1-3-0:(OI)(CI)(IO)(F)"));
+        assert!(icacls("*S-1-3-1:(OI)(IO)(M)"));
+        assert!(icacls("*S-1-5-32-545:(CI)(IO)(F)"));
+        assert!(icacls("*S-1-5-32-545:(RX)"));
+        assert!(!writable_by_others(&d).unwrap());
+        assert!(icacls("*S-1-5-32-545:(AD)"));
+        assert!(writable_by_others(&d).unwrap());
+        // 中に作るファイルへ継承する ACE (継承だけ) で、Users に変更を許す。
+        let d = dir.path().join("inherit");
+        create_private_dir(&d).unwrap();
+        let icacls = |arg: &str| {
+            std::process::Command::new("icacls")
+                .arg(&d)
+                .args(["/grant", arg])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(icacls("*S-1-5-32-545:(OI)(IO)(M)"));
+        assert!(writable_by_others(&d).unwrap());
     }
 }

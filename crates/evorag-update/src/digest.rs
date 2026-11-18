@@ -16,6 +16,25 @@ impl Sha256Digest {
         Self(Sha256::digest(bytes).into())
     }
 
+    /// 読み手の中身の SHA-256 と、読んだバイト数。中身を主記憶にまとめて読まず、少しずつ流し込む。
+    pub(crate) fn of_reader(mut reader: impl std::io::Read) -> std::io::Result<(Self, u64)> {
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buf[..n]);
+                    total += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((Self(hasher.finalize().into()), total))
+    }
+
     /// 32 バイトの値。
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
