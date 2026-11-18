@@ -89,6 +89,19 @@ pub fn with_view<T>(
     Ok(Some(f(&crate::export::ExportView::new(&rtx))))
 }
 
+/// ジャーナルの、種類 `kind` の `put` の行の単調に増える項目 `field` の値 (ID ごとに、行の数だけ)。何も書かない
+/// (`doctor` が、伏せ字の前の行の残りを数えるため、04 §7.2)。
+///
+/// # Errors
+/// ジャーナルのファイルを読めないとき。
+pub fn journal_revs(
+    root: &Path,
+    kind: &'static str,
+    field: &'static str,
+) -> std::io::Result<std::collections::BTreeMap<evorag_types::Id, Vec<u64>>> {
+    journal::put_revs(root, kind, field)
+}
+
 /// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。
 pub fn inspect_collect(
     root: &Path,

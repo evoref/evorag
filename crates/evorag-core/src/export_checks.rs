@@ -7,7 +7,8 @@
 //! - **含めない**: 忘れるの指示と合わないターン、出典が DB に無い派生の記録 (03 §4.2 の規則 12)、出典の改訂の
 //!   番号が今のターンと合わない派生の記録、当て直しが消す訂正とノート。private の事実は除かない (03 §11)。
 //!
-//! 伏せ字の印はプロンプトの言語で決まるが、書き出しは `meta` を読まないので、どれかの印で合えば合うとみなす。
+//! 伏せ字の印は、データ根のプロンプトの言語 (`meta` の `prompt.language`) で選ぶ (04 §7.3)。記録が無い・読めない
+//! ときだけ、どれかの印で合えば合うとみなす。
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,9 +19,8 @@ use evorag_memory::{
     REDACTION_MARKERS, RecallFeedbackBody, TurnBody, TurnForgets, TurnRole, ValueKey, note_matches,
     redaction_marker, turn_rev_checked,
 };
-use evorag_store::Envelope;
-use evorag_store::Read;
 use evorag_store::export::{ExportChecks, ExportView};
+use evorag_store::{Envelope, Read, meta};
 use evorag_types::Id;
 
 use crate::forgets::TurnCheck;
@@ -39,7 +39,10 @@ impl ExportFilter {
 
     fn prepared(&self, view: &ExportView<'_>) -> Option<&Prepared> {
         self.prepared
-            .get_or_init(|| Prepared::load(view, &REDACTION_MARKERS))
+            .get_or_init(|| {
+                let language = view.meta(meta::PROMPT_LANGUAGE).ok().flatten();
+                Prepared::load(view, &markers(language.as_deref()))
+            })
             .as_ref()
     }
 }
@@ -76,20 +79,71 @@ pub struct ForgetCheck {
 /// 記録を読めなければ `None`。
 #[must_use]
 pub fn forget_check(view: &ExportView<'_>, prompt_language: Option<&str>) -> Option<ForgetCheck> {
-    let one;
-    let markers: &[&str] = match prompt_language {
-        Some(l) => {
-            one = [redaction_marker(l)];
-            &one
-        }
-        None => &REDACTION_MARKERS,
-    };
-    let p = Prepared::load(view, markers)?;
+    let p = Prepared::load(view, &markers(prompt_language))?;
     Some(ForgetCheck {
         mismatched: p.excluded.len(),
         pending: p.pending,
         directives: p.directives,
     })
+}
+
+/// ジャーナルに残っている、伏せ字の前の `put` の行 (`doctor`、04 §7.2 の「ジャーナルの層の見つけ方」)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JournalLeftovers {
+    /// 伏せ字の後の番号より小さい改訂の番号の、ターンの `put` の行の数。
+    pub lines: usize,
+    /// その行の残っている忘れるの指示の数。
+    pub directives: usize,
+}
+
+/// ジャーナルのターンの `put` の行の改訂の番号 (`revs`、ID ごとに行の数だけ。
+/// [`evorag_store::inspect::journal_revs`]) のうち、忘れるの指示の伏せ字の後の番号より小さい行を数える。伏せ字の
+/// 後の番号以上の行がジャーナルに無いターンは数えない (書き直しは、その行があるときだけ前の行を除くため、03 §6)。
+/// 記録を読めなければ `None`。
+#[must_use]
+pub fn journal_leftovers(
+    view: &ExportView<'_>,
+    revs: &BTreeMap<Id, Vec<u64>>,
+) -> Option<JournalLeftovers> {
+    // ターンごとの、残っている行を除く基準 (伏せ字の後の番号のいちばん大きいもの)。
+    let mut cut: BTreeMap<Id, u64> = BTreeMap::new();
+    let mut directives: BTreeSet<Id> = BTreeSet::new();
+    view.for_each(KIND_FACT_DIRECTIVE, |x| {
+        if let Read::Ok(e) = x
+            && let Ok(b) = e.body_as::<FactDirectiveBody>()
+            && b.op == OP_FORGET
+        {
+            for r in &b.redactions {
+                let after = u64::from(r.rev_after);
+                let Some(lines) = revs.get(&r.turn) else {
+                    continue;
+                };
+                if lines.iter().any(|&v| v < after) && lines.iter().any(|&v| v >= after) {
+                    directives.insert(e.id);
+                    let c = cut.entry(r.turn).or_insert(after);
+                    *c = (*c).max(after);
+                }
+            }
+        }
+        true
+    })
+    .ok()?;
+    let lines = cut
+        .iter()
+        .map(|(t, after)| revs[t].iter().filter(|&&v| v < *after).count())
+        .sum();
+    Some(JournalLeftovers {
+        lines,
+        directives: directives.len(),
+    })
+}
+
+/// 伏せ字の印: データ根のプロンプトの言語 (`ja`・`en`) の印。言語の記録が無い・知らない値なら、すべての印。
+fn markers(prompt_language: Option<&str>) -> Vec<&'static str> {
+    match prompt_language {
+        Some(l @ ("ja" | "en")) => vec![redaction_marker(l)],
+        _ => REDACTION_MARKERS.to_vec(),
+    }
 }
 
 /// 伏せ字にしないで忘れた指示 1 つの、当て直しが消す訂正とノートの材料。

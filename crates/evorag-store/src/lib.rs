@@ -18,6 +18,7 @@ pub mod meta;
 pub mod migrate;
 pub mod recopy;
 pub mod relations;
+mod repair;
 pub mod restore;
 mod store;
 #[doc(hidden)]
@@ -32,6 +33,7 @@ pub use envelope::{BodyError, BodyPatch, DecodeError, Envelope};
 pub use journal::{JOURNAL_DIR, JournalCut, RevSpan, RewriteError, RewriteFault, RewriteReport};
 pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};
+pub use repair::Repaired;
 pub use store::{
     Census, DB_FILE, DeriveFn, Durability, FORMAT_MIN, FORMAT_VERSION, KIND_QUARANTINE, KindCount,
     KindSpec, OpenError, OpenOptions, OpenReport, PendingDeletes, RESERVE_FILE, Read,

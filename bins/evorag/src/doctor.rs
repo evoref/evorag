@@ -164,6 +164,27 @@ pub fn run(
                 if f.directives > 0 && !key_ok {
                     say(c, MessageKey::DoctorForgetKeyMissing, &[]);
                 }
+                // ジャーナルに残っている伏せ字の前の行 (書き直しの済んでいない忘れる、04 §7.2)。
+                if f.directives > 0
+                    && let Ok(revs) = evorag_store::inspect::journal_revs(
+                        data_root,
+                        evorag_memory::KIND_TURN,
+                        evorag_memory::TURN_REV_FIELD,
+                    )
+                    && let Ok(Some(Some(j))) = evorag_store::inspect::with_view(data_root, |v| {
+                        evorag_core::export_checks::journal_leftovers(v, &revs)
+                    })
+                    && j.lines > 0
+                {
+                    say(
+                        c,
+                        MessageKey::DoctorForgetJournalLines,
+                        &[
+                            ("lines", &j.lines.to_string()),
+                            ("directives", &j.directives.to_string()),
+                        ],
+                    );
+                }
             }
         }
     }

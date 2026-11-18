@@ -452,6 +452,28 @@ message_keys! {
     CliFactsKeyMalformed => "cli.facts_key.malformed",
     CliFactsKeyReadOnly => "cli.facts_key.read_only",
     CliRestoredFromJournal => "cli.restored_from_journal",
+    /// `repair` の結果。引数: `backup`・`replayed`・`deletes`・`restored`・`lower`・`quarantined`・`metas`・
+    /// `bad_lines`・`links_added`・`links_removed`・`lookups_added`・`lookups_removed`。
+    CliRepaired => "cli.repaired",
+    /// `repair` の忘れるの当て直し。引数: `patched`・`retracted`・`deleted`・`mismatched`。
+    CliRepairedForgets => "cli.repaired_forgets",
+    /// ジャーナルの伏せ字の前の行を除けなかった。
+    CliRepairJournalPending => "cli.repair_journal_pending",
+    /// 値の鍵が使えないので、忘れた値の事実の取り消しを当てていない。
+    CliRepairKeyMissing => "cli.repair_key_missing",
+    /// 引数: `detail`。
+    CliRepairFailed => "cli.repair_failed",
+    /// ストアの層をコミットした後に失敗した。引数: `restored`・`links_added`・`links_removed`・`lookups_added`・
+    /// `lookups_removed`・`detail`・`backup`。
+    CliRepairFailedAfterStore => "cli.repair_failed_after_store",
+    /// DB のファイルが壊れていたので、`repair` ではなく `restore` で戻す案内。
+    CliRepairBrokenHint => "cli.repair_broken_hint",
+    /// データ根のフォルダが無い (何も作らずに断った)。引数: `path`。
+    CliDataRootMissing => "cli.data_root_missing",
+    /// データ根が新しい形式なので書き換えない。引数: `min_write`。
+    CliReadOnlyNewerFormat => "cli.read_only_newer_format",
+    /// 古い形式のデータ根を移行できず、読むだけで開いた。引数: `reason`。
+    CliReadOnlyMigrationFailed => "cli.read_only_migration_failed",
     /// llama-server が API キーを拒んだ。引数: `url`、`status`、`env`。
     CliLlmUnauthorized => "cli.llm_unauthorized",
     /// データ根をほかの evorag が使っている。引数: `path`、`pid`。
@@ -540,6 +562,8 @@ message_keys! {
     DoctorForgetMismatched => "doctor.forget_mismatched",
     /// 当て直しの済んでいない忘れるがある (次の起動で当て直す、04 §7.2)。
     DoctorForgetPending => "doctor.forget_pending",
+    /// ジャーナルに伏せ字の前の行が残っている。引数: `lines`・`directives`。
+    DoctorForgetJournalLines => "doctor.forget_journal_lines",
     /// 忘れるの指示があるのに再び覚えない印の鍵が使えない (鍵に頼る当て直しを止めている、03 §3.1.1)。
     DoctorForgetKeyMissing => "doctor.forget_key_missing",
     /// 引数: `docs`, `segments`。
@@ -550,6 +574,14 @@ message_keys! {
     /// 引数: `kind`, `dir`, `seq`。
     BackupsItem => "backups.item",
     BackupsNone => "backups.none",
+    /// `backups purge` の確認。引数: `count`。
+    BackupsPurgeAsk => "backups.purge_ask",
+    /// 確かめなかったので消さなかった。
+    BackupsPurgeDeclined => "backups.purge_declined",
+    /// 引数: `count`。
+    BackupsPurged => "backups.purged",
+    /// 消せなかった退避がある。引数: `count`・`detail`。
+    BackupsPurgeFailed => "backups.purge_failed",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
 }

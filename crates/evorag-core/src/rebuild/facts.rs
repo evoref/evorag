@@ -16,20 +16,16 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use evorag_llm::{
-    ChatMessage, ChatRequest, Generation, LlmClient, LlmError, RequestExtra, Role, ServerInfo,
-};
+use evorag_llm::{ChatRequest, LlmClient, LlmError, RequestExtra, ServerInfo};
 use evorag_memory::{
-    Counting, Directives, EXTRACT_MAX_TOKENS, Event as FactEvent, ExtractionOutput, FactCtx,
-    ForgetEnv, ForgetKey, GateEnv, GateReason, KIND_FACT, ROLE_CHAT, Safety, Screened, Utterance,
-    attributes, check_candidates, extraction_fits, extraction_input, extraction_schema,
+    Counting, Directives, Event as FactEvent, ExtractionOutput, FactCtx, ForgetEnv, ForgetKey,
+    GateReason, KIND_FACT, ROLE_CHAT, Safety, Screened, attributes, extraction_fits,
     extraction_system, hidden_marker, load_bindings, load_corrections, load_directives,
     load_extract_progress, load_probe, pack, parse_extraction, prefilter, redaction_marker,
     replay_forgets, user_utterances_after, utterance_budget,
 };
 use evorag_store::{Durability, Priority, Read, Store, WriteOp, WriteRequest, WriterHandle, meta};
 use evorag_types::{Clock, Id, IdGen};
-use serde_json::json;
 
 use super::RebuildError;
 use crate::PromptLanguage;
@@ -346,33 +342,12 @@ struct Extractor<'a> {
 impl Extractor<'_> {
     /// 抽出の要求 (sleep-time の抽出と同じ形: 型縛り・temperature 0・固定の seed・裏のスロット、06 §6)。
     fn request(&self, texts: &[&str]) -> ChatRequest {
-        let mut extra = self.aux_request_extra.clone();
-        extra.insert(
-            "response_format".into(),
-            json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "fact_candidates",
-                    "strict": true,
-                    "schema": extraction_schema(attributes(), texts.len())
-                }
-            }),
-        );
-        ChatRequest {
-            messages: vec![
-                ChatMessage::new(Role::System, self.system.clone()),
-                ChatMessage::new(Role::User, extraction_input(texts.iter().copied())),
-            ],
-            generation: Generation {
-                temperature: 0.0,
-                top_p: 1.0,
-                max_tokens: Some(EXTRACT_MAX_TOKENS),
-                seed: Some(1),
-            },
-            id_slot: self.slot,
-            model: None,
-            extra,
-        }
+        crate::extraction::extraction_request(
+            self.aux_request_extra,
+            self.slot,
+            &self.system,
+            texts,
+        )
     }
 
     /// 束を送り、型で読む。型に合わなければ 1 回だけやり直す。
@@ -401,37 +376,18 @@ impl Extractor<'_> {
         Reply::Invalid
     }
 
-    /// 候補に、属性の一覧の確認と関門 1〜8 を当て、通ったものを統合の出来事にする。
+    /// 候補に、属性の一覧の確認と関門 1〜8 を当て、通ったものを統合の出来事にする (sleep-time の抽出と同じ)。
     fn gate(&mut self, items: &[&Item], out: ExtractionOutput) -> Vec<FactEvent> {
-        let safety = Safety::bundled();
-        let env = GateEnv {
-            attributes: attributes(),
-            safety: &safety,
-            key: self.key,
-            directives: self.directives,
-        };
-        let mut events = Vec::new();
-        for (item, raws) in items.iter().zip(out.by_utterance) {
-            let Screened::Send(filtered) = &item.screened else {
-                continue;
-            };
-            let u = Utterance {
-                turn: item.turn,
-                rev: item.rev,
-                text: &item.text,
-                filtered,
-            };
-            for r in check_candidates(&env, &u, &raws) {
-                match r {
-                    Ok(a) => events.push(FactEvent::Candidate(a.candidate)),
-                    Err(reason) => *self.gate_rejected.entry(reason.as_str()).or_default() += 1,
-                }
-            }
-        }
-        if out.out_of_batch > 0 {
-            *self.gate_rejected.entry("out_of_batch").or_default() += out.out_of_batch;
-        }
-        events
+        let sent = items
+            .iter()
+            .map(|it| (it.turn, it.rev, it.text.as_str(), &it.screened));
+        crate::extraction::gate_batch(
+            self.key,
+            self.directives,
+            sent,
+            out,
+            &mut self.gate_rejected,
+        )
     }
 
     /// 1 つの束を処理する。切れたら半分に分けて送り直し、型が合わない・切れた 1 つの発話の部分は飛ばして数える。

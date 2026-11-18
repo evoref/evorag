@@ -266,6 +266,17 @@ const OP_REVERT: &str = "revert";
 /// 指示の `op`: 印を解く (04 §7.5)。
 pub const OP_UNBLOCK: &str = "unblock";
 
+/// 記録が忘れるの指示か (`repair` が `forget.recheck` を立てるかを決める、03 §10)。本体の `op` だけを読む
+/// (新しい版の指示も、`op` が読めれば含める。印を立てすぎても当て直しが job を作り直すだけで、害が無いため)。
+#[must_use]
+pub fn is_forget_directive(e: &Envelope) -> bool {
+    #[derive(Deserialize)]
+    struct OpField {
+        op: String,
+    }
+    e.kind == KIND_FACT_DIRECTIVE && e.body_as::<OpField>().is_ok_and(|b| b.op == OP_FORGET)
+}
+
 impl FactDirectiveBody {
     /// 核の指示の形にする。知らない `op` は印だけを当てる `Unknown` にする (04 §7.5)。
     fn to_directive(&self, id: Id) -> Directive {
@@ -483,6 +494,15 @@ fn directive_entries(e: &Envelope) -> BTreeSet<IndexEntry> {
     }
     out
 }
+
+/// [`derive_fact`] が作りうる関係の名前 ([`fact_entries`])。
+pub(crate) const FACT_RELS: &[&str] = &[REL_FACT_SRC];
+/// [`derive_fact`] が作りうる副索引の項目。
+pub(crate) const FACT_LOOKUPS: &[&str] = &[LOOKUP_SA, LOOKUP_VK];
+/// [`derive_directive`] が作りうる関係の名前 ([`directive_entries`])。
+pub(crate) const DIRECTIVE_RELS: &[&str] = &[REL_CANCELS];
+/// [`derive_directive`] が作りうる副索引の項目。
+pub(crate) const DIRECTIVE_LOOKUPS: &[&str] = &[LOOKUP_SA, LOOKUP_VK, LOOKUP_MARK];
 
 /// `fact` の関係と副索引 (ジャーナルの取り込みや repair で、本体から作り直すときにも使う)。
 pub(crate) fn derive_fact(e: &Envelope) -> Vec<WriteOp> {

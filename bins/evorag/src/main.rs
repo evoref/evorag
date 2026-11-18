@@ -15,8 +15,8 @@ use std::sync::Arc;
 use clap::Parser;
 use evorag_core::{Core, CoreConfig, PromptLanguage, StartError};
 use evorag_llm::{Endpoint, Generation, HttpClient, RetryPolicy};
-use evorag_store::OpenError;
 use evorag_store::lock::LockError;
+use evorag_store::{OpenError, ReadOnlyReason};
 use evorag_tui::app::{App, Status};
 use evorag_tui::catalog::Catalog;
 use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
@@ -97,12 +97,20 @@ enum Sub {
         /// 退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb
         backup: PathBuf,
     },
+    /// 副索引と関係を記録から作り直し、ジャーナルにあって DB に無い記録を戻し、忘れる・削除を当て直す (先に退避する)
+    Repair,
 }
 
 #[derive(clap::Subcommand)]
 enum BackupsAction {
     /// 退避の一覧 (新しい順)
     List,
+    /// すべての退避 (日次・週次・移行と作り直しの前の退避) を消す
+    Purge {
+        /// 尋ねずに消す
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `rebuild` の作り直す範囲。
@@ -346,13 +354,229 @@ fn rebuild(
     }
 }
 
-/// y / n を尋ねる。端末でなければ n。
+/// `evorag repair` (03 §10、FR-211)。
+fn repair(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+    config_file: &std::path::Path,
+    prompt_language: PromptLanguage,
+    clock: Arc<dyn evorag_types::Clock>,
+) -> ExitCode {
+    use evorag_core::repair::{RepairError, RepairOptions};
+
+    let ids = Arc::new(UuidV7Gen::new(clock.clone()));
+    match evorag_core::repair::run(RepairOptions {
+        data_root: data_root.to_path_buf(),
+        // semver だけを書く (`VERSION` は作りの情報を含み、`meta` の版として読めない)。
+        evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
+        config_file: Some(config_file.to_path_buf()),
+        prompt_language,
+        clock,
+        ids,
+    }) {
+        Ok(r) => {
+            let s = &r.store;
+            let n = |v: usize| v.to_string();
+            let m = catalog.with(
+                MessageKey::CliRepaired,
+                &[
+                    ("backup", &r.backup.display().to_string()),
+                    ("replayed", &n(r.journal_replayed)),
+                    ("deletes", &n(r.journal_deletes)),
+                    ("restored", &n(s.restored_total())),
+                    ("lower", &n(s.lower_rev_skipped)),
+                    ("quarantined", &n(s.quarantined)),
+                    ("metas", &n(s.metas_restored)),
+                    ("bad_lines", &n(s.journal_bad_lines)),
+                    ("links_added", &n(s.links_added)),
+                    ("links_removed", &n(s.links_removed)),
+                    ("lookups_added", &n(s.lookups_added)),
+                    ("lookups_removed", &n(s.lookups_removed)),
+                ],
+            );
+            eprintln!("{}", m.replace("\\n", "\n"));
+            let f = &r.forgets;
+            if f.patched + f.retracted + f.deleted + f.mismatched > 0 {
+                let m = catalog.with(
+                    MessageKey::CliRepairedForgets,
+                    &[
+                        ("patched", &n(f.patched)),
+                        ("retracted", &n(f.retracted)),
+                        ("deleted", &n(f.deleted)),
+                        ("mismatched", &n(f.mismatched)),
+                    ],
+                );
+                eprintln!("{m}");
+            }
+            if f.journal_pending {
+                eprintln!("{}", catalog.key(MessageKey::CliRepairJournalPending));
+            }
+            if f.key_missing {
+                eprintln!("{}", catalog.key(MessageKey::CliRepairKeyMissing));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(RepairError::Open(OpenError::Lock(LockError::InUse { pid }))) => {
+            data_root_in_use(catalog, data_root, pid)
+        }
+        Err(RepairError::NoDataRoot(path)) => fail(
+            catalog,
+            2,
+            MessageKey::CliDataRootMissing,
+            &[("path", &path.display().to_string())],
+        ),
+        // DB のファイルが壊れていたので `broken/` へ移した。repair では直せないので、restore を案内する (03 §8)。
+        Err(RepairError::Open(OpenError::Broken { moved_to, reason })) => {
+            eprintln!(
+                "{}",
+                catalog.with(
+                    MessageKey::CliBroken,
+                    &[
+                        ("moved_to", &moved_to.display().to_string()),
+                        ("reason", &reason)
+                    ]
+                )
+            );
+            fail(catalog, 2, MessageKey::CliRepairBrokenHint, &[])
+        }
+        Err(RepairError::ReadOnly(why)) => {
+            let (key, args) = match &why {
+                ReadOnlyReason::NewerFormat { min_write } => (
+                    MessageKey::CliReadOnlyNewerFormat,
+                    [("min_write", min_write.as_str())],
+                ),
+                ReadOnlyReason::MigrationFailed { reason } => (
+                    MessageKey::CliReadOnlyMigrationFailed,
+                    [("reason", reason.as_str())],
+                ),
+            };
+            fail(catalog, 2, key, &args)
+        }
+        // データ根が使えない (ロック・新しい形式・ほかのプロセスが DB を開いている、07 §5 の終了コード 2)。
+        Err(
+            e @ RepairError::Open(
+                OpenError::Lock(_) | OpenError::DatabaseInUse | OpenError::TooNew { .. },
+            ),
+        ) => fail(
+            catalog,
+            2,
+            MessageKey::CliDataRootUnusable,
+            &[("detail", &e.to_string())],
+        ),
+        // ストアの層はコミットした後の失敗。戻した記録と作り直した関係を示し、退避の場所を案内する。
+        Err(RepairError::AfterStore {
+            store,
+            backup,
+            source,
+        }) => {
+            let n = |v: usize| v.to_string();
+            fail(
+                catalog,
+                1,
+                MessageKey::CliRepairFailedAfterStore,
+                &[
+                    ("restored", &n(store.restored_total())),
+                    ("links_added", &n(store.links_added)),
+                    ("links_removed", &n(store.links_removed)),
+                    ("lookups_added", &n(store.lookups_added)),
+                    ("lookups_removed", &n(store.lookups_removed)),
+                    ("detail", &source.to_string()),
+                    ("backup", &backup.display().to_string()),
+                ],
+            )
+        }
+        Err(e) => fail(
+            catalog,
+            1,
+            MessageKey::CliRepairFailed,
+            &[("detail", &e.to_string())],
+        ),
+    }
+}
+
+/// `evorag backups purge [--yes]` (03 §7.3・§10、FR-213)。データ根のロックを取ってから、確認の後に、すべての
+/// 退避を消す (TUI が動いていれば断る、03 §9)。
+fn purge_backups(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+    backup_dir: Option<&std::path::Path>,
+    yes: bool,
+) -> ExitCode {
+    use evorag_store::restore::{list_backups, purge_all_backups};
+
+    let _lock = match lock_data_root(catalog, data_root) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let count = list_backups(data_root, backup_dir).len();
+    // 消す退避が無くても、作りかけの退避は消す (尋ねない。戻せるものを消さないため)。
+    if count > 0 {
+        let ask = catalog.with(
+            MessageKey::BackupsPurgeAsk,
+            &[("count", &count.to_string())],
+        );
+        if !yes && !ask_yes(&ask) {
+            eprintln!("{}", catalog.key(MessageKey::BackupsPurgeDeclined));
+            return ExitCode::from(1);
+        }
+    }
+    let purged = purge_all_backups(data_root, backup_dir);
+    let removed = purged.removed.to_string();
+    if purged.failed.is_empty() {
+        let m = if purged.removed == 0 {
+            catalog.key(MessageKey::BackupsNone)
+        } else {
+            catalog.with(MessageKey::BackupsPurged, &[("count", &removed)])
+        };
+        eprintln!("{m}");
+        ExitCode::SUCCESS
+    } else {
+        fail(
+            catalog,
+            1,
+            MessageKey::BackupsPurgeFailed,
+            &[("count", &removed), ("detail", &purged.failed.join("; "))],
+        )
+    }
+}
+
+/// データ根のロックを取る (`backups list`・`backups purge`。TUI など、ほかの evorag が使っていれば終了コード 2 で
+/// 断る、03 §9)。データ根がまだ無ければ、使っているプロセスも無いので取らない (何も作らない)。
+fn lock_data_root(
+    catalog: &Catalog,
+    data_root: &std::path::Path,
+) -> Result<Option<evorag_store::lock::DataRootLock>, ExitCode> {
+    use evorag_store::lock::DataRootLock;
+
+    if !data_root.exists() {
+        return Ok(None);
+    }
+    match DataRootLock::acquire(data_root) {
+        Ok(l) => Ok(Some(l)),
+        Err(LockError::InUse { pid }) => Err(data_root_in_use(catalog, data_root, pid)),
+        Err(e) => Err(fail(
+            catalog,
+            2,
+            MessageKey::CliDataRootUnusable,
+            &[("detail", &e.to_string())],
+        )),
+    }
+}
+
+/// y / n を尋ねる。標準入力から 1 行を読み、`y`・`yes` (大文字・小文字を問わない) のときだけ真。ほかの答え・空の
+/// 行・入力の終わり (端末でないときなど)・読めないときは偽 (n)。
 fn ask_yes(prompt: &str) -> bool {
     use std::io::{BufRead, Write};
     eprint!("{prompt} [y/N] ");
     let _ = std::io::stderr().flush();
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => false,
+        Ok(_) => {
+            let answer = line.trim();
+            answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
+        }
+    }
 }
 
 /// データ根をほかの evorag が使っている (終了コード 2、NFR-604)。
@@ -530,11 +754,16 @@ fn main() -> ExitCode {
             llm,
         );
     }
-    if let Some(Sub::Backups {
-        action: BackupsAction::List,
-    }) = &args.command
-    {
-        return doctor::list_backups(&catalog, &data_root, backup_dir.as_deref());
+    if let Some(Sub::Backups { action }) = &args.command {
+        return match action {
+            BackupsAction::List => match lock_data_root(&catalog, &data_root) {
+                Ok(_lock) => doctor::list_backups(&catalog, &data_root, backup_dir.as_deref()),
+                Err(code) => code,
+            },
+            BackupsAction::Purge { yes } => {
+                purge_backups(&catalog, &data_root, backup_dir.as_deref(), *yes)
+            }
+        };
     }
     if let Some(Sub::Export { out }) = &args.command {
         return export::run(
@@ -613,6 +842,15 @@ fn main() -> ExitCode {
                 &[("detail", &e.to_string())],
             ),
         };
+    }
+    if let Some(Sub::Repair) = &args.command {
+        return repair(
+            &catalog,
+            &data_root,
+            &config_file,
+            prompt_language,
+            clock.clone(),
+        );
     }
 
     // 設定の表を JSON に写す (`chat_template_kwargs = { enable_thinking = false }` など)。

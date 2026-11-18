@@ -13,12 +13,16 @@ use evorag_core::rebind::DataRootModels;
 use evorag_core::{Core, CoreConfig, PromptLanguage};
 use evorag_llm::Generation;
 use evorag_llm::replay::ReplayClient;
-use evorag_memory::{ForgetEnv, ForgetKey, ForgetOptions, KIND_TURN, ModelProbeBody, TurnBody};
+use evorag_memory::{
+    ChunkBody, ForgetEnv, ForgetKey, ForgetOptions, KIND_CHUNK, KIND_FACT, KIND_FACT_DIRECTIVE,
+    KIND_SESSION, KIND_TURN, ModelProbeBody, REL_IN_SESSION, TurnBody,
+};
 use evorag_store::export::{ExportError, ExportOptions, export};
+use evorag_store::migrate::FormatPlan;
 use evorag_store::testutil::TempDir;
 use evorag_store::{
-    BodyPatch, OpenOptions, Read, RewriteFault, Store, WriteOp, WriteRequest, Writer, WriterHandle,
-    meta,
+    BodyPatch, Envelope, LookupRange, OpenOptions, Read, RewriteFault, Store, WriteOp,
+    WriteRequest, Writer, WriterHandle, meta,
 };
 use evorag_types::api::{
     Command, Event, FactKey, FactList, FactRow, ForgetOptions as ForgetChoices, ForgetPlanHash,
@@ -301,6 +305,76 @@ impl Closed {
             Some(Read::Ok(e)) => (e.body_as().unwrap(), e.body_uint("rev").unwrap_or(0)),
             other => panic!("{other:?}"),
         }
+    }
+}
+
+impl Closed {
+    /// v0.2.x の evorag のふりをして開く: 形式の版 0.2 だけを知り、v0.3 の種類 (事実・訂正・事実への指示) と
+    /// ターンの改訂の番号を知らない (09 §3.6 の「忘れると古い版」)。
+    fn open_v0_2(root: &Path, at: i64) -> Self {
+        let clock = clock_at(at);
+        let v0_3 = [
+            evorag_memory::KIND_FACT,
+            evorag_memory::KIND_CORRECTION,
+            evorag_memory::KIND_FACT_DIRECTIVE,
+        ];
+        let kinds = evorag_memory::kinds()
+            .into_iter()
+            .filter(|k| !v0_3.contains(&k.name))
+            .map(|k| evorag_store::KindSpec {
+                monotonic: None,
+                ..k
+            })
+            .collect();
+        let plan = FormatPlan {
+            version: "0.2".into(),
+            min_read: "0.1".into(),
+            min_write: "0.1".into(),
+            migrations: Vec::new(),
+        };
+        let (store, report) = Store::open_with(
+            OpenOptions {
+                data_root: root.to_path_buf(),
+                evorag_version: "0.2.0".into(),
+                kinds,
+                clock: clock.clone(),
+                ids: Arc::new(UuidV7Gen::with_seed(clock.clone(), 51)),
+                config_file: None,
+            },
+            plan,
+        )
+        .unwrap();
+        assert_eq!(report.read_only, None, "v0.2.x can still write");
+        let store = Arc::new(store);
+        let (writer, handle) = Writer::new(store.clone()).unwrap();
+        let thread = std::thread::spawn(move || writer.run());
+        Self {
+            store,
+            handle,
+            thread: Some(thread),
+            ids: UuidV7Gen::with_seed(clock.clone(), 52),
+            clock,
+        }
+    }
+
+    fn envelope(&self, kind: &str, id: Id) -> Envelope {
+        match self.store.read().unwrap().get(kind, id).unwrap() {
+            Some(Read::Ok(e)) => e,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn all(&self, kind: &str) -> Vec<Envelope> {
+        let tx = self.store.read().unwrap();
+        let mut out = Vec::new();
+        tx.for_each(kind, |r| {
+            if let Read::Ok(e) = r {
+                out.push(e);
+            }
+            true
+        })
+        .unwrap();
+        out
     }
 }
 
@@ -1174,4 +1248,391 @@ async fn deleting_a_session_asks_to_erase_the_slot_caches() {
     core.settle().await;
     assert_eq!(llm.erased_slots(), [0, 1]);
     core.shutdown().await;
+}
+
+fn repair_options(root: &Path, at: i64, seed: u64) -> evorag_core::repair::RepairOptions {
+    let clock = clock_at(at);
+    evorag_core::repair::RepairOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.6".into(),
+        config_file: None,
+        prompt_language: PromptLanguage::Ja,
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, seed)),
+    }
+}
+
+/// `repair` は、実行の前に退避し、DB から消えたターンと忘れるの指示をジャーナルから戻し (改訂の番号を下げる行は
+/// 当てない)、失った副索引を記録から作り直し、DB から失った忘れるの層 (事実の取り消し) とジャーナルの伏せ字の前の
+/// 行の除去を当て直す。次の起動で、退避からも値を除く。
+///
+/// verifies: 03 §10 (`repair`)、04 §7.2 (repair の当て直し)、AC-FR-211-1
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_restores_lost_turns_and_lookups_and_replays_forgets() {
+    let dir = TempDir::new("repair");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    // 忘れる前のターンと事実を取っておく。
+    let (before, facts_before) = {
+        let c = Closed::open(root);
+        (c.envelope(KIND_TURN, turn), c.all(KIND_FACT))
+    };
+    assert!(!facts_before.is_empty());
+    let (core, _rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + 1_000)).await;
+    let directive = core
+        .forget_now(key, ForgetOptions::default())
+        .await
+        .unwrap();
+    core.shutdown().await;
+    let journal = root.join(evorag_store::JOURNAL_DIR);
+    assert!(files_with(&journal, VALUE).is_empty());
+    {
+        let c = Closed::open(root);
+        // 伏せ字の前の写しが、ジャーナルの後ろに書き戻された (改訂の番号の小さい行)。
+        c.write(vec![WriteOp::Put(before)]);
+        // 事実の取り消しを失った (忘れる前の事実。関係と副索引は書かない。repair が記録から作る)。
+        c.write(facts_before.into_iter().map(WriteOp::Put).collect());
+    }
+    assert!(!files_with(&journal, VALUE).is_empty());
+    // DB から、ターンと忘れるの指示と、セッションの副索引を失う。
+    evorag_store::testutil::raw_remove_record(root, KIND_TURN, turn);
+    evorag_store::testutil::raw_remove_record(root, KIND_FACT_DIRECTIVE, directive);
+    assert!(evorag_store::testutil::raw_remove_lookups(root, KIND_SESSION) > 0);
+
+    let r = evorag_core::repair::run(repair_options(root, T0 + 2_000, 11)).unwrap();
+    assert!(r.backup.join(evorag_store::DB_FILE).is_file(), "{r:?}");
+    assert_eq!(r.store.restored.get(KIND_TURN), Some(&1), "{r:?}");
+    assert_eq!(r.store.restored.get(KIND_FACT_DIRECTIVE), Some(&1), "{r:?}");
+    assert!(r.store.lower_rev_skipped >= 1, "{r:?}");
+    assert!(r.store.lookups_added >= 1, "{r:?}");
+    assert!(r.forgets.retracted >= 1, "{r:?}");
+    assert!(
+        !r.forgets.journal_pending && !r.forgets.key_missing,
+        "{r:?}"
+    );
+    {
+        let c = Closed::open(root);
+        let (body, rev) = c.turn(turn);
+        assert_eq!(rev, 1, "the line from before the redaction is not applied");
+        assert!(body.text.contains(MARKER) && !body.text.contains(VALUE));
+        c.envelope(KIND_FACT_DIRECTIVE, directive);
+        let tx = c.store.read().unwrap();
+        // セッションの副索引と、戻したターンの関係を作り直した。
+        let sessions: Vec<Id> = c.all(KIND_SESSION).iter().map(|e| e.id).collect();
+        let indexed: Vec<Id> = tx
+            .lookup(
+                KIND_SESSION,
+                "updated_at",
+                &LookupRange::Between {
+                    from: None,
+                    to: None,
+                },
+                false,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(!sessions.is_empty());
+        assert!(sessions.iter().all(|s| indexed.contains(s)), "{indexed:?}");
+        assert_eq!(tx.links_from(turn, REL_IN_SESSION).unwrap().len(), 1);
+        let live = evorag_memory::load_facts(&tx).unwrap().set;
+        assert!(
+            live.facts.iter().all(|f| f.value.as_deref() != Some(VALUE)),
+            "{live:?}"
+        );
+        assert_eq!(c.recheck_flag().as_deref(), Some("1"));
+    }
+    assert!(files_with(&journal, VALUE).is_empty());
+
+    // 次の起動で、すべての忘れるの指示の退避の写し直しの job を作り直し、退避 (repair の前の退避を含む) から値を
+    // 除く。
+    let (core, mut rx, report) = start(root, &chat(&[]), 9, clock_at(T0 + 3_000)).await;
+    assert!(report.forget.mismatched.is_empty(), "{:?}", report.forget);
+    let list = facts(&core, &mut rx).await;
+    assert!(value_key_of(&list, VALUE).is_none(), "{list:?}");
+    assert_eq!(core.pending_cleanup_jobs(), 0);
+    core.shutdown().await;
+    let hits = files_with(&root.join("backups"), VALUE);
+    assert!(hits.is_empty(), "{hits:?}");
+    assert_eq!(Closed::open(root).recheck_flag(), None);
+}
+
+/// 伏せ字にしないで忘れると、本文は変えずに、値を事実の表・`/memory`・事実から作った検索の鍵から除き、添えた
+/// 往復の中では `[非表示]` にする。
+///
+/// verifies: 04 §7.1・§7.5 (伏せ字にしない忘れる)、AC-FR-307-7
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unredacted_forget_hides_the_value_from_facts_keys_and_attached_exchanges() {
+    let dir = TempDir::new("forget-unredacted");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    let fact_keys = |c: &Closed| {
+        let tx = c.store.read().unwrap();
+        evorag_memory::fact_keys(&evorag_memory::load_facts(&tx).unwrap().set)
+    };
+    // 対照: 忘れる前は、事実から作った検索の鍵に値がある。
+    assert!(
+        fact_keys(&Closed::open(root))
+            .iter()
+            .any(|k| k.text.contains(VALUE))
+    );
+    let llm = chat(&[reply(REPLY)]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 1_000)).await;
+    core.forget_now(
+        key,
+        ForgetOptions {
+            redact: false,
+            ..ForgetOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let list = facts(&core, &mut rx).await;
+    assert!(value_key_of(&list, VALUE).is_none(), "{list:?}");
+    new_session(&core, &mut rx).await;
+    let answer = ask(&core, &mut rx, ASK).await;
+    assert_eq!(answer.sources, 1, "the exchange is still attached");
+    let sent: Vec<String> = llm
+        .requests()
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    // 事実の表 (システムのプロンプト) にも、添えた往復にも値が出ず、添えた往復では `[非表示]` になる。
+    assert!(sent.iter().all(|m| !m.contains(VALUE)), "{sent:?}");
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("[非表示]") && m.contains("どれくらいの頻度")),
+        "{sent:?}"
+    );
+    core.shutdown().await;
+    let c = Closed::open(root);
+    let (body, rev) = c.turn(turn);
+    assert_eq!(rev, 0, "the utterance is not redacted");
+    assert!(body.text.contains(VALUE));
+    let keys = fact_keys(&c);
+    assert!(keys.iter().all(|k| !k.text.contains(VALUE)), "{keys:?}");
+}
+
+/// v0.3 で起動する (試験の版の文字列を `0.3.0` にする)。
+async fn start_v0_3(
+    root: &Path,
+    llm: ReplayClient,
+    seed: u64,
+    at: i64,
+) -> (Core, UnboundedReceiver<Event>, evorag_core::StartReport) {
+    let (core, rx, report) =
+        Core::start(config_as(root, seed, clock_at(at), "0.3.0"), Arc::new(llm))
+            .await
+            .unwrap();
+    core.settle().await;
+    settle(&core).await;
+    (core, rx, report)
+}
+
+/// v0.3 で忘れた後のデータ根を v0.2.x で開いて使い (伏せ字の前の写しを書き戻し、別のセッションを消す)、v0.3 で
+/// 開き直しても、事実への指示は残り、忘れた値は蘇らない (当て直して伏せ字に戻し、ジャーナル・退避・compact の後の
+/// DB から除く)。v0.2.x が消したセッションの派生の記録は、規則 12 の突き合わせで消える。前回書いた版が 0.3.0 より
+/// 古いので、すべての忘れるの指示の退避の写し直しの job を作り直して、印を消す。
+///
+/// verifies: 03 §4.2 の規則 6・12、04 §7.2、09 §3.6 (忘れると古い版)、AC-FR-307-6
+#[tokio::test(flavor = "multi_thread")]
+async fn forgets_survive_a_round_trip_through_v0_2() {
+    let dir = TempDir::new("forget-v0-2");
+    let root = dir.path();
+    prepare(root);
+    // v0.3: 忘れる事実のある会話と、事実の無い別のセッションの会話。
+    let (turn, other, key) = {
+        let llm = chat(&[
+            reply(REPLY),
+            reply(LIVES_FACT),
+            reply(REPLY),
+            reply(r#"{"c": []}"#),
+        ]);
+        let (core, mut rx, _) = start_v0_3(root, llm, 7, T0).await;
+        new_session(&core, &mut rx).await;
+        let turn = say(&core, &mut rx, LIVES).await;
+        let key = value_key_of(&facts(&core, &mut rx).await, VALUE).expect("the fact");
+        new_session(&core, &mut rx).await;
+        let other = say(&core, &mut rx, "観葉植物の植え替えの時期を知りたい").await;
+        core.shutdown().await;
+        (turn, other, key)
+    };
+    let before = Closed::open_as(root, "0.3.0").envelope(KIND_TURN, turn);
+    let (core, _rx, _) = start_v0_3(root, chat(&[]), 8, T0 + 1_000).await;
+    core.forget_now(key, ForgetOptions::default())
+        .await
+        .unwrap();
+    core.shutdown().await;
+    let directives = Closed::open_as(root, "0.3.0")
+        .all(KIND_FACT_DIRECTIVE)
+        .len();
+    assert!(directives >= 1);
+    let chunks_of_other = |c: &Closed| {
+        c.all(KIND_CHUNK)
+            .iter()
+            .filter(|e| e.body_as::<ChunkBody>().is_ok_and(|b| b.turn == other))
+            .count()
+    };
+    assert!(chunks_of_other(&Closed::open_as(root, "0.3.0")) > 0);
+
+    // v0.2.x: 伏せ字の前の写しを書き戻し (改訂の番号を知らない)、別のセッションを消す (事実・チャンクは知らない
+    // ので、ターンとセッションだけを消す)。
+    {
+        let c = Closed::open_v0_2(root, T0 + 2_000);
+        c.write(vec![WriteOp::Put(before)]);
+        let tx = c.store.read().unwrap();
+        let session = tx.links_from(other, REL_IN_SESSION).unwrap()[0].0;
+        let mut turns: Vec<Id> = tx
+            .links_to(session, REL_IN_SESSION)
+            .unwrap()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        turns.sort_unstable();
+        drop(tx);
+        let mut ops = Vec::new();
+        for t in turns {
+            ops.push(WriteOp::Delete {
+                kind: KIND_TURN.into(),
+                id: t,
+            });
+            ops.push(WriteOp::DeleteLinksOf(t));
+        }
+        ops.push(WriteOp::Delete {
+            kind: KIND_SESSION.into(),
+            id: session,
+        });
+        ops.push(WriteOp::DeleteLinksOf(session));
+        c.write(ops);
+        // v0.2.x には知らない種類として数えられ、消されない (03 §4.2 の規則 6)。
+        let census = c.store.census().unwrap();
+        assert_eq!(
+            census.unknown.get(KIND_FACT_DIRECTIVE).copied(),
+            Some(directives as u64),
+            "{census:?}"
+        );
+    }
+    assert!(!files_with(&root.join(evorag_store::JOURNAL_DIR), VALUE).is_empty());
+
+    // v0.3 で開き直す。
+    let (core, mut rx, report) = start_v0_3(root, chat(&[]), 9, T0 + 3_000).await;
+    assert!(report.forget.mismatched.is_empty(), "{:?}", report.forget);
+    assert!(!report.forget.journal_pending);
+    let list = facts(&core, &mut rx).await;
+    assert!(value_key_of(&list, VALUE).is_none(), "{list:?}");
+    assert_eq!(core.pending_cleanup_jobs(), 0);
+    core.shutdown().await;
+    {
+        let c = Closed::open_as(root, "0.3.0");
+        assert_eq!(
+            c.all(KIND_FACT_DIRECTIVE).len(),
+            directives,
+            "the directives are kept"
+        );
+        let (body, rev) = c.turn(turn);
+        assert_eq!(rev, 1);
+        assert!(body.text.contains(MARKER) && !body.text.contains(VALUE));
+        assert_eq!(
+            chunks_of_other(&c),
+            0,
+            "rule 12 removed the orphaned chunks"
+        );
+        assert_eq!(c.recheck_flag(), None, "the backup jobs were recreated");
+    }
+    // 次の起動の compact の後は、データ根のどのファイルにも値が残らない。
+    let (core, _rx, _) = start_v0_3(root, chat(&[]), 10, T0 + 4_000).await;
+    core.shutdown().await;
+    let hits = files_with(root, VALUE);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// `doctor` は、ジャーナルに残っている伏せ字の前の行を、忘れるの指示ごとに数える。起動して書き直した後は 0。
+///
+/// verifies: 04 §7.2 (ジャーナルの層の見つけ方)、04 §7.8
+#[tokio::test(flavor = "multi_thread")]
+async fn doctor_counts_journal_lines_left_from_before_a_redaction() {
+    let dir = TempDir::new("forget-leftovers");
+    let root = dir.path();
+    let (_, key) = conversation(root, clock_at(T0)).await;
+    let leftovers = || {
+        let revs =
+            evorag_store::inspect::journal_revs(root, KIND_TURN, evorag_memory::TURN_REV_FIELD)
+                .unwrap();
+        evorag_store::inspect::with_view(root, |v| {
+            evorag_core::export_checks::journal_leftovers(v, &revs)
+        })
+        .unwrap()
+        .flatten()
+        .unwrap()
+    };
+    {
+        let c = Closed::open(root);
+        c.store
+            .inject_journal_rewrite_fault(RewriteFault::FailSwap { nth: 0 });
+        let plan = c.plan(&key);
+        c.write(plan.ops);
+    }
+    let found = leftovers();
+    assert!(found.lines >= 1, "{found:?}");
+    assert_eq!(found.directives, 1, "{found:?}");
+    let (core, _rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + 1_000)).await;
+    core.shutdown().await;
+    assert_eq!(leftovers().lines, 0);
+}
+
+/// 書き出しは、伏せ字の印をデータ根のプロンプトの言語 (`meta` の `prompt.language`) で選ぶ。まだ伏せ字にしていない
+/// ターン (当て直しが済んでいない) は、知っている言語ならその言語の印だけで突き合わせ (日本語の印で計画した伏せ字は、
+/// 英語の印では本文と合わないので、合わないターンとして除いて書き出す)、言語の記録が無い・知らない値なら、どちらか
+/// の印で合えば合うとみなす (日本語の印で当て直せるので、当て直しが済むまで書き出しを断る)。
+///
+/// verifies: 04 §7.3 (伏せ字の印とプロンプトの言語)、03 §11 (書き出しの確かめ)
+#[tokio::test(flavor = "multi_thread")]
+async fn export_picks_the_redaction_marker_by_the_prompt_language() {
+    let dir = TempDir::new("forget-export-marker");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    {
+        let c = Closed::open(root);
+        // 日本語の印で計画した忘れるの、ターンの伏せ字だけを書かない (事実の取り消しなどは書く)。
+        let ops: Vec<WriteOp> = c
+            .plan(&key)
+            .ops
+            .into_iter()
+            .filter(|op| !matches!(op, WriteOp::Patch { id, .. } if *id == turn))
+            .collect();
+        c.write(ops);
+        assert_eq!(c.turn(turn).1, 0);
+        assert_eq!(
+            c.store.meta(meta::PROMPT_LANGUAGE).unwrap().as_deref(),
+            Some("ja")
+        );
+    }
+    let export_as = |language: Option<&str>| {
+        match language {
+            Some(l) => evorag_store::testutil::raw_set_meta(root, meta::PROMPT_LANGUAGE, l),
+            None => evorag_store::testutil::raw_remove_meta(root, meta::PROMPT_LANGUAGE),
+        }
+        let out = root.join(format!("export-{}", language.unwrap_or("none")));
+        let checks = ExportFilter::new();
+        export(root, &out, &export_opts(&checks))
+            .map(|_| exported_ids(&out.join("turn.jsonl")).contains(&turn.to_string()))
+    };
+    // 日本語: 当て直せる (済んでいない) ので断る。
+    assert!(matches!(
+        export_as(Some("ja")),
+        Err(ExportError::PendingForget)
+    ));
+    // 英語: 英語の印だけで突き合わせるので合わず、そのターンを除いて書き出す。
+    assert!(!export_as(Some("en")).unwrap(), "only the en marker counts");
+    // 知らない言語・記録が無い: どちらの印も数えるので、日本語の印で当て直せる。
+    assert!(matches!(
+        export_as(Some("xx")),
+        Err(ExportError::PendingForget)
+    ));
+    assert!(matches!(export_as(None), Err(ExportError::PendingForget)));
 }

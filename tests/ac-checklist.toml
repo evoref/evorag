@@ -1235,3 +1235,48 @@ status = "later"
 tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/verify.rs::the_trusted_comment_must_match_exactly", "crates/evorag-update/tests/verify.rs::name_tag_and_requested_version_must_match", "crates/evorag-update/tests/verify.rs::a_release_older_than_the_current_release_date_is_refused", "crates/evorag-update/tests/verify.rs::a_current_version_below_upgrade_from_is_told_which_version_to_apply_first", "crates/evorag-update/tests/verify.rs::an_unknown_schema_is_refused_before_other_fields", "crates/evorag-update/tests/verify.rs::exactly_one_archive_must_match_the_target", "crates/evorag-update/tests/verify.rs::malformed_fields_are_refused", "crates/evorag-update/tests/archive.rs::an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked", "crates/evorag-update/tests/archive.rs::an_exe_with_the_wrong_sha256_is_refused"]
 manual = ""
 note = "M3.5 の前半は検証の核だけ: 断る理由ごとの分け方 (改ざんを疑うものは 5、使えないものは 1、UpdateError::severity) と、署名の前に JSON として読まず、大きさと SHA-256 の前に展開しないこと (型で強制し、試験で確かめる)。`apply` の終了コードとインストール先が変わらないことは M3.5 の後半で判定する。"
+
+[[ac]]
+id = "AC-FR-211-1"
+requirement = "FR-211"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::repair_restores_lost_turns_and_lookups_and_replays_forgets", "crates/evorag-store/tests/repair.rs::missing_and_broken_records_come_back_from_the_journal_without_lowering_the_revision", "crates/evorag-store/tests/repair.rs::deleted_ids_are_not_restored_and_stale_records_are_removed", "crates/evorag-store/tests/repair.rs::intact_records_get_their_relations_back_and_unknown_names_are_kept", "crates/evorag-store/tests/repair.rs::relations_of_records_that_cannot_be_rederived_are_kept", "crates/evorag-store/tests/repair.rs::meta_lines_come_back_and_bad_lines_are_counted", "crates/evorag-store/tests/repair.rs::forget_recheck_is_set_whenever_a_forget_directive_exists", "crates/evorag-memory/src/kinds.rs::written_and_derived_names_are_declared_on_the_kind", "bins/evorag/tests/cli.rs::repair_backs_up_first_and_refuses_while_the_data_root_is_in_use", "bins/evorag/tests/cli.rs::repair_refuses_a_missing_data_root_and_points_a_broken_database_to_restore"]
+manual = ""
+note = "DB から消したターンと忘れるの指示がジャーナルから戻り (改訂の番号を下げる行は当てない)、消した副索引が作り直され、失った事実の取り消しとジャーナルの伏せ字の前の行の除去が当て直され、実行の前に退避が作られることで判定する。ストアの層は、壊れた記録の隔離、記録の無い ID の関係の除去、削除の行と cleanup.pending_deletes の ID を戻さないこと (DB に残っていた削除済みの記録が消えること)、失った関係の作り直し、作り直せない記録 (知らない種類・新しい版・読めない本体・壊れた記録) の関係と、知らない関係・副索引の項目を残すこと (03 §4.2 の規則 6・11)、ジャーナルの meta の行を戻すこと、忘れるの指示があれば forget.recheck を立てることも確かめる。種類の宣言 (derived_rels・derived_lookups) と derive・書き込みの経路が合うことは kinds.rs の試験で確かめる。CLI は、データ根が無いときに何も作らずに断ること、壊れた DB で restore を案内することも確かめる。"
+
+[[ac]]
+id = "AC-FR-213-1"
+requirement = "FR-213"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/tests/cli.rs::backups_purge_asks_first_and_removes_every_backup", "crates/evorag-store/tests/purge.rs::purge_removes_every_backup_and_partial_backups", "crates/evorag-store/tests/purge.rs::purge_covers_the_backup_dir_and_the_data_roots_pre_op", "crates/evorag-store/tests/purge.rs::purge_refuses_folders_that_look_like_a_data_root", "crates/evorag-store/tests/purge.rs::purge_does_not_follow_links"]
+manual = ""
+note = "確かめに n と答える・入力が終わると何も消さず、TUI がデータ根を持っている間は終了コード 2 で断り (backups list も)、y と答えるとすべての退避が消えることで判定する。ストアの層は、日次・週次・移行と作り直しの前の退避と作りかけの退避を消し、storage.backup_dir を指定したときはデータ根の backups/pre-op/ も消し、退避が 0 個でも作りかけの退避を消し、リンク (Unix のシンボリックリンク・Windows のジャンクション) をたどらずに残し、データ根に見えるフォルダ (journal/ かロックのファイルを持つ・データ根そのもの) を消さないことを確かめる。"
+
+[[ac]]
+id = "AC-FR-305-2"
+requirement = "FR-305"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/src/fold_cases.rs::consolidation_cases_hold_on_the_pure_core"]
+manual = ""
+note = "統合の回帰ケース C22 (置き換えの連鎖の新しい側のセッションを消しても、古い値は Superseded のまま、事実の表は空) で判定する。"
+
+[[ac]]
+id = "AC-FR-307-6"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::forgets_survive_a_round_trip_through_v0_2"]
+manual = "docs/compat/0.3.0/acceptance.md §1 (09 §3.6 の「忘れると古い版」を、配布物の v0.2.x で確かめる)"
+note = "v0.2.x は、形式の版 0.2 と v0.2 の種類だけを知り、改訂の番号を知らないストアとして開いてまねる (伏せ字の前の写しを書き戻し、別のセッションのターンとセッションだけを消す)。v0.3 で開き直した後に、事実への指示が残り、ターンが伏せ字に戻り、忘れた値が事実・ジャーナル・退避・compact の後の DB に無く、消したセッションのチャンクが規則 12 で消え、forget.recheck が消えることで判定する。配布物どうしの通しは、09 §3.6 の手動の受入で確かめる。"
+
+[[ac]]
+id = "AC-FR-307-7"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::an_unredacted_forget_hides_the_value_from_facts_keys_and_attached_exchanges"]
+manual = ""
+note = "伏せ字にしないで忘れた後に、/memory の一覧・事実から作った検索の鍵・次の要求 (事実の表を含む) に値が出ず、添えた往復の中で [非表示] になり、本文は変わらないことで判定する。"

@@ -335,6 +335,118 @@ fn backups_list_shows_the_backups() {
     assert!(text.contains("daily"), "{text}");
 }
 
+/// データ根を書き込みで開いて持つ (TUI が動いている状態をまねる)。
+fn hold_data_root(root: &Path) -> Store {
+    let clock = Arc::new(SystemClock);
+    Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.5".into(),
+        kinds: Vec::new(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    })
+    .unwrap()
+    .0
+}
+
+/// `evorag backups purge` は、確かめてから (または `--yes` で) すべての退避を消す。断られたら何も消さない。TUI が
+/// 動いているときは、終了コード 2 で断る (03 §9)。
+///
+/// verifies: AC-FR-213-1 (CLI の層)
+#[test]
+fn backups_purge_asks_first_and_removes_every_backup() {
+    let dir = TempDir::new("cli-purge");
+    let data = dir.path().join("data");
+    make_data_root_with_backup(&data);
+    let count = || evorag_store::restore::list_backups(&data, None).len();
+    // 日次と、週の最初の日次を写した週次。
+    let made = count();
+    assert!(made >= 1);
+
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "n\n");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("戻せません"),
+        "the prompt says what is lost: {err}"
+    );
+    assert_eq!(count(), made, "nothing is removed without a yes");
+    // 入力の終わり (端末でない) は n。
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(count(), made, "end of input means no");
+
+    {
+        let _held = hold_data_root(&data);
+        let out = evorag_with_stdin(dir.path(), "", &["backups", "purge", "--yes"], "");
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(count(), made);
+        // 一覧も、データ根を使っている間は断る。
+        let out = evorag_with_stdin(dir.path(), "", &["backups", "list"], "");
+        assert_eq!(out.status.code(), Some(2));
+    }
+
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "y\n");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(count(), 0);
+}
+
+/// `evorag repair` は、実行の前に退避してから直し、したことを示す。TUI が動いているときは、終了コード 2 で断る。
+///
+/// verifies: AC-FR-211-1 (CLI の層: 実行の前の退避と、使っているデータ根を断ること)
+#[test]
+fn repair_backs_up_first_and_refuses_while_the_data_root_is_in_use() {
+    let dir = TempDir::new("cli-repair");
+    let data = dir.path().join("data");
+    make_data_root_with_backup(&data);
+    {
+        let _held = hold_data_root(&data);
+        let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+        assert_eq!(out.status.code(), Some(2));
+    }
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("直しました"), "{err}");
+    let pre = data.join("backups").join("pre-op");
+    let made: Vec<String> = std::fs::read_dir(pre)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(made.iter().any(|n| n.contains("repair")), "{made:?}");
+}
+
+/// `evorag repair` は、データ根が無ければ何も作らずに終了コード 2 で断り、DB のファイルが壊れていれば (broken/ へ
+/// 移した) restore を案内して終了コード 2 で終える。
+///
+/// verifies: AC-FR-211-1 (CLI の層: データ根が無い・壊れた DB)
+#[test]
+fn repair_refuses_a_missing_data_root_and_points_a_broken_database_to_restore() {
+    let dir = TempDir::new("cli-repair-refused");
+    let data = dir.path().join("data");
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!data.exists(), "nothing is created");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ありません"), "{err}");
+
+    make_data_root_with_backup(&data);
+    std::fs::write(data.join("evorag.redb"), b"garbage").unwrap();
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("broken"), "{err}");
+    assert!(err.contains("evorag restore"), "{err}");
+    assert_eq!(std::fs::read_dir(data.join("broken")).unwrap().count(), 1);
+}
+
 /// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)、
 /// 03 §11 (取り込んでいないジャーナルの行があれば断る)
 #[test]
