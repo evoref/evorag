@@ -334,3 +334,14 @@ expect_candidate = true
 direction = { old = "東京 タワー", new = "東京タワー" }
 llm = { target = "fact", old = "東京 タワー", new = "東京タワー", e = "東京 タワーじゃなくて東京タワーです" }
 expect = "direction"
+
+[[case]]
+id = "K30"
+title = "穴の位置の本文が TAB を含むときは、記録する新しい値に関門 6 を当てて落とす"
+spec = "04 §6 の訂正の型の使い方"
+previous = "大阪 府ですね"
+text = "いや、大阪\t府じゃなくて京都\t府です"
+expect_candidate = true
+direction = { old = "大阪\t府", new = "京都\t府" }
+llm = { target = "fact", old = "大阪 府", new = "京都 府", e = "いや、大阪 府じゃなくて京都 府です" }
+expect = "new_not_in_utterance"

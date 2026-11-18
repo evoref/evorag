@@ -332,6 +332,10 @@ pub(crate) struct Haystack<'t> {
 pub(crate) enum Placed {
     /// 一致する元の本文の範囲 (空なら一致なし)。
     Ranges(Vec<Range<usize>>),
+    /// 正規化 v1 の一致の範囲は戻せたが、照合の形の対応表を作れず、照合の形の本文には値がある (照合の形の一致の
+    /// 位置を戻せない)。正規化 v1 の範囲は捨てずに持つ。呼び手は伏せる側に倒す (本文の全体や根拠の範囲の全体を
+    /// 伏せる・伏せ字を中止する)。
+    Partial(Vec<Range<usize>>),
     /// 正規化した本文に値はあるが、対応表を作れず位置を戻せない。
     Unplaceable,
 }
@@ -395,8 +399,9 @@ impl<'t> Haystack<'t> {
 
     /// 本文の中の `needle` の一致をすべて探す (伏せ字・`[非表示]` の範囲、04 §5.6 の「照合の順」・§7.3)。正規化
     /// v1 の一致を先に採り、照合の形では、それと重ならない一致だけを足す (元の本文の位置、前から順)。`widen` なら
-    /// 端が文字の展開の途中に来た一致も、その書記素まで広げて採る ([`Mapped::find_widened`])。対応表を作れない
-    /// 段で、その段の形の本文に値が含まれるときは `Unplaceable`。
+    /// 端が文字の展開の途中に来た一致も、その書記素まで広げて採る ([`Mapped::find_widened`])。正規化 v1 の対応表を
+    /// 作れず、正規化した本文に値が含まれるときは `Unplaceable`。照合の形の対応表だけを作れず、照合の形の本文に
+    /// 値が含まれるときは、正規化 v1 の範囲を持つ `Partial`。
     pub(crate) fn find_all(&self, needle: &Needle, edges: Edges, widen: Widen) -> Placed {
         if needle.is_empty() {
             return Placed::Ranges(Vec::new());
@@ -421,7 +426,8 @@ impl<'t> Haystack<'t> {
                 out.extend(extra);
             }
             None if normalize_loose(self.text).contains(&needle.loose) => {
-                return Placed::Unplaceable;
+                out.sort_by_key(|r| (r.start, r.end));
+                return Placed::Partial(out);
             }
             None => {}
         }

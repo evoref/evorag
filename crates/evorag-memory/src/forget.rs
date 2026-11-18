@@ -350,6 +350,14 @@ fn whole_matches(keys: &ForgetKeys, text: &str, needles: &[Needle]) -> Found {
                     out.push(widen_to_graphemes(text, h));
                 }
             }
+            // 照合の形の一致の位置を戻せないときも、正規化 v1 の範囲は確かめる (値の鍵が合わなければ中止)。
+            // そのうえで位置を戻せないものとして扱い、伏せる側に倒す (本文の全体か中止)。
+            Placed::Partial(hits) => {
+                if hits.iter().any(|h| !keys.checked(text, h)) {
+                    return Found::Mismatch;
+                }
+                unplaceable = true;
+            }
             Placed::Unplaceable => unplaceable = true,
         }
     }
@@ -363,7 +371,7 @@ fn whole_matches(keys: &ForgetKeys, text: &str, needles: &[Needle]) -> Found {
 fn holds_value(text: &str, needle: &Forms) -> bool {
     match Haystack::new(text).find_all(needle, Edges::Word, Widen::ToGraphemes) {
         Placed::Ranges(r) => !r.is_empty(),
-        Placed::Unplaceable => true,
+        Placed::Partial(_) | Placed::Unplaceable => true,
     }
 }
 
@@ -771,14 +779,23 @@ pub fn plan_forget(
                 usable = false;
                 break;
             }
-            let hits: Vec<Range<usize>> =
-                match needle.map(|n| hay.find_all(n, Edges::Word, Widen::No)) {
-                    Some(Placed::Ranges(all)) => all
-                        .into_iter()
-                        .filter(|h| span.start <= h.start && h.end <= span.end)
-                        .collect(),
-                    Some(Placed::Unplaceable) | None => Vec::new(),
-                };
+            let found = needle.map(|n| hay.find_all(n, Edges::Word, Widen::No));
+            if let Some(Placed::Partial(_)) = found {
+                // 照合の形の一致の位置を戻せない (正規化 v1 の一致だけでは、空白を挟んだ写しが残りうる)。伏せ字に
+                // するときは中止し (見本で伏せ字にしない忘れるを勧める)、しないときは根拠の範囲の全体を伏せる。
+                if options.redact {
+                    return Ok(Err(ForgetAbort::ValueMismatch(turn)));
+                }
+                ranges.push(widen_to_graphemes(&snap.text, span));
+                continue;
+            }
+            let hits: Vec<Range<usize>> = match found {
+                Some(Placed::Ranges(all)) => all
+                    .into_iter()
+                    .filter(|h| span.start <= h.start && h.end <= span.end)
+                    .collect(),
+                Some(Placed::Partial(_) | Placed::Unplaceable) | None => Vec::new(),
+            };
             if hits.is_empty() {
                 if !options.redact {
                     // 伏せ字にしないときは、根拠の範囲の全体を `[非表示]` にする (private と同じ、04 §7.5)。

@@ -208,7 +208,10 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
             assert!(text.contains(stored), "{id}: `stored` is in the utterance");
             assert_eq!(c.vk, value_key(&key, stored), "{id}");
             let want_subject = expected_subject(&raw.subject);
-            if want_subject == "self" || c.subject == "self" {
+            if let Some(stored) = s(case, "stored_subject") {
+                // 記録する主語は根拠の範囲の本文に正規化 v1 を当てたもの (`stored_subject`)。
+                assert_eq!(c.subject, stored, "{id}: subject");
+            } else if want_subject == "self" || c.subject == "self" {
                 assert_eq!(c.subject, want_subject, "{id}");
             } else {
                 // 記録する主語は根拠の範囲の本文から作る (照合の形で LLM の写しと同じ)。
@@ -267,7 +270,7 @@ fn prefilter_cases_pass() {
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 107);
+    assert_eq!(run_gates(&[]), 109);
 }
 
 #[test]

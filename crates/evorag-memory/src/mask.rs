@@ -193,7 +193,8 @@ impl Masker {
 fn value_hits(hay: &Haystack<'_>, forms: &Needle) -> Vec<Range<usize>> {
     match hay.find_all(forms, Edges::Word, Widen::ToGraphemes) {
         Placed::Ranges(r) => r,
-        Placed::Unplaceable => std::iter::once(0..hay.text().len()).collect(),
+        // 照合の形の一致の位置を戻せないときは、正規化 v1 の一致を含む本文の全体を伏せる。
+        Placed::Partial(_) | Placed::Unplaceable => std::iter::once(0..hay.text().len()).collect(),
     }
 }
 

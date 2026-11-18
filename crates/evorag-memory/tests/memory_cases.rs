@@ -155,6 +155,17 @@ fn gate_cases_are_well_formed_and_agree_with_the_attribute_list() {
                 "{id}: count is only for accepted candidates"
             );
         }
+        if let Some(subject) = s(&case, "stored_subject") {
+            assert_eq!(
+                expect, "accept",
+                "{id}: stored_subject is only for accepted candidates"
+            );
+            assert_eq!(
+                subject,
+                evorag_memory::normalize_v1(subject),
+                "{id}: stored_subject is in the normalized form"
+            );
+        }
         if let Some(stored) = s(&case, "stored") {
             assert_eq!(
                 expect, "accept",

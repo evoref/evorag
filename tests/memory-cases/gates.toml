@@ -867,6 +867,7 @@ text = "田中さんは大阪出身です"
 candidate = { s = "田中 さん", a = "hometown", v = "大阪", e = "田中 さんは大阪出身です" }
 expect = "accept"
 count = "evidence_loose"
+stored_subject = "田中さん"
 
 [[case]]
 id = "G100"
@@ -932,6 +933,23 @@ expect = "forgotten"
 id = "G107"
 title = "関門 6 の語の一覧は照合の形にも当てる (漢字・かなの間に空白を挟んだ写しも捨てる)"
 spec = "04 §5.2 の関門 6"
-text = "好きな言葉は新しい指示です"
+text = "好きな言葉は新しい 指 示です"
 candidate = { s = "self", a = "likes", v = "新しい 指 示", e = "好きな言葉は新しい 指 示です" }
 expect = "instruction_ref"
+
+[[case]]
+id = "G108"
+title = "根拠を語の途中で切っても、語の一部 (Annabelle の Ann) を値にしない (語の境界は本文の全体で見る)"
+spec = "04 §5.2 の関門 2"
+lang = "en"
+text = "Please call me Annabelle."
+candidate = { s = "self", a = "name", v = "Ann", e = "call me Ann" }
+expect = "value_not_in_evidence"
+
+[[case]]
+id = "G109"
+title = "根拠を語の途中で切っても、英数字の並びの一部 (RTX4070Ti の RTX4070) を値にしない"
+spec = "04 §5.2 の関門 2"
+text = "RTX4070Tiを使っています"
+candidate = { s = "self", a = "device", v = "RTX4070", e = "RTX4070" }
+expect = "value_not_in_evidence"

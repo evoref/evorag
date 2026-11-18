@@ -1005,7 +1005,8 @@ pub(crate) fn value_keys_of(
 ///    全体で見る。
 ///
 /// 照合はどれも、生の本文 → 正規化 v1 → 照合の形 (04 §5.6) の順に行う。記録する新しい値と古い値は、穴の位置で
-/// 一致した保存した本文の部分文字列にする (値の鍵もそこから作る)。古い値の穴の無い型では、古い値は LLM の出力の
+/// 一致した保存した本文の部分文字列にする (値の鍵もそこから作る)。記録する値には関門 6 を当て、外れたら新しい
+/// 値は 2 の理由、古い値は 4 の理由で落とす。古い値の穴の無い型では、古い値は LLM の出力の
 /// まま。出典は、新しい値の保存した本文の範囲にする (戻せなければ 2 の理由で落とす)。古い値の穴のある型では、
 /// 古い値の範囲も持つ (置き換えた事実の出典に足す、04 §5.3 の「終えた発言の出典」)。
 ///
@@ -1103,6 +1104,14 @@ pub fn verify(
         }
         None => (None, out.old.as_str()),
     };
+    // 記録する値にも関門 6 を当てる (穴の位置の本文は、正規化 v1 で LLM の写しと同じでも、TAB などを含みうる。
+    // 訂正の記録を学習に渡す前に守る、04 §6 の「訂正の型の使い方」)。
+    if check_text(ctx.safety, new_value).is_err() {
+        return Err(Rejection::NewNotInUtterance);
+    }
+    if check_text(ctx.safety, old_value).is_err() {
+        return Err(Rejection::OldNotFound);
+    }
     let (old_vk, new_vk) = (value_key(ctx.key, old_value), value_key(ctx.key, new_value));
     if old_vk == new_vk || normalize_loose(old_value) == normalize_loose(new_value) {
         return Err(Rejection::Direction);

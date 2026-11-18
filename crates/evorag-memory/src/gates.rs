@@ -300,14 +300,10 @@ fn check_one<'s>(
         return Err(GateReason::OldNotInEvidence);
     }
     let sent = utterance.filtered.text();
-    let span = Haystack::new(&sent[found.sent.clone()]);
-    let in_span = |n: &Needle| -> Vec<Range<usize>> {
-        let base = found.sent.start;
-        span.find(n, Edges::Word)
-            .into_iter()
-            .map(|h| base + h.source.start..base + h.source.end)
-            .collect()
-    };
+    // 語の境界は、根拠の範囲の端ではなく送る本文の全体で見る (LLM が根拠を語の途中で切っても、"Annabelle" から
+    // "Ann" を記録しない、04 §5.2 の関門 2)。
+    let whole = Haystack::new(sent);
+    let in_span = |n: &Needle| -> Vec<Range<usize>> { within(&whole, n, &found.sent) };
     let positions = in_span(&value_needle);
     if positions.is_empty() {
         return Err(GateReason::ValueNotInEvidence);
@@ -681,15 +677,25 @@ pub(crate) fn hits_in(hay: &str, needle: &str) -> Vec<Hit> {
 }
 
 /// 関門 4: 送る本文の根拠の範囲 `evidence` の中で、値が当たる位置 (送る本文の位置)。照合は関門 2 と同じ。
+///
+/// 語の境界は、根拠の範囲の端ではなく送る本文の全体で見る (04 §5.2 の関門 2)。
 pub(crate) fn value_positions(
     sent: &str,
     evidence: &Range<usize>,
     value: &str,
 ) -> Vec<Range<usize>> {
-    let base = evidence.start;
-    hits_in(&sent[evidence.clone()], value)
+    within(&Haystack::new(sent), &Needle::new(value), evidence)
+}
+
+/// 本文 `whole` の中の `needle` の一致のうち、範囲 `span` に収まるもの (`whole` の位置)。照合は正規化 v1 →
+/// 照合の形の順 (範囲の中に正規化 v1 の一致が無いときだけ照合の形)、英数字は本文の全体の語の境界で。
+fn within(whole: &Haystack<'_>, needle: &Needle, span: &Range<usize>) -> Vec<Range<usize>> {
+    whole
+        .find_where(needle, Edges::Word, |h| {
+            span.start <= h.source.start && h.source.end <= span.end
+        })
         .into_iter()
-        .map(|h| base + h.source.start..base + h.source.end)
+        .map(|h| h.source)
         .collect()
 }
 
@@ -1043,5 +1049,26 @@ mod tests {
         }
         // 空白を除くと繋がる別の語は、文字体系の混在にしない。
         assert_eq!(check_value(&safety, attr, "Python と Rust"), Ok(()));
+    }
+
+    /// 語の境界は根拠の範囲の端ではなく、送る本文の全体で見る (LLM が根拠を語の途中で切ったとき)。
+    #[test]
+    fn word_boundaries_use_the_whole_text_not_the_evidence_edges() {
+        for (text, a, v, e) in [
+            ("Please call me Annabelle.", "name", "Ann", "call me Ann"),
+            ("RTX4070Tiを使っています", "device", "RTX4070", "RTX4070"),
+        ] {
+            assert_eq!(
+                accept_one(text, &raw(a, v, e, None)),
+                Err(GateReason::ValueNotInEvidence),
+                "{text:?}"
+            );
+        }
+        let a = accept_one(
+            "RTX4070 Tiではなく RTX4070 を使っています",
+            &raw("device", "RTX4070", "RTX4070 を使っています", None),
+        )
+        .expect("accepted");
+        assert_eq!(a.candidate.value, "RTX4070");
     }
 }

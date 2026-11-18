@@ -43,7 +43,7 @@
 
 ## gates.toml
 
-`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化 v1 の後の照合で通ったときの `evidence_normalized`、照合の形 (04 §5.6) で通ったときの `evidence_loose`)。`stored` は、受け付けたときに記録する値 (04 §5.2 の「記録する文字列」。LLM の写しではなく、発話の保存した本文の部分文字列) で、省くと `candidate.v` と同じ。受け付けた事例は、記録する値と、その値の鍵を `stored` と比べる (`candidate.v` とは比べない)。
+`[[case]]` に `text` (発話)、`candidate` (候補)、`expect` を書く。`expect` は `accept` か、捨てる理由。`forgotten` に、前もって置く再び覚えない印 (`{ s, a, v }` の並び) を書ける。`count` は、受け付けても別に数える理由 (関門 1 を正規化 v1 の後の照合で通ったときの `evidence_normalized`、照合の形 (04 §5.6) で通ったときの `evidence_loose`)。`stored` は、受け付けたときに記録する値 (04 §5.2 の「記録する文字列」。LLM の写しではなく、発話の保存した本文の部分文字列) で、省くと `candidate.v` と同じ。受け付けた事例は、記録する値と、その値の鍵を `stored` と比べる (`candidate.v` とは比べない)。`stored_subject` は、受け付けたときに記録する主語 (`self` 以外の呼び名。根拠の範囲の中の最初の一致の本文に正規化 v1 を当てた文字列、04 §5.2 の関門 5) で、書いたときは記録する主語と完全に一致することを確かめる。
 
 関門は 1 から 8 の順に当て、最初に外れた関門の理由を `expect` に書く。関門 6 の中は次の順に当てる: `forbidden_category` → `forbidden_char` → `url` → `role_marker` → `mixed_script` → `imperative` → `instruction_ref` → `redaction_marker`。
 

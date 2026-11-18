@@ -1049,6 +1049,41 @@ async fn export_is_refused_while_the_forget_recheck_flag_is_set() {
     assert!(hits.is_empty(), "{hits:?}");
 }
 
+/// `memory.forget_key` が使えない起動では、忘れるの当て直しを鍵で済ませられないので、`forget.recheck` を消さず、
+/// 書き出しを断り続ける (03 §3.1.1・§11)。
+///
+/// verifies: 03 §3.1.1 (`forget.recheck`)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recheck_flag_stays_while_the_forget_key_is_unusable() {
+    let dir = TempDir::new("forget-recheck-no-key");
+    let root = dir.path();
+    let (_, key) = conversation(root, clock_at(T0)).await;
+    {
+        let c = Closed::open(root);
+        let plan = c.plan(&key);
+        c.write(plan.ops);
+    }
+    // ジャーナルの鍵と合わない鍵にして、事実の機能を止める (鍵が使えない)。
+    evorag_store::testutil::raw_set_meta(root, meta::FORGET_KEY, &"0".repeat(64));
+    evorag_store::testutil::raw_set_meta(root, meta::FORGET_RECHECK, meta::FORGET_RECHECK_SET);
+    let (core, _rx, _) = start(root, &chat(&[]), 8, clock_at(T0 + 2 * 3_600_000)).await;
+    assert!(!core.facts_enabled());
+    core.settle().await;
+    core.shutdown().await;
+    {
+        let c = Closed::open(root);
+        assert_eq!(
+            c.recheck_flag().as_deref(),
+            Some(meta::FORGET_RECHECK_SET),
+            "the flag is kept"
+        );
+    }
+    let out = root.join("export");
+    let checks = ExportFilter::new();
+    let err = export(root, &out, &export_opts(&checks)).unwrap_err();
+    assert!(matches!(err, ExportError::PendingForget), "{err:?}");
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // `/forget` の命令 (04 §7.1〜§7.3)
 // ---------------------------------------------------------------------------------------------------------------

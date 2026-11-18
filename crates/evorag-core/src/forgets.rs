@@ -150,25 +150,35 @@ fn unsettled_turns(r: &ReadTxn<'_>, marker: &str) -> Result<BTreeSet<Id>, String
 /// 起動時の当て直し (04 §7.2 の「起動の順」)。`Core::start` が、書き手を作った後、照会と命令を受け付ける前に
 /// 呼ぶ。
 pub(crate) async fn startup(inner: &Arc<Inner>) {
-    recreate_backup_jobs(inner).await;
+    let flagged = recreate_backup_jobs(inner).await;
     let outcome = recheck(inner).await;
     if outcome.changed {
         tracing::info!("forgets were replayed at startup");
+    }
+    // `forget.recheck` は、job を書き、忘れるの当て直しを `memory.forget_key` で済ませた後にだけ消す (03 §3.1.1)。
+    // 鍵が使えない・当て直しを書けなかったときは残す (立っている間は書き出しを断る、03 §11)。
+    if flagged && outcome.replayed_with_key {
+        if let Err(e) = crate::write(inner, vec![WriteOp::ClearForgetRecheck]).await {
+            tracing::warn!(error = %e, "the forget recheck flag could not be cleared");
+        }
+    } else if flagged {
+        tracing::warn!("forgets are not fully replayed; the forget recheck flag is kept");
     }
     // sleep-time の前にも残りが無いかを確かめる (04 §7.2)。
     state(inner).recheck = true;
 }
 
 /// `meta` の `forget.recheck` が立っていれば (03 §4.2 の規則 12 の (1) と restore の後)、事実への指示の関係と
-/// 副索引を作り直し、すべての忘れるの指示の `forget_backups` の job を書き、同じ依頼で印を消す。書けなければ
-/// 印を残し、次の起動で続ける。
-async fn recreate_backup_jobs(inner: &Arc<Inner>) {
+/// 副索引を作り直し、忘れるの指示の `forget_backups` の job を書く (job の残っている指示には書き足さない。印が
+/// 残って次の起動でまた呼ばれても、job を重ねないため)。印は消さない (当て直しの後に [`startup`] が消す)。
+/// 印が立っていて、job を書けたときだけ真。
+async fn recreate_backup_jobs(inner: &Arc<Inner>) -> bool {
     match inner.store.meta(meta::FORGET_RECHECK) {
         Ok(Some(v)) if v == meta::FORGET_RECHECK_SET => {}
-        Ok(_) => return,
+        Ok(_) => return false,
         Err(e) => {
             tracing::warn!(error = %e, "the forget recheck flag could not be read");
-            return;
+            return false;
         }
     }
     let store = inner.store.clone();
@@ -177,10 +187,31 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
     let planned = tokio::task::spawn_blocking(move || -> Result<Vec<WriteOp>, String> {
         let r = store.read().map_err(|e| e.to_string())?;
         let mut ops = evorag_memory::rebuild_directive_indexes(&r).map_err(|e| e.to_string())?;
+        let mut queued: BTreeSet<Id> = BTreeSet::new();
+        r.for_each(KIND_JOB, |x| {
+            if let Read::Ok(e) = x
+                && let Ok(b) = e.body_as::<JobBody>()
+                && b.task == JOB_FORGET_BACKUPS
+                && let Some(d) = b.directive
+            {
+                queued.insert(d);
+            }
+            true
+        })
+        .map_err(|e| e.to_string())?;
         ops.extend(
-            evorag_memory::forget_backups_for_all(&r, &*ids, now).map_err(|e| e.to_string())?,
+            evorag_memory::forget_backups_for_all(&r, &*ids, now)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|op| match op {
+                    WriteOp::Put(e) if e.kind == KIND_JOB => e
+                        .body_as::<JobBody>()
+                        .ok()
+                        .and_then(|b| b.directive)
+                        .is_none_or(|d| !queued.contains(&d)),
+                    _ => true,
+                }),
         );
-        ops.push(WriteOp::ClearForgetRecheck);
         Ok(ops)
     })
     .await
@@ -188,10 +219,19 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
     .and_then(|r| r);
     match planned {
         Ok(ops) => match crate::write(inner, ops).await {
-            Ok(()) => crate::flag_cleanup(inner),
-            Err(e) => tracing::warn!(error = %e, "forget backup jobs could not be recreated"),
+            Ok(()) => {
+                crate::flag_cleanup(inner);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "forget backup jobs could not be recreated");
+                false
+            }
         },
-        Err(e) => tracing::warn!(error = %e, "forget directives could not be read"),
+        Err(e) => {
+            tracing::warn!(error = %e, "forget directives could not be read");
+            false
+        }
     }
 }
 
@@ -200,6 +240,8 @@ async fn recreate_backup_jobs(inner: &Arc<Inner>) {
 pub(crate) struct Outcome {
     /// DB の記録を変えた。
     pub(crate) changed: bool,
+    /// 事実の層 (印による取り消し) まで、`memory.forget_key` で当て直しを済ませた (書くものが無かったときを含む)。
+    pub(crate) replayed_with_key: bool,
 }
 
 /// 忘れるの当て直しを確かめ、残りがあれば当てる (起動時と sleep-time)。何度当てても同じ。落とされない task で
@@ -258,7 +300,7 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
             );
             state(inner).key_missing = true;
         }
-        match planned.map(|(replay, _)| replay) {
+        let replayed = match planned.map(|(replay, _)| replay) {
             Ok(replay) if replay.changed() => {
                 // 先に済ませる処理を、書く前に止める (04 §7.2 の「捨てるキャッシュ」)。
                 drop(inner.pre.stop());
@@ -279,19 +321,23 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
                             .copied()
                             .collect();
                         after_change(inner, gone).await;
+                        true
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "replayed forgets could not be written");
                         failed = true;
+                        false
                     }
                 }
             }
-            Ok(_) => {}
+            Ok(_) => true,
             Err(e) => {
                 tracing::warn!(error = %e, "forgets could not be replayed");
                 failed = true;
+                false
             }
-        }
+        };
+        out.replayed_with_key = replayed && !key_missing;
     }
     let journal_pending = rewrite_journal(inner).await;
     let store = inner.store.clone();
