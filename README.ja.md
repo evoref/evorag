@@ -47,6 +47,13 @@ RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
 minisign -Vm SHA256SUMS -P RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
 ```
 
+evorag には、鍵を替えるときのために、次の鍵 ([minisign.next.pub](minisign.next.pub)) も埋め込んでいます。`evorag update` は、どちらの鍵で署名したリリースも受け付けます。リリースは、リリースノートに断りが無い限り、上の今の鍵で署名します。
+
+```text
+untrusted comment: minisign public key 45B083FCB9BE29F1
+RWTxKb65/IOwRZ5bqFrSPF7sR8YJANIQZYNUkjuxl99PRFJaj4XJK6g9
+```
+
 詳しい手順は、同梱の README にあります。
 
 ## 仕様書

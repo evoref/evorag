@@ -47,6 +47,13 @@ RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
 minisign -Vm SHA256SUMS -P RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
 ```
 
+evorag also embeds a second key, the next key ([minisign.next.pub](minisign.next.pub)), so that it can switch keys if the current one has to be retired. `evorag update` accepts a release signed with either key. Releases are signed with the current key above unless the release notes say otherwise.
+
+```text
+untrusted comment: minisign public key 45B083FCB9BE29F1
+RWTxKb65/IOwRZ5bqFrSPF7sR8YJANIQZYNUkjuxl99PRFJaj4XJK6g9
+```
+
 The full steps are in the bundled README.
 
 ## Specification
