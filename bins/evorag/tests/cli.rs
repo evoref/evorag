@@ -683,7 +683,13 @@ fn version_shows_the_build_and_how_it_was_installed() {
         text.starts_with(&format!("evorag {}", env!("CARGO_PKG_VERSION"))),
         "{text}"
     );
-    for label in ["commit: ", "target: ", "rustc: ", "installed via: "] {
+    for label in [
+        "commit: ",
+        "target: ",
+        "rustc: ",
+        "installed via: ",
+        "db format: ",
+    ] {
         assert!(text.contains(label), "{label} in {text}");
     }
 }
@@ -707,4 +713,102 @@ fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
     let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--index", "--facts"], "");
     assert_ne!(out.status.code(), Some(0));
     assert!(!pre.exists());
+}
+
+/// `evorag update …` を、状態のフォルダを試験のフォルダに向けて動かす。
+fn evorag_update(dir: &Path, config: &str, args: &[&str]) -> Output {
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    Command::new(exe)
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--data-root")
+        .arg(dir.join("data"))
+        .arg("update")
+        .args(args)
+        .env("LOCALAPPDATA", dir.join("local"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_DATA_HOME", dir.join("share"))
+        .output()
+        .unwrap()
+}
+
+/// verifies: AC-FR-806-1 (入れ方が zip でない evorag では、`update apply` と `update rollback` が通信せず、
+/// インストール先を変えずに断り、その管理の仕組みでの更新を案内する)
+#[test]
+fn update_apply_and_rollback_refuse_a_non_zip_build() {
+    // 配布物と同じ作り方 (EVORAG_CHANNEL=zip) で試験を作ったときは、この試験の前提に合わない。
+    if option_env!("EVORAG_CHANNEL") == Some("zip") {
+        return;
+    }
+    let dir = TempDir::new("cli-update-channel");
+    let exe = std::path::PathBuf::from(
+        std::env::var_os("NEXTEST_BIN_EXE_evorag")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into()),
+    );
+    let install = exe.parent().unwrap();
+    let names = |d: &Path| -> Vec<std::ffi::OsString> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with("evorag."))
+            .collect();
+        v.sort();
+        v
+    };
+    let before = names(install);
+    for args in [&["apply"][..], &["apply", "9.9.9"], &["rollback"]] {
+        let out = evorag_update(
+            dir.path(),
+            "version = 1
+",
+            args,
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(
+            err.contains("evorag update apply と rollback は使えません"),
+            "{err}"
+        );
+        assert!(err.contains("evorag update check"), "{err}");
+    }
+    assert_eq!(names(install), before, "the install folder changed");
+    for d in ["local", "state", "data"] {
+        assert!(!dir.path().join(d).exists(), "{d} was created");
+    }
+}
+
+/// `update.trusted_keys` の誤りは、設定の誤りとして通信の前に 4 で止める (07 §5)。
+#[test]
+fn update_with_a_bad_trusted_key_exits_with_4() {
+    let dir = TempDir::new("cli-update-keys");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+}
+
+/// 版として読めない指定は、通信の前に 1 で断る。
+#[test]
+fn update_apply_refuses_an_unreadable_version() {
+    let dir = TempDir::new("cli-update-version");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+",
+        &["apply", "latest"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
 }

@@ -59,8 +59,16 @@ only_in = ["evorag-tui"]
 [[tree_only_in]]
 rule = "R3, R5"
 # TLS を持ってよいのは evorag-update だけ。evorag-llm は TLS を持たない。
-crates = ["rustls", "rustls-graviola", "graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "webpki-root-certs", "rustls-platform-verifier", "rustls-native-certs"]
+crates = ["ureq", "rustls", "rustls-graviola", "graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "webpki-root-certs", "rustls-platform-verifier", "rustls-native-certs"]
 only_in = ["evorag-update"]
+
+# 配布物 (bin の evorag) の依存の木で、crate に有効にしてはいけない機能 (末尾の * は前方一致)。
+[[features_forbidden]]
+rule = "R3, R5"
+crate = "reqwest"
+# reqwest は配布物の中で 1 つなので、どこかが TLS の機能を入れると evorag-llm の reqwest にも TLS が入る (S-06 §2.4・§6.1)。
+features = ["__rustls*", "__tls", "__native-tls*", "rustls*", "native-tls*", "default-tls", "default"]
+reason = "evorag-llm has no TLS; only evorag-update may (via ureq)"
 
 # workspace の crate ごとに、直接の依存として使ってよいものを列挙する規則。
 [[direct_allow]]

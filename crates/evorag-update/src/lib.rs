@@ -1,6 +1,12 @@
-//! evorag 本体の更新の検証: 署名つきの `release.json` と配布物を確かめる (12 §5.2・§5.3・§7.2)。
+//! evorag 本体の更新 (12 §5・§7)。
 //!
-//! 通信もファイルの置き換えもしない、純粋な核。確かめる順は型で決まっている。
+//! - 検証 (このモジュールの直下): 署名つきの `release.json` と配布物を確かめる。通信もファイルの置き換えも
+//!   しない、純粋な核。
+//! - [`net`]: 確認と取得の通信 (12 §7.5)。
+//! - [`swap`]: インストール先の実行ファイルの置き換え・巻き戻し・続き・片付け (12 §7.3)。
+//! - [`flow`]: `evorag update check`・`apply`・`rollback` の流れ (12 §7.2)。
+//!
+//! 検証の確かめる順は型で決まっている。
 //!
 //! 1. [`verify_signature`]: `release.json` のバイト列の minisign の署名 (prehash の形だけ) と、
 //!    trusted comment (`evorag <版> release.json sha256 <SHA-256>`) を確かめ、[`SignedManifest`] を返す。
@@ -55,8 +61,10 @@ mod base64;
 mod date;
 mod digest;
 mod error;
+pub mod flow;
 mod keys;
 mod manifest;
+pub mod net;
 mod notes;
 mod signed;
 pub mod swap;

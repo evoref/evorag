@@ -15,7 +15,7 @@ pub use env::Env;
 pub use error::{CheckFailure, Failure, FileOp, OwnershipProblem, SwapError};
 pub use installation::{
     ApplyReport, Build, CleanupReport, Installation, PlanSummary, PrevInfo, PrevSource, Purpose,
-    ResumeOutcome, ResumeReport, Startup, Strictness, startup,
+    ResumeOutcome, ResumeReport, Startup, Strictness, check_exe_name, startup,
 };
 pub use names::{EXE_NAME, FileName, GapRecovery, Op};
 pub use probe::{PROBE_MAX_OUTPUT, PROBE_TIMEOUT, ProbeError, ProcessProbe, VersionProbe};

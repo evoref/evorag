@@ -395,19 +395,19 @@ note = ""
 id = "AC-FR-805-1"
 requirement = "FR-805"
 level = "Must"
-status = "later"
-tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output"]
+status = "test"
+tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output", "crates/evorag-update/tests/flow.rs::apply_then_rollback_restores_the_files_and_keeps_the_data", "crates/evorag-update/tests/flow.rs::rollback_tells_how_to_restore_when_the_old_version_cannot_write"]
 manual = ""
-note = "M3.5 の後半の前段は置き換えの核 (evorag-update の swap) だけ: apply → rollback → apply で各ファイルの SHA-256 が役割と合い、状態のファイルの記録が合うこと、記録の無い evorag.prev の版を --version で知ること。`evorag update rollback` のデータの案内 (min_write・min_read・退避のパス) と終了コード 0、データ根が変わらないことは、コマンドを入れる M3.5 の残り (取得と CLI) で判定する。"
+note = "置き換えの核 (swap) で apply → rollback → apply の SHA-256 と記録を、更新の流れ (flow) で apply の後の rollback が evorag(.exe)・evorag.prev を SHA-256 で戻し、データ根の中身 (ロックのファイルを除く) を変えず、戻した版が書けない・開けないときに移行の前の退避のパス (無ければ無いこと) と設定の写しを示して 0 で終わることを判定する。偽の Releases と偽の --version を使う。"
 
 [[ac]]
 id = "AC-FR-805-2"
 requirement = "FR-805"
 level = "Must"
-status = "later"
-tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps"]
+status = "test"
+tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps", "crates/evorag-update/tests/flow.rs::an_interrupted_apply_is_finished_by_the_startup_cleanup"]
 manual = ""
-note = "置き換えの核で判定する: apply・rollback・元に戻す途中の各改名・写し・削除・新しいファイルの書き切り・状態のファイルの書き込みの後で止め (試験の差し込み。フォルダとファイルの同期は直前の操作に含め、同期の点は別に模擬しない)、次の続き (途中でもう一度止めたときを含む) と名前での片付けの後に、evorag(.exe) が前か後の版で、evorag.prev が役割どおりであること。Windows の隙間は案内の手順で戻す。子プロセスの強制終了と、TUI の起動の片付け・CLI からの続きは M3.5 の残りで判定する。"
+note = "置き換えの核で、apply・rollback・元に戻す途中の各操作の後で止めて (試験の差し込み。同期は直前の操作に含める)、次の続きと名前での片付けの後に、evorag(.exe) が前か後の版で evorag.prev が役割どおりであることを判定する。Windows の隙間は案内の手順で戻す。更新の流れでは、置き換えの後の確かめの最中に止めて (panic で模擬)、TUI の起動の片付け (swap::startup) が続きを済ませることを判定する。子プロセスの強制終了での試験は 09 §3 の別の段で行う。"
 
 [[ac]]
 id = "AC-FR-901-1"
@@ -1231,28 +1231,28 @@ note = "restore の後の起動で、忘れた事実が蘇らず、すべての�
 id = "AC-FR-804-1"
 requirement = "FR-804"
 level = "Must"
-status = "later"
-tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused"]
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/flow.rs::a_tampered_or_wrongly_signed_release_is_refused_with_5"]
 manual = ""
-note = "M3.5 の前半は検証の核 (evorag-update) だけ: 署名の合わない release.json・legacy の署名・鍵の違う署名を断る。`update apply` が配布物を適用しないこと (インストール先が変わらないこと) は、取得と置き換えを入れる M3.5 の後半で判定する。"
+note = "検証の核で署名の合わない release.json・legacy の署名・鍵の違う署名を断ることを、更新の流れで apply が 5 で断り、配布物を取得せず、インストール先を変えないことを判定する。"
 
 [[ac]]
 id = "AC-NFR-505-1"
 requirement = "NFR-505"
 level = "Must"
-status = "later"
-tests = ["crates/evorag-update/tests/verify.rs::the_same_or_an_older_version_is_refused"]
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::the_same_or_an_older_version_is_refused", "crates/evorag-update/tests/flow.rs::the_same_or_an_older_version_cannot_be_applied"]
 manual = ""
-note = "M3.5 の前半は検証の核だけ: 今と同じ版・古い版の release.json を断る。`update apply` で入れられないこと (指定した版が今と同じか古いときに通信の前に断ることを含む) は M3.5 の後半で判定する。"
+note = "検証の核で今と同じ版・古い版の release.json を断ることを、更新の流れで指定した版が今と同じか古ければ通信の前 (通信の前の確かめの前) に 1 で断り、版を省いて今が最新なら 0 で何も変えないことを判定する。"
 
 [[ac]]
 id = "AC-NFR-505-2"
 requirement = "NFR-505"
 level = "Must"
-status = "later"
-tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/verify.rs::the_trusted_comment_must_match_exactly", "crates/evorag-update/tests/verify.rs::name_tag_and_requested_version_must_match", "crates/evorag-update/tests/verify.rs::a_release_older_than_the_current_release_date_is_refused", "crates/evorag-update/tests/verify.rs::a_current_version_below_upgrade_from_is_told_which_version_to_apply_first", "crates/evorag-update/tests/verify.rs::an_unknown_schema_is_refused_before_other_fields", "crates/evorag-update/tests/verify.rs::exactly_one_archive_must_match_the_target", "crates/evorag-update/tests/verify.rs::malformed_fields_are_refused", "crates/evorag-update/tests/archive.rs::an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked", "crates/evorag-update/tests/archive.rs::an_exe_with_the_wrong_sha256_is_refused"]
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/verify.rs::the_trusted_comment_must_match_exactly", "crates/evorag-update/tests/verify.rs::name_tag_and_requested_version_must_match", "crates/evorag-update/tests/verify.rs::a_release_older_than_the_current_release_date_is_refused", "crates/evorag-update/tests/verify.rs::a_current_version_below_upgrade_from_is_told_which_version_to_apply_first", "crates/evorag-update/tests/verify.rs::an_unknown_schema_is_refused_before_other_fields", "crates/evorag-update/tests/verify.rs::exactly_one_archive_must_match_the_target", "crates/evorag-update/tests/verify.rs::malformed_fields_are_refused", "crates/evorag-update/tests/archive.rs::an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked", "crates/evorag-update/tests/archive.rs::an_exe_with_the_wrong_sha256_is_refused", "crates/evorag-update/tests/flow.rs::a_tampered_or_wrongly_signed_release_is_refused_with_5", "crates/evorag-update/tests/flow.rs::unusable_releases_are_refused_with_1", "crates/evorag-update/tests/flow.rs::an_archive_that_does_not_match_is_refused_with_5"]
 manual = ""
-note = "M3.5 の前半は検証の核だけ: 断る理由ごとの分け方 (改ざんを疑うものは 5、使えないものは 1、UpdateError::severity) と、署名の前に JSON として読まず、大きさと SHA-256 の前に展開しないこと (型で強制し、試験で確かめる)。`apply` の終了コードとインストール先が変わらないことは M3.5 の後半で判定する。"
+note = "検証の核で、断る理由ごとの分け方 (改ざんを疑うものは 5、使えないものは 1) と、署名の前に JSON として読まず、大きさと SHA-256 の前に展開しないこと (型で強制し、試験で確かめる) を判定する。更新の流れで apply の終了コードと、どの場合もインストール先のファイルが変わらないことを判定する。"
 
 [[ac]]
 id = "AC-FR-211-1"
@@ -1298,3 +1298,21 @@ status = "test"
 tests = ["crates/evorag-core/tests/forget_wiring.rs::an_unredacted_forget_hides_the_value_from_facts_keys_and_attached_exchanges"]
 manual = ""
 note = "伏せ字にしないで忘れた後に、/memory の一覧・事実から作った検索の鍵・次の要求 (事実の表を含む) に値が出ず、添えた往復の中で [非表示] になり、本文は変わらないことで判定する。"
+
+[[ac]]
+id = "AC-FR-803-1"
+requirement = "FR-803"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/tests/flow.rs::check_shows_the_newest_verified_release_and_touches_nothing", "crates/evorag-update/tests/flow.rs::check_without_a_newer_version_says_so"]
+manual = ""
+note = "更新の流れで、偽の Releases (試験の鍵で署名したもの) に今より新しい版があれば semver でいちばん大きい版の検証した版・日付・除いた要点を、無ければ無いことを示して 0 で終わり、ロックを取らず、状態のフォルダ・データ根・インストール先を作らず変えず、固定の接続先だけを要求することを判定する。"
+
+[[ac]]
+id = "AC-FR-806-1"
+requirement = "FR-806"
+level = "Should"
+status = "test"
+tests = ["crates/evorag-update/tests/flow.rs::a_non_zip_install_refuses_apply_and_rollback_without_network", "bins/evorag/tests/cli.rs::update_apply_and_rollback_refuse_a_non_zip_build"]
+manual = ""
+note = "更新の流れで、入れ方が zip でなければ apply と rollback が通信の前の確かめも要求もせず、更新のロックを取らず、インストール先を変えずに断ることを、実行ファイル (開発のビルドは cargo) で、断る文言 (入れたときの仕組みでの更新と check の案内) と終了コード 1 を判定する。check が使えることは check_without_a_newer_version_says_so で判定する。"

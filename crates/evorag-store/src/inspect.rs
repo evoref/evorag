@@ -102,6 +102,35 @@ pub fn journal_revs(
     journal::put_revs(root, kind, field)
 }
 
+/// データ根の DB の `meta` を、何も書かずに読むだけで開いて読む (`evorag update rollback` のデータの案内、
+/// 12 §7.2 の rollback の 3)。
+///
+/// 呼ぶ側が、そのデータ根のロック `lock` を取って持っていること (同じプロセスの中でもロックはもう一度
+/// 取れないので、取ったロックを受け取る)。DB が無ければ [`DbState::Missing`]、読むだけでは開けなければ
+/// [`DbState::NeedsRepair`] か [`DbState::Unreadable`] と空の表を返す。
+pub fn read_meta_locked(
+    lock: &DataRootLock,
+) -> (DbState, std::collections::BTreeMap<String, String>) {
+    let Some(root) = lock.path().parent() else {
+        return (DbState::Missing, Default::default());
+    };
+    let file = root.join(DB_FILE);
+    if !file.is_file() {
+        return (DbState::Missing, Default::default());
+    }
+    match ReadOnlyDatabase::open(&file) {
+        Ok(db) => match read_meta_db_any(&db) {
+            Ok(meta) => (DbState::Opened, meta),
+            Err(e) => (DbState::Unreadable(e.to_string()), Default::default()),
+        },
+        Err(redb::DatabaseError::RepairAborted) => (
+            DbState::NeedsRepair("repair aborted".into()),
+            Default::default(),
+        ),
+        Err(e) => (DbState::Unreadable(e.to_string()), Default::default()),
+    }
+}
+
 /// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。
 pub fn inspect_collect(
     root: &Path,

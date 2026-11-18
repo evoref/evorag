@@ -54,6 +54,26 @@ pub fn startup(
     }
 }
 
+/// 動いている実行ファイルの名前が `evorag(.exe)` であることを確かめる (12 §7.2 の始める前の確かめの 1)。
+/// ロックを取らず、何も変えない。名前の比べ方は [`Installation::open`] と同じ。
+///
+/// # Errors
+///
+/// 名前が違う ([`SwapError::ExeName`])、パスを正規化できない。
+pub fn check_exe_name(running_exe: &Path) -> Result<(), SwapError> {
+    let running_path =
+        canonical_exe_path(running_exe).map_err(SwapError::io(FileOp::Open, running_exe))?;
+    let name = running_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if is_exe_name(&name) {
+        Ok(())
+    } else {
+        Err(SwapError::ExeName { found: name })
+    }
+}
+
 /// 更新のロックを持った、インストール先 (12 §7.3)。落とすとロックが外れる。
 ///
 /// 呼ぶ順 (12 §7.2 の始める前の確かめ): [`Self::open`] (1・3) → [`Self::pending`] (4。計画があれば、

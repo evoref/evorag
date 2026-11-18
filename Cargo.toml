@@ -75,6 +75,14 @@ minisign-verify = "0.3.0"
 zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2"] }
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# 更新の確認と取得の通信 (12 §7.5、S-06)。TLS は evorag-update の中だけに閉じる (02 §4.3 の R3・R5)。
+# ureq は圧縮・Cookie・同梱のルートの一覧を入れない (Accept-Encoding を送らない、ライセンス)。証明書は OS の検証器。
+ureq = { version = "3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "logging"] }
+rustls-platform-verifier = { version = "0.7.1", default-features = false }
+# 純 Rust の暗号の実装 (OQ-05)。graviola は、CPU の機能の一覧 (12 §7.5) が版に結び付くので = で固定する。
+rustls-graviola = "0.4.0"
+graviola = "=0.4.5"
 
 # evorag の作業の設定 (cargo は読まない)。
 [workspace.metadata.evorag]

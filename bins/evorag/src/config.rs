@@ -200,9 +200,21 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
             }
         }
     }
+    if let Some(u) = &config.update {
+        if let Some(keys) = u.get(TRUSTED_KEYS) {
+            trusted_keys(keys).map_err(|e| {
+                format!(
+                    "line {}: update.{TRUSTED_KEYS} {e}",
+                    line_of(text, TRUSTED_KEYS)
+                )
+            })?;
+        }
+        for k in u.keys().filter(|k| k.as_str() != TRUSTED_KEYS) {
+            ignored.push(format!("update.{k}"));
+        }
+    }
     for (name, t) in [
         ("learning", &config.learning),
-        ("update", &config.update),
         ("cartridge", &config.cartridge),
     ] {
         if t.is_some() {
@@ -262,7 +274,34 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
     })
 }
 
+/// `update.trusted_keys` のキー (07 §4.2)。
+const TRUSTED_KEYS: &str = "trusted_keys";
+
+/// `update.trusted_keys` の値を、更新の署名を確かめる鍵として読む (07 §4.2)。
+fn trusted_keys(value: &toml::Value) -> Result<Vec<evorag_update::TrustedKey>, String> {
+    let not_strings = || "must be an array of strings".to_owned();
+    value
+        .as_array()
+        .ok_or_else(not_strings)?
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let s = v.as_str().ok_or_else(not_strings)?;
+            evorag_update::TrustedKey::from_config(s).map_err(|e| format!("[{i}]: {e}"))
+        })
+        .collect()
+}
+
 impl Config {
+    /// 設定で足した、更新の署名を確かめる鍵 (`update.trusted_keys`、07 §4.2)。値は読むときに確かめた。
+    pub fn trusted_keys(&self) -> Vec<evorag_update::TrustedKey> {
+        self.update
+            .as_ref()
+            .and_then(|u| u.get(TRUSTED_KEYS))
+            .and_then(|v| trusted_keys(v).ok())
+            .unwrap_or_default()
+    }
+
     /// 裏の処理の設定 (`memory.sleep_time`・`idle_seconds`・`on_battery`、07 §4.2)。値は読むときに確かめた。
     pub fn sleep(&self) -> evorag_core::SleepConfig {
         let d = evorag_core::SleepConfig::default();
@@ -484,6 +523,52 @@ enabled = true
         let r = l.config.role("embed").unwrap();
         assert_eq!(r.url, "http://127.0.0.1:8081");
         assert!(l.config.role("rerank").is_none());
+    }
+
+    /// `update.trusted_keys` は読むときに確かめ、鍵として読めない値は行番号つきの誤りにする (07 §4.2)。
+    #[test]
+    fn trusted_keys_are_checked_when_the_config_is_read() {
+        let line = include_str!("../../../minisign.pub")
+            .lines()
+            .nth(1)
+            .expect("the second line of minisign.pub");
+        let l = parse(&format!(
+            "version = 1
+[update]
+trusted_keys = [\"{line}\"]
+future = 1
+"
+        ))
+        .unwrap();
+        assert_eq!(l.config.trusted_keys().len(), 1);
+        assert_eq!(l.ignored, ["update.future"]);
+        assert!(
+            parse(
+                "[update]
+"
+            )
+            .unwrap()
+            .config
+            .trusted_keys()
+            .is_empty()
+        );
+        for bad in [
+            "[update]
+trusted_keys = \"RWQ\"
+",
+            "[update]
+trusted_keys = [1]
+",
+            "[update]
+trusted_keys = [\"not base64!\"]
+",
+            "[update]
+trusted_keys = [\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"]
+",
+        ] {
+            let e = parse(bad).expect_err(bad);
+            assert!(e.starts_with("line 2: update.trusted_keys"), "{e}");
+        }
     }
 
     /// verifies: AC-FR-415-2 (ループバック以外を許した設定では、書かなければ入力が止まったときの処理を切る)

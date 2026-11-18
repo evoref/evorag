@@ -7,10 +7,11 @@ mod config;
 mod doctor;
 mod export;
 mod setup;
+mod update;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use clap::Parser;
 use evorag_core::{Core, CoreConfig, PromptLanguage, StartError};
@@ -23,27 +24,29 @@ use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 
-/// `--version` (FR-906): 版・作りの情報・入れ方。
-const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "
-commit: ",
-    env!("EVORAG_COMMIT"),
-    "
-target: ",
-    env!("EVORAG_TARGET"),
-    "
-rustc: ",
-    env!("EVORAG_RUSTC"),
-    "
-installed via: ",
-    env!("EVORAG_CHANNEL"),
-);
+/// `--version` (FR-906、07 §5): 版・作りの情報・入れ方・書く DB の形式の版。1 行目 (`evorag <版>`) の形は
+/// 変えない (`evorag update` が読む、12 §7.2)。通信せず、データ根・設定・`update/` に触れない。
+static VERSION: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}
+commit: {}
+target: {}
+rustc: {}
+installed via: {}
+db format: {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("EVORAG_COMMIT"),
+        env!("EVORAG_TARGET"),
+        env!("EVORAG_RUSTC"),
+        env!("EVORAG_CHANNEL"),
+        evorag_store::FORMAT_VERSION,
+    )
+});
 
 #[derive(Parser)]
 #[command(
     name = "evorag",
-    version = VERSION,
+    version = VERSION.as_str(),
     about = "Chat with a local llama-server, with long-term memory"
 )]
 struct Args {
@@ -99,6 +102,24 @@ enum Sub {
     },
     /// 副索引と関係を記録から作り直し、ジャーナルにあって DB に無い記録を戻し、忘れる・削除を当て直す (先に退避する)
     Repair,
+    /// 本体の更新 (新しい版の確認・置き換え・巻き戻し)
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum UpdateAction {
+    /// 新しい版があるかを確かめる (何も書き換えない)
+    Check,
+    /// 新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)
+    Apply {
+        /// 入れる版 (省くと、いちばん新しい版)
+        version: Option<String>,
+    },
+    /// evorag.prev に戻す (通信しない)
+    Rollback,
 }
 
 #[derive(clap::Subcommand)]
@@ -615,8 +636,9 @@ fn main() -> ExitCode {
             &[("detail", "no home directory")],
         );
     };
-    // doctor は読むだけ (設定の移行もしない)。
-    let migrate = !matches!(args.command, Some(Sub::Doctor));
+    // doctor は読むだけ (設定の移行もしない)。update も設定を書き換えない (check は何も書き換えない、
+    // rollback は戻した版が読む設定を残す)。
+    let migrate = !matches!(args.command, Some(Sub::Doctor | Sub::Update { .. }));
     let loaded = match config::load(&config_file, migrate) {
         Ok(l) => l,
         Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
@@ -652,6 +674,25 @@ fn main() -> ExitCode {
             &[("detail", "no home directory")],
         );
     };
+
+    if let Some(Sub::Update { action }) = args.command {
+        let action = match action {
+            UpdateAction::Check => update::Action::Check,
+            UpdateAction::Apply { version } => update::Action::Apply { version },
+            UpdateAction::Rollback => update::Action::Rollback,
+        };
+        return update::run(
+            &catalog,
+            action,
+            cfg.trusted_keys(),
+            &update::Places {
+                data_root: &data_root,
+                backup_dir: cfg.storage.backup_dir.as_deref(),
+                config_file: &config_file,
+                state_dir: places.as_ref().map(|p| p.state_dir.as_path()),
+            },
+        );
+    }
 
     let url = cfg
         .llm
@@ -915,6 +956,18 @@ fn main() -> ExitCode {
     if let Some(p) = &places {
         let _ = evorag_core::logging::init(&p.state_dir.join("logs"), clock.now().as_millis());
     }
+    // 更新の続きと片付け (12 §7.3)。データ根のロックを取ってから、ストアを開く前に行う。失敗しても起動する。
+    let update_notices = match places
+        .as_ref()
+        .map(|p| update::startup_cleanup(&catalog, &data_root, &p.state_dir))
+    {
+        Some(update::StartupCleanup::Restart(m)) => {
+            eprintln!("{m}");
+            return ExitCode::from(1);
+        }
+        Some(update::StartupCleanup::Continue(notices)) => notices,
+        None => Vec::new(),
+    };
     let mut started = rt.block_on(Core::start(make_cfg(), llm.clone()));
     // DB のファイルが壊れていたら、退避とジャーナルから戻すかを尋ねる (03 §8、FR-205)。
     if let Err(StartError::Store(OpenError::Broken { moved_to, reason })) = &started {
@@ -1049,6 +1102,7 @@ fn main() -> ExitCode {
             }),
         },
     );
+    app.notices.extend(update_notices);
     for w in &report.location_warnings {
         let m = app
             .catalog
