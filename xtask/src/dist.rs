@@ -395,6 +395,16 @@ fn print_signing(out: &Path, version: Version, release_sum: &Sha256Digest) {
 /// `cargo xtask dist [--target T] [--out DIR] [--skip-build] [--tag vX.Y.Z] [--manifest-only]`
 pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
     let a = parse_args(root, args)?;
+    if a.skip_build && a.tag.is_some() {
+        // 作り置きの実行ファイルに埋め込んだ EVORAG_RELEASE_DATE が release.json の date と同じとは
+        // 限らない。リリースでは必ずビルドする (変わっていなければ cargo は作り直さない)。
+        // ファイルを読む前に断る。
+        return Err(
+            "--skip-build cannot be used with --tag: a release always builds, so that the embedded \
+             EVORAG_RELEASE_DATE is the date in release.json (12 §7.4)"
+                .into(),
+        );
+    }
     let version_text = workspace_version(root)?;
     if let Some(tag) = &a.tag
         && !crate::verify_tag::tag_matches(tag, &version_text)
@@ -402,15 +412,6 @@ pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(format!(
             "the tag {tag} must be exactly v{version_text} (pre-releases are not used, 09 §9.1)"
         ));
-    }
-    if a.skip_build && a.tag.is_some() {
-        // 作り置きの実行ファイルに埋め込んだ EVORAG_RELEASE_DATE が release.json の date と同じとは
-        // 限らない。リリースでは必ずビルドする (変わっていなければ cargo は作り直さない)。
-        return Err(
-            "--skip-build cannot be used with --tag: a release always builds, so that the embedded \
-             EVORAG_RELEASE_DATE is the date in release.json (12 §7.4)"
-                .into(),
-        );
     }
     let version: Version = version_text
         .parse()
@@ -879,12 +880,15 @@ mod tests {
 
     #[test]
     fn a_release_build_cannot_skip_the_build() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let version = workspace_version(root).unwrap();
+        // ファイルを読まずに断ること (no-network の確認は別の利用者で試験を走らせ、
+        // リポジトリのファイルを読めない)。
+        let root = Path::new("no-such-workspace");
         let args: Vec<String> = [
             "--skip-build",
             "--tag",
-            &format!("v{version}"),
+            "v0.0.0",
+            "--target",
+            "x86_64-unknown-linux-gnu",
             "--out",
             "unused",
         ]
@@ -929,9 +933,9 @@ mod tests {
 
     #[test]
     fn the_real_changelog_gives_notes_within_4_kib() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let text = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
-        let notes = changelog_notes(&text, "0.2.0").expect("the 0.2.0 section");
+        // ビルドのときに埋め込む (no-network の確認は別の利用者で試験を走らせる)。
+        let text = include_str!("../../CHANGELOG.md");
+        let notes = changelog_notes(text, "0.2.0").expect("the 0.2.0 section");
         assert!(notes.len() <= DISPLAY_MAX_BYTES);
         assert!(notes.starts_with("埋め込みとリランカー"), "{notes}");
     }
