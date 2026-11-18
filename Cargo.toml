@@ -1,5 +1,5 @@
 # evorag の workspace (docs/11-dev-workflow.md §1、crate の構成は docs/02-architecture.md §4)。
-# v0.1 で入る crate だけを置く。evorag-learn (v0.4)・evorag-cartridge (v0.5)・evorag-update (v0.3) は、その版で足す。
+# その版で入る crate だけを置く。evorag-learn (v0.4)・evorag-cartridge (v0.5) は、その版で足す。
 
 [workspace]
 resolver = "3"
@@ -12,6 +12,7 @@ members = [
     "crates/evorag-retrieval",
     "crates/evorag-core",
     "crates/evorag-tui",
+    "crates/evorag-update",
     "bins/evorag",
     "xtask",
 ]
@@ -37,6 +38,7 @@ evorag-memory = { path = "crates/evorag-memory" }
 evorag-retrieval = { path = "crates/evorag-retrieval" }
 evorag-core = { path = "crates/evorag-core" }
 evorag-tui = { path = "crates/evorag-tui" }
+evorag-update = { path = "crates/evorag-update" }
 
 # 外部の crate (版は workspace で 1 か所に決める)。
 serde = { version = "1.0.228", features = ["derive"] }
@@ -67,6 +69,19 @@ thiserror = "2.0.17"
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+# 更新の署名 (minisign、prehash の形だけを通す、12 §5.2)。依存なし。
+minisign-verify = "0.3.0"
+# 配布物の読み手 (02 §4.1)。zip は deflate だけ (既定の機能を切る)、tar.gz は tar + flate2 (純 Rust の miniz_oxide)。
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+
+# evorag の作業の設定 (cargo は読まない)。
+[workspace.metadata.evorag]
+# `evorag update apply` でこの版へ更新できる、今の版の下限 (release.json の upgrade_from、12 §5.3)。
+# v0.1〜v0.4 は直前の機能リリースの `.0` 以上で、この版より小さい (cargo xtask verify-release が確かめる)。
+# 版上げの PR で、直前の機能リリースの `.0` に直す (例: 0.3.0 なら "0.2.0")。
+upgrade_from = "0.1.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

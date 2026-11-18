@@ -1208,3 +1208,30 @@ status = "test"
 tests = ["crates/evorag-core/tests/forget_wiring.rs::restoring_an_older_backup_replays_forgets_and_rewrites_the_backups", "crates/evorag-core/tests/forget_wiring.rs::the_backup_job_rewrites_daily_weekly_and_pre_op_backups"]
 manual = ""
 note = "restore の後の起動で、忘れた事実が蘇らず、すべての忘れるの指示の forget_backups の job を作り直して退避からも値が消えることで判定する。rebuild --facts の後と private は、それぞれの経路の試験 (rebuild・fact_ops) で足す。"
+
+[[ac]]
+id = "AC-FR-804-1"
+requirement = "FR-804"
+level = "Must"
+status = "later"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused"]
+manual = ""
+note = "M3.5 の前半は検証の核 (evorag-update) だけ: 署名の合わない release.json・legacy の署名・鍵の違う署名を断る。`update apply` が配布物を適用しないこと (インストール先が変わらないこと) は、取得と置き換えを入れる M3.5 の後半で判定する。"
+
+[[ac]]
+id = "AC-NFR-505-1"
+requirement = "NFR-505"
+level = "Must"
+status = "later"
+tests = ["crates/evorag-update/tests/verify.rs::the_same_or_an_older_version_is_refused"]
+manual = ""
+note = "M3.5 の前半は検証の核だけ: 今と同じ版・古い版の release.json を断る。`update apply` で入れられないこと (指定した版が今と同じか古いときに通信の前に断ることを含む) は M3.5 の後半で判定する。"
+
+[[ac]]
+id = "AC-NFR-505-2"
+requirement = "NFR-505"
+level = "Must"
+status = "later"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/verify.rs::the_trusted_comment_must_match_exactly", "crates/evorag-update/tests/verify.rs::name_tag_and_requested_version_must_match", "crates/evorag-update/tests/verify.rs::a_release_older_than_the_current_release_date_is_refused", "crates/evorag-update/tests/verify.rs::a_current_version_below_upgrade_from_is_told_which_version_to_apply_first", "crates/evorag-update/tests/verify.rs::an_unknown_schema_is_refused_before_other_fields", "crates/evorag-update/tests/verify.rs::exactly_one_archive_must_match_the_target", "crates/evorag-update/tests/verify.rs::malformed_fields_are_refused", "crates/evorag-update/tests/archive.rs::an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked", "crates/evorag-update/tests/archive.rs::an_exe_with_the_wrong_sha256_is_refused"]
+manual = ""
+note = "M3.5 の前半は検証の核だけ: 断る理由ごとの分け方 (改ざんを疑うものは 5、使えないものは 1、UpdateError::severity) と、署名の前に JSON として読まず、大きさと SHA-256 の前に展開しないこと (型で強制し、試験で確かめる)。`apply` の終了コードとインストール先が変わらないことは M3.5 の後半で判定する。"

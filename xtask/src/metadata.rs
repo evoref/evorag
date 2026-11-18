@@ -4,7 +4,7 @@
 //! - 実際に入る依存の木は `cargo tree` から読む。`cargo metadata` の resolve は機能 (feature) の選択を
 //!   反映せず、使われない optional の依存まで含むため、数や C の判定には使わない。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -23,12 +23,20 @@ pub struct Package {
     pub version: String,
     pub links: Option<String>,
     pub dependencies: Vec<Dependency>,
+    /// package の機能 (名前 → 有効にするもの)。
+    #[serde(default)]
+    pub features: BTreeMap<String, Vec<String>>,
+    /// `Cargo.toml` のパス。
+    pub manifest_path: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Dependency {
     /// package の名前 (rename していても元の名前)。
     pub name: String,
+    /// この依存で有効にする機能。
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 impl Metadata {

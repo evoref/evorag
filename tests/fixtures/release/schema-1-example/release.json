@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "name": "evorag",
+  "version": "0.3.0",
+  "date": "2026-12-01",
+  "upgrade_from": "0.2.0",
+  "notes": "schema 1 の形の見本 (作ったもの)。実際のリリースの release.json は、リリースのときに tests/fixtures/release/<版>/ に足す。",
+  "artifacts": [
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "name": "evorag-0.3.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "size": 4194304,
+      "exe": "evorag-0.3.0-x86_64-pc-windows-msvc/evorag.exe",
+      "exe_sha256": "0000000000000000000000000000000000000000000000000000000000000002"
+    },
+    {
+      "target": "x86_64-unknown-linux-musl",
+      "name": "evorag-0.3.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+      "size": 4194304,
+      "exe": "evorag-0.3.0-x86_64-unknown-linux-musl/evorag",
+      "exe_sha256": "0000000000000000000000000000000000000000000000000000000000000004"
+    }
+  ],
+  "db_format": "0.3",
+  "db_min_write": "0.1",
+  "llama_server_min_build": null
+}
