@@ -29,6 +29,15 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+/// 事例の `count` (文字列 1 つか、文字列の並び。無ければ空)。受け付けた候補の `Accepted::counts` と同じ順に書く。
+fn counts(case: &Value) -> Vec<&str> {
+    match case.get("count") {
+        Some(Value::String(c)) => vec![c.as_str()],
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn id_of(case: &Value) -> &str {
     s(case, "id").expect("id")
 }
@@ -177,12 +186,9 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
     match got {
         Ok(a) => {
             assert_eq!(want, "accept", "{id}: accepted, want `{want}`");
-            assert_eq!(
-                a.evidence.count(),
-                s(case, "count"),
-                "{id}: evidence match {:?}",
-                a.evidence
-            );
+            let got_counts: Vec<&str> = a.counts().collect();
+            let want_counts = counts(case);
+            assert_eq!(got_counts, want_counts, "{id}: counts ({:?})", a.evidence);
             let c = &a.candidate;
             let span = usize::try_from(c.source.start).expect("u32")
                 ..usize::try_from(c.source.end).expect("u32");
@@ -222,16 +228,18 @@ fn run_gate_case(case: &Value) -> Option<evorag_memory::Accepted> {
                     "{id}: subject"
                 );
             }
-            assert_eq!(
-                c.old_vk,
-                raw.old.as_deref().map(|o| value_key(&key, o)),
-                "{id}"
-            );
+            // 根拠に無い `old` は空として扱う (`old_ignored`、04 §5.2 の関門 2)。
+            let want_old = raw
+                .old
+                .as_deref()
+                .filter(|_| !a.old_ignored)
+                .map(|o| value_key(&key, o));
+            assert_eq!(c.old_vk, want_old, "{id}");
             Some(a)
         }
         Err(r) => {
             assert_eq!(r.as_str(), want, "{id}: rejected as `{r}`");
-            assert!(s(case, "count").is_none(), "{id}: count on a rejection");
+            assert!(counts(case).is_empty(), "{id}: count on a rejection");
             None
         }
     }
@@ -270,7 +278,7 @@ fn prefilter_cases_pass() {
 
 #[test]
 fn gate_cases_pass() {
-    assert_eq!(run_gates(&[]), 109);
+    assert_eq!(run_gates(&[]), 129);
 }
 
 #[test]
@@ -351,6 +359,18 @@ fn negations_questions_and_hypotheticals_make_no_fact() {
     );
     assert!(set.facts.is_empty(), "a negation made {:?}", set.facts);
     assert_eq!(report.negation_dropped, 1);
+}
+
+/// 問いの文の最後の節の語句は、LLM が言い切り・否定としても問いとして捨てる (「ください」だけは問いの印に
+/// しない)。`cue = true` の属性 (住む地域) は、値の位置が掛かる文に手がかりの語が無ければ捨てる (旅行の行き先・
+/// 「うち」)。手がかりの語と問いの印は、同梱のすべての言語のものを合わせて当てる (04 §5.2 の関門 3 の補い・
+/// 関門 3a)。根拠に無い `old` は、候補を捨てずに空として扱う (関門 2 の `old_ignored`)。
+#[test]
+fn question_clauses_cue_words_and_ignored_old() {
+    run_gates(&[
+        "G14", "G110", "G111", "G112", "G113", "G114", "G115", "G116", "G117", "G118", "G119",
+        "G120", "G121", "G122", "G123", "G124", "G125", "G126", "G127", "G128", "G129",
+    ]);
 }
 
 /// `ja` のデータ根でも英語の命令形を、`en` のデータ根でも日本語の命令形を捨てる (安全の規則は全言語を合わせて

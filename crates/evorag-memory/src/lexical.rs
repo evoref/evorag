@@ -41,7 +41,7 @@ pub fn signals(evidence: &str, subject: &str) -> Signals {
     };
     let text = fold(evidence);
     let r: &ReadingRules = &rules.reading;
-    let word_bounded = lang == "en";
+    let word_bounded = word_bounded(lang);
     let explicit_subject = if subject == "self" {
         let excluded = Exclusions::new(&text, &r.subject_self_exclude, word_bounded);
         any_outside(&text, &r.subject_self, &excluded, word_bounded)
@@ -68,15 +68,21 @@ fn fold(s: &str) -> String {
     crate::rules::fold(s)
 }
 
+/// 言語 `lang` の読み取りの規則と訂正の一次のふるいの語を、語の境界で当てるか (英語だけ、04 §5.2)。
+pub(crate) fn word_bounded(lang: &str) -> bool {
+    lang == "en"
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
 }
 
-/// `needle` が `hay` に現れる位置 (バイト)。`bounded` なら、前後が英数字でない位置だけ。
+/// `needle` が `hay` に現れる位置 (バイト)。`bounded` なら、`needle` の端が英数字の側だけ、その外が英数字でない
+/// 位置に限る (記号だけの語 `,`・`;` と、記号で終わる語 `no,` は、記号の側の境界を見ない、04 §5.2)。
 pub(crate) fn find_all(hay: &str, needle: &str, bounded: bool) -> Vec<usize> {
-    if needle.is_empty() {
+    let (Some(first), Some(last)) = (needle.chars().next(), needle.chars().next_back()) else {
         return Vec::new();
-    }
+    };
     hay.match_indices(needle)
         .map(|(i, _)| i)
         .filter(|&i| {
@@ -85,7 +91,8 @@ pub(crate) fn find_all(hay: &str, needle: &str, bounded: bool) -> Vec<usize> {
             }
             let before = hay[..i].chars().next_back();
             let after = hay[i + needle.len()..].chars().next();
-            !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+            !(is_word_char(first) && before.is_some_and(is_word_char))
+                && !(is_word_char(last) && after.is_some_and(is_word_char))
         })
         .collect()
 }
@@ -226,6 +233,15 @@ mod tests {
         assert!(signals("住所が変わりました", "self").change);
         assert!(!signals("相変わらず東京に住んでる", "self").change);
         assert!(!signals("着替えて東京に行った", "self").change);
+    }
+
+    /// 記号だけの語は、記号の側の語の境界を見ない (英語の `,` が語の直後でも当たる)。
+    #[test]
+    fn symbol_words_ignore_the_boundary_on_the_symbol_side() {
+        assert_eq!(find_all("tokyo now, any tips?", ",", true), [9]);
+        assert_eq!(find_all("no,thanks", "no,", true), [0]);
+        assert!(find_all("know, any", "no,", true).is_empty());
+        assert!(find_all("known", "now", true).is_empty());
     }
 
     #[test]

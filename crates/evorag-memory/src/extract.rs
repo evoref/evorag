@@ -22,7 +22,7 @@ use crate::rules::Attributes;
 /// job の手順: 利用者の発話から事実の候補を抽出する (04 §5.2.1)。
 pub const JOB_EXTRACT_FACTS: &str = "extract_facts";
 /// 抽出の手順の版 (プロンプトと出力の型)。job に記録する (04 §4 の「冪等」)。
-pub const EXTRACT_VERSION: u32 = 1;
+pub const EXTRACT_VERSION: u32 = 2;
 /// 裏の処理の 1 回の要求のプロンプトの上限 (トークン、暫定、04 §4)。
 pub const REQUEST_TOKENS: usize = 2_048;
 /// 発話の予算から引く余白 (トークン、04 §5.2.1)。束の番号・区切り・チャットのテンプレートのぶん。
@@ -98,7 +98,10 @@ const SYSTEM_JA: &str = "あなたは、利用者の発話から、利用者と�
 必ず守ること:\n\
 - 値は、発話の中の続いた語句をそのまま写す。言い換えたり組み替えたりしない (組み替えた値は捨てられる)。\n\
 - 要素が離れていれば、別の候補にする。\n\
-- 健康・病気、宗教、政治、性的指向、正確な住所は、どの属性にも入れない。";
+- 健康・病気、宗教、政治、性的指向、正確な住所は、どの属性にも入れない。\n\
+- 1 つの発話は、それだけで読む。ほかの番号の発話の語を、値・根拠・old に使わない。\n\
+- 動物や物の様子・行動を、利用者の事実にしない。\n\
+- tn は、動詞の形ではなく、その値が今も成り立つかで決める。「〜に引っ越した」「〜に転職した」の移った先は current、移る前の値は past にする。";
 
 /// 指示と「抽出のプロンプトに必ず書くこと」(04 §5.2) の英語の文言。
 const SYSTEM_EN: &str = "You extract facts about the user and the people around them from the user's utterances.\n\
@@ -118,7 +121,10 @@ Fields of a candidate (all required):\n\
 Always:\n\
 - Copy the value as one continuous phrase from the utterance. Do not paraphrase or rearrange it (rearranged values are discarded).\n\
 - If the parts are apart, make separate candidates.\n\
-- Never put health or illness, religion, politics, sexual orientation, or an exact address into any attribute.";
+- Never put health or illness, religion, politics, sexual orientation, or an exact address into any attribute.\n\
+- Read each utterance on its own. Never use words from another numbered utterance in the value, the evidence or old.\n\
+- Never record what an animal or a thing does as a fact about the user.\n\
+- Choose tn by whether the value still holds, not by the verb form. The place or job the person moved to (\"moved to ...\", \"switched to ...\") is current; the one they left is past.";
 
 /// 抽出の利用者のメッセージ: 束の発話 (前のふるいの後の本文) を、束の中で 1 から振った番号で並べる。
 pub fn extraction_input<'a>(texts: impl IntoIterator<Item = &'a str>) -> String {
@@ -506,11 +512,21 @@ mod tests {
             "そのまま写す",
             "別の候補にする",
             "健康・病気、宗教、政治、性的指向、正確な住所",
+            "ほかの番号の発話の語",
+            "動物や物の様子・行動",
+            "動詞の形ではなく",
         ] {
             assert!(ja.contains(must), "{must}");
         }
         let en = extraction_system("en", attributes());
-        for must in ["verbatim", "separate candidates", "sexual orientation"] {
+        for must in [
+            "verbatim",
+            "separate candidates",
+            "sexual orientation",
+            "another numbered utterance",
+            "an animal or a thing",
+            "not by the verb form",
+        ] {
             assert!(en.contains(must), "{must}");
         }
         assert_ne!(ja, en);

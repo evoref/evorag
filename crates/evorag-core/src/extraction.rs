@@ -191,7 +191,7 @@ struct Tally {
     requests: usize,
     /// 送らずに飛ばした発話 (前のふるいの理由、`too_long`、`invalid_output`、`truncated`、`rejected`、`failed`)。
     skipped: BTreeMap<&'static str, usize>,
-    /// 関門と属性の一覧の確認で捨てた候補 (理由ごと)。
+    /// 関門と属性の一覧の確認で捨てた候補 (理由ごと)。通った候補の別に数える理由 (`old_ignored` など) も含む。
     gate: BTreeMap<&'static str, usize>,
     /// 型に合わなかった答え (やり直しの前のものも数える)。
     invalid_outputs: usize,
@@ -391,13 +391,14 @@ fn gate(
 
 /// 束の候補に、属性の一覧の確認と関門 1〜8 を当て、通ったものを統合の出来事にする (sleep-time の抽出と
 /// `rebuild --facts` で共通)。`items` は束の発話 (ターン・改訂の番号・保存した本文・前のふるいの結果) で、
-/// 答えの発話ごとの候補と順に組にする。捨てた候補は理由ごとに `rejected` に数える。
+/// 答えの発話ごとの候補と順に組にする。捨てた候補は理由ごとに `gate_counts` に数え、通った候補の別に数える理由
+/// (`evidence_normalized`・`evidence_loose`・`old_ignored`、04 §5.2) も同じ表に数える。
 pub(crate) fn gate_batch<'a>(
     key: &evorag_memory::ForgetKey,
     directives: &evorag_memory::Directives,
     items: impl IntoIterator<Item = (Id, u32, &'a str, &'a Screened)>,
     out: ExtractionOutput,
-    rejected: &mut BTreeMap<&'static str, usize>,
+    gate_counts: &mut BTreeMap<&'static str, usize>,
 ) -> Vec<FactEvent> {
     let safety = Safety::bundled();
     let env = GateEnv {
@@ -419,13 +420,18 @@ pub(crate) fn gate_batch<'a>(
         };
         for r in check_candidates(&env, &u, &raws) {
             match r {
-                Ok(a) => events.push(FactEvent::Candidate(a.candidate)),
-                Err(reason) => *rejected.entry(reason.as_str()).or_default() += 1,
+                Ok(a) => {
+                    for count in a.counts() {
+                        *gate_counts.entry(count).or_default() += 1;
+                    }
+                    events.push(FactEvent::Candidate(a.candidate));
+                }
+                Err(reason) => *gate_counts.entry(reason.as_str()).or_default() += 1,
             }
         }
     }
     if out.out_of_batch > 0 {
-        *rejected.entry("out_of_batch").or_default() += out.out_of_batch;
+        *gate_counts.entry("out_of_batch").or_default() += out.out_of_batch;
     }
     events
 }

@@ -59,6 +59,10 @@ pub struct Attribute {
     pub other_subjects: bool,
     /// 抽出のプロンプトに書く説明 (プロンプトの言語 → 文)。
     pub describe: BTreeMap<String, String>,
+    /// 手がかりの語を求めるか (04 §5.2 の関門 3a の `no_cue`)。`true` なら、値の位置が掛かる文に、言語の規則の
+    /// `[reading]` の `<属性>_cue` の語 (同梱のすべての言語) のどれも無い候補を捨てる。
+    #[serde(default)]
+    pub cue: bool,
 }
 
 /// 属性の一覧。
@@ -249,9 +253,12 @@ pub struct SafetyRules {
     pub quote: Vec<Quote>,
 }
 
-/// 読み取りの規則 (04 §5.3)。根拠の言語で選んで当てる。
+/// 読み取りの規則 (04 §5.3)。根拠の言語で選んで当てる。ただし、属性の手がかりの語・問いの印・節の区切りは、
+/// 同梱のすべての言語のものを合わせて当てる (04 §5.2 の関門 3 の補いと関門 3a)。
+///
+/// 属性の手がかりの語は `<属性>_cue` のキーで書くので、知らないキーは型で拒まず、[`LanguageRules::problems`]
+/// が報告する。
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReadingRules {
     /// 主語が利用者本人だと明示する語。
     pub subject_self: Vec<String>,
@@ -264,7 +271,27 @@ pub struct ReadingRules {
     pub change_exclude: Vec<String>,
     /// 否定の候補で、今の値を終わらせてよい語。
     pub negation_change: Vec<String>,
+    /// 問いの文の終わりの印 (04 §5.2 の関門 3 の補い)。文の終わり (後ろの空白と、`?` 以外の文の区切りの文字を
+    /// 除いた形) がどれかで終われば、その文を問いとみなす。
+    pub question_end: Vec<String>,
+    /// 節の区切り (04 §5.2 の関門 3 の補い)。値の後ろから文の終わりまでにどれかがあれば、値は最後の節に無い。
+    pub clause_break: Vec<String>,
+    /// ほかのキー。属性の手がかりの語 (`<属性>_cue` → 語、04 §5.2 の関門 3a) だけを書ける。
+    #[serde(flatten)]
+    pub other: BTreeMap<String, Vec<String>>,
 }
+
+impl ReadingRules {
+    /// 属性 `attribute` の手がかりの語 (`<属性>_cue`)。
+    pub fn cue(&self, attribute: &str) -> Option<&[String]> {
+        self.other
+            .get(&format!("{attribute}{CUE_SUFFIX}"))
+            .map(Vec::as_slice)
+    }
+}
+
+/// 属性の手がかりの語のキーの接尾辞 (`residence_cue`)。
+const CUE_SUFFIX: &str = "_cue";
 
 /// 訂正の規則 (04 §6)。
 #[derive(Debug, Clone, Deserialize)]
@@ -343,10 +370,34 @@ impl LanguageRules {
             ("reading.change", &self.reading.change),
             ("reading.change_exclude", &self.reading.change_exclude),
             ("reading.negation_change", &self.reading.negation_change),
+            ("reading.question_end", &self.reading.question_end),
+            ("reading.clause_break", &self.reading.clause_break),
             ("correction.triggers", &self.correction.triggers),
             ("correction.patterns", &self.correction.patterns),
         ] {
             check_entries(&mut out, &at, name, list);
+        }
+        for (key, words) in &self.reading.other {
+            check_entries(&mut out, &at, &format!("reading.{key}"), words);
+            let cue_of = key
+                .strip_suffix(CUE_SUFFIX)
+                .and_then(|name| attributes.get(name));
+            if !cue_of.is_some_and(|a| a.cue) {
+                out.push(at(&format!(
+                    "reading.{key} is unknown (only <attribute>_cue of an attribute with cue = true)"
+                )));
+            }
+        }
+        for a in attributes.list.iter().filter(|a| a.cue) {
+            if self.reading.cue(&a.name).is_none_or(<[String]>::is_empty) {
+                out.push(at(&format!(
+                    "reading.{}{CUE_SUFFIX} is missing (the attribute has cue = true)",
+                    a.name
+                )));
+            }
+        }
+        if self.reading.question_end.is_empty() {
+            out.push(at("reading.question_end is empty"));
         }
         for q in &self.safety.quote {
             if q.open.is_empty() || q.close.is_empty() {
@@ -522,6 +573,35 @@ mod tests {
         r.correction.patterns.push("{new} versus {old}".into());
         let p = r.problems("en", attributes());
         assert!(p.iter().any(|s| s.contains("contains no trigger")));
+    }
+
+    #[test]
+    fn cue_words_are_checked_against_the_attribute_list() {
+        let ja = language_rules("ja").expect("bundled");
+        assert!(
+            ja.reading
+                .cue("residence")
+                .is_some_and(|w| w.iter().any(|x| x == "住ん"))
+        );
+        assert!(ja.reading.cue("hobby").is_none());
+        let mut r = ja.clone();
+        r.reading.other.remove("residence_cue");
+        r.reading
+            .other
+            .insert("hobby_cue".into(), vec!["趣味".into()]);
+        r.reading
+            .other
+            .insert("qustion_end".into(), vec!["?".into()]);
+        let p = r.problems("ja", attributes());
+        assert!(
+            p.iter()
+                .any(|s| s.contains("reading.residence_cue is missing"))
+        );
+        assert!(p.iter().any(|s| s.contains("reading.hobby_cue is unknown")));
+        assert!(
+            p.iter()
+                .any(|s| s.contains("reading.qustion_end is unknown"))
+        );
     }
 
     #[test]

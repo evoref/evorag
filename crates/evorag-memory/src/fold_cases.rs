@@ -812,7 +812,10 @@ impl Runner {
                         "planned" => Tense::Planned,
                         _ => Tense::Current,
                     },
-                    old_vk: s(body, "old").map(|o| value_key(&self.key, o)),
+                    // 根拠に無い `old` は、関門 2 と同じく空として扱う (`old_ignored`、04 §5.2)。
+                    old_vk: s(body, "old")
+                        .filter(|o| !crate::gates::hits_in(e, o).is_empty())
+                        .map(|o| value_key(&self.key, o)),
                 };
                 self.batch.push(Event::Candidate(c));
             }
