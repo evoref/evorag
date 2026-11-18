@@ -18,10 +18,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use evorag_update::dist::{exe_in_archive, parse_unsigned};
+use evorag_update::unverified_dist::{exe_in_archive, parse_unsigned};
 use evorag_update::{
-    ArchiveFormat, DISPLAY_MAX_BYTES, Keyring, Manifest, ReleaseDate, Sha256Digest, TrustedKey,
-    Version, sanitize_for_display, trusted_comment, verify_signature,
+    ArchiveFormat, DISPLAY_MAX_BYTES, Keyring, MAX_ARCHIVE_BYTES, MAX_MANIFEST_BYTES, Manifest,
+    ReleaseDate, Sha256Digest, TrustedKey, Version, sanitize_for_display, trusted_comment,
+    verify_signature,
 };
 
 /// 配布する実行ファイルの大きさの上限 (NFR-204: 30 MB)。
@@ -228,6 +229,7 @@ fn write_manifest(out: &Path, input: &ManifestInput) -> Result<Sha256Digest, Str
     let mut sums = String::new();
     for (name, target) in &names {
         let bytes = std::fs::read(out.join(name)).map_err(|e| e.to_string())?;
+        check_archive_size(name, bytes.len())?;
         let sum = Sha256Digest::of(&bytes);
         sums.push_str(&format!("{sum}  {name}\n"));
         let exe = format!("evorag-{version}-{target}/{}", exe_name(target));
@@ -260,6 +262,7 @@ fn write_manifest(out: &Path, input: &ManifestInput) -> Result<Sha256Digest, Str
     release["llama_server_min_build"] = serde_json::Value::Null;
     let release_text = serde_json::to_string_pretty(&release).map_err(|e| e.to_string())? + "\n";
     // 本体の更新と同じ読み手で読めて、リリースの規則に合うことを、書く前に確かめる。
+    check_manifest_size(release_text.len())?;
     let manifest =
         parse_unsigned(release_text.as_bytes()).map_err(|e| format!("release.json: {e}"))?;
     check_rules(&manifest)?;
@@ -271,9 +274,32 @@ fn write_manifest(out: &Path, input: &ManifestInput) -> Result<Sha256Digest, Str
     Ok(Sha256Digest::of(release_text.as_bytes()))
 }
 
-/// 作る側の規則 (12 §5.3、09 §9.2 の手順 6): `upgrade_from` の決め方、配布物の名前と `exe`、対象ごとに
-/// 配布物を 1 つに選べること。
+/// `release.json` は、本体の更新が取得する上限 (64 KiB、12 §7.5) 以内。
+fn check_manifest_size(len: usize) -> Result<(), String> {
+    if len > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "release.json is {len} bytes, over the limit {MAX_MANIFEST_BYTES} of evorag update (12 §7.5)"
+        ));
+    }
+    Ok(())
+}
+
+/// 配布物は、本体の更新が取得する上限 (64 MiB、12 §7.5) 以内。
+fn check_archive_size(name: &str, len: usize) -> Result<(), String> {
+    if u64::try_from(len).map_or(true, |l| l > MAX_ARCHIVE_BYTES) {
+        return Err(format!(
+            "{name} is {len} bytes, over the limit {MAX_ARCHIVE_BYTES} of evorag update (12 §7.5)"
+        ));
+    }
+    Ok(())
+}
+
+/// 作る側の規則 (12 §5.3、09 §9.2 の手順 6): 配布物が 1 つ以上あること、`upgrade_from` の決め方、
+/// 配布物の名前と `exe` と大きさ、対象ごとに配布物を 1 つに選べること。
 fn check_rules(m: &Manifest) -> Result<(), String> {
+    if m.artifacts().is_empty() {
+        return Err("release.json lists no archive".into());
+    }
     let version = m.version();
     let from = m.upgrade_from();
     if from >= version {
@@ -305,6 +331,13 @@ fn check_rules(m: &Manifest) -> Result<(), String> {
         let exe = format!("evorag-{version}-{target}/{}", exe_name(target));
         if a.exe() != exe {
             return Err(format!("{}: exe must be {exe}, not {}", a.name(), a.exe()));
+        }
+        if a.size() > MAX_ARCHIVE_BYTES {
+            return Err(format!(
+                "{}: size {} is over the limit {MAX_ARCHIVE_BYTES} of evorag update (12 §7.5)",
+                a.name(),
+                a.size()
+            ));
         }
         m.artifact_for(target)
             .map_err(|e| format!("{}: {e}", a.name()))?;
@@ -369,6 +402,15 @@ pub fn dist(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(format!(
             "the tag {tag} must be exactly v{version_text} (pre-releases are not used, 09 §9.1)"
         ));
+    }
+    if a.skip_build && a.tag.is_some() {
+        // 作り置きの実行ファイルに埋め込んだ EVORAG_RELEASE_DATE が release.json の date と同じとは
+        // 限らない。リリースでは必ずビルドする (変わっていなければ cargo は作り直さない)。
+        return Err(
+            "--skip-build cannot be used with --tag: a release always builds, so that the embedded \
+             EVORAG_RELEASE_DATE is the date in release.json (12 §7.4)"
+                .into(),
+        );
     }
     let version: Version = version_text
         .parse()
@@ -547,6 +589,7 @@ pub fn verify_release(_root: &Path, args: &[String]) -> Result<(), String> {
 
     // release.json を本体の更新と同じ読み手で読む (schema 1 の規則、12 §5.3)。
     let release_bytes = read("release.json")?;
+    check_manifest_size(release_bytes.len())?;
     let manifest = parse_unsigned(&release_bytes).map_err(|e| format!("release.json: {e}"))?;
     let raw: serde_json::Value =
         serde_json::from_slice(&release_bytes).map_err(|e| format!("release.json: {e}"))?;
@@ -558,6 +601,22 @@ pub fn verify_release(_root: &Path, args: &[String]) -> Result<(), String> {
         ));
     }
     check_rules(&manifest)?;
+    // SHA256SUMS の配布物 (.zip・.tar.gz) は、どれも release.json にちょうど 1 回だけ載る。
+    for (_, name) in &sums {
+        if ArchiveFormat::from_name(name).is_none() {
+            continue;
+        }
+        let listed = manifest
+            .artifacts()
+            .iter()
+            .filter(|a| a.name() == name)
+            .count();
+        if listed != 1 {
+            return Err(format!(
+                "{name} is in SHA256SUMS but listed {listed} times in release.json (must be once)"
+            ));
+        }
+    }
     for a in manifest.artifacts() {
         let name = a.name();
         if !sums
@@ -567,6 +626,7 @@ pub fn verify_release(_root: &Path, args: &[String]) -> Result<(), String> {
             return Err(format!("release.json and SHA256SUMS disagree on {name}"));
         }
         let bytes = read(name)?;
+        check_archive_size(name, bytes.len())?;
         if u64::try_from(bytes.len()).ok() != Some(a.size()) {
             return Err(format!(
                 "{name}: {} bytes, release.json says {}",
@@ -732,6 +792,28 @@ mod tests {
         );
         verify_release(Path::new("."), &[dir.display().to_string()]).unwrap();
 
+        // SHA256SUMS に載る配布物が release.json に無ければ断る。
+        let release_text = std::fs::read_to_string(dir.join("release.json")).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&release_text).unwrap();
+        value["artifacts"].as_array_mut().unwrap().remove(1);
+        std::fs::write(
+            dir.join("release.json"),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        let e = verify_release(Path::new("."), &[dir.display().to_string()]).unwrap_err();
+        assert!(e.contains("listed 0 times"), "{e}");
+        // 配布物の無い release.json も断る。
+        value["artifacts"] = serde_json::json!([]);
+        std::fs::write(
+            dir.join("release.json"),
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(verify_release(Path::new("."), &[dir.display().to_string()]).is_err());
+        std::fs::write(dir.join("release.json"), &release_text).unwrap();
+        verify_release(Path::new("."), &[dir.display().to_string()]).unwrap();
+
         // 配布物の中の実行ファイルが release.json と合わなければ、verify-release が断る。
         std::fs::write(
             dir.join(format!("{linux}.tar.gz")),
@@ -759,15 +841,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    const WIN: &str = "x86_64-pc-windows-msvc";
+
+    /// 規則を確かめるための release.json (対象ごとに配布物を 1 つ)。
+    fn manifest_with(version: &str, from: &str, targets: &[&str]) -> Manifest {
+        let artifacts: Vec<serde_json::Value> = targets
+            .iter()
+            .map(|t| {
+                let suffix = ArchiveFormat::for_target(t).unwrap().suffix();
+                serde_json::json!({
+                    "target": t,
+                    "name": format!("evorag-{version}-{t}{suffix}"),
+                    "sha256": "0".repeat(64),
+                    "size": 1,
+                    "exe": format!("evorag-{version}-{t}/{}", exe_name(t)),
+                    "exe_sha256": "0".repeat(64),
+                })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "schema": 1, "name": "evorag", "version": version, "date": "2026-11-12",
+            "upgrade_from": from, "artifacts": artifacts,
+        });
+        parse_unsigned(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_release_lists_at_least_one_archive_within_the_size_limit() {
+        assert!(check_rules(&manifest_with("0.3.0", "0.2.0", &[])).is_err());
+        assert!(check_rules(&manifest_with("0.3.0", "0.2.0", &[WIN])).is_ok());
+        assert!(check_manifest_size(MAX_MANIFEST_BYTES).is_ok());
+        assert!(check_manifest_size(MAX_MANIFEST_BYTES + 1).is_err());
+        let max = usize::try_from(MAX_ARCHIVE_BYTES).unwrap();
+        assert!(check_archive_size("a.zip", max).is_ok());
+        assert!(check_archive_size("a.zip", max + 1).is_err());
+    }
+
+    #[test]
+    fn a_release_build_cannot_skip_the_build() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let version = workspace_version(root).unwrap();
+        let args: Vec<String> = [
+            "--skip-build",
+            "--tag",
+            &format!("v{version}"),
+            "--out",
+            "unused",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let e = dist(root, &args).unwrap_err();
+        assert!(e.contains("--skip-build"), "{e}");
+    }
+
     #[test]
     fn upgrade_from_follows_the_rule_of_the_version() {
-        let manifest = |version: &str, from: &str| {
-            let json = serde_json::json!({
-                "schema": 1, "name": "evorag", "version": version, "date": "2026-11-12",
-                "upgrade_from": from, "artifacts": [],
-            });
-            parse_unsigned(&serde_json::to_vec(&json).unwrap()).unwrap()
-        };
+        let manifest = |version: &str, from: &str| manifest_with(version, from, &[WIN]);
         assert!(check_rules(&manifest("0.3.0", "0.2.0")).is_ok());
         assert!(check_rules(&manifest("0.3.2", "0.2.1")).is_ok());
         assert!(check_rules(&manifest("0.3.0", "0.1.0")).is_err());

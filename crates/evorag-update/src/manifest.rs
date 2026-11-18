@@ -1,12 +1,13 @@
 //! `release.json` (schema 1) の形と、読む側の規則 (12 §5.3)。
 //!
 //! ここの関数は、署名を確かめた後 ([`crate::SignedManifest`]) か、`cargo xtask` が自分で作った
-//! `release.json` (`dist` の機能) からだけ呼ぶ。
+//! `release.json` (`unverified-dist` の機能) からだけ呼ぶ。
 
 use serde::Deserialize;
 
 use crate::{
-    DISPLAY_MAX_BYTES, ReleaseDate, Sha256Digest, UpdateError, Version, sanitize_for_display,
+    DISPLAY_MAX_BYTES, ReleaseDate, Sha256Digest, UpdateError, Version, VersionSource,
+    sanitize_for_display,
 };
 
 /// この版が読める `release.json` の形式の版。
@@ -91,7 +92,8 @@ impl Artifact {
         self.size
     }
 
-    /// 配布物の中の実行ファイルのパス。項目と比べるためだけに使い、書き出す先には使わない。
+    /// 配布物の中の実行ファイルのパス。項目と比べるためだけに使い、書き出す先には使わない。制御文字と
+    /// 双方向の書式の文字を含むものは読むときに断るので、そのまま示してよい。
     #[must_use]
     pub fn exe(&self) -> &str {
         &self.exe
@@ -154,13 +156,13 @@ impl Manifest {
         &self.artifacts
     }
 
-    /// この版が書く DB の形式の版。
+    /// この版が書く DB の形式の版。示せるように整えたもの (制御文字を除き、64 バイトまで)。
     #[must_use]
     pub fn db_format(&self) -> Option<&str> {
         self.db_format.as_deref()
     }
 
-    /// この版が移行した後の DB の `format.min_write`。
+    /// この版が移行した後の DB の `format.min_write`。示せるように整えたもの (制御文字を除き、64 バイトまで)。
     #[must_use]
     pub fn db_min_write(&self) -> Option<&str> {
         self.db_min_write.as_deref()
@@ -198,16 +200,18 @@ impl Manifest {
     }
 }
 
-/// `schema` だけを見る (形式の版が違えば、ほかの項目の決まりも違うため、先に見る)。
+/// `schema`・`name`・`version` だけを見る (形式の版が違えば、ほかの項目の決まりも違うため、先に見る。
+/// `name` と `version` は、ほかの項目の形より先に比べる)。
 #[derive(Deserialize)]
 struct Probe {
     schema: Option<serde_json::Value>,
+    name: Option<serde_json::Value>,
+    version: Option<serde_json::Value>,
 }
 
 /// schema 1 の項目。知らない項目は無視する。
 #[derive(Deserialize)]
 struct RawManifest {
-    name: String,
     version: String,
     date: String,
     upgrade_from: String,
@@ -226,6 +230,14 @@ struct RawArtifact {
     size: u64,
     exe: String,
     exe_sha256: String,
+}
+
+/// 示すために整える短い項目 (`db_format`・`db_min_write`・断った理由の値) の上限 (バイト)。
+const SHORT_FIELD_MAX_BYTES: usize = 64;
+
+/// 示すと端末を乱す文字 (制御文字と双方向の書式の文字) を含むか。
+fn has_unsafe_chars(s: &str) -> bool {
+    sanitize_for_display(s, s.len()) != s
 }
 
 fn malformed(reason: impl std::fmt::Display) -> UpdateError {
@@ -252,12 +264,15 @@ fn exe_is_allowed(exe: &str) -> bool {
         && !exe.ends_with('/')
         && !drive
         && !exe.contains("..")
-        && !exe.contains(['\\', '\0'])
+        && !exe.contains('\\')
+        && !has_unsafe_chars(exe)
 }
 
 fn artifact(raw: RawArtifact, i: usize) -> Result<Artifact, UpdateError> {
-    if raw.target.is_empty() {
-        return Err(malformed(format!("artifacts[{i}].target is empty")));
+    if raw.target.is_empty() || has_unsafe_chars(&raw.target) {
+        return Err(malformed(format!(
+            "artifacts[{i}].target is empty or has control characters"
+        )));
     }
     if !name_is_allowed(&raw.name) {
         return Err(malformed(format!(
@@ -266,7 +281,7 @@ fn artifact(raw: RawArtifact, i: usize) -> Result<Artifact, UpdateError> {
     }
     if !exe_is_allowed(&raw.exe) {
         return Err(malformed(format!(
-            "artifacts[{i}].exe is absolute or has `..` or `\\`"
+            "artifacts[{i}].exe is absolute or has `..`, `\\` or control characters"
         )));
     }
     let digest = |field: &str, v: &str| {
@@ -283,13 +298,41 @@ fn artifact(raw: RawArtifact, i: usize) -> Result<Artifact, UpdateError> {
     })
 }
 
-/// `release.json` のバイト列を読む: `schema` を見てから、項目と形の条件を確かめ、`name` を比べる。
+/// `release.json` のバイト列を読む。順は、`schema` (1 でなければ断る)、`name` (`evorag` でなければ
+/// 改ざんを疑う)、`version` (`expected_version` があれば、その版の文字列とちょうど同じでなければ改ざんを
+/// 疑う。版として読めないものも同じ)、項目の型と形の条件 (使えない理由)。
 ///
-/// 署名を確かめた後のバイト列だけを渡す (呼ぶのは [`crate::SignedManifest`] と `dist`)。
-pub(crate) fn parse(json: &[u8]) -> Result<Manifest, UpdateError> {
+/// 署名を確かめた後のバイト列だけを渡す (呼ぶのは [`crate::SignedManifest`] と、xtask 向けの
+/// `unverified-dist` の機能)。
+pub(crate) fn parse(
+    json: &[u8],
+    expected_version: Option<Version>,
+) -> Result<Manifest, UpdateError> {
     let probe: Probe = serde_json::from_slice(json).map_err(malformed)?;
     if probe.schema.as_ref().and_then(serde_json::Value::as_u64) != Some(SCHEMA) {
         return Err(UpdateError::UnknownSchema);
+    }
+    if probe.name.as_ref().and_then(serde_json::Value::as_str) != Some(NAME) {
+        return Err(UpdateError::NameMismatch);
+    }
+    if let Some(expected) = expected_version {
+        let found = probe.version.as_ref().and_then(serde_json::Value::as_str);
+        if found != Some(expected.to_string().as_str()) {
+            let found = found.map_or_else(
+                || {
+                    probe
+                        .version
+                        .as_ref()
+                        .map_or_else(|| "(none)".to_owned(), ToString::to_string)
+                },
+                str::to_owned,
+            );
+            return Err(UpdateError::VersionMismatch {
+                source_of: VersionSource::TrustedComment,
+                found: sanitize_for_display(&found, SHORT_FIELD_MAX_BYTES),
+                expected: expected.to_string(),
+            });
+        }
     }
     let raw: RawManifest = serde_json::from_slice(json).map_err(malformed)?;
     let version = raw
@@ -310,9 +353,7 @@ pub(crate) fn parse(json: &[u8]) -> Result<Manifest, UpdateError> {
         .enumerate()
         .map(|(i, a)| artifact(a, i))
         .collect::<Result<Vec<_>, _>>()?;
-    if raw.name != NAME {
-        return Err(UpdateError::NameMismatch);
-    }
+    let short = |v: Option<String>| v.map(|v| sanitize_for_display(&v, SHORT_FIELD_MAX_BYTES));
     Ok(Manifest {
         version,
         date,
@@ -321,8 +362,8 @@ pub(crate) fn parse(json: &[u8]) -> Result<Manifest, UpdateError> {
             .notes
             .map(|n| sanitize_for_display(&n, DISPLAY_MAX_BYTES)),
         artifacts,
-        db_format: raw.db_format,
-        db_min_write: raw.db_min_write,
+        db_format: short(raw.db_format),
+        db_min_write: short(raw.db_min_write),
         llama_server_min_build: raw.llama_server_min_build,
     })
 }

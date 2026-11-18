@@ -18,14 +18,36 @@
 //! 確かめる前のバイト列から、検証済みの型は作れない (AC-NFR-505-2: 署名と配布物の検証の前に、JSON と
 //! して読まず、展開しない)。
 //!
-//! ```compile_fail
+//! 次の 3 つは、すべての項目を書いても、項目が非公開なので作れない (E0451)。同じ形の値をクレートの中で
+//! 作れることは、各型のモジュールの試験 `the_compile_fail_literal_names_every_field` が確かめる。
+//!
+//! ```compile_fail,E0451
 //! // 署名を確かめずに、中身を読める型を作れない。
-//! let signed = evorag_update::SignedManifest { bytes: b"{}" };
+//! use evorag_update::{SignedManifest, Signer, Version};
+//! fn forge(signer: Signer) -> SignedManifest<'static> {
+//!     SignedManifest { bytes: b"{}", comment_version: Version::new(0, 3, 0), signer }
+//! }
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0451
+//! // 中身を確かめずに、配布物を確かめられる型を作れない。
+//! use evorag_update::{Artifact, Manifest, Signer, VerifiedRelease};
+//! fn forge(manifest: Manifest, artifact: Artifact, signer: Signer) -> VerifiedRelease {
+//!     VerifiedRelease { manifest, artifact, signer }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
 //! // 大きさと SHA-256 を確かめずに、展開できる型を作れない。
-//! let archive = evorag_update::VerifiedArchive { bytes: Vec::new() };
+//! use evorag_update::{ArchiveFormat, Sha256Digest, VerifiedArchive};
+//! fn forge() -> VerifiedArchive {
+//!     VerifiedArchive {
+//!         bytes: Vec::new(),
+//!         format: ArchiveFormat::Zip,
+//!         exe: String::new(),
+//!         exe_sha256: Sha256Digest::of(b""),
+//!     }
+//! }
 //! ```
 
 mod archive;
@@ -39,18 +61,18 @@ mod notes;
 mod signed;
 mod version;
 
-#[cfg(feature = "dist")]
-pub mod dist;
+#[cfg(feature = "unverified-dist")]
+pub mod unverified_dist;
 
 pub use archive::{Executable, MAX_ARCHIVE_BYTES, MAX_EXE_BYTES, VerifiedArchive};
 pub use date::{ParseDateError, ReleaseDate};
 pub use digest::{ParseDigestError, Sha256Digest};
-pub use error::{Severity, UpdateError, VersionSource};
+pub use error::{Severity, SizedInput, UpdateError, VersionSource};
 pub use keys::{KeyFormatError, KeyId, KeySource, Keyring, Signer, TrustedKey, VerifiedSignature};
 pub use manifest::{ArchiveFormat, Artifact, Manifest, NAME, SCHEMA};
 pub use notes::{DISPLAY_MAX_BYTES, sanitize_for_display};
 pub use signed::{
     Expectations, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, SignedManifest, VerifiedRelease,
-    trusted_comment, verify_manifest, verify_signature,
+    ZIP_CHANNEL, release_date_of_build, trusted_comment, verify_manifest, verify_signature,
 };
 pub use version::{ParseVersionError, Version};

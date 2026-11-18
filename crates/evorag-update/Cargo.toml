@@ -10,8 +10,8 @@ publish.workspace = true
 
 [features]
 # cargo xtask dist・verify-release が、署名の前の release.json と自分で作った配布物を、同じ規則で読む。
-# 本体 (bins/evorag) では使わない。
-dist = []
+# 検証を飛ばす入口なので、xtask のほかは有効にしない (cargo xtask check-deps が確かめる)。
+unverified-dist = []
 
 [dependencies]
 minisign-verify = { workspace = true }

@@ -1,7 +1,9 @@
 //! `cargo xtask dist`・`verify-release` 向け: 署名の前の `release.json` と、自分で作った配布物を、
-//! 本体の更新と同じ規則で読む (機能 `dist`)。
+//! 本体の更新と同じ規則で読む (機能 `unverified-dist`)。
 //!
-//! 取得したもの (信頼できないバイト列) には使わない。本体は [`crate::verify_signature`] からの順で読む。
+//! 署名と配布物の検証を飛ばす入口なので、取得したもの (信頼できないバイト列) には使わない。本体は
+//! [`crate::verify_signature`] からの順で読む。この機能を有効にしてよいのは xtask だけで、
+//! `cargo xtask check-deps` がほかの crate から使っていないことを確かめる。
 
 use crate::UpdateError;
 use crate::archive::{self, LIMITS};
@@ -13,7 +15,7 @@ use crate::manifest::{self, ArchiveFormat, Manifest};
 ///
 /// [`crate::SignedManifest::parse`] と同じ (trusted comment の版との比べを除く)。
 pub fn parse_unsigned(json: &[u8]) -> Result<Manifest, UpdateError> {
-    manifest::parse(json)
+    manifest::parse(json, None)
 }
 
 /// 自分で作った配布物から、名前が `exe` と同じ項目を取り出す。形式は配布物の名前の末尾で決める。

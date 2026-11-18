@@ -45,6 +45,27 @@ impl fmt::Display for VersionSource {
     }
 }
 
+/// 大きさに上限のある入力 (12 §7.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SizedInput {
+    /// `release.json` (64 KiB)。
+    Manifest,
+    /// `release.json.minisig` (4 KiB)。
+    Signature,
+    /// 配布物 (64 MiB)。
+    Archive,
+}
+
+impl fmt::Display for SizedInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Manifest => "release.json",
+            Self::Signature => "release.json.minisig",
+            Self::Archive => "the archive",
+        })
+    }
+}
+
 /// 更新の検証で断った理由。
 ///
 /// 文言はログ向けの英語で、署名の前の内容を含めない。利用者に示す文言は、呼ぶ側が文言キーで作る。
@@ -91,9 +112,9 @@ pub enum UpdateError {
     VersionMismatch {
         /// 比べた相手。
         source_of: VersionSource,
-        /// `release.json` の版。
-        found: Version,
-        /// 相手の値 (タグはそのまま)。
+        /// `release.json` の `version` の値 (版として読めないものを含む。表示用に整えたもの)。
+        found: String,
+        /// 相手の版。
         expected: String,
     },
     /// 版が今の版より新しくない (巻き戻しは `rollback` だけ)。
@@ -139,6 +160,18 @@ pub enum UpdateError {
         /// 当てはまる数。
         count: usize,
     },
+    /// 入力が大きさの上限を超える (通信の大きさの上限と同じ扱い、07 §5 の 1)。読む前に断る。
+    #[error("{what} is over {limit} bytes")]
+    TooLarge {
+        /// 何が大きすぎるか。
+        what: SizedInput,
+        /// 上限 (バイト)。
+        limit: u64,
+    },
+    /// 配布物の版 (`EVORAG_CHANNEL=zip`) なのに、埋め込んだリリースの日付が無いか読めない。日付の確かめを
+    /// 飛ばさずに、更新を断る (12 §7.2 の apply の 4)。
+    #[error("this release build has no readable EVORAG_RELEASE_DATE")]
+    BuildDateUnreadable,
     /// 配布物の大きさが `size` と違う。
     #[error("the archive is {actual} bytes, not {expected}")]
     ArchiveSizeMismatch {
@@ -199,6 +232,8 @@ impl UpdateError {
             | Self::ArchiveDigestMismatch
             | Self::ExeDigestMismatch => Severity::Tampered,
             Self::UnknownSchema
+            | Self::TooLarge { .. }
+            | Self::BuildDateUnreadable
             | Self::Malformed { .. }
             | Self::NotNewer { .. }
             | Self::BelowUpgradeFrom { .. }

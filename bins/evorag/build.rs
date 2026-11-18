@@ -19,18 +19,10 @@ fn output(cmd: &str, args: &[&str]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// `YYYY-MM-DD` の形か (日付として正しいかは evorag-update の `ReleaseDate` が確かめる)。
-fn is_date_shape(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 10
-        && b.iter().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                *c == b'-'
-            } else {
-                c.is_ascii_digit()
-            }
-        })
-}
+// リリースの日付の確かめ。evorag-update の試験が、ReleaseDate と同じ条件であることを確かめる。
+mod build_date;
+
+use build_date::is_date;
 
 fn main() {
     let commit =
@@ -51,11 +43,13 @@ fn main() {
         .ok()
         .filter(|d| !d.is_empty())
     {
-        Some(date) if is_date_shape(&date) => {
+        Some(date) if is_date(&date) => {
             println!("cargo:rustc-env=EVORAG_RELEASE_DATE={date}");
         }
         Some(date) => {
-            panic!("EVORAG_RELEASE_DATE must be YYYY-MM-DD (UTC), not `{date}` (12 §5.3)")
+            panic!(
+                "EVORAG_RELEASE_DATE must be a real date YYYY-MM-DD (UTC), not `{date}` (12 §5.3)"
+            )
         }
         None if channel == "zip" => panic!(
             "EVORAG_CHANNEL=zip needs EVORAG_RELEASE_DATE (YYYY-MM-DD, UTC; 12 §7.4); build the release with `cargo xtask dist`"

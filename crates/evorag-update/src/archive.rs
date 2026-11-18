@@ -51,6 +51,12 @@ impl std::fmt::Debug for VerifiedArchive {
 impl VerifiedArchive {
     pub(crate) fn check(artifact: &Artifact, bytes: Vec<u8>) -> Result<Self, UpdateError> {
         let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if actual > MAX_ARCHIVE_BYTES {
+            return Err(UpdateError::TooLarge {
+                what: crate::SizedInput::Archive,
+                limit: MAX_ARCHIVE_BYTES,
+            });
+        }
         if actual != artifact.size() {
             return Err(UpdateError::ArchiveSizeMismatch {
                 expected: artifact.size(),
@@ -150,7 +156,7 @@ fn read_capped(entry: impl Read, limit: u64) -> Result<Vec<u8>, UpdateError> {
 }
 
 /// 名前が `exe` と同じ項目のバイト列を返す。配布物を確かめた後 ([`VerifiedArchive`]) か、
-/// `cargo xtask` が自分で作った配布物 (`dist` の機能) だけを渡す。
+/// `cargo xtask` が自分で作った配布物 (`unverified-dist` の機能) だけを渡す。
 pub(crate) fn read_exe(
     format: ArchiveFormat,
     bytes: &[u8],
@@ -316,6 +322,20 @@ mod tests {
             read_exe(ArchiveFormat::TarGz, &tgz, EXE, SMALL),
             Err(UpdateError::UnpackedTooLarge { limit: 100_000 })
         ));
+    }
+
+    /// lib.rs の compile_fail の例が、すべての項目を書いていること (項目の非公開だけで失敗すること)。
+    #[test]
+    fn the_compile_fail_literal_names_every_field() {
+        fn forge() -> VerifiedArchive {
+            VerifiedArchive {
+                bytes: Vec::new(),
+                format: ArchiveFormat::Zip,
+                exe: String::new(),
+                exe_sha256: Sha256Digest::of(b""),
+            }
+        }
+        assert_eq!(forge().format(), ArchiveFormat::Zip);
     }
 
     #[test]

@@ -7,8 +7,8 @@ use common::{
     key, keyring, tar_gz, tar_gz_declaring, tar_gz_raw_name, v, zip_archive, zip_with_symlink,
 };
 use evorag_update::{
-    ArchiveFormat, Expectations, MAX_EXE_BYTES, Severity, UpdateError, VerifiedRelease,
-    verify_manifest,
+    ArchiveFormat, Expectations, MAX_ARCHIVE_BYTES, MAX_EXE_BYTES, Severity, SizedInput,
+    UpdateError, VerifiedRelease, verify_manifest,
 };
 
 /// 配布物を差し替えたリリースを、署名して確かめる。
@@ -72,6 +72,18 @@ fn an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked() {
     flipped[last] ^= 1;
     let e = refused(win.verify_archive(flipped), Severity::Tampered);
     assert!(matches!(e, UpdateError::ArchiveDigestMismatch), "{e}");
+}
+
+#[test]
+fn an_archive_over_64_mib_is_refused_before_it_is_hashed() {
+    let (zip, tgz) = archives();
+    let win = release_with(&zip, &tgz, WINDOWS);
+    let huge = vec![0u8; usize::try_from(MAX_ARCHIVE_BYTES).expect("fits") + 1];
+    let e = refused(win.verify_archive(huge), Severity::Unusable);
+    assert!(
+        matches!(e, UpdateError::TooLarge { what: SizedInput::Archive, limit } if limit == MAX_ARCHIVE_BYTES),
+        "{e}"
+    );
 }
 
 /// verifies: AC-NFR-505-2 (`exe_sha256` の合わない配布物は 5)

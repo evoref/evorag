@@ -9,7 +9,7 @@ use evorag_update::{
 };
 
 fn expect() -> Expectations {
-    Expectations::new(v("0.2.1"), WINDOWS).with_tag("v0.3.0")
+    Expectations::new(v("0.2.1"), WINDOWS).with_tag(v("0.3.0"))
 }
 
 fn release() -> Release {
@@ -178,6 +178,30 @@ fn the_trusted_comment_must_match_exactly() {
         ),
         "{e}"
     );
+    // version が版として読めない・文字列でないときも、trusted comment の版との不一致 (改ざんを疑う)。
+    for bad in [
+        serde_json::json!("0.3"),
+        serde_json::json!("v0.3.0"),
+        serde_json::json!("0.3.0 "),
+        serde_json::json!(3),
+        serde_json::json!(null),
+    ] {
+        let mut r = release();
+        r.json["version"] = bad.clone();
+        let json = r.bytes();
+        let sig = k.sign(&json, &comment_for("0.3.0", &json));
+        let e = tampered(verify_manifest(&json, &sig, &keyring(&[&k]), &expect()));
+        assert!(
+            matches!(
+                e,
+                UpdateError::VersionMismatch {
+                    source_of: VersionSource::TrustedComment,
+                    ..
+                }
+            ),
+            "{bad}: {e}"
+        );
+    }
     // trusted comment を書き換えると、全体の署名が通らない。
     let sig = k.sign(&json, &good);
     let forged = String::from_utf8(sig)
@@ -196,7 +220,7 @@ fn name_tag_and_requested_version_must_match() {
     let e = tampered(check(&r, &expect()));
     assert!(matches!(e, UpdateError::NameMismatch), "{e}");
 
-    let e = tampered(check(&release(), &expect().with_tag("v0.3.1")));
+    let e = tampered(check(&release(), &expect().with_tag(v("0.3.1"))));
     assert!(
         matches!(
             e,
@@ -207,17 +231,18 @@ fn name_tag_and_requested_version_must_match() {
         ),
         "{e}"
     );
-    let e = tampered(check(&release(), &expect().with_tag("0.3.0")));
-    assert!(
-        matches!(
-            e,
-            UpdateError::VersionMismatch {
-                source_of: VersionSource::Tag,
-                ..
-            }
-        ),
-        "{e}"
-    );
+
+    // name は、ほかの項目の形より先に比べる (形が壊れていても、改ざんを疑う理由で断る)。
+    let mut r = release();
+    r.json["name"] = "evorag-pro".into();
+    r.json["date"] = "not a date".into();
+    r.json.as_object_mut().expect("object").remove("artifacts");
+    let e = tampered(check(&r, &expect()));
+    assert!(matches!(e, UpdateError::NameMismatch), "{e}");
+    let mut r = release();
+    r.json.as_object_mut().expect("object").remove("name");
+    let e = tampered(check(&r, &expect()));
+    assert!(matches!(e, UpdateError::NameMismatch), "{e}");
 
     let e = tampered(check(
         &release(),
@@ -409,6 +434,21 @@ fn malformed_fields_are_refused() {
             Box::new(|j| j["artifacts"][0]["size"] = "10".into()),
         ),
         (
+            "exe with a control character",
+            Box::new(|j| {
+                j["artifacts"][0]["exe"] =
+                    "evorag-0.3.0-x86_64-pc-windows-msvc/evorag\u{1b}[2J.exe".into();
+            }),
+        ),
+        (
+            "exe with a bidi control",
+            Box::new(|j| j["artifacts"][0]["exe"] = "evorag-0.3.0/\u{202E}exe.evorag".into()),
+        ),
+        (
+            "target with a control character",
+            Box::new(|j| j["artifacts"][0]["target"] = "x86_64-pc-windows-msvc\r".into()),
+        ),
+        (
             "missing exe",
             Box::new(|j| {
                 j["artifacts"][0]
@@ -473,6 +513,16 @@ fn malformed_fields_are_refused() {
             .llama_server_min_build(),
         Some(4000)
     );
+}
+
+#[test]
+fn db_fields_are_sanitized_for_display() {
+    let mut r = release();
+    r.json["db_format"] = "0.4\u{1b}[2J\r\u{202E}".into();
+    r.json["db_min_write"] = "x".repeat(200).into();
+    let ok = check(&r, &expect()).expect("valid");
+    assert_eq!(ok.manifest().db_format(), Some("0.4[2J"));
+    assert_eq!(ok.manifest().db_min_write().map(str::len), Some(64));
 }
 
 #[test]
