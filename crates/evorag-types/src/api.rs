@@ -67,6 +67,133 @@ pub enum Command {
     RevertFact { target: FactKey },
     /// 再び覚えない印を解く (`/memory unblock`、04 §7.6)。
     UnblockFact { target: ForgottenRef },
+    /// 忘れるの見本を求める (`/forget` の確認の画面、04 §7.1)。記録は変えない。答えは
+    /// [`Event::ForgetPreviewInfo`]。画面は選択を変えるたびに求め直す。
+    PreviewForget {
+        target: FactKey,
+        options: ForgetOptions,
+    },
+    /// 値の行を忘れる (`/forget`、04 §7.1〜§7.3)。`plan` は見本の計画のハッシュ。コアは書く直前に計画を作り
+    /// 直し、違えば実行せずに新しい見本を返す。答えは [`Event::FactForgotten`] か [`Event::ForgetRejected`]。
+    ForgetFact {
+        target: FactKey,
+        options: ForgetOptions,
+        plan: ForgetPlanHash,
+    },
+    /// `broken/` に移した壊れた DB のファイルを消す (忘れるの後に尋ねて、利用者が選んだとき、04 §7.2)。
+    DiscardBroken,
+}
+
+/// 忘れるの選択 (04 §7.1 の確認の画面)。既定は [`ForgetOptions::default`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForgetOptions {
+    /// 出典の発話を伏せ字にする (既定)。偽なら事実だけを消し、選んだ範囲を想起での `[非表示]` にする。
+    pub redact: bool,
+    /// 同じ (主語, 属性) の置き換えの履歴の値もまとめて忘れる。
+    pub history: bool,
+    /// 同じ往復の応答の中で値の鍵が一致する範囲も伏せる (既定)。出典の発話の根拠の外の一致も含む。
+    pub echo: bool,
+    /// ほかのターンで値の鍵が一致する範囲も伏せる。
+    pub others: bool,
+}
+
+impl Default for ForgetOptions {
+    fn default() -> Self {
+        Self {
+            redact: true,
+            history: false,
+            echo: true,
+            others: false,
+        }
+    }
+}
+
+/// 忘れるの計画のハッシュ (04 §7.1 の「見本と計画」。16 進の文字列)。実行の命令に添える。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForgetPlanHash(String);
+
+impl ForgetPlanHash {
+    pub fn new(hex: String) -> Self {
+        Self(hex)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 見本の 1 件: 伏せ字 (か `[非表示]`) にするターンの、前と後の本文を 1 行ずつ (変わる箇所の周り)。`Debug` は
+/// 本文を出さない (ログに忘れる値を残さないため)。
+#[derive(Clone, PartialEq, Eq)]
+pub struct ForgetSample {
+    pub turn: Id,
+    pub role: Role,
+    pub before: String,
+    pub after: String,
+}
+
+impl std::fmt::Debug for ForgetSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgetSample")
+            .field("turn", &self.turn)
+            .field("role", &self.role)
+            .field("before_len", &self.before.len())
+            .field("after_len", &self.after.len())
+            .finish()
+    }
+}
+
+/// 伏せ字にできない理由 (04 §7.1 の「中止」、§7.3)。見本では警告に示し、伏せ字にしないで忘れることを勧める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetWarning {
+    /// 伏せ字にするターンが読めない (読めない記録・新しい版の記録)。
+    UnreadableTurn,
+    /// 取り消す事実の出典の改訂の番号が、今のターンと合わない。
+    StaleSource,
+    /// 伏せ字にする範囲の本文が、忘れる値と合わない (本文が記録と食い違う)。
+    ValueMismatch,
+    /// 伏せ字にするターンが、前の忘れるの指示と合わない。
+    MismatchedTurn,
+}
+
+/// 忘れるの見本 (04 §7.1 の「見本と計画」)。値は見本の本文の中にだけある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetPreview {
+    pub target: FactKey,
+    /// 見本を作った選択 (画面は、今の選択と同じ見本だけを使う)。
+    pub options: ForgetOptions,
+    /// 伏せ字 (か `[非表示]`) にするターンの見本 (ターンの順)。
+    pub samples: Vec<ForgetSample>,
+    /// ほかのターンで値の鍵が一致したターンの数と、範囲の数 (選んでいなくても数える)。
+    pub other_turns: usize,
+    pub other_matches: usize,
+    /// まとめて忘れられる履歴の値の数 (選んでいなくても数える)。
+    pub history_values: usize,
+    /// 伏せ字の範囲に span が重なる、ほかの事実の行 (自動では忘れない、04 §7.1 の「影響するほかの事実」)。
+    pub affected: Vec<FactKey>,
+    /// 根拠の範囲に値の一致が無いので伏せ字にしない出典のターンの数。
+    pub unredacted_sources: usize,
+    /// 出典の発話の、根拠の範囲の外で値の鍵が一致した範囲の数 (`echo` と同じ選択で伏せる)。
+    pub source_outside: usize,
+    /// 位置を戻せないので全体を `[非表示]` にするターンの数 (伏せ字にしないとき)。
+    pub whole_turns: usize,
+    /// 前の忘れるの指示と合わないので飛ばしたターンの数 (伏せ字にしないとき)。
+    pub mismatched_turns: usize,
+    /// 探さずに飛ばした読めないターンの数。
+    pub skipped_unreadable: usize,
+    /// 実行できる計画のハッシュ。伏せ字にできなければ、その理由 (計画は無い)。
+    pub plan: Result<ForgetPlanHash, ForgetWarning>,
+}
+
+/// 忘れるの状態 (状態の行、04 §7.2・§7.8)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForgetState {
+    /// 忘れるの指示と合わないターンの数 (想起・裏の処理・書き出しに使わず、画面は本文を出さない)。
+    pub mismatched: usize,
+    /// ジャーナルに、伏せ字の前の行が残っている (書き直しの入れ替えに失敗した。sleep-time に試し直す)。
+    pub journal_pending: bool,
+    /// `memory.forget_key` が使えないので、忘れた値に当たる事実の取り消しを保留している。
+    pub key_missing: bool,
 }
 
 /// 事実の主語 (04 §5.1)。
@@ -444,6 +571,27 @@ pub struct TurnView {
     pub band_nearby: bool,
     /// この応答で「無関係」の印を付けた往復 (出典・帯の代表のターン)。
     pub irrelevant: Vec<Id>,
+    /// 伏せ字と `[非表示]` の印の範囲 (04 §7.3 の「画面への印の範囲」。始まりの順、重ならない)。
+    pub marks: Vec<TurnMark>,
+    /// 本文が忘れるの指示と合わないので、本文を確かめられない (04 §7.2 の「合わないターン」)。`text` は空。
+    /// 画面は本文の代わりに、確かめられないことを示す。
+    pub unverified: bool,
+}
+
+/// 画面への印 1 つ (04 §7.3)。範囲は今の本文の UTF-8 のバイト位置で、書記素の境界にある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnMark {
+    pub range: std::ops::Range<usize>,
+    pub kind: TurnMarkKind,
+}
+
+/// 印の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMarkKind {
+    /// 本文のその範囲が、すでに伏せ字の印の文字列。そのまま見分けられる表示で出す。
+    Redacted,
+    /// 本文には値が残っている。画面は、その範囲を `[非表示]` の印に置き換えて出す。
+    Hidden,
 }
 
 /// 帯の 1 件 (05 §5.2): セッション名・日時・利用者の発話の冒頭。
@@ -624,4 +772,33 @@ pub enum Event {
         error: Message,
         list: Option<FactList>,
     },
+    /// 忘れるの見本 (`PreviewForget` の答え)。
+    ForgetPreviewInfo { preview: ForgetPreview },
+    /// 事実を忘れた (`ForgetFact`)。`list` は操作の後の一覧 (前の番号は使えなくなる。読み直せなければ `None`:
+    /// 忘れるは済んでいる)。`redacted` は伏せ字か `[非表示]` の範囲を足したターンの数。`journal_pending` は、
+    /// ジャーナルの書き直しが済んでいない (sleep-time に試し直す、04 §7.8)。`broken` は `broken/` に残っている
+    /// 壊れた DB の置き場所 (`broken/<日時>/` のフォルダ) の数 (消すかを尋ねる、04 §7.2)。`slow_next_turn` は、
+    /// 次の応答の前に事実の表を作り直すので、始まるまで少し長くかかるか (04 §5.4)。
+    FactForgotten {
+        list: Option<FactList>,
+        redacted: usize,
+        journal_pending: bool,
+        broken: usize,
+        slow_next_turn: bool,
+    },
+    /// 忘れるの見本を作れなかった・実行しなかった。見本の後に計画が変わったときは、新しい見本を持つ (04 §7.1。
+    /// 利用者が見ていない範囲を伏せないため)。指した行が変わっていたときは、新しい一覧を持つ。
+    ForgetRejected {
+        error: Message,
+        preview: Option<ForgetPreview>,
+        list: Option<FactList>,
+    },
+    /// 開いているセッションのターンに、伏せ字か `[非表示]` の範囲ができた (04 §7.3)。`turns` は読み直したターン
+    /// (印の範囲と帯を持つ。伏せたターンと、帯に伏せたターンを含む応答)。画面は同じ ID のターンを置き換えて
+    /// 描き直す。
+    TurnsRedacted { session: Id, turns: Vec<TurnView> },
+    /// 忘れるの状態が変わった (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
+    ForgetState { state: ForgetState },
+    /// `broken/` の置き場所 (フォルダ) を消した (`DiscardBroken` の答え)。`failed` は消せなかった数。
+    BrokenDiscarded { removed: usize, failed: usize },
 }

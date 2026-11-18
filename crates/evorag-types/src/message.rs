@@ -259,6 +259,87 @@ message_keys! {
     /// 引数: `n`。
     UiPrivateOffHistory => "ui.private_off.history",
     UiPrivateOffHint => "ui.private_off.hint",
+    // 忘れる (`/forget`、04 §7.1〜§7.3・§7.8、07 §3)。
+    /// どれかのセッションで応答を生成しているので、忘れるを受け付けない。
+    ForgetBusy => "error.forget.busy",
+    /// 見本の後に計画が変わった (実行せずに新しい見本を出す)。
+    ForgetOutdated => "error.forget.outdated",
+    /// 伏せ字にできないので中止した (理由は、一緒に返す見本の警告)。
+    ForgetAborted => "error.forget.aborted",
+    /// 伏せ字にできない見本で Enter を押した。
+    ForgetBlocked => "error.forget.blocked",
+    /// 見本がまだ届いていない。
+    ForgetCounting => "error.forget.counting",
+    /// 忘れるを実行している間に、発話・作り直しを送ろうとした。
+    ForgetInProgress => "error.forget.in_progress",
+    /// 忘れるを書いた後に、事実の一覧を読み直せなかった (忘れるは済んでいる)。
+    UiForgetListUnreadable => "ui.forget.list_unreadable",
+    /// 忘れるの確認の画面を閉じたが、実行は続いている。
+    UiForgetContinues => "ui.forget.continues",
+    /// 確認の画面の外で忘れるが済み、`broken/` に置き場所が残っている。引数: `n`。
+    UiForgetBrokenLater => "ui.forget.broken_later",
+    /// 引数: `detail`。
+    ForgetNotSaved => "error.forget.not_saved",
+    UiForgetTitle => "ui.forget.title",
+    /// 引数: `label` (主語・属性・値)。
+    UiForgetTarget => "ui.forget.target",
+    UiForgetCounting => "ui.forget.counting",
+    UiForgetSamplesRedact => "ui.forget.samples_redact",
+    UiForgetSamplesHide => "ui.forget.samples_hide",
+    /// 引数: `who`・`text`。
+    UiForgetSampleBefore => "ui.forget.sample_before",
+    /// 引数: `text`。
+    UiForgetSampleAfter => "ui.forget.sample_after",
+    UiForgetNoSamples => "ui.forget.no_samples",
+    /// 引数: `turns`・`matches`。
+    UiForgetOthers => "ui.forget.others",
+    /// 引数: `n`。
+    UiForgetHistory => "ui.forget.history",
+    /// 引数: `n`。
+    UiForgetSkipped => "ui.forget.skipped",
+    /// 引数: `n`。
+    UiForgetUnredacted => "ui.forget.unredacted",
+    /// 引数: `n`。
+    UiForgetSourceOutside => "ui.forget.source_outside",
+    /// 引数: `n`。
+    UiForgetWhole => "ui.forget.whole",
+    /// 引数: `n`。
+    UiForgetMismatched => "ui.forget.mismatched",
+    UiForgetAffected => "ui.forget.affected",
+    /// 引数: `reason`。
+    UiForgetWarning => "ui.forget.warning",
+    UiForgetWarnUnreadable => "ui.forget.warn_unreadable",
+    UiForgetWarnStale => "ui.forget.warn_stale",
+    UiForgetWarnValue => "ui.forget.warn_value",
+    UiForgetWarnMismatched => "ui.forget.warn_mismatched",
+    UiForgetKeptNote => "ui.forget.kept_note",
+    /// 引数: `summary`。
+    UiForgetChoicesFolded => "ui.forget.choices_folded",
+    UiForgetChoiceRedact => "ui.forget.choice_redact",
+    UiForgetChoiceHistory => "ui.forget.choice_history",
+    UiForgetChoiceEcho => "ui.forget.choice_echo",
+    UiForgetChoiceOthers => "ui.forget.choice_others",
+    UiForgetPromiseFolded => "ui.forget.promise_folded",
+    UiForgetPromise => "ui.forget.promise",
+    UiForgetHint => "ui.forget.hint",
+    UiForgetHintOpen => "ui.forget.hint_open",
+    UiForgetSending => "ui.forget.sending",
+    /// 引数: `n`。
+    UiForgetDone => "ui.forget.done",
+    UiForgetDoneKept => "ui.forget.done_kept",
+    /// 引数: `n`。
+    UiForgetBroken => "ui.forget.broken",
+    /// 引数: `n`。
+    UiForgetBrokenRemoved => "ui.forget.broken_removed",
+    /// 引数: `n`。
+    UiForgetBrokenFailed => "ui.forget.broken_failed",
+    /// 本文が忘れるの指示と合わないので表示しないターンの、本文の代わりの文 (04 §7.2)。
+    UiMarkUnverified => "ui.mark.unverified",
+    /// 伏せ字にしないで忘れた値の範囲を、表示するときに置き換える印 (04 §7.3)。
+    UiMarkHidden => "ui.mark.hidden",
+    /// 引数: `count`。
+    UiStatusForgetMismatched => "ui.status.forget_mismatched",
+    UiStatusForgetJournal => "ui.status.forget_journal",
     /// 利用者が中断した。
     Interrupted => "response.interrupted",
     // 画面の文言 (07 §2)。

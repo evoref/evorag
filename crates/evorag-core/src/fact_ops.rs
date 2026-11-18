@@ -100,7 +100,7 @@ fn list_of(snap: &Snapshot, note: Option<FactsUnavailable>) -> FactList {
 }
 
 /// 今の一覧を作る。記録を読めなければ `None`。
-fn current_list(inner: &Inner) -> Option<FactList> {
+pub(crate) fn current_list(inner: &Inner) -> Option<FactList> {
     let r = inner.store.read().ok()?;
     Some(list_of(&snapshot(&r)?, note(inner)))
 }

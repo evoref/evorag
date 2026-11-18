@@ -2,7 +2,8 @@
 
 use evorag_memory::{Session, Turn, TurnBody, TurnRole, TurnState};
 use evorag_store::Envelope;
-use evorag_types::api::{Role, SessionView, TurnStatus, TurnView};
+use evorag_store::forget::MarkKind;
+use evorag_types::api::{Role, SessionView, TurnMark, TurnMarkKind, TurnStatus, TurnView};
 
 pub fn session(s: &Session) -> SessionView {
     SessionView {
@@ -47,5 +48,33 @@ pub fn turn_of(e: &Envelope, b: &TurnBody) -> TurnView {
         band: Vec::new(),
         band_nearby: false,
         irrelevant: Vec::new(),
+        // 印と「確かめられない」は、忘れるの指示を読める呼び手が足す (`display`)。
+        marks: Vec::new(),
+        unverified: false,
     }
+}
+
+/// 画面に出すターン: 忘れるの指示の印の範囲を添え、指示と合わないターン (04 §7.2) は本文を出さずに「確かめ
+/// られない」とする。伏せる材料を読めなければ (`hide` が `None`)、指示の有無を確かめられないので本文を出さない。
+pub(crate) fn display(hide: Option<&crate::masking::Hide>, t: &Turn) -> TurnView {
+    let mut v = turn(t);
+    match hide.and_then(|h| h.marks(t)) {
+        Some(marks) => {
+            v.marks = marks
+                .into_iter()
+                .map(|m| TurnMark {
+                    range: m.range,
+                    kind: match m.kind {
+                        MarkKind::Redacted => TurnMarkKind::Redacted,
+                        MarkKind::Hidden => TurnMarkKind::Hidden,
+                    },
+                })
+                .collect();
+        }
+        None => {
+            v.text.clear();
+            v.unverified = true;
+        }
+    }
+    v
 }

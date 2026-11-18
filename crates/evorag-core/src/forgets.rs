@@ -302,6 +302,7 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
+    let before = status(inner);
     let mut st = state(inner);
     match unsettled {
         Ok(set) => {
@@ -320,7 +321,26 @@ async fn recheck_locked(inner: &Arc<Inner>) -> Outcome {
     }
     st.journal_pending = journal_pending;
     st.recheck = failed || journal_pending;
+    drop(st);
+    if status(inner) != before {
+        emit_state(inner);
+    }
     out
+}
+
+/// 忘れるの状態を画面に知らせる (状態の行、04 §7.2・§7.8)。
+pub(crate) fn emit_state(inner: &Inner) {
+    let s = status(inner);
+    crate::emit(
+        inner,
+        evorag_types::api::Event::ForgetState {
+            state: evorag_types::api::ForgetState {
+                mismatched: s.mismatched.len(),
+                journal_pending: s.journal_pending,
+                key_missing: s.key_missing,
+            },
+        },
+    );
 }
 
 /// 記録を消した・書き換えた後: 知らせる前に、消した ID を今と前の世代のすべての索引から除き (除けなかった分は
@@ -393,19 +413,13 @@ pub(crate) enum Executed {
     /// 書いた。
     Done {
         directive: Id,
+        /// 伏せ字か `[非表示]` の範囲を足したターン (ID の順。開いているセッションにあれば、画面に読み直させる)。
+        turns: Vec<Id>,
         /// ジャーナルの書き直しが済んでいない (sleep-time に試し直す)。
-        #[expect(
-            dead_code,
-            reason = "the /forget command (M3.4c) shows it with the result"
-        )]
         journal_pending: bool,
     },
     /// 計画のハッシュが見本と違った。実行せず、新しい見本を返す (04 §7.1 の「見本と計画」)。
     Changed {
-        #[expect(
-            dead_code,
-            reason = "the /forget command (M3.4c) shows the new preview"
-        )]
         preview: Box<ForgetPreview>,
         hash: PlanHash,
     },
@@ -418,13 +432,14 @@ pub(crate) enum Executed {
 }
 
 /// 忘れるを実行する (04 §7.1〜§7.3)。索引の鍵 → 事実を書く経路のロックの順に取り、その下で計画を作り直し、
-/// `expect` があればハッシュを比べてから書く。書いた後に、知らせる前に、消した ID を索引から除き、キャッシュを
-/// 捨てる。退避の写し直しは、続けてした操作をまとめるため、少し待ってから始める ([`schedule_backups`])。
+/// `expect` (見本の計画のハッシュの 16 進) があればハッシュを比べてから書く。書いた後に、知らせる前に、消した
+/// ID を索引から除き、キャッシュを捨てる。退避の写し直しは、続けてした操作をまとめるため、少し待ってから始める
+/// ([`schedule_backups`])。
 pub(crate) async fn execute(
     inner: &Arc<Inner>,
     target: FactKey,
     options: ForgetOptions,
-    expect: Option<PlanHash>,
+    expect: Option<String>,
 ) -> Executed {
     if crate::is_running(inner) {
         return Executed::Busy;
@@ -437,6 +452,10 @@ pub(crate) async fn execute(
     let worker = inner.clone();
     tokio::spawn(async move {
         let _guards = (index, facts);
+        // ロックを待つ間に生成が始まっていたら受け付けない (04 §7.1 の「受け付けないとき」)。
+        if crate::is_running(&worker) {
+            return Executed::Busy;
+        }
         // 先に済ませる処理を、ロックを取った直後に止める (書いた後に捨てるキャッシュに、書く前の結果を足させない)。
         drop(worker.pre.stop());
         execute_locked(&worker, key, target, options, expect).await
@@ -450,7 +469,7 @@ async fn execute_locked(
     key: evorag_memory::ForgetKey,
     target: FactKey,
     options: ForgetOptions,
-    expect: Option<PlanHash>,
+    expect: Option<String>,
 ) -> Executed {
     let store = inner.store.clone();
     let ids = inner.ids.clone();
@@ -476,7 +495,7 @@ async fn execute_locked(
         Ok(Err(abort)) => return Executed::Aborted(abort),
         Err(e) => return Executed::Failed(e),
     };
-    if expect.is_some_and(|h| h != plan.hash) {
+    if expect.is_some_and(|h| h != plan.hash.to_string()) {
         return Executed::Changed {
             preview: Box::new(plan.preview),
             hash: plan.hash,
@@ -502,8 +521,15 @@ async fn execute_locked(
         }
     }
     schedule_backups(inner);
+    let turns: BTreeSet<Id> = plan
+        .redacted_turns
+        .iter()
+        .chain(&plan.hidden_turns)
+        .copied()
+        .collect();
     Executed::Done {
         directive: plan.directive,
+        turns: turns.into_iter().collect(),
         journal_pending,
     }
 }

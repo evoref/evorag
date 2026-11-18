@@ -404,3 +404,41 @@ async fn a_plain_server_gets_no_model_name() {
             .all(|r| !r.contains("model=chat") && !r.contains(r#""model""#))
     );
 }
+
+/// スロットのキャッシュの消去は、`/slots/{id}?action=erase` を 1 回だけ送る (断られても再試行しない)。ルーターなら
+/// 本文にモデルの名前を付ける (06 §2・§4)。
+///
+/// verifies: 04 §7.2 (llama-server の行)、06 §4
+#[tokio::test]
+async fn slot_erase_is_sent_once_and_names_the_routed_model() {
+    let (url, seen) = serve(vec![Reply::Json(501, "not supported".into())]).await;
+    let c = client(&url, None);
+    assert!(matches!(
+        c.erase_slot(1).await,
+        Err(LlmError::Http { status: 501, .. })
+    ));
+    let reqs = seen.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1, "a refused erase is not retried");
+    assert!(
+        reqs[0].starts_with("POST /slots/1?action=erase "),
+        "{}",
+        reqs[0]
+    );
+
+    let (url, seen) = serve(vec![
+        Reply::Json(200, ROUTER.into()),
+        Reply::Json(200, CHAT_PROPS.into()),
+        Reply::Json(200, router_models(true)),
+        Reply::Json(200, "{}".into()),
+    ])
+    .await;
+    let c = client(&url, None).with_model(Some("chat".into()));
+    c.server_info().await.unwrap();
+    c.erase_slot(0).await.unwrap();
+    let reqs = seen.requests.lock().unwrap().clone();
+    let erase = reqs.last().unwrap();
+    assert!(
+        erase.starts_with("POST /slots/0?action=erase ") && erase.contains(r#""model":"chat""#),
+        "{erase}"
+    );
+}

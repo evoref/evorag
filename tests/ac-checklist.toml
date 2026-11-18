@@ -1165,6 +1165,15 @@ manual = ""
 note = "v0.3 の M3.4 (忘れるの確認の文言) で確かめる。"
 
 [[ac]]
+id = "AC-FR-307-1"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::after_the_forget_command_the_value_is_gone_from_requests_and_files", "crates/evorag-core/tests/forget_wiring.rs::a_forget_cut_short_before_its_commit_is_replayed_at_the_next_start", "crates/evorag-core/tests/forget_wiring.rs::the_backup_job_rewrites_daily_weekly_and_pre_op_backups", "crates/evorag-core/tests/forget_wiring.rs::export_is_refused_until_the_forget_is_replayed"]
+manual = ""
+note = "/forget の命令 (見本の計画のハッシュを添えた実行) の後に、次のターンの llama-server への要求 (偽の llama-server で記録する。忘れる前の起動の裏の処理の要求は数えない)・ジャーナル・索引・退避と、再起動 (compact) の後のデータ根のすべてのファイルに値が出ないことで判定する。移行と作り直しの前の退避は退避の写し直しの試験で、書き出しは書き出しの試験で判定する。回帰台帳は v0.4 で足す種類なので、その版で足す。"
+
+[[ac]]
 id = "AC-FR-307-4"
 requirement = "FR-307"
 level = "Must"

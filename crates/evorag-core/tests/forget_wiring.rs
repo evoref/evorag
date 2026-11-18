@@ -2,7 +2,7 @@
 //! 03 §4.2 の規則 12・§6・§7.3・§11)。llama-server は記録の再生で置き換える。試験の値は架空のもの。
 //!
 //! 忘れるの操作は、閉じたデータ根に `evorag-memory` の計画 (`plan_forget`) を直接書くか、試験の口
-//! (`Core::forget_now`) で作る (`/forget` の命令は M3.4c の後半で足す)。
+//! (`Core::forget_now`) か、`/forget` の命令 (`PreviewForget`・`ForgetFact`) で作る。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,8 +20,11 @@ use evorag_store::{
     BodyPatch, OpenOptions, Read, RewriteFault, Store, WriteOp, WriteRequest, Writer, WriterHandle,
     meta,
 };
-use evorag_types::api::{Command, Event, FactKey, FactList, FactRow};
-use evorag_types::{Clock, Id, ManualClock, Timestamp, UuidV7Gen};
+use evorag_types::api::{
+    Command, Event, FactKey, FactList, FactRow, ForgetOptions as ForgetChoices, ForgetPlanHash,
+    ForgetPreview, Role, TurnMarkKind,
+};
+use evorag_types::{Clock, Id, ManualClock, MessageKey, Timestamp, UuidV7Gen};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 const REPLY: &str = "了解です";
@@ -572,8 +575,8 @@ async fn the_backup_job_rewrites_daily_weekly_and_pre_op_backups() {
     let _ = turn;
 }
 
-/// 本文が忘れるの指示と合わないターン (値を含む) は、会話の履歴に送らず、画面には伏せ字の印だけを出し、
-/// チャンクを埋め込まない。
+/// 本文が忘れるの指示と合わないターン (値を含む) は、会話の履歴に送らず、画面には本文を出さずに「確かめられ
+/// ない」とし、チャンクを埋め込まない。
 ///
 /// verifies: 04 §7.2 (合わないターン)
 #[tokio::test(flavor = "multi_thread")]
@@ -602,19 +605,20 @@ async fn a_mismatched_turn_is_withheld_from_the_history_the_view_and_embeddings(
     core.settle().await;
     settle(&core).await;
     assert_eq!(report.forget.mismatched, [turn]);
-    // 画面: 伏せ字の印だけ。
+    // 画面: 本文を出さずに「確かめられない」とする (04 §7.2)。
     let view = core.turns(session);
     let shown = view
         .iter()
         .find(|t| t.id == turn)
         .expect("the turn is listed");
-    assert_eq!(shown.text, MARKER);
+    assert!(shown.unverified && shown.text.is_empty(), "{shown:?}");
     core.command(Command::OpenSession { id: session });
     let ev = until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     let Some(Event::SessionOpened { turns, .. }) = ev.last() else {
         panic!()
     };
     assert!(turns.iter().all(|t| !t.text.contains(VALUE)), "{turns:?}");
+    assert!(turns.iter().any(|t| t.id == turn && t.unverified));
     // 会話の履歴にも、先に温める要求にも、値を送らない。
     ask(&core, &mut rx, "うん").await;
     core.hold(false);
@@ -818,4 +822,356 @@ async fn export_is_refused_until_the_forget_is_replayed() {
     assert!(turns.contains(MARKER), "{turns}");
     let hits = files_with(&out, VALUE);
     assert!(hits.is_empty(), "{hits:?}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// `/forget` の命令 (04 §7.1〜§7.3)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// ノートの鍵の答え (起動の裏の処理が、前の起動の往復のノートを作る)。
+const KEYS: &str = r#"{"keys": ["観葉植物の水やり"]}"#;
+
+/// 生成を途中で止めたままにする応答 (応答を生成している間をまねる)。
+const HANG: &str = r#"{"events": [{"delta": "考え"}, {"hang": true}]}"#;
+
+/// 開いているセッションを開き直す (前の起動で作ったセッション)。セッションの ID を返す。
+async fn reopen(core: &Core, rx: &mut UnboundedReceiver<Event>) -> Id {
+    let session = core.sessions(1)[0].id;
+    core.command(Command::OpenSession { id: session });
+    until(rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    session
+}
+
+async fn preview_of(
+    core: &Core,
+    rx: &mut UnboundedReceiver<Event>,
+    key: &FactKey,
+    options: ForgetChoices,
+) -> ForgetPreview {
+    core.command(Command::PreviewForget {
+        target: key.clone(),
+        options,
+    });
+    let ev = until(rx, |e| {
+        matches!(
+            e,
+            Event::ForgetPreviewInfo { .. } | Event::ForgetRejected { .. }
+        )
+    })
+    .await;
+    match ev.into_iter().last() {
+        Some(Event::ForgetPreviewInfo { preview }) => preview,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// 忘れるの実行の結果 (`FactForgotten` か `ForgetRejected`) までのイベント。
+async fn forget_with(
+    core: &Core,
+    rx: &mut UnboundedReceiver<Event>,
+    key: &FactKey,
+    options: ForgetChoices,
+    plan: ForgetPlanHash,
+) -> Vec<Event> {
+    core.command(Command::ForgetFact {
+        target: key.clone(),
+        options,
+        plan,
+    });
+    until(rx, |e| {
+        matches!(
+            e,
+            Event::FactForgotten { .. } | Event::ForgetRejected { .. }
+        )
+    })
+    .await
+}
+
+/// `/forget` の見本は記録を変えない。見本の計画のハッシュを添えた実行で忘れ、開いているセッションの伏せたターン
+/// を、印の範囲を添えて知らせ、新しい一覧を返す。応答のモデルのすべてのスロットにキャッシュの消去を求め、断られ
+/// ても (既定の構成の 501) 続ける。
+///
+/// verifies: 04 §7.1 (見本と計画)、04 §7.2 (llama-server の行)、04 §7.3 (画面への印の範囲)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_forget_command_previews_then_forgets_with_the_plan_hash() {
+    let dir = TempDir::new("forget-command");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    let llm = chat(&[]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 3_600_000)).await;
+    core.hold(true);
+    let session = reopen(&core, &mut rx).await;
+
+    let preview = preview_of(&core, &mut rx, &key, ForgetChoices::default()).await;
+    assert_eq!(preview.target, key);
+    assert_eq!(preview.samples.len(), 1, "{preview:?}");
+    let s = &preview.samples[0];
+    assert_eq!((s.turn, s.role), (turn, Role::User));
+    assert!(s.before.contains(VALUE) && !s.before.contains('\n'));
+    assert!(s.after.contains(MARKER) && !s.after.contains(VALUE));
+    let Ok(hash) = preview.plan.clone() else {
+        panic!("{preview:?}")
+    };
+    // 見本は記録を変えない。
+    assert!(
+        core.turns(session)
+            .iter()
+            .any(|t| t.id == turn && t.text.contains(VALUE) && t.marks.is_empty())
+    );
+    assert!(value_key_of(&facts(&core, &mut rx).await, VALUE).is_some());
+    assert_eq!(core.pending_cleanup_jobs(), 0);
+    assert!(llm.erased_slots().is_empty());
+
+    let ev = forget_with(&core, &mut rx, &key, ForgetChoices::default(), hash).await;
+    let shown = ev
+        .iter()
+        .find_map(|e| match e {
+            Event::TurnsRedacted { session: s, turns } if *s == session => Some(turns.clone()),
+            _ => None,
+        })
+        .expect("the open session is told about the redacted turn");
+    let t = shown
+        .iter()
+        .find(|t| t.id == turn)
+        .expect("the source turn");
+    assert!(!t.text.contains(VALUE) && !t.unverified);
+    assert_eq!(t.marks.len(), 1, "{t:?}");
+    assert_eq!(t.marks[0].kind, TurnMarkKind::Redacted);
+    assert_eq!(&t.text[t.marks[0].range.clone()], MARKER);
+    match ev.last() {
+        Some(Event::FactForgotten {
+            list: Some(list),
+            redacted,
+            journal_pending,
+            broken,
+            slow_next_turn,
+        }) => {
+            assert!(value_key_of(list, VALUE).is_none(), "{list:?}");
+            assert_eq!((*redacted, *journal_pending, *broken), (1, false, 0));
+            assert!(slow_next_turn);
+        }
+        other => panic!("{other:?}"),
+    }
+    // 照会のターンにも印の範囲を添える。
+    let again = core.turns(session);
+    let t = again.iter().find(|t| t.id == turn).unwrap();
+    assert_eq!(t.marks.len(), 1);
+    core.settle().await;
+    assert_eq!(llm.erased_slots(), [0, 1], "every slot is asked once");
+    core.shutdown().await;
+}
+
+/// 見本の後に計画が変わっていたら、実行せずに新しい見本を返す。選択を変えた見本は別の計画になる。応答を生成して
+/// いる間は、忘れるを受け付けない。どちらも記録を変えない。
+///
+/// verifies: 04 §7.1 (見本と計画、受け付けないとき)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outdated_plan_or_a_running_reply_stops_the_forget() {
+    let dir = TempDir::new("forget-refused");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    let llm = chat(&[reply(KEYS), HANG.to_owned()]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 3_600_000)).await;
+    core.hold(true);
+    let session = reopen(&core, &mut rx).await;
+    let preview = preview_of(&core, &mut rx, &key, ForgetChoices::default()).await;
+    let kept_options = ForgetChoices {
+        redact: false,
+        ..ForgetChoices::default()
+    };
+    let kept = preview_of(&core, &mut rx, &key, kept_options).await;
+    assert_eq!(kept.options, kept_options);
+    assert_ne!(
+        kept.plan, preview.plan,
+        "the choices are covered by the plan"
+    );
+    assert!(kept.samples[0].after.contains("[非表示]"), "{kept:?}");
+
+    let stale = ForgetPlanHash::new("0".repeat(64));
+    let ev = forget_with(&core, &mut rx, &key, ForgetChoices::default(), stale).await;
+    match ev.last() {
+        Some(Event::ForgetRejected {
+            error,
+            preview: Some(fresh),
+            list: None,
+        }) => {
+            assert_eq!(error.key, MessageKey::ForgetOutdated);
+            assert_eq!(fresh.plan, preview.plan);
+            assert_eq!(fresh.samples, preview.samples);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    core.command(Command::Send {
+        text: "続けて".into(),
+    });
+    until(&mut rx, |e| matches!(e, Event::Token { .. })).await;
+    let hash = preview.plan.clone().unwrap();
+    let ev = forget_with(&core, &mut rx, &key, ForgetChoices::default(), hash).await;
+    match ev.last() {
+        Some(Event::ForgetRejected {
+            error,
+            preview: None,
+            list: None,
+        }) => assert_eq!(error.key, MessageKey::ForgetBusy),
+        other => panic!("{other:?}"),
+    }
+    core.command(Command::Interrupt);
+    until(&mut rx, |e| matches!(e, Event::ResponseFinished { .. })).await;
+    assert!(value_key_of(&facts(&core, &mut rx).await, VALUE).is_some());
+    assert!(
+        core.turns(session)
+            .iter()
+            .any(|t| t.id == turn && t.text.contains(VALUE))
+    );
+    assert!(llm.erased_slots().is_empty());
+    core.shutdown().await;
+}
+
+/// `/forget` の命令で伏せ字にして忘れた後は、値が、次のターンの llama-server への要求 (偽の llama-server で記録
+/// する)・ジャーナル・索引・退避と、再起動 (compact) の後のデータ根のどのファイルにも出ない。
+///
+/// verifies: AC-FR-307-1、04 §7.2
+#[tokio::test(flavor = "multi_thread")]
+async fn after_the_forget_command_the_value_is_gone_from_requests_and_files() {
+    let dir = TempDir::new("forget-gone");
+    let root = dir.path();
+    let (turn, key) = conversation(root, clock_at(T0)).await;
+    // 起動の裏の処理 (前の往復のノートの鍵) → 次のターンの応答 → その後の裏の処理 (抽出・ノートの鍵)。
+    let llm = chat(&[
+        reply(KEYS),
+        reply(REPLY),
+        reply(r#"{"c": []}"#),
+        reply(KEYS),
+        reply(KEYS),
+    ]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 3_600_000)).await;
+    core.hold(true);
+    reopen(&core, &mut rx).await;
+    let preview = preview_of(&core, &mut rx, &key, ForgetChoices::default()).await;
+    let ev = forget_with(
+        &core,
+        &mut rx,
+        &key,
+        ForgetChoices::default(),
+        preview.plan.clone().unwrap(),
+    )
+    .await;
+    assert!(
+        matches!(ev.last(), Some(Event::FactForgotten { .. })),
+        "{ev:?}"
+    );
+    // 忘れる前の要求 (起動の裏の処理) は数えない。
+    let (from, from_warm) = (llm.requests().len(), llm.warm_requests().len());
+    core.settle().await;
+    for sub in [
+        root.join(evorag_store::JOURNAL_DIR),
+        root.join("index"),
+        root.join("backups"),
+    ] {
+        let hits = files_with(&sub, VALUE);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    say(&core, &mut rx, ASK).await;
+    let sent: Vec<String> = llm.requests()[from..]
+        .iter()
+        .chain(llm.warm_requests()[from_warm..].iter())
+        .flat_map(|r| r.messages.iter().map(|m| m.content.clone()))
+        .collect();
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|m| !m.contains(VALUE)), "{sent:?}");
+    assert!(
+        sent.iter().any(|m| m.contains(MARKER)),
+        "the redacted utterance stays in the history"
+    );
+    core.shutdown().await;
+
+    // 次の起動で compact する。データ根のどのファイルにも値が残らない。
+    let (core, _rx, _) = start(root, &chat(&[]), 9, clock_at(T0 + 2 * 3_600_000)).await;
+    core.shutdown().await;
+    let hits = files_with(root, VALUE);
+    assert!(hits.is_empty(), "{hits:?}");
+    let c = Closed::open(root);
+    assert!(c.turn(turn).0.text.contains(MARKER));
+}
+
+/// 忘れるを実行している間 (命令を受けてから結果を知らせるまで) は、発話と作り直しを受け付けない。発話は入力欄に
+/// 戻す。忘れた後の発話は、値を含まずに送る。
+///
+/// verifies: 04 §7.1 (受け付けないとき)、AC-FR-307-1
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_during_a_pending_forget_is_refused() {
+    let dir = TempDir::new("forget-pending");
+    let root = dir.path();
+    let (_, key) = conversation(root, clock_at(T0)).await;
+    let llm = chat(&[reply(KEYS), reply(REPLY)]);
+    let (core, mut rx, _) = start(root, &llm, 8, clock_at(T0 + 3_600_000)).await;
+    core.hold(true);
+    reopen(&core, &mut rx).await;
+    let preview = preview_of(&core, &mut rx, &key, ForgetChoices::default()).await;
+    let from = llm.requests().len();
+    // 忘れるを、ロックを待つところで止めておく。
+    let lock = core.hold_index_lock().await;
+    core.command(Command::ForgetFact {
+        target: key.clone(),
+        options: ForgetChoices::default(),
+        plan: preview.plan.clone().unwrap(),
+    });
+    core.command(Command::Send { text: ASK.into() });
+    let ev = until(&mut rx, |e| {
+        matches!(e, Event::SendRejected { .. } | Event::UserTurnSaved { .. })
+    })
+    .await;
+    match ev.last() {
+        Some(Event::SendRejected { text, error }) => {
+            assert_eq!(text, ASK, "the utterance goes back to the input");
+            assert_eq!(error.key, MessageKey::ForgetInProgress);
+        }
+        other => panic!("{other:?}"),
+    }
+    core.command(Command::Retry);
+    let ev = until(&mut rx, |e| matches!(e, Event::Rejected { .. })).await;
+    let Some(Event::Rejected { error }) = ev.last() else {
+        panic!()
+    };
+    assert_eq!(error.key, MessageKey::ForgetInProgress);
+    drop(lock);
+    let ev = until(&mut rx, |e| {
+        matches!(
+            e,
+            Event::FactForgotten { .. } | Event::ForgetRejected { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(ev.last(), Some(Event::FactForgotten { .. })),
+        "{ev:?}"
+    );
+    ask(&core, &mut rx, ASK).await;
+    let sent: Vec<String> = llm.requests()[from..]
+        .iter()
+        .flat_map(|r| r.messages.iter().map(|m| m.content.clone()))
+        .collect();
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|m| !m.contains(VALUE)), "{sent:?}");
+    core.shutdown().await;
+}
+
+/// セッションを消した後も、応答のモデルのすべてのスロットにキャッシュの消去を求める (06 §4)。
+///
+/// verifies: 04 §7.2 (llama-server の行)、06 §4
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_asks_to_erase_the_slot_caches() {
+    let dir = TempDir::new("delete-erase");
+    let root = dir.path();
+    prepare(root);
+    let llm = chat(&[]);
+    let (core, mut rx, _) = start(root, &llm, 7, clock_at(T0)).await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    assert_eq!(llm.erased_slots(), [0, 1]);
+    core.shutdown().await;
 }

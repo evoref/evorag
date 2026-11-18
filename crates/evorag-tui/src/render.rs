@@ -1,7 +1,9 @@
 //! 描画 (07 §2.1)。描画のたびに、端末の本当のカーソルを入力欄の入力位置に置く (07 §2.3)。
 
 use evorag_types::MessageKey;
-use evorag_types::api::{BackgroundState, RecallState, Role, StyleItem, TurnStatus, TurnView};
+use evorag_types::api::{
+    BackgroundState, RecallState, Role, StyleItem, TurnMark, TurnMarkKind, TurnStatus, TurnView,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -78,13 +80,40 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Some(t.created_at.as_millis()),
             mark(app, t),
         ));
-        if t.role == Role::Assistant {
-            lines.extend(crate::markdown::render(&t.text, body_w, "  "));
-            band_lines(app, t, body_w, &mut lines);
+        // 伏せ字と `[非表示]` の印 (04 §7.3)。印の範囲が本文と合わなければ、本文を出さない。
+        let marked = if t.unverified {
+            None
+        } else if t.marks.is_empty() {
+            // 印の無いターン (ほとんど): 本文を写さずにそのまま描く。
+            Some(None)
         } else {
-            for l in wrap(&t.text, body_w) {
-                lines.push(Line::from(format!("  {l}")));
+            let hidden = app.catalog.key(MessageKey::UiMarkHidden);
+            marked_text(&t.text, &t.marks, &hidden).map(Some)
+        };
+        match marked {
+            None => lines.push(Line::styled(
+                format!("  {}", app.catalog.key(MessageKey::UiMarkUnverified)),
+                Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
+            )),
+            Some(None) if t.role == Role::Assistant => {
+                lines.extend(crate::markdown::render(&t.text, body_w, "  "));
             }
+            Some(None) => {
+                for l in wrap(&t.text, body_w) {
+                    lines.push(Line::from(format!("  {l}")));
+                }
+            }
+            Some(Some(Marked { text, overlay })) if t.role == Role::Assistant => {
+                lines.extend(crate::markdown::render_marked(
+                    &text, body_w, "  ", &overlay,
+                ));
+            }
+            Some(Some(Marked { text, overlay })) => {
+                lines.extend(crate::markdown::plain_marked(&text, body_w, "  ", &overlay));
+            }
+        }
+        if t.role == Role::Assistant {
+            band_lines(app, t, body_w, &mut lines);
         }
         lines.push(Line::from(""));
     }
@@ -109,6 +138,66 @@ pub fn conversation_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// 伏せ字の範囲の表示 (本文がすでに印なので、そのまま反転して見分ける)。
+fn redacted_style() -> Style {
+    Style::new().add_modifier(Modifier::REVERSED)
+}
+
+/// `[非表示]` の範囲の表示 (置き換えた印を、伏せ字と別の見え方にする)。
+fn hidden_style() -> Style {
+    Style::new().add_modifier(Modifier::DIM | Modifier::UNDERLINED)
+}
+
+/// 印を当てた表示の本文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marked {
+    pub text: String,
+    /// 表示の本文の中の、印の範囲と装飾。
+    pub overlay: Vec<(std::ops::Range<usize>, Style)>,
+}
+
+/// 印を当てた表示の本文と、その中の印の範囲と装飾 (04 §7.3)。伏せ字の範囲は本文のまま、`[非表示]` の範囲は
+/// `hidden` に置き換える。範囲が本文と合わない (始まりの順でない・重なる・本文の外・文字の途中) ときは `None`
+/// (値を出してしまわないよう、呼び手は本文を出さない)。
+pub fn marked_text(text: &str, marks: &[TurnMark], hidden: &str) -> Option<Marked> {
+    if marks.is_empty() {
+        return Some(Marked {
+            text: text.to_owned(),
+            overlay: Vec::new(),
+        });
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut overlay = Vec::with_capacity(marks.len());
+    let mut pos = 0;
+    for m in marks {
+        let r = &m.range;
+        if r.start < pos
+            || r.start > r.end
+            || !text.is_char_boundary(r.start)
+            || !text.is_char_boundary(r.end)
+            || r.end > text.len()
+        {
+            return None;
+        }
+        out.push_str(&text[pos..r.start]);
+        let start = out.len();
+        let style = match m.kind {
+            TurnMarkKind::Redacted => {
+                out.push_str(&text[r.clone()]);
+                redacted_style()
+            }
+            TurnMarkKind::Hidden => {
+                out.push_str(hidden);
+                hidden_style()
+            }
+        };
+        overlay.push((start..out.len(), style));
+        pos = r.end;
+    }
+    out.push_str(&text[pos..]);
+    Some(Marked { text: out, overlay })
 }
 
 /// 応答の下の候補の帯 (05 §5.2): セッション名・日時・発話の冒頭を薄く出す。選んでいるものは反転する。
@@ -303,11 +392,25 @@ pub fn draw(app: &App, f: &mut Frame) {
         };
         format!(" {} │", app.catalog.key(k))
     });
-    let limited = if st.limited {
+    let mut limited = if st.limited {
         format!(" │ {}", app.catalog.key(MessageKey::UiStatusLimited))
     } else {
         String::new()
     };
+    // 忘れるの指示と合わないターンと、ジャーナルの書き直しの残り (04 §7.2・§7.8)。
+    if let Some(fs) = st.forget {
+        if fs.mismatched > 0 {
+            limited.push_str(" │ ");
+            limited.push_str(&app.catalog.with(
+                MessageKey::UiStatusForgetMismatched,
+                &[("count", &fs.mismatched.to_string())],
+            ));
+        }
+        if fs.journal_pending {
+            limited.push_str(" │ ");
+            limited.push_str(&app.catalog.key(MessageKey::UiStatusForgetJournal));
+        }
+    }
     f.render_widget(
         Paragraph::new(format!(
             " {} │ {} │{} n_ctx {} │ {state}{limited}",
@@ -383,6 +486,39 @@ pub fn draw(app: &App, f: &mut Frame) {
                             .borders(Borders::ALL)
                             .title(app.catalog.key(MessageKey::UiPrivateOffTitle)),
                     ),
+                r,
+            );
+        }
+        Mode::ConfirmForget(fc) => {
+            // `/forget` の確認の画面 (07 §3)。見本が長いのでスクロールできる。
+            let r = centered(
+                area,
+                area.width.saturating_sub(4).min(100),
+                area.height.saturating_sub(2),
+            );
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(app.forget_text(fc))
+                    .wrap(Wrap { trim: false })
+                    .scroll((u16::try_from(fc.scroll).unwrap_or(u16::MAX), 0))
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title(format!(" {} ", app.catalog.key(MessageKey::UiForgetTitle))),
+                    ),
+                r,
+            );
+        }
+        Mode::ConfirmBroken { n } => {
+            let r = centered(area, 72, 7);
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(
+                    app.catalog
+                        .with(MessageKey::UiForgetBroken, &[("n", &n.to_string())]),
+                )
+                .wrap(Wrap { trim: false })
+                .block(Block::new().borders(Borders::ALL)),
                 r,
             );
         }
@@ -552,6 +688,7 @@ mod tests {
                 recall: None,
                 background: None,
                 remote_llm: false,
+                forget: None,
             },
         );
         let sid = Id::from_bytes([1; 16]);
@@ -576,6 +713,8 @@ mod tests {
                 band: Vec::new(),
                 band_nearby: false,
                 irrelevant: Vec::new(),
+                marks: Vec::new(),
+                unverified: false,
             }],
             unreadable: 0,
         });
@@ -630,6 +769,8 @@ mod tests {
             }],
             band_nearby: false,
             irrelevant: vec![target],
+            marks: Vec::new(),
+            unverified: false,
         }];
         let text: Vec<String> = conversation_lines(&app, 80)
             .iter()

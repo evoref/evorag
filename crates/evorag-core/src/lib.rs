@@ -20,6 +20,7 @@ pub mod export_checks;
 mod extraction;
 mod fact_ops;
 mod fact_table;
+mod forget_ops;
 mod forgets;
 pub use forgets::ForgetStatus;
 pub mod localtime;
@@ -232,6 +233,9 @@ struct Running {
 struct State {
     session: Option<Id>,
     running: Option<Running>,
+    /// `/forget` を実行している (命令を受けてから結果を知らせるまで。04 §7.1 の「受け付けないとき」の裏返しで、
+    /// その間は発話・作り直し・先に済ませる処理を始めない)。
+    forgetting: bool,
 }
 
 struct Inner {
@@ -335,6 +339,8 @@ struct Inner {
     forget: Mutex<forgets::State>,
     /// 忘れるの退避の写し直しの回 (動いている間に足された job は、次の回にまとめる)。
     forget_batch: Mutex<forgets::Batch>,
+    /// 最後に求められた忘れるの見本の番号 (古い求めの見本は知らせない)。
+    forget_preview_seq: std::sync::atomic::AtomicU64,
 }
 
 /// 途中まで済んだ較正の、問いごとの結果。
@@ -662,6 +668,7 @@ impl Core {
             command_loop: Mutex::new(None),
             forget: Mutex::new(forgets::State::default()),
             forget_batch: Mutex::new(forgets::Batch::default()),
+            forget_preview_seq: std::sync::atomic::AtomicU64::new(0),
         });
         // 忘れるの当て直し (04 §7.2 の「起動の順」): 書き手を作った後、照会と命令を受け付ける前。`Core` を返す
         // のはこの後なので、照会と命令は当て直しを終えてから届く。
@@ -791,8 +798,8 @@ impl Core {
             .collect()
     }
 
-    /// 照会: セッションのターン (元の順)。
-    /// 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
+    /// 照会: セッションのターン (元の順)。伏せ字と `[非表示]` の印の範囲を添える (04 §7.3)。
+    /// 忘れるの指示と合わないターンは、本文を出さずに「確かめられない」とする (04 §7.2)。
     pub fn turns(&self, session: Id) -> Vec<evorag_types::api::TurnView> {
         let Ok(rtx) = self.inner.store.read() else {
             return Vec::new();
@@ -800,11 +807,8 @@ impl Core {
         let hide = masking::Hide::load(&rtx, self.inner.language);
         evorag_memory::session_turns(&rtx, session)
             .unwrap_or_default()
-            .into_iter()
-            .map(|mut t| {
-                withhold(hide.as_ref(), &mut t);
-                views::turn(&t)
-            })
+            .iter()
+            .map(|t| views::display(hide.as_ref(), t))
             .collect()
     }
 
@@ -833,7 +837,7 @@ impl Core {
     }
 
     /// 試験のため: 忘れるを実行する (04 §7.1〜§7.3。見本を確かめずに、既定の計画で書く)。画面からの操作は
-    /// `/forget` の命令 (M3.4c の後半で足す) が同じ経路を通す。書いたら忘れるの指示の ID。
+    /// `/forget` の命令 (`Command::ForgetFact`) が同じ経路を通す。書いたら忘れるの指示の ID。
     ///
     /// # Errors
     /// 応答を生成している、中止した (04 §7.1 の「中止」)、記録を読めない・書けないとき (理由の文)。
@@ -850,6 +854,13 @@ impl Core {
             forgets::Executed::Busy => Err("a reply is being generated".into()),
             forgets::Executed::Failed(e) => Err(e),
         }
+    }
+
+    /// 試験のため: 索引を書き換える経路の鍵を取って持つ (落とすまで、忘れる・削除などがロックを待つ。忘れるの
+    /// 途中の操作をまねる)。
+    #[doc(hidden)]
+    pub async fn hold_index_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inner.index_lock.clone().lock_owned().await
     }
 
     /// 試験のための注入: 次のジャーナルの書き直しを、決まった点で失敗させる (09 §3.5)。
@@ -1743,6 +1754,15 @@ fn is_running(inner: &Inner) -> bool {
         .is_some_and(|r| !r.done && !r.task.is_finished())
 }
 
+/// `/forget` を実行しているか (その間は生成を始めない)。
+fn forgetting(inner: &Inner) -> bool {
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forgetting
+}
+
 fn current_session(inner: &Inner) -> Option<Id> {
     inner
         .state
@@ -1816,6 +1836,13 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::AcceptFact { target } => fact_ops::run(inner, fact_ops::Request::Accept(target)),
         Command::RevertFact { target } => fact_ops::run(inner, fact_ops::Request::Revert(target)),
         Command::UnblockFact { target } => fact_ops::run(inner, fact_ops::Request::Unblock(target)),
+        Command::PreviewForget { target, options } => forget_ops::preview(inner, target, options),
+        Command::ForgetFact {
+            target,
+            options,
+            plan,
+        } => forget_ops::run(inner, target, options, plan),
+        Command::DiscardBroken => forget_ops::discard_broken(inner),
         _ => {}
     }
 }
@@ -1941,6 +1968,15 @@ async fn delete(inner: &Arc<Inner>) {
     extraction::touch(inner);
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
+    // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。知らせる前に `background` に
+    // 載せる (知らせを受けてから裏の処理を待つ呼び手が、この task を見落とさないため)。
+    let worker = inner.clone();
+    let erase = tokio::spawn(async move { forget_ops::erase_slots(&worker).await });
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(erase);
     emit(inner, Event::SessionDeleted { id: sid });
     // 整理の鍵は task の中で取る (長い整理の後ろで、次の命令を待たせない)。終了の処理は、この task を
     // `background` で待つ。
@@ -2235,12 +2271,9 @@ fn open_session(inner: &Inner, id: Id) {
         return;
     };
     // この版では読めないターンは読み飛ばし、件数を画面に知らせる (03 §4.2 の規則 11)。
-    let mut read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
-    // 忘れるの指示と合わないターンの本文は、伏せ字の印だけにする (04 §7.2)。
+    let read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
+    // 印の範囲を添え、忘れるの指示と合わないターンは本文を出さない (04 §7.2・§7.3)。
     let hide = masking::Hide::load(&rtx, inner.language);
-    for t in &mut read.turns {
-        withhold(hide.as_ref(), t);
-    }
     inner
         .state
         .lock()
@@ -2255,7 +2288,7 @@ fn open_session(inner: &Inner, id: Id) {
                 read.turns
                     .iter()
                     .map(|t| {
-                        let mut v = views::turn(t);
+                        let mut v = views::display(hide.as_ref(), t);
                         decorate(inner, &mut v, &t.body, &hidden);
                         v
                     })
@@ -2266,20 +2299,20 @@ fn open_session(inner: &Inner, id: Id) {
     );
 }
 
-/// 画面に出すターンの本文: 忘れるの指示と合わないターンは、伏せ字の印だけにする (04 §7.2)。伏せる材料を読め
-/// なければ、忘れるの指示の有無を確かめられないので、本文を出さない。
-fn withhold(hide: Option<&masking::Hide>, t: &mut evorag_memory::Turn) {
-    match hide {
-        Some(h) => {
-            h.withhold(t);
-        }
-        None => t.body.text = String::new(),
-    }
-}
-
 async fn send(inner: &Arc<Inner>, text: String) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    // 忘れるの途中は送らない (伏せ字にする往復が生成の途中にならないため)。発話は入力欄に戻す。
+    if forgetting(inner) {
+        emit(
+            inner,
+            Event::SendRejected {
+                text,
+                error: Message::new(MessageKey::ForgetInProgress),
+            },
+        );
         return;
     }
     let Some(sid) = current_session(inner) else {
@@ -2338,6 +2371,10 @@ async fn send(inner: &Arc<Inner>, text: String) {
 async fn regenerate(inner: &Arc<Inner>, retry: bool) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
         return;
     }
     let Some(sid) = current_session(inner) else {
@@ -3000,6 +3037,10 @@ fn feedback_body(
 async fn attach_band(inner: &Arc<Inner>, answer: Id, target: Id) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
         return;
     }
     let Some(sid) = current_session(inner) else {
