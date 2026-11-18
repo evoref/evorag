@@ -2,9 +2,9 @@
 
 English | [日本語](README.ja.md)
 
-A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. Later versions will remember facts about you and improve from your ratings and corrections. It never trains model weights.
+A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. It remembers facts about you, replaces them when you correct yourself, and forgets them when you ask. Later versions will improve from your ratings and corrections. It never trains model weights.
 
-> **The latest release is v0.2.0 (2026-11-12).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64) and a tar.gz for Linux (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.md](dist/README.md), in Japanese).
+> **The latest release is v0.3.0 (2026-11-19).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64) and a tar.gz for Linux (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.en.md](dist/README.en.md); the Japanese [dist/README.md](dist/README.md) is the original).
 
 ## Status
 
@@ -21,6 +21,14 @@ A chat and long-term memory tool written in Rust. It runs against your own llama
   - You can choose the default answer language, length and format (`/style`).
   - Linux (x86_64, GNOME Terminal and tmux) is supported.
   - The storage format moved to 0.2; a v0.1 data root is backed up and migrated on the first start.
+- **v0.3 (memory)** was released as v0.3.0 on 2026-11-19.
+  - While you are away, it extracts facts about you from conversations (name, where you live, likes and dislikes, plans and so on) and attaches them to answers in other sessions too. Only values that pass fixed rule-based gates are used. `/memory` lists them and lets you accept, view the history of, and revert them.
+  - When you correct yourself ("not X but Y"), it replaces the old value.
+  - `/forget` forgets a fact and the text it came from: the text is redacted and removed from the database, the journal, the indexes and the automatic backups, and the same value is not learned again. `/private` marks a fact so that it is not sent to llama-server.
+  - `evorag update` updates the program and rolls it back. Downloads are checked by signature. It goes online only when you run `update check` or `update apply`.
+  - The user interface can be switched to English (`ui.language = "en"`).
+  - Added `evorag repair`, `evorag backups purge` and `evorag rebuild --facts`.
+  - The storage format moved to 0.3. Records are not rewritten, so v0.2 can still read and write the data. From v0.2, update by hand as described in the bundled README.
 
 The plan for each version up to v0.6 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
 

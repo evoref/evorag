@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-19
+
 利用者についての事実を覚え、訂正で置き換え、「忘れて」で確実に消す版。`evorag update` で本体を更新・巻き戻しでき、英語の UI を選べる。データの形式を 0.3 に上げるが、記録は書き換えないので、v0.2.x に戻しても読み書きできる (最初の起動で退避してから上げる)。v0.2.x からは、同梱の `README.md` §6 の手作業の手順で更新してください (v0.2.x は `evorag update` を持たないため)。
 
 ### 追加
@@ -108,7 +110,8 @@
 - ログを状態のフォルダの `logs\` に書く (7 日分)。会話の本文や API キーは書かない。
 - 以前の会話の中に紛れ込ませた指示に従わないよう、引用の扱いをシステムプロンプトで指示する。
 
-[Unreleased]: https://github.com/evoref/evorag/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/evoref/evorag/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/evoref/evorag/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/evoref/evorag/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/evoref/evorag/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/evoref/evorag/compare/v0.1.0...v0.1.1
