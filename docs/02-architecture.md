@@ -66,7 +66,7 @@ flowchart TB
 | `evorag-retrieval` | 問いの準備、候補の収集と順位付け、文脈の組み立て | unicode-normalization | v0.1 |
 | `evorag-learn` | 回帰台帳、precept、提案、リプレイ、ゲート | — | v0.4 |
 | `evorag-cartridge` | カートリッジの形式・検証・導入・作成 | zip (圧縮なしの読み書きだけ、既定の機能を切る)、minisign-verify、encoding_rs | v0.5 |
-| `evorag-update` | 本体の更新の確認・取得・検証・適用 | ureq (`rustls-no-provider`・`platform-verifier`) + rustls + rustls-graviola (純 Rust の暗号の実装、OQ-05、S-06)、minisign-verify | v0.3 |
+| `evorag-update` | 本体の更新の確認・取得・検証・置き換え・巻き戻し (12 §7) | ureq (`rustls-no-provider`・`platform-verifier`。圧縮の機能は入れない、12 §7.5) + rustls + rustls-graviola (純 Rust の暗号の実装、OQ-05、S-06。graviola は `=` で版を固定する、12 §7.5)、minisign-verify、sha2、serde・serde_json (`release.json` と状態のファイル)。配布物の読み手は zip (deflate だけ。既定の機能を切る) と tar + flate2 (`rust_backend` の miniz_oxide)。どの読み手で読むかは配布物の名前の末尾で決める (12 §5.3。`cfg` では決めない)。読み手を入れるのは、その形式を読む対象だけでよい。推移的な依存の数が上限 (09 §7) を超えるときは、`exe` の 1 項目を取り出すだけの最小の読み手を自前で持つ | v0.3 |
 | `evorag-core` | 上を組み立てるコア。コアの API の実装、sleep-time の進行 | tokio、tracing、getrandom (`memory.forget_key` を作る OS の乱数、v0.3) | v0.1 |
 | `evorag-tui` | TUI | ratatui、crossterm、unicode-width、unicode-segmentation | v0.1 |
 | `evorag` (bin) | サブコマンドの入口 | clap | v0.1 |

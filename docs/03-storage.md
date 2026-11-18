@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | 設定 | `config.toml` | `%LOCALAPPDATA%\evorag\config\` | `~/.config/evorag/` | `~/Library/Application Support/evorag/config/` |
 | データ根 | `evorag.redb`、`journal/`、`index/`、`cartridges/`、`backups/`、`broken/`、`lock` | `%LOCALAPPDATA%\evorag\data\` | `~/.local/share/evorag/` | `~/Library/Application Support/evorag/data/` |
-| 状態 | `logs/`、`update/` (取得した更新の一時置き場) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` | `~/Library/Logs/evorag/` (logs)、`~/Library/Caches/evorag/` (update) |
+| 状態 | `logs/`、`update/` (更新のロックと状態のファイル、12 §7.2・§7.3。取得したものは主記憶で扱い、ここには置かない) | `%LOCALAPPDATA%\evorag\state\` | `~/.local/state/evorag/` | `~/Library/Logs/evorag/` (logs)、`~/Library/Application Support/evorag/state/update/` (update。`Caches` は OS に消されることがあり、状態のファイルを失うと巻き戻しの記録が無くなるため) |
 
 - Windows で Roaming (`%APPDATA%`) を使わない。移動プロファイルで同期され、§2.2 の「危ない置き場所」に自分から当たるため。
 - macOS では設定とデータ根を別の下位フォルダにする。`evorag reset` (データ根を消し、設定は残す) が設定まで消さないようにするため。
@@ -290,14 +290,14 @@
 - データ根の `lock` ファイルに、プロセスが生きている間ずっと OS のロックを持つ。std の `File::try_lock` (Rust 1.89 で安定。Windows は `LockFileEx`、Unix は `flock`) を使い、取れないときは `TryLockError::WouldBlock` で見分ける。強制終了するとロックはすぐに外れる (S-01)。ファイルがあるかどうかでは判定しないので、異常終了の後に残ったファイルで誤判定しない。
 - Windows のロックは強制ロックで、ロックを持たれたファイルは他のプロセスから読めない。そのため、動いている evorag の PID はロックのファイルとは別のファイル (`lock.pid`) に書く。
 - redb も DB のファイルをロックし、2 つ目の open (読み取り専用を含む) は `DatabaseAlreadyOpen` で失敗する。
-- どちらのロックが取れなくても、理由 (分かれば PID) を示して終了コード 2 で終わる。
+- どちらのロックが取れなくても、理由 (分かれば PID) を示して終了コード 2 で終わる。文言は、ほかの evorag か `evorag update` (置き換えの間はデータ根のロックを持つ、12 §7.2) が動いていることを示す。
 - ネットワークのファイルシステムではロックが効かないことがある。§2.2 の拒否の理由の 1 つでもある。
 
 | コマンド | TUI が動いているとき |
 |---|---|
-| `evorag --version`、`evorag setup` (設定だけを書く) | 動く |
+| `evorag --version`、`evorag setup` (設定だけを書く)、`evorag update check` | 動く |
 | `evorag setup` (モデルの記録を書き換える・点検の結果やしきい値を書く、06 §3.2) | 設定だけを書き、DB に書く部分は TUI を閉じてから実行するよう案内する |
-| `evorag doctor`、`export`、`restore`、`repair`、`rebuild`、`backups`、`reset`、`import`、`update apply` | 理由を示して断る (TUI を閉じてから実行する) |
+| `evorag doctor`、`export`、`restore`、`repair`、`rebuild`、`backups`、`reset`、`import`、`update apply`、`update rollback` | 理由を示して断る (TUI を閉じてから実行する)。`update apply` は書き込みを始めてから (12 §7.2 の apply の 8)、`update rollback` はデータの案内を求めてから、操作の終わりまでデータ根のロックを持つ |
 
 ## 10. 点検と復元のコマンド
 
