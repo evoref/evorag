@@ -186,8 +186,8 @@
 | `evorag backups list` | 退避の一覧 | v0.1 (Should) |
 | `evorag reset` | データ根を消す (確認あり) | v0.1 (Should、v0.2 に繰り越し) |
 | `evorag rebuild [--index] [--facts]` | 派生データ (または索引だけ) を作り直す (03 §10)。`--facts` で事実も抽出し直す (v0.3)。埋め込みのモデルの切り替えは `evorag setup` で行い、作り直しは裏の処理で進む | v0.2 |
-| `evorag repair` | 副索引と関係を作り直し、ジャーナルから戻す | v0.3 |
-| `evorag backups purge` | 退避を消す | v0.3 |
+| `evorag repair` | 副索引と関係を作り直し、ジャーナルから戻し、忘れる・削除を当て直す | v0.3 |
+| `evorag backups purge [--yes]` | 退避を消す (確認あり。`--yes` で確認を省く) | v0.3 |
 | `evorag update check|apply|rollback` | 本体の更新 (12 §7) | v0.3 |
 | `evorag cartridge add|build|list|enable|disable|remove|verify` | カートリッジの操作 (14) | v0.5 |
 | `evorag import <書き出し>` | 空のデータ根へ取り込む | v0.6 |
@@ -195,6 +195,7 @@
 
 - 共通のオプション: `--data-root <パス>`、`--config <パス>`、`--version`、`--help`。
 - 終了コード: 0 正常、1 一般のエラー、2 データ根が使えない (ロック・危ない置き場所・新しい形式)、3 llama-server に繋がらない、4 設定の誤り、5 署名・検証の失敗、6 応答のモデルが記録と違う (v0.2、06 §3)。
+- 確認 (`backups purge`・`reset`) に y 以外を答えたとき (標準入力が終わった・読めないときを含む) は、何も変えずに 1 で終わる。起動のときの「戻すか」(03 §8) を断ったときの 2 (データ根が使えない) とは分ける。
 - `--version` の出力 (FR-906): 1 行目は `evorag <版>` で、この形は今後も変えない (後の版の `evorag update` が、置き換えの後の確かめと巻き戻しで読む、12 §7.2)。2 行目からは `commit:`・`target:`・`rustc:`・`installed via:` (入れ方、12 §7.4) の行を出し、v0.3 から `db format: <x.y>` (その版が書く DB の形式の版、03 §3.1.1) の行を足す。`--version` は通信せず、データ根・設定・`update/` に触れない。
 - `evorag update` の終了コード (v0.3、12 §7):
   - 0: 済んだ。`check` で新しい版が無いとき・新しい版を示したとき (`upgrade_from` の案内を含む)、`apply` で版を省いて今が最新のとき、`rollback` でデータの案内に警告があるときも 0。
