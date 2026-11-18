@@ -212,7 +212,7 @@
 | 実際の LLM | §3.4 の試験 (`cargo xtask live-llm`) が合格 (v0.1 は AC-NFR-504-1) |
 | セキュリティ | `cargo deny check advisories` がきれい。配布物・docs・試験データに秘密と個人情報が無い (12 §6 の PC-1・PC-2・PC-6) |
 | 依存 | C を含む依存 0、推移的な依存が上限以内 (`cargo xtask check-deps`) |
-| ドキュメント | 利用者向けの README (`dist/README.md`)・CHANGELOG・リリースノートに、既知の制約・更新と巻き戻しの手順・データの移行の有無がある。リポジトリの README (`README.md` と `README.ja.md`) の「最新の版」と「状況」がその版と合っていて、2 つの内容が食い違っていない (11 §9.3) |
+| ドキュメント | 利用者向けの README (`dist/README.md` と英語版の `dist/README.en.md`。2 つの内容が食い違っていない)・CHANGELOG・リリースノートに、既知の制約・更新と巻き戻しの手順・データの移行の有無がある。リポジトリの README (`README.md` と `README.ja.md`) の「最新の版」と「状況」がその版と合っていて、2 つの内容が食い違っていない (11 §9.3) |
 
 - 判定コミットを書いた後に入れてよい変更は、`docs/compat/<X.Y.Z>/`・`docs/perf/<X.Y.Z>/`・`tests/ac-checklist.toml` だけ (記録の許可リスト)。ほかを入れたらゲートをやり直す。
 - 基準機の型番など固有の情報は記録に書かない (11 §9.7)。

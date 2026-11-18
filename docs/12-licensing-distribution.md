@@ -45,7 +45,7 @@
 | v0.2 | Linux x86_64 (`x86_64-unknown-linux-musl`、静的) | tar.gz |
 | v0.6 | macOS (`aarch64-apple-darwin`、実機を確保したとき) | tar.gz |
 
-- 配布物の中身: 実行ファイル、`README.md` (利用者向け。インストール・setup・更新と巻き戻し・既知の制約)、`LICENSE`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`config.example.toml`。
+- 配布物の中身: 実行ファイル、`README.md` (利用者向け。インストール・setup・更新と巻き戻し・既知の制約)、`README.en.md` (その英語版。v0.3 から。日本語版の `README.md` が正)、`LICENSE`、`NOTICE`、`THIRD-PARTY-NOTICES.md`、`config.example.toml`。
 - `cargo install --locked --git https://github.com/evoref/evorag --tag v0.y.z evorag` でも入れられる (crates.io への公開は v1.0 の前に決める)。
 
 ### 5.2 署名
