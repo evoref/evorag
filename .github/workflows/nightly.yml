@@ -1,6 +1,7 @@
 # 毎日の長い試験 (docs/09-testing-quality.md §6.1)。既定ブランチの定義で動き、develop を対象にする。
 # 障害の注入 (任意の時点での強制終了): 毎日は 1,000 回。リリースゲート (09 §8.2) は v0.1 が 1,000 回、
-# v0.2 から 10,000 回で、手動の起動の入力 runs で回数を渡す。
+# v0.2 から 10,000 回で、手動の起動の入力 runs で回数を渡す。OS ごとに 4 つの job に分け、それぞれ
+# runs の 4 分の 1 (切り上げ) を、別の乱数の種とデータ根で流す (job の上限に収めるため、09 §6.1)。
 name: nightly
 
 on:
@@ -23,17 +24,20 @@ env:
 
 jobs:
   fault-injection:
-    name: fault-injection (${{ matrix.role }})
+    name: fault-injection (${{ matrix.role }} ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
+        role: [windows, linux]
+        shard: [1, 2, 3, 4]
         include:
           - role: windows
             os: windows-2025
           - role: linux
             os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
-    # 10,000 回で 2 時間ほど (1,000 回で 13 分ほど、2026-11-12)。
+    # 1 つにまとめた 10,000 回は、Windows で 4 時間 56 分、Linux は 300 分で終わらなかった (v0.2.0、
+    # 08 §6)。4 つに分けて、1 つの job を 2,500 回にする。
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,9 +49,19 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest
-      - name: kill at random points (${{ inputs.runs || '1000' }} runs)
+      - name: runs of this shard
+        id: runs
+        shell: bash
         env:
-          EVORAG_FAULT_RUNS: ${{ inputs.runs || '1000' }}
+          TOTAL: ${{ inputs.runs || '1000' }}
+        run: |
+          set -eu
+          case "$TOTAL" in ''|*[!0-9]*) echo "::error::runs must be a number: $TOTAL"; exit 1;; esac
+          echo "runs=$(( (TOTAL + 3) / 4 ))" >> "$GITHUB_OUTPUT"
+      - name: kill at random points (${{ steps.runs.outputs.runs }} runs, shard ${{ matrix.shard }}/4)
+        env:
+          EVORAG_FAULT_RUNS: ${{ steps.runs.outputs.runs }}
+          EVORAG_FAULT_SHARD: ${{ matrix.shard }}/4
         # nextest の設定 (develop の .config/nextest.toml) はこの試験を 60 分で打ち切るので、打ち切りの無い
         # cargo test で流す。上限は job の timeout-minutes で押さえる。
         run: cargo test -p evorag-core --test fault_injection --locked -- --exact committed_turns_survive_kills_at_random_points --nocapture
