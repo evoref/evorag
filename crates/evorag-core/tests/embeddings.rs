@@ -89,6 +89,7 @@ fn config(
         config_file: None,
         evorag_version: "0.0.6".into(),
         prompt_language: PromptLanguage::Ja,
+        prompt_language_explicit: true,
         generation: Generation::default(),
         request_extra: Default::default(),
         reserve_for_output: None,
@@ -306,8 +307,11 @@ async fn on_battery_reduce_delays_the_embedding() {
     )
     .await
     .unwrap();
+    // 発話を送って応答を待つ間は、裏の処理を止めておく (遅い機械では、応答と後片付けだけで 5 倍の
+    // 1.5 秒を超え、時間を測り始める前に埋め込みが始まることがあった)。止めを解くと操作として数える。
+    core.hold(true);
     talk(&core, &mut rx, &TALK[..1]).await;
-    core.touch();
+    core.hold(false);
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(emb.aux_calls().0, 0, "not before 5 x idle");
     // 5 倍 (1.5 秒) を過ぎたら始まる (見直しは 1 秒ごとなので、締切つきで待つ)。
@@ -482,4 +486,176 @@ async fn deleting_a_session_removes_its_embeddings() {
     })
     .unwrap();
     assert_eq!(blobs, 0);
+}
+
+/// 前の世代 (vec-<2>) と今の世代 (vec-<5>) のベクトルの索引に行がある状態を作る。最初のセッションの ID を返す。
+async fn two_generations(root: &Path) -> evorag_types::Id {
+    let (core, mut rx, _) = Core::start(
+        config(root, 1, embedder(2), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(1)),
+    )
+    .await
+    .unwrap();
+    talk(&core, &mut rx, &TALK[..1]).await;
+    core.settle_background().await;
+    core.shutdown().await;
+    {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_660_000_000)));
+        let m = DataRootModels::open(
+            root,
+            "0.0.6",
+            clock.clone(),
+            Arc::new(UuidV7Gen::with_seed(clock, 3)),
+        )
+        .unwrap();
+        m.bind("embed", origin(5)).unwrap();
+    }
+    let (core, _rx, _) = Core::start(
+        config(root, 4, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    core.shutdown().await;
+    for size in [2, 5] {
+        let ix = evorag_index::vec::VecIndex::open_existing(&vec_dir(root, size)).unwrap();
+        assert!(!ix.snapshot().is_empty(), "generation {size} has rows");
+    }
+    first_session(root)
+}
+
+fn rows(root: &Path, size: u64) -> usize {
+    evorag_index::vec::VecIndex::open_existing(&vec_dir(root, size))
+        .map_or(0, |ix| ix.snapshot().len())
+}
+
+fn cleanup_jobs(root: &Path) -> usize {
+    let s = store(root);
+    let r = s.read().unwrap();
+    evorag_memory::pending_purge_jobs(&r).unwrap().len()
+}
+
+/// 削除をコミットした直後 (索引から除く前) に落ちても、次の起動で、job から今と前の世代の索引の行を除く。
+/// verifies: AC-FR-309-2 (前の世代の索引の分を含む)、04 §7.7 の 2 (除く ID を job に残し、起動時に続ける)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_before_the_indexes_are_cleaned_is_finished_on_the_next_start() {
+    let dir = TempDir::new("embed-delete-crash");
+    let first = two_generations(dir.path()).await;
+    // 削除のコミット (job を同じ依頼で書く) だけを行い、索引には触れずに終わる (強制終了をまねる)。
+    {
+        let store = Arc::new(store(dir.path()));
+        let (writer, h) = evorag_store::Writer::new(store.clone()).unwrap();
+        let t = std::thread::spawn(move || writer.run());
+        let w = evorag_memory::Writes {
+            clock: &**store.clock(),
+            ids: &**store.ids(),
+        };
+        let mut ops = {
+            let r = store.read().unwrap();
+            let s = evorag_memory::load_session(&r, first).unwrap();
+            evorag_memory::delete_session(&r, &s.envelope, &w).unwrap()
+        };
+        let ids = evorag_memory::deleted_ids(&ops);
+        ops.push(evorag_memory::purge_job(&w, ids).unwrap().1);
+        h.submit_wait(evorag_store::WriteRequest::conversation(ops))
+            .unwrap();
+        h.shutdown();
+        t.join().unwrap();
+    }
+    assert!(rows(dir.path(), 2) > 0, "the crash left the previous rows");
+
+    let (core, _rx, _) = Core::start(
+        config(dir.path(), 6, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.settle_background().await;
+    core.shutdown().await;
+    assert_eq!(rows(dir.path(), 2), 0, "the previous generation is cleaned");
+    assert_eq!(rows(dir.path(), 5), 0, "the current generation is cleaned");
+    assert_eq!(cleanup_jobs(dir.path()), 0, "the job is done");
+}
+
+/// 整理の job が済むまで、裏の処理を試し直させながら待つ (遅い CI の機械では、1 回の `settle_background` の
+/// 間に sleep-time の整理の手順まで回らないことがあるため)。最後に残っていた job の数を返す。
+async fn cleanup_finished(core: &Core) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        core.settle_background().await;
+        let left = core.pending_cleanup_jobs();
+        if left == 0 || std::time::Instant::now() > deadline {
+            return left;
+        }
+        core.retry_background_now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// 索引から除けなかったら、job を残して sleep-time に試し直す (終わるまで job の記録として `doctor` に出る)。
+/// verifies: AC-FR-309-2 (前の世代の索引の分を含む)、04 §7.7 の 2 (除けなかった分は job から再試行する)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_removal_that_fails_is_retried_from_the_job() {
+    let dir = TempDir::new("embed-delete-retry");
+    let first = two_generations(dir.path()).await;
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), 6, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.inject_index_removal_failure(usize::MAX);
+    core.command(Command::OpenSession { id: first });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(core.pending_cleanup_jobs(), 1, "the job is kept");
+
+    // 除けるようになったら、sleep-time の手順が job から続けて終える。
+    core.inject_index_removal_failure(0);
+    core.retry_background_now();
+    assert_eq!(cleanup_finished(&core).await, 0, "the job is done");
+    core.shutdown().await;
+    assert_eq!(rows(dir.path(), 2), 0, "the previous generation is cleaned");
+    assert_eq!(rows(dir.path(), 5), 0, "the current generation is cleaned");
+}
+
+/// 整理の手順は、利用者の操作で sleep-time の手順が落とされても途中で止まらず、job を残したまま旗を下ろさない。
+/// verifies: 04 §7.7 の 2 (除けなかった分は job から再試行する)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleanup_interrupted_by_input_still_finishes() {
+    let dir = TempDir::new("embed-cleanup-touch");
+    let first = two_generations(dir.path()).await;
+    let (core, mut rx, _) = Core::start(
+        config(dir.path(), 6, embedder(5), SleepConfig::immediate(), on_ac),
+        Arc::new(chat(0)),
+    )
+    .await
+    .unwrap();
+    core.settle().await;
+    core.inject_index_removal_failure(usize::MAX);
+    core.command(Command::OpenSession { id: first });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(core.pending_cleanup_jobs(), 1);
+
+    // 試し直しを始めさせ、その間も操作を続ける。
+    core.inject_index_removal_failure(0);
+    core.retry_background_now();
+    for _ in 0..200 {
+        core.touch();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(cleanup_finished(&core).await, 0, "the job is done");
+    core.shutdown().await;
+    assert_eq!(rows(dir.path(), 2), 0);
 }

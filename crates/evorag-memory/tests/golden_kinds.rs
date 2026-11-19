@@ -111,6 +111,8 @@ fn turn_v1() {
                 band: vec![id("019a6a2b-0000-7000-8000-00000000000b")],
                 user_attached: vec![id("019a6a2b-0000-7000-8000-00000000000c")],
                 degraded: vec![DEGRADED_NO_EMBED.into()],
+                // 見本 (tests/fixtures/) は v0.2 の形のまま。事実の表の版は任意の項目なので、無くても読める。
+                fact_table: None,
             }),
         },
     );
@@ -230,6 +232,7 @@ fn chunk_v1() {
             start: 0,
             end: 398,
             rules: 1,
+            src_rev: Some(1),
         },
     );
 }
@@ -246,6 +249,7 @@ fn embedding_v1() {
             model_key: format!("{:032x}", 0x0fed_cba9_8765_4321_u128),
             dim: 1024,
             key: None,
+            src_rev: Some(1),
         },
     );
 }
@@ -261,6 +265,17 @@ fn note_v1() {
             keys: vec!["観葉植物の水やり".into(), "モンステラ".into()],
             model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
             rules: 1,
+            src_revs: vec![
+                SrcRev {
+                    turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                    rev: 0,
+                },
+                SrcRev {
+                    turn: id("019a6a2b-0000-7000-8000-000000000003"),
+                    rev: 1,
+                },
+            ],
+            forgets_seen: Some(id("019a6a2b-0000-7000-8000-000000000022")),
         },
     );
 }
@@ -273,6 +288,104 @@ fn job_v1() {
         JobBody {
             task: JOB_PURGE_BACKUPS.into(),
             ids: vec![id("019a6a2b-0000-7000-8000-000000000001")],
+            directive: None,
+        },
+    );
+}
+
+#[test]
+fn fact_v1() {
+    check(
+        KIND_FACT,
+        id("019a6a2b-0000-7000-8000-000000000020"),
+        FactBody {
+            subject: "self".into(),
+            attribute: "residence".into(),
+            value: Some("見本の町".into()),
+            vk: Some("ab".repeat(32)),
+            norm: 1,
+            tense: "current".into(),
+            valid_from: Some("2026-01".into()),
+            valid_to: None,
+            state: "superseded".into(),
+            against: None,
+            by: Some(id("019a6a2b-0000-7000-8000-000000000021")),
+            state_at: Some(1_762_650_000_000),
+            recorded_at: 1_762_640_000_000,
+            private: false,
+            sources: vec![SourceBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev: 0,
+                start: Some(0),
+                end: Some(12),
+            }],
+        },
+    );
+}
+
+#[test]
+fn fact_directive_v1() {
+    check(
+        KIND_FACT_DIRECTIVE,
+        id("019a6a2b-0000-7000-8000-000000000022"),
+        FactDirectiveBody {
+            op: "forget".into(),
+            subject: "self".into(),
+            attribute: "hobby".into(),
+            vk: None,
+            norm: Some(1),
+            fact: Some(id("019a6a2b-0000-7000-8000-000000000020")),
+            target: None,
+            scope: None,
+            marks: vec!["cd".repeat(32)],
+            vks: vec!["ab".repeat(32)],
+            turns: vec![id("019a6a2b-0000-7000-8000-000000000002")],
+            redactions: vec![RedactionBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev_before: 0,
+                rev_after: 1,
+                start: 3,
+                end: 9,
+                hash: "ef".repeat(32),
+            }],
+            hidden: vec![HiddenBody {
+                turn: id("019a6a2b-0000-7000-8000-000000000002"),
+                rev: 1,
+                start: 0,
+                end: 3,
+            }],
+            history: false,
+            redact: true,
+            origin: "user".into(),
+        },
+    );
+}
+
+#[test]
+fn correction_v1() {
+    check(
+        KIND_CORRECTION,
+        id("019a6a2b-0000-7000-8000-000000000023"),
+        CorrectionBody {
+            stage: "verified".into(),
+            turn: id("019a6a2b-0000-7000-8000-000000000002"),
+            rev: 0,
+            previous: Some(id("019a6a2b-0000-7000-8000-000000000003")),
+            pattern: "{old}じゃなくて{new}".into(),
+            dir_old: Some("見本の村".into()),
+            dir_new: Some("見本の町".into()),
+            checked: true,
+            rejected: None,
+            target: Some("fact".into()),
+            old: Some("見本の村".into()),
+            new: Some("見本の町".into()),
+            old_vk: Some("ab".repeat(32)),
+            new_vk: Some("cd".repeat(32)),
+            norm: Some(1),
+            start: Some(21),
+            end: Some(33),
+            old_start: Some(0),
+            old_end: Some(12),
         },
     );
 }

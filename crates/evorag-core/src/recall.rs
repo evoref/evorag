@@ -6,7 +6,10 @@
 //!   その往復の相手と一緒に、セッションごとに 1 つの出典にまとめる (§3.4 の多様性)。
 //! - 出典は「信頼しない引用」の枠に入れ、今の発話の直前に置く (次のターンでは外す、§4.1)。枠の区切りに
 //!   は要求ごとの乱数の並びを含め、本文に同じ並びがあれば除く (§4.3)。予算は 800 トークン (n_ctx が
-//!   小さければ半分、§4.1)。
+//!   小さければ半分、§4.1。`context::frame_budgets`)。
+//! - 事実から作った検索の鍵 (04 §5.5) は、出典の往復を引くためだけに使う。当たったら、今の事実の状態を
+//!   読み直し (private・`Retracted` になった事実の鍵は、索引に残っていても使わない、05 §3.2)、出典の
+//!   往復の原文を添える (鍵は添えない、OQ-36 の 7)。
 //! - 出典の番号は、セッションの中の通し番号 (§5.1)。
 
 use std::collections::{HashMap, HashSet};
@@ -16,7 +19,7 @@ use std::sync::Arc;
 use evorag_index::lex::{LexIndex, Opened};
 use evorag_llm::LlmClient;
 use evorag_memory::{
-    ChunkBody, KIND_CHUNK, KIND_NOTE, KIND_SESSION, KIND_TURN, NoteBody, RecallDecision,
+    ChunkBody, FactKey, KIND_CHUNK, KIND_NOTE, KIND_SESSION, KIND_TURN, NoteBody, RecallDecision,
     RecallRecord, Turn, TurnBody, TurnRole, TurnState,
 };
 use evorag_retrieval::doc_input;
@@ -27,8 +30,6 @@ use evorag_types::Id;
 use crate::context::{TokenCache, estimate};
 use crate::prompt::PromptLanguage;
 
-/// 以前の会話の枠の予算 (05 §4.1)。
-const MEMORY_BUDGET: usize = 800;
 /// 引用する 1 ターンの本文の上限 (文字)。
 const EXCERPT_CHARS: usize = 400;
 
@@ -58,8 +59,9 @@ pub(crate) fn indexable(b: &TurnBody) -> bool {
     !b.text.trim().is_empty() && b.state != TurnState::Failed && b.role != TurnRole::System
 }
 
-/// ターンの本文から、チャンクの本体を作る (05 §2.4)。
-pub(crate) fn chunk_bodies(turn: Id, b: &TurnBody) -> Vec<ChunkBody> {
+/// ターンの本文 (改訂の番号 `rev`) から、チャンクの本体を作る (05 §2.4)。作ったときの改訂の番号を `src_rev` に
+/// 持つ (03 §3.3)。
+pub(crate) fn chunk_bodies(turn: Id, rev: u32, b: &TurnBody) -> Vec<ChunkBody> {
     evorag_retrieval::chunk::split(&b.text)
         .into_iter()
         .map(|s| ChunkBody {
@@ -68,6 +70,7 @@ pub(crate) fn chunk_bodies(turn: Id, b: &TurnBody) -> Vec<ChunkBody> {
             start: s.start as u32,
             end: s.end as u32,
             rules: evorag_retrieval::chunk::CHUNK_RULES_VERSION,
+            src_rev: Some(rev),
         })
         .collect()
 }
@@ -86,21 +89,93 @@ pub(crate) fn note_docs(id: Id, n: &NoteBody) -> Vec<evorag_index::lex::DocInput
     n.keys.iter().map(|k| doc_input(id, n.session, k)).collect()
 }
 
-/// 索引の当たり (チャンクかノート) が指すターン。ノートは、指す往復の発話のターンのすべて (04 §2)。
-fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id) -> Vec<Id> {
+/// 事実の検索の鍵の項目のセッション (04 §5.5)。1 つの事実の出典は複数のセッションにまたがるので、鍵は
+/// どのセッションにも属さない値で索引に入れ、今のセッションの往復は当たりをターンに直すときに除く
+/// ([`hit_turns`])。
+const FACT_KEY_SESSION: Id = Id::from_bytes([0; 16]);
+
+/// 事実の検索の鍵を索引の項目にする (ID は事実の ID、04 §5.5)。
+pub(crate) fn fact_doc(k: &FactKey) -> evorag_index::lex::DocInput {
+    doc_input(k.fact, FACT_KEY_SESSION, &k.text)
+}
+
+/// 語彙の索引に今ある事実の鍵の項目 (事実の ID)。
+pub(crate) fn indexed_fact_keys(index: &LexIndex) -> HashSet<Id> {
+    index.snapshot().ids_where(is_fact_key)
+}
+
+/// 索引の項目が事実の鍵か。
+pub(crate) fn is_fact_key(d: &evorag_index::lex::Doc) -> bool {
+    d.session == FACT_KEY_SESSION
+}
+
+/// 今のセッション `current` のターンだけを出典とする事実 (残っている出典のターンが、今のセッションの外に
+/// 1 つも無いもの)。その鍵は想起の候補を集める段階で除く (今のセッションのターンを添えないのと同じ、04 §5.5、
+/// 05 §3.2)。事実は数百件の見込みなので、問いごとに読む。
+fn current_only_facts(store: &Store, current: Id) -> HashSet<Id> {
+    let Ok(rtx) = store.read() else {
+        return HashSet::new();
+    };
+    let Ok(loaded) = evorag_memory::load_facts(&rtx) else {
+        return HashSet::new();
+    };
+    let mut sessions: HashMap<Id, Option<Id>> = HashMap::new();
+    let mut session_of = |turn: Id| {
+        *sessions
+            .entry(turn)
+            .or_insert_with(|| match rtx.get(KIND_TURN, turn) {
+                Ok(Some(Read::Ok(e))) => e.body_as::<TurnBody>().ok().map(|b| b.session),
+                _ => None,
+            })
+    };
+    loaded
+        .set
+        .facts
+        .iter()
+        .filter_map(evorag_memory::fact_key)
+        .filter(|k| {
+            !k.turns
+                .iter()
+                .any(|t| session_of(*t).is_some_and(|s| s != current))
+        })
+        .map(|k| k.fact)
+        .collect()
+}
+
+/// 索引の当たり (チャンク・ノート・事実の鍵) が指すターン。ノートは、指す往復の発話のターンのすべて
+/// (04 §2)。事実の鍵は、今の状態で鍵を持つ事実の出典のターンのうち、今のセッション `current` に無いもの
+/// (新しい順、04 §5.5、05 §3.2)。
+fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id, current: Id) -> Vec<Id> {
     if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_CHUNK, id) {
         return e
             .body_as::<ChunkBody>()
             .map(|c| vec![c.turn])
             .unwrap_or_default();
     }
-    match rtx.get(KIND_NOTE, id) {
-        Ok(Some(Read::Ok(e))) => e
+    if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_NOTE, id) {
+        // 出典が DB に無い・改訂の番号が今と合わないノート (消した・伏せ字にした前の本文から作ったもの) は
+        // 除く (04 §7.7 の 1)。
+        return e
             .body_as::<NoteBody>()
+            .ok()
+            .filter(|n| evorag_memory::note_is_current(rtx, n))
             .map(|n| n.exchanges)
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            .unwrap_or_default();
     }
+    let Some(key) = evorag_memory::load_fact(rtx, id)
+        .ok()
+        .flatten()
+        .and_then(|f| evorag_memory::fact_key(&f))
+    else {
+        return Vec::new();
+    };
+    key.turns
+        .into_iter()
+        .filter(|t| match rtx.get(KIND_TURN, *t) {
+            Ok(Some(Read::Ok(e))) => e.body_as::<TurnBody>().is_ok_and(|b| b.session != current),
+            _ => false,
+        })
+        .collect()
 }
 
 /// 起動時の突き合わせの計画 (DB を読むだけ)。
@@ -110,7 +185,7 @@ pub(crate) struct SyncPlan {
     pub delete: Vec<Id>,
     /// チャンクの無いターンの、新しいチャンク。
     pub create: Vec<ChunkBody>,
-    /// 残すチャンクとノートの鍵の、索引の 1 件。
+    /// 残すチャンク・ノートの鍵・事実の鍵の、索引の 1 件。
     pub keep: Vec<evorag_index::lex::DocInput>,
     /// ターンの本文 (新しいチャンクの索引の 1 件を作るため)。
     pub texts: HashMap<Id, String>,
@@ -122,11 +197,14 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
         return SyncPlan::default();
     };
     let mut turns: HashMap<Id, TurnBody> = HashMap::new();
+    let mut revs: HashMap<Id, u32> = HashMap::new();
     let _ = rtx.for_each(KIND_TURN, |r| {
         if let Read::Ok(e) = r
             && let Ok(b) = e.body_as::<TurnBody>()
             && indexable(&b)
+            && let Some(rev) = evorag_memory::turn_rev_checked(&e)
         {
+            revs.insert(e.id, rev);
             turns.insert(e.id, b);
         }
         true
@@ -142,13 +220,19 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
     });
     let mut notes: Vec<(Id, NoteBody)> = Vec::new();
     let _ = rtx.for_each(KIND_NOTE, |r| {
+        // 出典が今と合うノートだけ (04 §7.7 の 1。合わないノートは、ノートの手順が作り直す)。
         if let Read::Ok(e) = r
             && let Ok(b) = e.body_as::<NoteBody>()
+            && evorag_memory::note_is_current(&rtx, &b)
         {
             notes.push((e.id, b));
         }
         true
     });
+    // 事実の鍵 (出典のターンの残っているもの。表と同じ判定、04 §5.4・§5.5)。
+    let facts = crate::fact_table::surviving_facts(&rtx)
+        .map(|set| evorag_memory::fact_keys(&set))
+        .unwrap_or_default();
     drop(rtx);
     let mut plan = SyncPlan::default();
     // ノートの鍵 (出典の往復の残っているもの。出典の無いノートは、ノートの手順が消す)。
@@ -157,10 +241,16 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
             plan.keep.extend(note_docs(*id, n));
         }
     }
+    plan.keep.extend(facts.iter().map(fact_doc));
     let mut covered: HashSet<Id> = HashSet::new();
     for (id, c) in chunks {
         match turns.get(&c.turn) {
-            Some(t) if c.rules == evorag_retrieval::chunk::CHUNK_RULES_VERSION => {
+            // 伏せ字の前の本文から作ったチャンク (出典の改訂の番号が今と合わない) は使わずに作り直す
+            // (04 §7.7 の 1)。
+            Some(t)
+                if c.rules == evorag_retrieval::chunk::CHUNK_RULES_VERSION
+                    && revs.get(&c.turn) == Some(&c.src_rev()) =>
+            {
                 covered.insert(c.turn);
                 plan.keep.push(chunk_doc(id, &c, &t.text));
             }
@@ -169,7 +259,7 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
     }
     for (id, t) in &turns {
         if !covered.contains(id) {
-            plan.create.extend(chunk_bodies(*id, t));
+            plan.create.extend(chunk_bodies(*id, revs[id], t));
         }
     }
     plan.texts = turns.into_iter().map(|(id, t)| (id, t.text)).collect();
@@ -181,6 +271,7 @@ pub(crate) fn sync_plan(store: &Store) -> SyncPlan {
 fn turn_hits(
     store: &Store,
     hits: &[evorag_retrieval::recall::Hit],
+    current: Id,
 ) -> Vec<evorag_retrieval::recall::Hit> {
     let Ok(rtx) = store.read() else {
         return Vec::new();
@@ -188,7 +279,7 @@ fn turn_hits(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for h in hits {
-        for turn in hit_turns(&rtx, h.id) {
+        for turn in hit_turns(&rtx, h.id, current) {
             if seen.insert(turn) {
                 out.push(evorag_retrieval::recall::Hit { id: turn, ..*h });
             }
@@ -317,9 +408,14 @@ fn partner(turns: &[Turn], id: Id, b: &TurnBody) -> Option<Id> {
     }
 }
 
-/// 選んだターンを、その往復の相手と一緒に、セッションごとの出典にまとめる (スコアの順)。
-fn sources(store: &Store, hits: &[Id]) -> Vec<Source> {
+/// 選んだターンを、その往復の相手と一緒に、セッションごとの出典にまとめる (スコアの順)。本文には `[非表示]` の
+/// 置き換えを当てる (04 §7.5、05 §3.4)。
+fn sources(store: &Store, hits: &[Id], lang: PromptLanguage) -> Vec<Source> {
     let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    // 伏せる値を確かめられなければ、今回は添えない (帯・詳細にも出さない、04 §7.5)。
+    let Some(hide) = crate::masking::Hide::load(&rtx, lang) else {
         return Vec::new();
     };
     let mut order: Vec<Id> = Vec::new();
@@ -329,6 +425,10 @@ fn sources(store: &Store, hits: &[Id]) -> Vec<Source> {
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは添えない・帯に出さない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -349,12 +449,13 @@ fn sources(store: &Store, hits: &[Id]) -> Vec<Source> {
                 .map(|s| s.body.title)
                 .unwrap_or_default();
             let set = &picked[&sid];
-            let turns = session_turns
+            let mut turns: Vec<Turn> = session_turns
                 .remove(&sid)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|t| set.contains(&t.envelope.id))
+                .filter(|t| set.contains(&t.envelope.id) && !hide.excluded(&t.envelope))
                 .collect();
+            hide.apply(&rtx, &mut turns);
             Source {
                 session: sid,
                 title,
@@ -374,9 +475,14 @@ struct Exchange {
     turns: Vec<Turn>,
 }
 
-/// 語彙の上位のターンを往復にまとめ、上位 `limit` 往復にする (05 §3.3 の 2)。
-fn exchanges(store: &Store, ranked: &[Id], limit: usize) -> Vec<Exchange> {
+/// 語彙の上位のターンを往復にまとめ、上位 `limit` 往復にする (05 §3.3 の 2)。本文には `[非表示]` の置き換えを
+/// 当てる (リランクの要求にも private の値を送らない、04 §7.5)。
+fn exchanges(store: &Store, ranked: &[Id], limit: usize, lang: PromptLanguage) -> Vec<Exchange> {
     let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    // 伏せる値を確かめられなければ、リランクにも送らない (今回は添えない)。
+    let Some(hide) = crate::masking::Hide::load(&rtx, lang) else {
         return Vec::new();
     };
     let mut session_turns: HashMap<Id, Vec<Turn>> = HashMap::new();
@@ -388,6 +494,10 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize) -> Vec<Exchange> {
         let Ok(Some(Read::Ok(e))) = rtx.get(KIND_TURN, *id) else {
             continue;
         };
+        // 忘れるの指示と合わないターンは、リランクにも送らない (04 §7.2)。
+        if hide.excluded(&e) {
+            continue;
+        }
         let Ok(b) = e.body_as::<TurnBody>() else {
             continue;
         };
@@ -402,11 +512,13 @@ fn exchanges(store: &Store, ranked: &[Id], limit: usize) -> Vec<Exchange> {
         if out.iter().any(|x| x.rep == rep) {
             continue;
         }
-        let members: Vec<Turn> = turns
+        let mut members: Vec<Turn> = turns
             .iter()
             .filter(|t| t.envelope.id == *id || Some(t.envelope.id) == other)
+            .filter(|t| !hide.excluded(&t.envelope))
             .cloned()
             .collect();
+        hide.apply(&rtx, &mut members);
         let pos = turns.iter().position(|t| t.envelope.id == rep).unwrap_or(0);
         out.push(Exchange {
             rep,
@@ -494,6 +606,11 @@ impl QueryCache {
             (std::time::Instant::now(), v),
         );
     }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
 
 /// リランクの結果のキャッシュ (入力が止まったときに先に済ませた結果を、同じ発話を送ったときに使う、
@@ -522,6 +639,11 @@ impl RerankCache {
             m.remove(0);
         }
         m.push((std::time::Instant::now(), key, scores));
+    }
+
+    /// すべて捨てる (忘れるの後、04 §7.2 の「捨てるキャッシュ」)。
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -564,14 +686,14 @@ pub async fn embed_query(
 }
 
 /// ベクトルの当たり (チャンク) を、ターンの順位にする (チャンクの最も良い順位をターンの順位にする)。
-fn vector_turns(store: &Store, rows: &[(evorag_index::vec::VecRow, f32)]) -> Vec<Id> {
+fn vector_turns(store: &Store, rows: &[(evorag_index::vec::VecRow, f32)], current: Id) -> Vec<Id> {
     let Ok(rtx) = store.read() else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (row, _) in rows {
-        for turn in hit_turns(&rtx, row.id) {
+        for turn in hit_turns(&rtx, row.id, current) {
             if seen.insert(turn) {
                 out.push(turn);
             }
@@ -607,15 +729,16 @@ pub(crate) async fn eval_exchanges(
         return Vec::new();
     };
     let snap = index.snapshot();
+    let current_only = current_only_facts(store, session);
     let r = recall(
         &snap,
         query,
         None,
-        &|d| d.session == session,
+        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
         &RecallConfig::default(),
     );
     let mut lists: Vec<Vec<Id>> = vec![
-        turn_hits(store, &r.candidates)
+        turn_hits(store, &r.candidates, session)
             .iter()
             .map(|h| h.id)
             .collect(),
@@ -627,9 +750,10 @@ pub(crate) async fn eval_exchanges(
             .index
             .snapshot()
             .search(&qv, CANDIDATES, &|row| row.session == session);
-        lists.push(vector_turns(store, &rows));
+        lists.push(vector_turns(store, &rows, session));
     }
-    exchanges(store, &rrf(&lists), limit)
+    // ID だけを返すので、置き換えの言語はどちらでもよい。
+    exchanges(store, &rrf(&lists), limit, PromptLanguage::Ja)
         .into_iter()
         .map(|x| x.turns.iter().map(|t| t.envelope.id).collect())
         .collect()
@@ -643,16 +767,19 @@ struct Selection {
 }
 
 /// セッションの `upto` までの発話の本文 (新しい順)。
-fn user_texts(store: &Store, session: Id, upto: Id) -> Vec<String> {
-    let turns = store
-        .read()
-        .ok()
-        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
-        .unwrap_or_default();
+fn user_texts(store: &Store, session: Id, upto: Id, lang: PromptLanguage) -> Vec<String> {
+    let Ok(r) = store.read() else {
+        return Vec::new();
+    };
+    let turns = evorag_memory::session_turns(&r, session).unwrap_or_default();
+    // 忘れるの指示と合わない発話は、問いの本文 (語彙・埋め込み・リランクの問い) に使わない (04 §7.2)。確かめ
+    // られなければ使わない。
+    let hide = crate::masking::Hide::load(&r, lang);
     turns
         .iter()
         .rev()
         .filter(|t| t.body.role == TurnRole::User && t.envelope.id <= upto)
+        .filter(|t| hide.as_ref().is_some_and(|h| !h.excluded(&t.envelope)))
         .map(|t| t.body.text.clone())
         .collect()
 }
@@ -667,7 +794,7 @@ async fn select(
     mode: &RerankMode,
     vectors: Option<&VectorQuery>,
 ) -> Selection {
-    let mut users = user_texts(store, session, user_turn).into_iter();
+    let mut users = user_texts(store, session, user_turn, lang).into_iter();
     let query = users.next().unwrap_or_default();
     let previous = users.next();
     select_for(
@@ -697,7 +824,7 @@ pub async fn precompute(
     vectors: Option<&VectorQuery>,
 ) {
     // 送ると、今の最後の発話が「直前の発話」になる。
-    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]))
+    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]), lang)
         .into_iter()
         .next();
     select_for(
@@ -742,12 +869,14 @@ async fn select_for(
         return none(RecallDecision::Skip, obs);
     };
     let snap = index.snapshot();
-    // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。
+    // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。今のセッションだけを出典とする
+    // 事実の鍵も除く (04 §5.5)。
+    let current_only = current_only_facts(store, session);
     let mut r = recall(
         &snap,
         &query,
         previous.as_deref(),
-        &|d| d.session == session,
+        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
         &RecallConfig::default(),
     );
     if r.decision == Decision::Skip {
@@ -755,10 +884,11 @@ async fn select_for(
         return none(RecallDecision::Skip, obs);
     }
     // 索引の単位はチャンク。ターンにまとめる (05 §2.4)。
-    r.hits = turn_hits(store, &r.hits);
-    r.candidates = turn_hits(store, &r.candidates);
+    r.hits = turn_hits(store, &r.hits, session);
+    r.candidates = turn_hits(store, &r.candidates, session);
     let lexical = |obs: RecallObs| {
-        if r.decision == Decision::Abstain {
+        // ターンに直して何も残らない当たり (鍵の事実が読み直しで外れたなど) は、添えない。
+        if r.decision == Decision::Abstain || r.hits.is_empty() {
             none(RecallDecision::Abstain, obs)
         } else {
             Selection {
@@ -792,7 +922,7 @@ async fn select_for(
                     .index
                     .snapshot()
                     .search(&qv, CANDIDATES, &|row| row.session == session);
-                lists.push(vector_turns(store, &rows));
+                lists.push(vector_turns(store, &rows, session));
             }
             // 問いの埋め込みが締切に間に合わない: その要求だけ語彙の候補で (05 §3.5)。
             None => obs
@@ -801,7 +931,7 @@ async fn select_for(
         }
     }
     let ranked = rrf(&lists);
-    let ex = exchanges(store, &ranked, u.top);
+    let ex = exchanges(store, &ranked, u.top, lang);
     if ex.is_empty() {
         return none(RecallDecision::Abstain, obs);
     }
@@ -872,8 +1002,7 @@ pub async fn attach(
     llm: &dyn LlmClient,
     tokens: &TokenCache,
     model_key: &str,
-    n_ctx: usize,
-    reserve: usize,
+    budget: usize,
     session: Id,
     user_turn: Id,
     base: u32,
@@ -900,7 +1029,7 @@ pub async fn attach(
         };
     }
     finish(
-        store, lang, llm, tokens, model_key, n_ctx, reserve, session, base, sel.hits, sel.obs,
+        store, lang, llm, tokens, model_key, budget, session, base, sel.hits, sel.obs,
     )
     .await
 }
@@ -913,24 +1042,18 @@ async fn finish(
     llm: &dyn LlmClient,
     tokens: &TokenCache,
     model_key: &str,
-    n_ctx: usize,
-    reserve: usize,
+    budget: usize,
     session: Id,
     base: u32,
     hits: Vec<Id>,
     obs: RecallObs,
 ) -> Attached {
-    // n_ctx が小さく、直近の会話に 2,000 トークンを残せないときは半分にする (05 §4.1)。
-    let mut budget = MEMORY_BUDGET;
-    if n_ctx < 8192 && n_ctx.saturating_sub(reserve + MEMORY_BUDGET) < 2000 {
-        budget /= 2;
-    }
     let nonce = nonce();
     let mut body = String::new();
     let mut used = 0;
     let mut attached = Vec::new();
     let mut counts = Vec::new();
-    for s in sources(store, &hits) {
+    for s in sources(store, &hits, lang) {
         if s.session == session || s.turns.is_empty() {
             continue;
         }
@@ -969,9 +1092,9 @@ async fn finish(
     }
 }
 
-/// 往復 (代表のターンと、その相手) のターン。帯の詳細に使う (05 §5.2)。
-pub fn exchange_turns(store: &Store, target: Id) -> Option<Vec<Turn>> {
-    sources(store, &[target])
+/// 往復 (代表のターンと、その相手) のターン。帯の詳細に使う (05 §5.2)。本文には `[非表示]` の置き換えを当てる。
+pub fn exchange_turns(store: &Store, target: Id, lang: PromptLanguage) -> Option<Vec<Turn>> {
+    sources(store, &[target], lang)
         .into_iter()
         .next()
         .map(|s| s.turns)
@@ -995,8 +1118,13 @@ pub fn next_source_number(turns: &[Turn]) -> u32 {
         .unwrap_or(1)
 }
 
-/// 応答の出典 `n` (このセッションの通し番号) のターン。
-pub fn source_turns(store: &Store, answer: &TurnBody, n: usize) -> Option<Vec<Turn>> {
+/// 応答の出典 `n` (このセッションの通し番号) のターン。本文には `[非表示]` の置き換えを当てる (表示に使う)。
+pub fn source_turns(
+    store: &Store,
+    answer: &TurnBody,
+    n: usize,
+    lang: PromptLanguage,
+) -> Option<Vec<Turn>> {
     let counts = &answer.recall.as_ref()?.sources;
     // その応答の中での位置 (0 から)。
     let i = n.checked_sub(source_base(answer) as usize)?;
@@ -1012,6 +1140,10 @@ pub fn source_turns(store: &Store, answer: &TurnBody, n: usize) -> Option<Vec<Tu
             out.push(Turn { envelope: e, body });
         }
     }
+    let hide = crate::masking::Hide::load(&rtx, lang)?;
+    // 忘れるの指示と合わないターンは出さない (04 §7.2)。
+    out.retain(|t| !hide.excluded(&t.envelope));
+    hide.apply(&rtx, &mut out);
     (!out.is_empty()).then_some(out)
 }
 

@@ -33,6 +33,8 @@ fn app() -> App {
             limited: false,
             recall: None,
             background: None,
+            remote_llm: false,
+            forget: None,
         },
     );
     let turns = (0..TURNS)
@@ -55,6 +57,8 @@ fn app() -> App {
             band: Vec::new(),
             band_nearby: false,
             irrelevant: Vec::new(),
+            marks: Vec::new(),
+            unverified: false,
             source_base: 1,
         })
         .collect();

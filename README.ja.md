@@ -2,9 +2,9 @@
 
 [English](README.md) | 日本語
 
-Rust 製の、チャットと長期メモリのツールです。手元の llama-server (llama.cpp) だけを使って動くので、会話は PC の外に出ません。以前の会話のうち関係のあるところを、出典つきで応答に添えます。この先の版で、利用者についての事実を覚え、評価と訂正から少しずつ良くなるようにします。モデルの重みは学習しません。
+Rust 製の、チャットと長期メモリのツールです。手元の llama-server (llama.cpp) だけを使って動くので、会話は PC の外に出ません。以前の会話のうち関係のあるところを、出典つきで応答に添えます。利用者についての事実を覚え、訂正で置き換え、「忘れて」で消せます。この先の版で、評価と訂正から少しずつ良くなるようにします。モデルの重みは学習しません。
 
-> **最新の版は v0.2.0 (2026-11-12) です。** 配布物は [GitHub Releases](https://github.com/evoref/evorag/releases) にあります。Windows 11 (x86_64) 用の zip と、Linux (x86_64) 用の tar.gz です。入れ方・最初の設定・更新と巻き戻し・署名の検証・既知の制約は、同梱の README ([dist/README.md](dist/README.md)) にあります。
+> **最新の版は v0.3.0 (2026-11-19) です。** 配布物は [GitHub Releases](https://github.com/evoref/evorag/releases) にあります。Windows 11 (x86_64) 用の zip と、Linux (x86_64) 用の tar.gz です。入れ方・最初の設定・更新と巻き戻し・署名の検証・既知の制約は、同梱の README ([dist/README.md](dist/README.md)。英語版は [dist/README.en.md](dist/README.en.md)) にあります。
 
 ## 状況
 
@@ -21,6 +21,14 @@ Rust 製の、チャットと長期メモリのツールです。手元の llama
   - 答える言語・長さ・書式の既定を選べます (`/style`)。
   - Linux (x86_64、GNOME Terminal と tmux) に対応しました。
   - 保存の形式を 0.2 に上げました。v0.1 のデータ根は、最初の起動で退避してから移します。
+- **v0.3 (覚える力)** は、2026-11-19 に v0.3.0 としてリリースしました。
+  - 会話から、利用者についての事実 (名前・住まい・好き嫌い・予定など) を裏の処理で抜き出して覚え、別のセッションでも応答に添えます。抜き出した値は、決まった規則の関門を通ったものだけを使います。`/memory` で一覧し、採る・履歴を見る・戻すができます。
+  - 言い直し (「〜じゃなくて〜」) で、前の値を置き換えます。
+  - `/forget` で、事実とその出典の本文を忘れます。本文は伏せ字にし、データベース・ジャーナル・索引・自動の退避からも消します。同じ値は再び覚えません。`/private` で、事実を llama-server に送らない印を付けられます。
+  - `evorag update` で、本体を更新・巻き戻しできます。配布物は署名で確かめます。外へ通信するのは、`update check`・`update apply` を打ったときだけです。
+  - 英語の UI を選べます (`ui.language = "en"`)。
+  - `evorag repair`・`evorag backups purge`・`evorag rebuild --facts` を足しました。
+  - 保存の形式を 0.3 に上げました。記録は書き換えないので、v0.2 に戻しても読み書きできます。v0.2 からは、同梱の README の手順で手作業で更新してください。
 
 v0.6 までの版ごとの予定は [docs/08-roadmap.md](docs/08-roadmap.md) にあります。
 
@@ -45,6 +53,13 @@ RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
 
 ```sh
 minisign -Vm SHA256SUMS -P RWSOgurhdwywo1k6KUE/J4IMo5HcwmhR6dsz/+OgROUdnDutFx3qxies
+```
+
+evorag には、鍵を替えるときのために、次の鍵 ([minisign.next.pub](minisign.next.pub)) も埋め込んでいます。`evorag update` は、どちらの鍵で署名したリリースも受け付けます。リリースは、リリースノートに断りが無い限り、上の今の鍵で署名します。
+
+```text
+untrusted comment: minisign public key 45B083FCB9BE29F1
+RWTxKb65/IOwRZ5bqFrSPF7sR8YJANIQZYNUkjuxl99PRFJaj4XJK6g9
 ```
 
 詳しい手順は、同梱の README にあります。

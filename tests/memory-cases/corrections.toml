@@ -1,0 +1,347 @@
+# 訂正の候補と検証の関門 (04 §6)。書式は README.md。会話はすべて架空 (11 §9.7)。
+# llm は検証の LLM の出力を固定したもの。direction は訂正の型から決まる向き。
+
+[[case]]
+id = "K01"
+title = "「{old}じゃなくて{new}」の訂正を検証済みにする"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京です" }
+expect = "verified"
+
+[[case]]
+id = "K02"
+title = "固定の部分の長い型 (ではなくて) を先に当て、新しい値を「て東京」にしない"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪ではなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪ではなくて東京です" }
+expect = "verified"
+
+[[case]]
+id = "K03"
+title = "「{old}は{new}の間違い」は、否定の語が無くても向きを決める"
+spec = "04 §6"
+previous = "東京の天気は晴れです"
+text = "東京は大阪の間違いでした"
+expect_candidate = true
+direction = { old = "東京", new = "大阪" }
+llm = { target = "response", old = "東京", new = "大阪", e = "東京は大阪の間違いでした" }
+expect = "verified"
+
+[[case]]
+id = "K04"
+title = "英語の「{new}, not {old}」は新しい値が先に来る"
+spec = "04 §6"
+lang = "en"
+previous = "So you live in Tokyo."
+text = "It's Osaka, not Tokyo."
+expect_candidate = true
+direction = { old = "Tokyo", new = "Osaka" }
+llm = { target = "fact", old = "Tokyo", new = "Osaka", e = "It's Osaka, not Tokyo." }
+expect = "verified"
+
+[[case]]
+id = "K05"
+title = "英語の isn't を一次のふるいで拾う"
+spec = "04 §6、rules/en.toml"
+lang = "en"
+previous = "So you live in Tokyo."
+text = "It isn't Tokyo, it's Osaka."
+expect_candidate = true
+direction = { old = "Tokyo", new = "Osaka" }
+llm = { target = "fact", old = "Tokyo", new = "Osaka", e = "It isn't Tokyo, it's Osaka." }
+expect = "verified"
+
+[[case]]
+id = "K06"
+title = "古い値の無い型 (I meant {new}) は、古い値を LLM の出力から取り、直前の応答にあれば検証済みにする"
+spec = "04 §6"
+lang = "en"
+previous = "Here is the weather for Tokyo."
+text = "I meant Osaka."
+expect_candidate = true
+direction = { new = "Osaka" }
+llm = { target = "response", old = "Tokyo", new = "Osaka", e = "I meant Osaka." }
+expect = "verified"
+
+[[case]]
+id = "K07"
+title = "LLM の出力の向きが型の向きと逆なら捨てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね。東京にも近いですか"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "東京", new = "大阪", e = "大阪じゃなくて東京です" }
+expect = "direction"
+
+[[case]]
+id = "K08"
+title = "新しい値が発話に無い (言い換えた) 出力は捨てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京都", e = "大阪じゃなくて東京です" }
+expect = "new_not_in_utterance"
+
+[[case]]
+id = "K09"
+title = "古い値が直前の応答にも、それより前の発話にも、今の値にも無ければ捨てる"
+spec = "04 §6"
+previous = "今日は晴れです"
+text = "京都じゃなくて奈良です"
+expect_candidate = true
+direction = { old = "京都", new = "奈良" }
+llm = { target = "fact", old = "京都", new = "奈良", e = "京都じゃなくて奈良です" }
+expect = "old_not_found"
+
+[[case]]
+id = "K10"
+title = "引用の行の中の訂正は候補にしない (型は前のふるいの後の本文に当てる)"
+spec = "04 §6、§5.2 の前のふるい"
+previous = "大阪にお住まいなんですね"
+text = """
+> 大阪じゃなくて東京です
+と友人に言われました"""
+expect_candidate = false
+
+[[case]]
+id = "K11"
+title = "訂正の語の無い発話は候補にしない"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "東京に住んでいます"
+expect_candidate = false
+
+[[case]]
+id = "K12"
+title = "コーディングのセッションでは候補を探さない"
+spec = "04 §6、15 §4.5"
+mode = "coding"
+previous = "Build succeeded."
+text = "This is not working, it's failing on Windows, not Linux."
+expect_candidate = false
+
+[[case]]
+id = "K13"
+title = "読点のある型 ({old}じゃなくて、{new}) も、読点を区別せずに当てる"
+spec = "04 §6"
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて、東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて、東京です" }
+expect = "verified"
+
+[[case]]
+id = "K14"
+title = "古い値が、直前の応答に無くても、それより前の利用者の発話にあれば検証済みにする"
+spec = "04 §6"
+earlier = ["来週は京都に行きます"]
+previous = "楽しんできてください"
+text = "京都じゃなくて奈良でした"
+expect_candidate = true
+direction = { old = "京都", new = "奈良" }
+llm = { target = "fact", old = "京都", new = "奈良", e = "京都じゃなくて奈良でした" }
+expect = "verified"
+
+[[case]]
+id = "K15"
+title = "古い値が、今の Live の値にだけあっても検証済みにする"
+spec = "04 §6"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "今日は晴れです"
+text = "大阪じゃなくて東京に住んでいます"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて東京に住んでいます" }
+expect = "verified"
+
+[[case]]
+id = "K16"
+title = "一次のふるいと型に当たっても、検証の LLM が訂正ではないと答えたら捨てる"
+spec = "04 §6"
+previous = "おすすめの本を 3 冊挙げました"
+text = "それじゃなくて別のを見せて"
+expect_candidate = true
+direction = { old = "それ", new = "別のを見せて" }
+llm = { target = "response", old = "", new = "", e = "" }
+expect = "not_correction"
+
+[[case]]
+id = "K17"
+title = "括弧の内側の訂正 (引用して貼った他人の文) は、事実を置き換えない"
+spec = "04 §6、§5.2 の関門 4"
+live = [{ s = "self", a = "name", v = "田中" }]
+previous = "その記事を読みました"
+text = "記事に「田中じゃなくて佐藤」と書いてありました"
+expect_candidate = true
+direction = { old = "田中", new = "佐藤" }
+llm = { target = "fact", old = "田中", new = "佐藤", e = "田中じゃなくて佐藤" }
+expect = "quoted"
+
+[[case]]
+id = "K18"
+title = "新しい値の穴は同じ文の中だけ。後ろの文の語を新しい値にできない"
+spec = "04 §6 の穴の範囲"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて東京です。妻は花子です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京です。妻は花子", e = "大阪じゃなくて東京です。妻は花子です" }
+expect = "direction"
+
+[[case]]
+id = "K19"
+title = "末尾の穴の値は穴の始まりに置く。間に語が入れば落とす (安全の側)"
+spec = "04 §6 の値の位置"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "大阪じゃなくて、今は東京です"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "大阪じゃなくて、今は東京です" }
+expect = "direction"
+
+[[case]]
+id = "K20"
+title = "古い値の無い型は、検証済みでも事実を変えない"
+spec = "04 §6 の事実への効き方"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪の天気をお伝えしました"
+text = "正しくは東京です"
+expect_candidate = true
+direction = { new = "東京" }
+llm = { target = "response", old = "大阪", new = "東京", e = "正しくは東京です" }
+expect = "verified"
+replaces = false
+
+[[case]]
+id = "K21"
+title = "古い値が関門 6 に外れる (URL) なら捨てる"
+spec = "04 §6 の関門 4"
+previous = "詳しくは https://example.com/a を見てください"
+text = "https://example.com/a じゃなくて東京の話です"
+expect_candidate = true
+direction = { old = "https://example.com/a", new = "東京の話" }
+llm = { target = "fact", old = "https://example.com/a", new = "東京", e = "https://example.com/a じゃなくて東京の話です" }
+expect = "old_not_found"
+
+[[case]]
+id = "K22"
+title = "同じ値を括弧の内と外に書いても、置いた位置が括弧の内側なら捨てる"
+spec = "04 §6 の一致の端と括弧"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "その記事を読みました"
+text = "「大阪じゃなくて東京」と書いてあったけど、東京"
+expect_candidate = true
+direction = { old = "大阪", new = "東京" }
+llm = { target = "fact", old = "大阪", new = "東京", e = "「大阪じゃなくて東京」と書いてあったけど、東京" }
+expect = "quoted"
+
+[[case]]
+id = "K23"
+title = "根拠を語の途中で切っても、語の境界は本文の全体で確かめる"
+spec = "04 §6 の一致の端と括弧"
+lang = "en"
+live = [{ s = "self", a = "name", v = "Ann" }]
+previous = "Where did you move?"
+text = "We moved to Kyoto, not Annapolis."
+expect_candidate = true
+direction = { old = "Annapolis", new = "Kyoto" }
+llm = { target = "fact", old = "Ann", new = "Kyoto", e = "Kyoto, not Ann" }
+expect = "direction"
+
+[[case]]
+id = "K24"
+title = "古い値は穴の全体と一致させる (東大阪の大阪は通らない)"
+spec = "04 §6 の古い値は穴の全体"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "東大阪にお住まいなんですね"
+text = "東大阪じゃなくて京都です"
+expect_candidate = true
+direction = { old = "東大阪", new = "京都" }
+llm = { target = "fact", old = "大阪", new = "京都", e = "東大阪じゃなくて京都です" }
+expect = "direction"
+
+[[case]]
+id = "K25"
+title = "読点で切った古い値の穴は、その全体と一致すれば通る"
+spec = "04 §6 の古い値は穴の全体"
+live = [{ s = "self", a = "residence", v = "大阪" }]
+previous = "大阪にお住まいなんですね"
+text = "いや、大阪じゃなくて京都です"
+expect_candidate = true
+direction = { old = "大阪", new = "京都" }
+llm = { target = "fact", old = "大阪", new = "京都", e = "いや、大阪じゃなくて京都です" }
+expect = "verified"
+
+[[case]]
+id = "K26"
+title = "文末でない「よ」は値の一部として残す"
+spec = "04 §6 の文末の「よ」「です」"
+live = [{ s = "self", a = "name", v = "かよ" }]
+previous = "かよさんですね"
+text = "かよじゃなくてさよです"
+expect_candidate = true
+direction = { old = "かよ", new = "さよ" }
+llm = { target = "fact", old = "かよ", new = "さよ", e = "かよじゃなくてさよです" }
+expect = "verified"
+
+# ---- 照合の形 (04 §5.6・§6、2026-11-18) ----
+
+[[case]]
+id = "K27"
+title = "LLM が空白を足して写した新しい値と古い値を照合の形で探し、穴の位置の発話の書き方で記録する"
+spec = "04 §6 の関門 2・4・5、訂正の型の使い方"
+live = [{ s = "self", a = "birthday", v = "5月3日" }]
+previous = "誕生日は5月3日ですね"
+text = "いや、5月3日じゃなくて5月13日です"
+expect_candidate = true
+direction = { old = "5月3日", new = "5月13日" }
+llm = { target = "fact", old = "5 月 3 日", new = "5 月 13 日", e = "いや、 5 月 3 日じゃなくて 5 月 13 日です" }
+expect = "verified"
+stored = { old = "5月3日", new = "5月13日" }
+
+[[case]]
+id = "K28"
+title = "利用者が空白を入れ、LLM が除いて写したときも検証済みにし、利用者の書き方で記録する"
+spec = "04 §6 の関門 2・5、訂正の型の使い方"
+previous = "誕生日は5月3日ですね"
+text = "いや、5 月 3 日じゃなくて 5 月 13 日です"
+expect_candidate = true
+direction = { old = "5 月 3 日", new = "5 月 13 日" }
+llm = { target = "fact", old = "5月3日", new = "5月13日", e = "いや、5月3日じゃなくて5月13日です" }
+expect = "verified"
+stored = { old = "5 月 3 日", new = "5 月 13 日" }
+
+[[case]]
+id = "K29"
+title = "空白の有無だけが違う古い値と新しい値は、照合の形で同じなので向きの関門で落とす"
+spec = "04 §6 の関門 5"
+previous = "東京 タワーの近くですね"
+text = "東京 タワーじゃなくて東京タワーです"
+expect_candidate = true
+direction = { old = "東京 タワー", new = "東京タワー" }
+llm = { target = "fact", old = "東京 タワー", new = "東京タワー", e = "東京 タワーじゃなくて東京タワーです" }
+expect = "direction"
+
+[[case]]
+id = "K30"
+title = "穴の位置の本文が TAB を含むときは、記録する新しい値に関門 6 を当てて落とす"
+spec = "04 §6 の訂正の型の使い方"
+previous = "大阪 府ですね"
+text = "いや、大阪\t府じゃなくて京都\t府です"
+expect_candidate = true
+direction = { old = "大阪\t府", new = "京都\t府" }
+llm = { target = "fact", old = "大阪 府", new = "京都 府", e = "いや、大阪 府じゃなくて京都 府です" }
+expect = "new_not_in_utterance"

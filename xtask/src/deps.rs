@@ -3,7 +3,7 @@
 //! 規則の入力は `deps-policy.toml`。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -21,7 +21,23 @@ pub struct Policy {
     pub tree_only_in: Vec<OnlyIn>,
     #[serde(default)]
     pub direct_allow: Vec<DirectAllow>,
+    #[serde(default)]
+    pub features_forbidden: Vec<FeaturesForbidden>,
     pub layers: Layers,
+}
+
+/// 配布物の依存の木で、ある crate に有効にしてはいけない機能 (S-06 §6.1: evorag-llm の reqwest に TLS が
+/// 混ざらないこと。`tree_only_in` は crate ごとの木を見るので、配布物の中で機能がまとまることは見えない)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeaturesForbidden {
+    pub rule: String,
+    #[serde(rename = "crate")]
+    pub krate: String,
+    /// 有効なら違反にする機能の名前。末尾が `*` なら、その前までで始まる名前すべて。
+    pub features: Vec<String>,
+    /// 人が読むための理由。
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +91,11 @@ pub struct Layers {
 const OUTSIDE_LAYERS: &[&str] = &["xtask"];
 /// 推移的な依存を数える起点 (配布物)。
 const DIST_BIN: &str = "evorag";
+
+/// 署名と配布物の検証を飛ばす evorag-update の機能。有効にしてよいのは xtask だけ。
+const UNVERIFIED_FEATURE: &str = "unverified-dist";
+const UNVERIFIED_MODULE: &str = "unverified_dist";
+const UNVERIFIED_ALLOWED: &[&str] = &["xtask", "evorag-update"];
 
 pub fn load_policy(path: &Path) -> Result<Policy, String> {
     let text = std::fs::read_to_string(path)
@@ -148,6 +169,7 @@ pub fn run(policy: &Policy, manifest_path: Option<&Path>) -> Result<Vec<String>,
 
         if manifest_path.is_none() {
             check_tree_only_in(policy, &members, target, &mut errors)?;
+            check_features_forbidden(policy, target, &mut errors)?;
         }
     }
 
@@ -155,6 +177,7 @@ pub fn run(policy: &Policy, manifest_path: Option<&Path>) -> Result<Vec<String>,
         check_direct_only_in(policy, &meta, &mut errors);
         check_direct_allow(policy, &meta, &mut errors);
         check_layers(policy, &meta, &mut errors);
+        check_unverified_dist(&meta, &mut errors);
     }
 
     errors.sort();
@@ -231,6 +254,38 @@ fn check_tree_only_in(
         }
     }
     Ok(())
+}
+
+/// 配布物の木で、`features_forbidden` の機能が有効になっていないこと。
+fn check_features_forbidden(
+    policy: &Policy,
+    target: &str,
+    errors: &mut Vec<String>,
+) -> Result<(), String> {
+    for rule in &policy.features_forbidden {
+        let enabled = metadata::enabled_features(DIST_BIN, target, &rule.krate)?;
+        errors.extend(forbidden_features(rule, &enabled).into_iter().map(|f| {
+            format!(
+                "{}: `{}` has the feature `{f}` in `{DIST_BIN}` on {target} ({})",
+                rule.rule, rule.krate, rule.reason
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// `enabled` のうち、`rule` が禁じる機能。
+fn forbidden_features<'a>(rule: &FeaturesForbidden, enabled: &'a BTreeSet<String>) -> Vec<&'a str> {
+    enabled
+        .iter()
+        .filter(|f| {
+            rule.features.iter().any(|p| match p.strip_suffix('*') {
+                Some(prefix) => f.starts_with(prefix),
+                None => *f == p,
+            })
+        })
+        .map(String::as_str)
+        .collect()
 }
 
 /// workspace の crate ごとの直接の依存 (宣言のとおり、dev も含む) の名前。
@@ -327,5 +382,142 @@ fn check_layers(policy: &Policy, meta: &Metadata, errors: &mut Vec<String>) {
                 ));
             }
         }
+    }
+}
+
+/// evorag-update の `unverified-dist` (検証を飛ばす入口) を、xtask のほかが使っていないこと。
+/// 機能の宣言 (依存の `features`、evorag-update の機能) と、ソースの中の名前の両方を見る。
+fn check_unverified_dist(meta: &Metadata, errors: &mut Vec<String>) {
+    for p in meta.members() {
+        if p.name == "evorag-update" {
+            let enabled_by = p
+                .features
+                .iter()
+                .filter(|(_, on)| on.iter().any(|f| f == UNVERIFIED_FEATURE))
+                .map(|(name, _)| name.as_str());
+            for feature in enabled_by {
+                errors.push(format!(
+                    "evorag-update: the feature `{feature}` turns on `{UNVERIFIED_FEATURE}`; only xtask may enable it"
+                ));
+            }
+        }
+        if UNVERIFIED_ALLOWED.contains(&p.name.as_str()) {
+            continue;
+        }
+        for d in p.dependencies.iter().filter(|d| d.name == "evorag-update") {
+            if d.features.iter().any(|f| f == UNVERIFIED_FEATURE) {
+                errors.push(format!(
+                    "`{}` enables evorag-update's `{UNVERIFIED_FEATURE}`; only xtask may (it skips verification)",
+                    p.name
+                ));
+            }
+        }
+        let dir = Path::new(&p.manifest_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        for file in rust_sources(&dir) {
+            if std::fs::read_to_string(&file).is_ok_and(|t| t.contains(UNVERIFIED_MODULE)) {
+                errors.push(format!(
+                    "{}: uses evorag_update::{UNVERIFIED_MODULE}; only xtask may (it skips verification)",
+                    file.display()
+                ));
+            }
+        }
+    }
+}
+
+/// `dir` の下の `.rs` (target と fixtures は見ない)。
+fn rust_sources(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if e.file_name() != "target" && e.file_name() != "fixtures" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(json: serde_json::Value) -> Metadata {
+        serde_json::from_value(json).expect("metadata")
+    }
+
+    fn package(
+        name: &str,
+        deps: serde_json::Value,
+        features: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": name, "name": name, "version": "0.2.0", "links": null,
+            "dependencies": deps, "features": features,
+            "manifest_path": format!("/nonexistent/{name}/Cargo.toml"),
+        })
+    }
+
+    #[test]
+    fn forbidden_features_match_names_and_prefixes() {
+        let rule = FeaturesForbidden {
+            rule: "R3".into(),
+            krate: "reqwest".into(),
+            features: vec!["__rustls*".into(), "native-tls".into()],
+            reason: "x".into(),
+        };
+        let enabled: BTreeSet<String> = [
+            "json",
+            "__rustls",
+            "__rustls-ring",
+            "native-tls",
+            "native-tls-alpn",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            forbidden_features(&rule, &enabled),
+            ["__rustls", "__rustls-ring", "native-tls"]
+        );
+    }
+
+    #[test]
+    fn only_xtask_may_enable_the_unverified_feature() {
+        let dep = |features: &[&str]| serde_json::json!([{ "name": "evorag-update", "features": features }]);
+        let ok = meta(serde_json::json!({
+            "packages": [
+                package("xtask", dep(&["unverified-dist"]), serde_json::json!({})),
+                package("evorag", dep(&[]), serde_json::json!({})),
+                package("evorag-update", serde_json::json!([]), serde_json::json!({ "unverified-dist": [] })),
+            ],
+            "workspace_members": ["xtask", "evorag", "evorag-update"],
+        }));
+        let mut errors = Vec::new();
+        check_unverified_dist(&ok, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let bad = meta(serde_json::json!({
+            "packages": [
+                package("evorag-core", dep(&["unverified-dist"]), serde_json::json!({})),
+                package("evorag-update", serde_json::json!([]),
+                    serde_json::json!({ "default": ["unverified-dist"], "unverified-dist": [] })),
+            ],
+            "workspace_members": ["evorag-core", "evorag-update"],
+        }));
+        let mut errors = Vec::new();
+        check_unverified_dist(&bad, &mut errors);
+        assert_eq!(errors.len(), 2, "{errors:?}");
     }
 }

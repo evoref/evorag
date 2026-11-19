@@ -90,6 +90,12 @@ pub trait LlmClient: Send + Sync {
     fn slots(&self) -> BoxFuture<'_, Result<Vec<SlotState>, LlmError>> {
         Box::pin(async { Err(not_supported("slots")) })
     }
+    /// `/slots/{id}?action=erase` (06 §4): スロット `id` のプロンプトのキャッシュを消す。サーバを
+    /// `--slot-save-path` 付きで起動したときだけ使える (既定の構成は 501 で断る)。再試行しない。
+    fn erase_slot(&self, id: u32) -> BoxFuture<'_, Result<(), LlmError>> {
+        let _ = id;
+        Box::pin(async { Err(not_supported("slot erase")) })
+    }
 }
 
 /// スロットの状態 (`/slots` の 1 件)。

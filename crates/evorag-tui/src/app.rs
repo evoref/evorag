@@ -3,12 +3,15 @@
 //! キーとコアのイベントを受けて状態を変え、コアへの命令 (`Action`) を返す。描画は `render`。
 
 use evorag_types::api::{
-    BackgroundState, Command, Event, ModelRoleInfo, RecallState, Role, RoleStatus, SessionView,
-    StyleItem, TurnStatus, TurnView,
+    BackgroundState, Command, Event, FactGroup, FactGroupKey, FactHistory, FactKey, FactList,
+    FactOp, FactRow, FactRowRef, FactStatus, FactSubject, FactTense, FactsUnavailable, ForgetState,
+    ForgottenFact, ModelRoleInfo, PrivateCause, PrivateScope, RecallState, Role, RoleStatus,
+    SessionView, StyleItem, TurnStatus, TurnView,
 };
 use evorag_types::{Id, MessageKey};
 
 use crate::catalog::Catalog;
+use crate::forget::ForgetConfirm;
 use crate::input::InputBox;
 use crate::slash::{self, Slash};
 
@@ -103,6 +106,80 @@ pub enum Mode {
         choice: [usize; 3],
         initial: [usize; 3],
     },
+    /// スクロールできる窓 (事実の一覧・置き換えの履歴・忘れた事実の一覧、07 §3)。`scroll` は上から飛ばす行の数。
+    Panel {
+        title: String,
+        body: String,
+        scroll: usize,
+    },
+    /// `/private` の確認の画面 (07 §3、04 §7.1)。既定のまま Enter で実行できる。
+    ConfirmPrivate {
+        target: FactKey,
+        /// 対象の行 (主語・属性・値)。
+        label: String,
+        multi: bool,
+        scope: PrivateScope,
+    },
+    /// `/private off` の確認の画面。ほかの行や履歴の値の印も外れるときは、それを示す (04 §7.5)。
+    ConfirmPrivateOff {
+        target: FactRowRef,
+        label: String,
+        others: Vec<String>,
+        /// 一緒に印が外れる履歴の値 (主語・属性・値)。
+        history: Vec<String>,
+    },
+    /// `/forget` の確認の画面 (07 §3、04 §7.1)。既定のまま Enter で実行できる。
+    ConfirmForget(Box<ForgetConfirm>),
+    /// 忘れるの後に、`broken/` に残っている `n` 件のファイルを消すかを尋ねる (04 §7.2)。
+    ConfirmBroken {
+        n: usize,
+    },
+}
+
+/// 番号と行の対応 (画面が持つ、04 §7.1)。番号は最後に表示した一覧に結び付く。
+#[derive(Debug, Clone, Default)]
+pub struct FactRefs {
+    /// 最後に表示した事実の一覧 (`F` の番号)。
+    pub list: Option<FactList>,
+    /// その前に表示した一覧 (前に見てから変わった行の印に使う。プロセスの間だけ覚える)。
+    pub previous: Option<FactList>,
+    /// 最後に表示した置き換えの履歴 (`H` の番号)。
+    pub history: Option<FactHistory>,
+    /// 最後に表示した忘れた事実の一覧 (`X` の番号)。
+    pub forgotten: Option<Vec<ForgottenFact>>,
+    /// `/memory` で、事実の一覧と一緒に窓に出す想起の答え (事実の一覧が届くまで待たせる)。
+    memory: Option<String>,
+    /// `/memory` の事実の一覧を待っている。
+    awaiting: bool,
+}
+
+/// 一覧の行を番号の順に並べる (`F1` から)。
+pub fn fact_rows(list: &FactList) -> Vec<(&FactGroup, &FactRow)> {
+    list.groups
+        .iter()
+        .flat_map(|g| g.rows.iter().map(move |r| (g, r)))
+        .collect()
+}
+
+/// 前の一覧と比べるときの行の同一性 (出典の増減・private の印の変化は数えない、04 §7.1)。
+fn same_row(a: &FactRow, b: &FactRow) -> bool {
+    match (a, b) {
+        (FactRow::Value { key: x, .. }, FactRow::Value { key: y, .. }) => x == y,
+        (FactRow::Vacant { group: x }, FactRow::Vacant { group: y })
+        | (FactRow::RuleOnly { group: x, .. }, FactRow::RuleOnly { group: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
+/// 行に効いている private の指示 (`/private off` で一緒に解かれる)。
+fn row_directives(r: &FactRow) -> &[Id] {
+    match r {
+        FactRow::Value {
+            private: Some(p), ..
+        } => &p.directives,
+        FactRow::RuleOnly { directives, .. } => directives,
+        _ => &[],
+    }
 }
 
 /// Tab で選んでいるもの (07 §2.5)。
@@ -145,6 +222,10 @@ pub struct Status {
     pub recall: Option<RecallState>,
     /// 裏の処理の状態 (07 §2.1、04 §4)。
     pub background: Option<BackgroundState>,
+    /// 設定 `llm.allow_remote` (`/private` の確認に、発話の本文が外の機械に出うることを書く、07 §3)。
+    pub remote_llm: bool,
+    /// 忘れるの状態 (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
+    pub forget: Option<ForgetState>,
 }
 
 /// 生成中の応答。
@@ -210,6 +291,12 @@ pub struct App {
     /// 次の答え方の既定の知らせで、選ぶ窓を開く (`/style` を値なしで打った)。
     style_picker: bool,
     ctrl_c_armed: bool,
+    /// 事実の一覧などの番号と行の対応。
+    pub facts: FactRefs,
+    /// `/forget` の実行を送り、結果を待っている (その間は発話を送らない)。
+    pub(crate) forget_pending: bool,
+    /// 確認の画面の外で忘れるが済んだときの、`broken/` の置き場所の数 (次に事実の一覧を開いたときに尋ねる)。
+    pub(crate) pending_broken: Option<usize>,
 }
 
 impl App {
@@ -227,7 +314,549 @@ impl App {
             pick: None,
             style_picker: false,
             ctrl_c_armed: false,
+            facts: FactRefs::default(),
+            forget_pending: false,
+            pending_broken: None,
         }
+    }
+
+    fn subject_label(&self, s: &FactSubject) -> String {
+        match s {
+            FactSubject::User => self.catalog.key(MessageKey::UiFactsSelf),
+            FactSubject::Named(n) => n.clone(),
+        }
+    }
+
+    /// 行の主語・属性・値 (確認の画面と、ほかの行の表示に使う)。
+    pub(crate) fn row_label(&self, g: &FactGroup, r: &FactRow) -> String {
+        let subject = self.subject_label(&g.group.subject);
+        let attr = self.catalog.attribute(&g.attr.name);
+        match r {
+            FactRow::Value { value, .. } => {
+                format!("{}: {value}", self.catalog.fact_label(&subject, &attr))
+            }
+            _ => self.catalog.fact_label(&subject, &attr),
+        }
+    }
+
+    /// 値の行の印 (矛盾・予定・private とその理由・履歴の数)。
+    fn value_marks(&self, g: &FactGroup, r: &FactRow, first: bool) -> String {
+        let c = &self.catalog;
+        let mut marks = String::new();
+        let FactRow::Value { key, private, .. } = r else {
+            return marks;
+        };
+        if key.status == FactStatus::Contested {
+            marks.push_str(&c.key(MessageKey::UiFactsMarkContested));
+        }
+        if key.tense == FactTense::Planned {
+            marks.push_str(&c.key(MessageKey::UiFactsMarkPlanned));
+        }
+        for cause in private.iter().flat_map(|p| p.causes.iter()) {
+            marks.push_str(&c.key(match cause {
+                PrivateCause::Chosen {
+                    scope: PrivateScope::Successors,
+                } => MessageKey::UiFactsMarkPrivateSuccessors,
+                PrivateCause::Chosen {
+                    scope: PrivateScope::ValueOnly,
+                } => MessageKey::UiFactsMarkPrivateValueOnly,
+                PrivateCause::Successor => MessageKey::UiFactsMarkPrivateSuccessor,
+                PrivateCause::KeptAfterDelete => MessageKey::UiFactsMarkPrivateKept,
+            }));
+        }
+        if first && g.history > 0 {
+            marks.push_str(&c.with(
+                MessageKey::UiFactsMarkHistory,
+                &[("n", &g.history.to_string())],
+            ));
+        }
+        marks
+    }
+
+    /// 事実の一覧を文にする (07 §3)。`previous` は前に表示した一覧 (変わった行に印を付ける)。
+    fn facts_text(&self, list: &FactList, previous: Option<&FactList>) -> String {
+        let c = &self.catalog;
+        let mut lines = vec![c.key(MessageKey::UiFactsHeader)];
+        if let Some(n) = list.note {
+            lines.push(c.key(match n {
+                FactsUnavailable::SleepTimeOff => MessageKey::UiFactsNoteSleepOff,
+                FactsUnavailable::StoppedByProbe => MessageKey::UiFactsNoteProbe,
+                FactsUnavailable::KeyUnavailable => MessageKey::UiFactsNoteKey,
+            }));
+        }
+        let rows = fact_rows(list);
+        if rows.is_empty() {
+            lines.push(c.key(MessageKey::UiFactsEmpty));
+        }
+        let before: Vec<&FactRow> = previous
+            .map(|p| fact_rows(p).into_iter().map(|(_, r)| r).collect())
+            .unwrap_or_default();
+        let mut last_group: Option<&FactGroupKey> = None;
+        for (i, (g, r)) in rows.iter().enumerate() {
+            let n = (i + 1).to_string();
+            let subject = self.subject_label(&g.group.subject);
+            let attr = c.attribute(&g.attr.name);
+            let first = last_group != Some(&g.group);
+            last_group = Some(&g.group);
+            let line = match r {
+                FactRow::Value { value, .. } => c.with(
+                    MessageKey::UiFactsRow,
+                    &[
+                        ("n", &n),
+                        ("subject", &subject),
+                        ("attr", &attr),
+                        ("value", value),
+                        ("marks", &self.value_marks(g, r, first)),
+                    ],
+                ),
+                FactRow::Vacant { .. } => c.with(
+                    MessageKey::UiFactsVacant,
+                    &[
+                        ("n", &n),
+                        ("subject", &subject),
+                        ("attr", &attr),
+                        ("history", &g.history.to_string()),
+                    ],
+                ),
+                FactRow::RuleOnly { .. } => c.with(
+                    MessageKey::UiFactsRuleOnly,
+                    &[("n", &n), ("subject", &subject), ("attr", &attr)],
+                ),
+            };
+            // 前に見てから変わった行 (プロセスの間だけ、画面が前に出した一覧と比べる、04 §7.1)。
+            if previous.is_some() && !before.iter().any(|b| same_row(b, r)) {
+                lines.push(format!("{line}{}", c.key(MessageKey::UiFactsMarkChanged)));
+            } else {
+                lines.push(line);
+            }
+        }
+        lines.push(String::new());
+        lines.push(c.key(MessageKey::UiFactsHint));
+        lines.join("\n")
+    }
+
+    /// 置き換えの履歴を文にする (`H` の番号)。
+    fn history_text(&self, h: &FactHistory) -> String {
+        let c = &self.catalog;
+        let mut lines = vec![c.with(
+            MessageKey::UiFactsHistoryTitle,
+            &[
+                ("subject", &self.subject_label(&h.group.subject)),
+                ("attr", &c.attribute(&h.attr.name)),
+            ],
+        )];
+        if h.items.is_empty() {
+            lines.push(c.key(MessageKey::UiFactsHistoryEmpty));
+        }
+        for (i, it) in h.items.iter().enumerate() {
+            let marks = if it.private {
+                c.key(MessageKey::UiFactsMarkPrivate)
+            } else {
+                String::new()
+            };
+            let at = evorag_core::localtime::datetime(it.superseded_at.as_millis());
+            lines.push(c.with(
+                MessageKey::UiFactsHistoryRow,
+                &[
+                    ("n", &(i + 1).to_string()),
+                    ("value", &it.value),
+                    ("at", &at),
+                    ("marks", &marks),
+                ],
+            ));
+        }
+        lines.push(String::new());
+        lines.push(c.key(MessageKey::UiFactsHistoryHint));
+        lines.join("\n")
+    }
+
+    /// 忘れた事実の一覧を文にする (`X` の番号。値は出さない、04 §7.6)。
+    fn forgotten_text(&self, items: &[ForgottenFact]) -> String {
+        let c = &self.catalog;
+        let mut lines = vec![c.key(MessageKey::UiFactsForgottenTitle)];
+        if items.is_empty() {
+            lines.push(c.key(MessageKey::UiFactsForgottenEmpty));
+        }
+        for (i, f) in items.iter().enumerate() {
+            let how = c.key(if f.redacted {
+                MessageKey::UiFactsForgottenRedacted
+            } else {
+                MessageKey::UiFactsForgottenKept
+            });
+            let mut sessions = f.sessions.clone();
+            if f.deleted_turns > 0 {
+                sessions.push(c.with(
+                    MessageKey::UiFactsForgottenDeleted,
+                    &[("n", &f.deleted_turns.to_string())],
+                ));
+            }
+            let sessions = c.join_comma(&sessions);
+            let at = evorag_core::localtime::datetime(f.at.as_millis());
+            lines.push(c.with(
+                MessageKey::UiFactsForgottenRow,
+                &[
+                    ("n", &(i + 1).to_string()),
+                    ("subject", &self.subject_label(&f.subject)),
+                    ("attr", &c.attribute(&f.attr.name)),
+                    ("at", &at),
+                    ("values", &f.values.to_string()),
+                    ("how", &how),
+                    ("sessions", &sessions),
+                ],
+            ));
+        }
+        lines.push(String::new());
+        lines.push(c.key(MessageKey::UiFactsForgottenHint));
+        lines.join("\n")
+    }
+
+    /// 窓を開く。確認の画面などほかの窓を開いているときは、それを閉じない (番号の対応だけが新しくなる)。
+    fn open_panel(&mut self, title: String, body: String) {
+        if matches!(self.mode, Mode::Chat | Mode::Panel { .. }) {
+            self.mode = Mode::Panel {
+                title,
+                body,
+                scroll: 0,
+            };
+        }
+    }
+
+    /// 事実の一覧を窓に出し、`F` の番号をこの一覧に結び付ける。`head` は一覧の前に置く文。
+    pub(crate) fn show_facts(&mut self, list: FactList, head: Option<String>) {
+        let previous = self.facts.list.take();
+        let text = self.facts_text(&list, previous.as_ref());
+        let body = match head {
+            Some(h) => format!("{h}\n\n{text}"),
+            None => text,
+        };
+        if previous.is_some() {
+            self.facts.previous = previous;
+        }
+        self.facts.list = Some(list);
+        let title = self.catalog.key(MessageKey::UiFactsTitle);
+        self.open_panel(title, body);
+    }
+
+    /// 最後に表示した事実の一覧の行 `n` (`F` の番号)。一覧が無い・番号が無ければ知らせて `None`。
+    pub(crate) fn fact_row(&mut self, n: usize) -> Option<(FactGroup, FactRow)> {
+        let Some(list) = &self.facts.list else {
+            let m = self
+                .catalog
+                .with(MessageKey::FactsNoList, &[("list", "/memory")]);
+            self.notice(m);
+            return None;
+        };
+        let found = fact_rows(list)
+            .get(n - 1)
+            .map(|(g, r)| ((*g).clone(), (*r).clone()));
+        if found.is_none() {
+            let m = self
+                .catalog
+                .with(MessageKey::FactsBadNumber, &[("n", &format!("F{n}"))]);
+            self.notice(m);
+        }
+        found
+    }
+
+    pub(crate) fn not_allowed(&mut self) {
+        let m = self.catalog.key(MessageKey::FactsNotAllowed);
+        self.notice(m);
+    }
+
+    /// 事実への操作のコマンド (07 §3)。番号は最後に表示した一覧に結び付く (04 §7.1)。
+    fn fact_command(&mut self, cmd: Slash) -> Vec<Action> {
+        let c = |cmd| vec![Action::Command(cmd)];
+        match cmd {
+            Slash::MemoryHistory(n) => match self.fact_row(n) {
+                Some((g, _)) => c(Command::ShowFactHistory { group: g.group }),
+                None => Vec::new(),
+            },
+            Slash::MemoryAccept(n) => match self.fact_row(n) {
+                Some((_, FactRow::Value { key, .. })) if key.status == FactStatus::Contested => {
+                    c(Command::AcceptFact { target: key })
+                }
+                Some(_) => {
+                    self.not_allowed();
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
+            Slash::MemoryRevert(n) => {
+                let Some(h) = &self.facts.history else {
+                    let m = self
+                        .catalog
+                        .with(MessageKey::FactsNoList, &[("list", "/memory history F1")]);
+                    self.notice(m);
+                    return Vec::new();
+                };
+                match h.items.get(n - 1) {
+                    Some(it) => c(Command::RevertFact {
+                        target: it.key.clone(),
+                    }),
+                    None => {
+                        let m = self
+                            .catalog
+                            .with(MessageKey::FactsBadNumber, &[("n", &format!("H{n}"))]);
+                        self.notice(m);
+                        Vec::new()
+                    }
+                }
+            }
+            Slash::MemoryForgotten => c(Command::ShowForgotten),
+            Slash::Forget(n) => self.open_forget(n),
+            Slash::MemoryUnblock(n) => {
+                let Some(items) = &self.facts.forgotten else {
+                    let m = self
+                        .catalog
+                        .with(MessageKey::FactsNoList, &[("list", "/memory forgotten")]);
+                    self.notice(m);
+                    return Vec::new();
+                };
+                match items.get(n - 1) {
+                    Some(f) => c(Command::UnblockFact { target: f.target }),
+                    None => {
+                        let m = self
+                            .catalog
+                            .with(MessageKey::FactsBadNumber, &[("n", &format!("X{n}"))]);
+                        self.notice(m);
+                        Vec::new()
+                    }
+                }
+            }
+            Slash::Private(n) => {
+                match self.fact_row(n) {
+                    Some((g, r @ FactRow::Value { private: None, .. })) => {
+                        let label = self.row_label(&g, &r);
+                        let FactRow::Value { key, .. } = r else {
+                            return Vec::new();
+                        };
+                        // 既定は「後継まで」(04 §7.5、OQ-47)。
+                        self.mode = Mode::ConfirmPrivate {
+                            target: key,
+                            label,
+                            multi: g.attr.multi,
+                            scope: PrivateScope::Successors,
+                        };
+                    }
+                    Some(_) => self.not_allowed(),
+                    None => {}
+                }
+                Vec::new()
+            }
+            Slash::PrivateOff(n) => {
+                let Some((g, r)) = self.fact_row(n) else {
+                    return Vec::new();
+                };
+                let target = match &r {
+                    FactRow::Value {
+                        key,
+                        private: Some(_),
+                        ..
+                    } => FactRowRef::Value(key.clone()),
+                    FactRow::RuleOnly { group, .. } => FactRowRef::RuleOnly(group.clone()),
+                    _ => {
+                        self.not_allowed();
+                        return Vec::new();
+                    }
+                };
+                // ほかの行の印も外れるときは、その行を示す (04 §7.5 の「private の解除」)。
+                let mine = row_directives(&r);
+                let others: Vec<String> = self
+                    .facts
+                    .list
+                    .as_ref()
+                    .map(|list| {
+                        fact_rows(list)
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(i, (_, o))| {
+                                *i != n - 1 && row_directives(o).iter().any(|d| mine.contains(d))
+                            })
+                            .map(|(i, (og, o))| format!("F{} {}", i + 1, self.row_label(og, o)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // 履歴 (`Superseded`) の値の印も外れる (04 §7.5)。
+                let history: Vec<String> = self
+                    .facts
+                    .list
+                    .as_ref()
+                    .map(|list| {
+                        list.groups
+                            .iter()
+                            .flat_map(|hg| {
+                                hg.private_history
+                                    .iter()
+                                    .filter(|h| h.directives.iter().any(|d| mine.contains(d)))
+                                    .map(move |h| (hg, h))
+                            })
+                            .map(|(hg, h)| {
+                                format!(
+                                    "{}: {}",
+                                    self.catalog.fact_label(
+                                        &self.subject_label(&hg.group.subject),
+                                        &self.catalog.attribute(&hg.attr.name)
+                                    ),
+                                    h.value
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let label = self.row_label(&g, &r);
+                self.mode = Mode::ConfirmPrivateOff {
+                    target,
+                    label,
+                    others,
+                    history,
+                };
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// 事実の窓・確認の画面のキー。
+    fn on_fact_key(&mut self, key: Key) -> Vec<Action> {
+        match self.mode.clone() {
+            Mode::Panel {
+                title,
+                body,
+                scroll,
+            } => {
+                let scroll = match key {
+                    Key::Esc | Key::Enter { .. } | Key::Char('q') => {
+                        self.mode = Mode::Chat;
+                        return Vec::new();
+                    }
+                    Key::Up => scroll.saturating_sub(1),
+                    Key::Down => scroll + 1,
+                    Key::PageUp => scroll.saturating_sub(10),
+                    Key::PageDown => scroll + 10,
+                    Key::Home => 0,
+                    _ => scroll,
+                };
+                // 本文の行の数を超えて送らない (描画の側でも窓の高さに合わせて止める)。
+                let max = body.lines().count().saturating_sub(1);
+                self.mode = Mode::Panel {
+                    title,
+                    body,
+                    scroll: scroll.min(max),
+                };
+                Vec::new()
+            }
+            Mode::ConfirmPrivate {
+                target,
+                label,
+                multi,
+                scope,
+            } => match key {
+                Key::Esc => {
+                    self.mode = Mode::Chat;
+                    Vec::new()
+                }
+                Key::Up | Key::Down | Key::Tab => {
+                    let scope = match scope {
+                        PrivateScope::Successors => PrivateScope::ValueOnly,
+                        PrivateScope::ValueOnly => PrivateScope::Successors,
+                    };
+                    self.mode = Mode::ConfirmPrivate {
+                        target,
+                        label,
+                        multi,
+                        scope,
+                    };
+                    Vec::new()
+                }
+                Key::Enter { .. } => {
+                    self.mode = Mode::Chat;
+                    vec![Action::Command(Command::SetFactPrivate { target, scope })]
+                }
+                _ => Vec::new(),
+            },
+            Mode::ConfirmPrivateOff { target, .. } => match key {
+                Key::Esc => {
+                    self.mode = Mode::Chat;
+                    Vec::new()
+                }
+                Key::Enter { .. } => {
+                    self.mode = Mode::Chat;
+                    vec![Action::Command(Command::UnsetFactPrivate { target })]
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// 事実の一覧と操作の結果のイベント。扱ったら `true`。
+    fn on_fact_event(&mut self, ev: &Event) -> bool {
+        match ev {
+            Event::FactsInfo { list } => {
+                let head = if std::mem::take(&mut self.facts.awaiting) {
+                    self.facts.memory.take()
+                } else {
+                    None
+                };
+                self.show_facts(list.clone(), head);
+                self.ask_pending_broken();
+            }
+            Event::FactHistoryInfo { history } => {
+                let body = self.history_text(history);
+                self.facts.history = Some(history.clone());
+                let title = self.catalog.key(MessageKey::UiFactsTitle);
+                self.open_panel(title, body);
+            }
+            Event::ForgottenInfo { items } => {
+                let body = self.forgotten_text(items);
+                self.facts.forgotten = Some(items.clone());
+                let title = self.catalog.key(MessageKey::UiFactsTitle);
+                self.open_panel(title, body);
+            }
+            Event::FactsUpdated {
+                op,
+                list,
+                slow_next_turn,
+            } => {
+                let done = self.catalog.key(match op {
+                    FactOp::Private => MessageKey::UiFactsDonePrivate,
+                    FactOp::PrivateOff => MessageKey::UiFactsDonePrivateOff,
+                    FactOp::Accept => MessageKey::UiFactsDoneAccept,
+                    FactOp::Revert => MessageKey::UiFactsDoneRevert,
+                    FactOp::Unblock => MessageKey::UiFactsDoneUnblock,
+                });
+                self.notice(done.clone());
+                if *slow_next_turn {
+                    let m = self.catalog.key(MessageKey::UiFactsSlowNext);
+                    self.notice(m);
+                }
+                // 印を解いた行は、忘れた事実の一覧から外れる (`X` の番号は使えなくする)。
+                self.facts.forgotten = None;
+                if *op == FactOp::Unblock {
+                    return true;
+                }
+                // 番号が変わるので、新しい一覧を出し、番号をそれに結び付ける。履歴の番号は使えなくする。
+                self.facts.history = None;
+                self.show_facts(list.clone(), Some(done));
+            }
+            Event::FactOpRejected { error, list } => {
+                let m = self.catalog.message(error);
+                self.notice(m.clone());
+                if let Some(list) = list {
+                    // 「一覧が更新されました」と出し、同じ読み取りで作った新しい一覧を出す (04 §7.1)。
+                    self.facts.history = None;
+                    self.show_facts(list.clone(), Some(m));
+                } else if std::mem::take(&mut self.facts.awaiting) {
+                    // `/memory` の事実の一覧を出せなかった: 想起の答えだけを出す。
+                    if let Some(memory) = self.facts.memory.take() {
+                        let title = self.catalog.key(MessageKey::UiFactsTitle);
+                        self.open_panel(title, memory);
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// `/memory` の答えを文にする (FR-310、07 §3)。
@@ -328,7 +957,7 @@ impl App {
         Some(slash::unescape(text).to_owned())
     }
 
-    fn notice(&mut self, text: String) {
+    pub(crate) fn notice(&mut self, text: String) {
         self.notices.push(text);
         if self.notices.len() > 5 {
             self.notices.remove(0);
@@ -344,6 +973,9 @@ impl App {
 
     /// コアのイベントを受ける。
     pub fn on_event(&mut self, ev: Event) {
+        if self.on_fact_event(&ev) || self.on_forget_event(&ev) {
+            return;
+        }
         match ev {
             Event::SessionOpened {
                 session,
@@ -427,7 +1059,12 @@ impl App {
             }
             Event::MemoryInfo { report } => {
                 let text = self.memory_text(&report);
-                self.notice(text);
+                // `/memory` では、事実の一覧と一緒に窓に出す (一覧は通知の欄に出さない、07 §3)。
+                if self.facts.awaiting {
+                    self.facts.memory = Some(text);
+                } else {
+                    self.notice(text);
+                }
             }
             Event::ModelInfo { roles, n_ctx } => {
                 self.status.n_ctx = n_ctx;
@@ -508,9 +1145,35 @@ impl App {
                 self.status.limited = true;
                 let m = self.catalog.with(
                     MessageKey::UiProbeIssues,
-                    &[("role", &role), ("reasons", &reasons.join("、"))],
+                    &[
+                        ("role", &role),
+                        ("reasons", &self.catalog.join_comma(&reasons)),
+                    ],
                 );
                 self.notice(m);
+            }
+            Event::FactsChanged {
+                added,
+                replaced,
+                contested,
+            } => {
+                // 件数だけを短く出す (値は出さない、04 §5.3 の「知らせ」)。
+                let parts: Vec<String> = [
+                    (MessageKey::UiFactsAdded, added),
+                    (MessageKey::UiFactsReplaced, replaced),
+                    (MessageKey::UiFactsContested, contested),
+                ]
+                .into_iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(k, n)| self.catalog.with(k, &[("n", &n.to_string())]))
+                .collect();
+                if !parts.is_empty() {
+                    let parts = parts.join(&self.catalog.key(MessageKey::UiSepDot));
+                    let m = self
+                        .catalog
+                        .with(MessageKey::UiFactsChanged, &[("parts", &parts)]);
+                    self.notice(m);
+                }
             }
             Event::SourcesInfo { memory } => {
                 let k = if memory {
@@ -756,6 +1419,11 @@ impl App {
                 _ => Vec::new(),
             },
             Mode::Detail { .. } => self.on_detail_key(key),
+            Mode::Panel { .. } | Mode::ConfirmPrivate { .. } | Mode::ConfirmPrivateOff { .. } => {
+                self.on_fact_key(key)
+            }
+            Mode::ConfirmForget(_) => self.on_forget_key(key),
+            Mode::ConfirmBroken { .. } => self.on_broken_key(key),
             Mode::Chat => self.on_chat_key(key),
         }
     }
@@ -968,6 +1636,12 @@ impl App {
             self.notice(m);
             return Vec::new();
         }
+        if self.forget_pending {
+            // 忘れるの途中は送らない (コアも断る)。入力欄に残す。
+            let m = self.catalog.key(MessageKey::ForgetInProgress);
+            self.notice(m);
+            return Vec::new();
+        }
         self.input.take();
         let text = slash::unescape(&text).to_owned();
         let mut actions = Vec::new();
@@ -1012,7 +1686,32 @@ impl App {
             Slash::Quit => vec![Action::Quit],
             Slash::Model(name) => c(Command::Model { name }),
             Slash::Sources(memory) => c(Command::Sources { memory }),
-            Slash::Memory => c(Command::Memory),
+            Slash::Memory => {
+                // 事実の一覧はデータ根の全体のものなので、セッションを開いていなくても出す (04 §7.1)。
+                self.facts.memory = None;
+                self.facts.awaiting = true;
+                if self.session.is_some() {
+                    vec![
+                        Action::Command(Command::Memory),
+                        Action::Command(Command::ShowFacts),
+                    ]
+                } else {
+                    c(Command::ShowFacts)
+                }
+            }
+            Slash::BadNumber(n) => {
+                let m = self.catalog.with(MessageKey::FactsBadNumber, &[("n", &n)]);
+                self.notice(m);
+                Vec::new()
+            }
+            cmd @ (Slash::MemoryAccept(_)
+            | Slash::MemoryHistory(_)
+            | Slash::MemoryRevert(_)
+            | Slash::MemoryForgotten
+            | Slash::MemoryUnblock(_)
+            | Slash::Private(_)
+            | Slash::PrivateOff(_)
+            | Slash::Forget(_)) => self.fact_command(cmd),
             Slash::Style(set) => {
                 self.style_picker = set.is_none();
                 c(Command::Style { set })
@@ -1061,6 +1760,8 @@ mod tests {
             band: Vec::new(),
             band_nearby: false,
             irrelevant: Vec::new(),
+            marks: Vec::new(),
+            unverified: false,
         }
     }
 
@@ -1077,6 +1778,27 @@ mod tests {
         for ch in s.chars() {
             a.on_key(Key::Char(ch));
         }
+    }
+
+    /// 事実が変わった知らせは、0 でない件数だけを並べる (04 §5.3 の「知らせ」)。
+    #[test]
+    fn facts_changes_show_counts_only() {
+        let mut a = app();
+        a.on_event(Event::FactsChanged {
+            added: 2,
+            replaced: 0,
+            contested: 1,
+        });
+        let last = a.notices.last().expect("a notice");
+        assert!(last.contains("事実 +2・矛盾 1"), "{last}");
+        assert!(!last.contains("置き換え"), "{last}");
+        let before = a.notices.len();
+        a.on_event(Event::FactsChanged {
+            added: 0,
+            replaced: 0,
+            contested: 0,
+        });
+        assert_eq!(a.notices.len(), before);
     }
 
     /// verifies: AC-FR-415-1 (入力欄の文字が 500 ms 変わらなければ、その文字で 1 回だけ知らせる)
@@ -1213,11 +1935,14 @@ mod tests {
         type_text(&mut a, "/memory");
         assert_eq!(
             a.on_key(Key::Enter { newline: false }),
-            vec![Action::Command(Command::Memory)]
+            vec![
+                Action::Command(Command::Memory),
+                Action::Command(Command::ShowFacts)
+            ]
         );
-        type_text(&mut a, "/forget 1");
+        type_text(&mut a, "/precepts");
         assert!(a.on_key(Key::Enter { newline: false }).is_empty());
-        assert!(a.notices.last().unwrap().contains("/forget"));
+        assert!(a.notices.last().unwrap().contains("/precepts"));
     }
 
     /// verifies: AC-FR-105-1 (画面の層: 確認の後にだけ消す)
@@ -1631,5 +2356,1305 @@ mod tests {
                 "{example} must work"
             );
         }
+    }
+
+    // 事実の一覧と事実への操作 (04 §7.1・§7.4〜§7.6、07 §3)。
+
+    use evorag_types::api::{
+        AttrInfo, FactGroupKey, FactHistory, FactHistoryRow, FactKey, FactList, FactRow,
+        FactRowRef, FactStatus, FactSubject, FactTense, ForgottenFact, ForgottenRef, PrivateCause,
+        PrivateInfo, PrivateScope,
+    };
+
+    fn fkey(attribute: &str, vk: char, status: FactStatus) -> FactKey {
+        FactKey {
+            subject: FactSubject::User,
+            attribute: attribute.into(),
+            vk: vk.to_string().repeat(64),
+            status,
+            tense: FactTense::Current,
+            fact: None,
+        }
+    }
+
+    fn fgroup(attribute: &str) -> FactGroupKey {
+        FactGroupKey {
+            subject: FactSubject::User,
+            attribute: attribute.into(),
+        }
+    }
+
+    fn value_row(key: FactKey, value: &str, private: Option<PrivateInfo>) -> FactRow {
+        FactRow::Value {
+            key,
+            value: value.into(),
+            private,
+        }
+    }
+
+    fn group(attribute: &str, multi: bool, rows: Vec<FactRow>, history: usize) -> FactGroup {
+        FactGroup {
+            group: fgroup(attribute),
+            attr: AttrInfo {
+                name: attribute.into(),
+                multi,
+            },
+            rows,
+            history,
+            private_history: Vec::new(),
+        }
+    }
+
+    /// 住んでいる所 (今の値と矛盾の値)、食べないもの (private の 2 行が同じ指示を共有)、ペット (今の値なし)、
+    /// 趣味 (指示だけが残る)。
+    fn sample_list() -> FactList {
+        let shared = PrivateInfo {
+            causes: vec![PrivateCause::Chosen {
+                scope: PrivateScope::Successors,
+            }],
+            directives: vec![id(50)],
+        };
+        let successor = PrivateInfo {
+            causes: vec![PrivateCause::Successor],
+            directives: vec![id(50)],
+        };
+        let mut list = FactList {
+            groups: vec![
+                group(
+                    "residence",
+                    false,
+                    vec![
+                        value_row(fkey("residence", 'a', FactStatus::Live), "大阪", None),
+                        value_row(fkey("residence", 'b', FactStatus::Contested), "東京", None),
+                    ],
+                    1,
+                ),
+                group(
+                    "dietary",
+                    true,
+                    vec![
+                        value_row(fkey("dietary", 'c', FactStatus::Live), "えび", Some(shared)),
+                        value_row(
+                            fkey("dietary", 'd', FactStatus::Live),
+                            "かに",
+                            Some(successor),
+                        ),
+                    ],
+                    0,
+                ),
+                group(
+                    "pet",
+                    false,
+                    vec![FactRow::Vacant {
+                        group: fgroup("pet"),
+                    }],
+                    2,
+                ),
+                group(
+                    "hobby",
+                    true,
+                    vec![FactRow::RuleOnly {
+                        group: fgroup("hobby"),
+                        directives: vec![id(60)],
+                    }],
+                    0,
+                ),
+            ],
+            note: None,
+        };
+        // 同じ指示で private の履歴の値。
+        list.groups[1].private_history = vec![evorag_types::api::PrivateHistoryValue {
+            value: "たこ".into(),
+            directives: vec![id(50)],
+        }];
+        list
+    }
+
+    fn panel(a: &App) -> String {
+        match &a.mode {
+            Mode::Panel { body, .. } => body.clone(),
+            other => panic!("not a panel: {other:?}"),
+        }
+    }
+
+    fn run(a: &mut App, line: &str) -> Vec<Action> {
+        a.mode = Mode::Chat;
+        type_text(a, line);
+        a.on_key(Key::Enter { newline: false })
+    }
+
+    /// `/memory` は、セッションが無くても事実の一覧を照会し、一覧を通知の欄ではなく窓に出す。番号は値の行のほか、
+    /// 今の値が消えた属性と指示だけが残る属性にも振り、印と理由を付ける。前に見てから変わった行に印を付ける。
+    ///
+    /// verifies: AC-FR-310-2
+    #[test]
+    fn the_fact_list_opens_in_a_panel_with_numbers_and_marks() {
+        let mut a = app();
+        assert_eq!(
+            run(&mut a, "/memory"),
+            vec![Action::Command(Command::ShowFacts)],
+            "no session: only the facts"
+        );
+        let notices = a.notices.len();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert_eq!(a.notices.len(), notices, "not in the notices");
+        let body = panel(&a);
+        for want in [
+            "F1 あなた・住んでいる所: 大阪 (履歴 1 件)",
+            "F2 あなた・住んでいる所: 東京 [矛盾]",
+            "F3 あなた・食べないもの: えび [private: 選んだ値 (後の値にも効く)]",
+            "F4 あなた・食べないもの: かに [private: 指示の後に言われた値]",
+            "F5 あなた・ペット: (今の値なし。履歴 2 件",
+            "F6 あなた・趣味: (値なし。",
+        ] {
+            assert!(body.contains(want), "{want}\n{body}");
+        }
+        assert!(
+            !body.contains("前に見てから"),
+            "the first list has no marks"
+        );
+        // 窓はスクロールでき、Esc で閉じる。
+        a.on_key(Key::Down);
+        assert!(matches!(a.mode, Mode::Panel { scroll: 1, .. }));
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Chat);
+
+        // セッションがあれば、想起の答えと一緒に 1 つの窓に出す。前の一覧から変わった行に印を付ける。
+        a.session = Some(session());
+        assert_eq!(
+            run(&mut a, "/memory"),
+            vec![
+                Action::Command(Command::Memory),
+                Action::Command(Command::ShowFacts)
+            ]
+        );
+        a.on_event(Event::MemoryInfo {
+            report: evorag_types::api::MemoryReport {
+                answer: None,
+                items: Vec::new(),
+                degraded: Vec::new(),
+                recall: RecallState::Simple,
+                sources: Vec::new(),
+            },
+        });
+        let mut next = sample_list();
+        next.groups[0].rows[0] = value_row(fkey("residence", 'e', FactStatus::Live), "京都", None);
+        a.on_event(Event::FactsInfo { list: next });
+        let body = panel(&a);
+        assert!(
+            body.starts_with("このセッションには、まだ応答がありません。"),
+            "{body}"
+        );
+        assert!(
+            body.contains("F1 あなた・住んでいる所: 京都 (履歴 1 件) ← 前に見てから変わりました"),
+            "{body}"
+        );
+        assert!(
+            body.contains("F2 あなた・住んでいる所: 東京 [矛盾]\n"),
+            "{body}"
+        );
+    }
+
+    /// `/private F<n>` は確認の画面を出し、既定 (後継まで) のまま Enter で実行できる。↑↓ で「この値だけ」を選べる。
+    /// 多値の属性では兄弟の値が対象にならないことを、`llm.allow_remote` の構成では外へ出うることを書く。
+    ///
+    /// verifies: AC-FR-308-1
+    #[test]
+    fn private_asks_with_the_scope_and_sends_the_row_reference() {
+        let mut a = app();
+        assert!(run(&mut a, "/private F1").is_empty());
+        assert!(a.notices.last().unwrap().contains("/memory"), "list first");
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(run(&mut a, "/private 1").is_empty());
+        let Mode::ConfirmPrivate {
+            label,
+            scope,
+            multi,
+            ..
+        } = &a.mode
+        else {
+            panic!("{:?}", a.mode)
+        };
+        assert_eq!(label, "あなた・住んでいる所: 大阪");
+        assert_eq!(*scope, PrivateScope::Successors);
+        assert!(!multi);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::SetFactPrivate {
+                target: fkey("residence", 'a', FactStatus::Live),
+                scope: PrivateScope::Successors,
+            })]
+        );
+        assert_eq!(a.mode, Mode::Chat);
+
+        // 「この値だけ」を選ぶ。Esc なら何も送らない。
+        a.status.remote_llm = true;
+        assert!(run(&mut a, "/private F2").is_empty());
+        let text = match &a.mode {
+            Mode::ConfirmPrivate {
+                label,
+                multi,
+                scope,
+                ..
+            } => crate::render::private_confirm_text(&a, label, *multi, *scope),
+            other => panic!("{other:?}"),
+        };
+        assert!(text.contains("消しません"), "{text}");
+        assert!(text.contains("これまでのやり取りには残ります"), "{text}");
+        assert!(text.contains("送らなくなるだけ"), "{text}");
+        assert!(text.contains("llm.allow_remote"), "{text}");
+        a.on_key(Key::Down);
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::SetFactPrivate {
+                target: fkey("residence", 'b', FactStatus::Contested),
+                scope: PrivateScope::ValueOnly,
+            })]
+        );
+        run(&mut a, "/private F3");
+        assert_eq!(a.mode, Mode::Chat, "already private");
+        assert!(a.notices.last().unwrap().contains("できません"));
+        run(&mut a, "/private F5");
+        assert_eq!(a.mode, Mode::Chat, "a vacant row has no value");
+        run(&mut a, "/private F9");
+        assert!(a.notices.last().unwrap().contains("F9"));
+        // 多値の属性では、兄弟の値が対象にならないことを書く。
+        a.facts.list.as_mut().unwrap().groups[1].rows[0] =
+            value_row(fkey("dietary", 'c', FactStatus::Live), "えび", None);
+        run(&mut a, "/private F3");
+        let Mode::ConfirmPrivate {
+            label,
+            multi: true,
+            scope,
+            ..
+        } = &a.mode
+        else {
+            panic!("{:?}", a.mode)
+        };
+        let text = crate::render::private_confirm_text(&a, label, true, *scope);
+        assert!(text.contains("兄弟の値"), "{text}");
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
+    /// `/private off` は、同じ指示を共有するほかの行も外れることを確認の画面で示す。指示だけが残る属性の行も
+    /// 解ける。private でない行には使えない (04 §7.5)。
+    ///
+    /// verifies: AC-FR-308-2
+    #[test]
+    fn private_off_lists_the_other_rows_sharing_a_directive() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(run(&mut a, "/private off F3").is_empty());
+        let Mode::ConfirmPrivateOff {
+            label,
+            others,
+            history,
+            ..
+        } = &a.mode
+        else {
+            panic!("{:?}", a.mode)
+        };
+        assert_eq!(label, "あなた・食べないもの: えび");
+        assert_eq!(others, &["F4 あなた・食べないもの: かに".to_owned()]);
+        // 同じ指示で private の履歴の値も、件数と行を示す。
+        assert_eq!(history, &["あなた・食べないもの: たこ".to_owned()]);
+        let text = crate::render::private_off_text(&a, label, others, history);
+        assert!(text.contains("履歴の値 1 件"), "{text}");
+        assert!(text.contains("たこ"), "{text}");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::UnsetFactPrivate {
+                target: FactRowRef::Value(fkey("dietary", 'c', FactStatus::Live)),
+            })]
+        );
+        run(&mut a, "/private off F6");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::UnsetFactPrivate {
+                target: FactRowRef::RuleOnly(fgroup("hobby")),
+            })]
+        );
+        assert!(run(&mut a, "/private off F1").is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+        assert!(a.notices.last().unwrap().contains("できません"));
+    }
+
+    /// accept は矛盾の行にだけ。history は値の無い行からも届く。revert は履歴の番号 (H) を取る。
+    #[test]
+    fn accept_history_and_revert_use_their_own_numbers() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert_eq!(
+            run(&mut a, "/memory accept F2"),
+            vec![Action::Command(Command::AcceptFact {
+                target: fkey("residence", 'b', FactStatus::Contested),
+            })]
+        );
+        assert!(run(&mut a, "/memory accept F1").is_empty(), "not contested");
+        assert!(run(&mut a, "/memory revert H1").is_empty());
+        assert!(a.notices.last().unwrap().contains("/memory history"));
+        assert_eq!(
+            run(&mut a, "/memory history F5"),
+            vec![Action::Command(Command::ShowFactHistory {
+                group: fgroup("pet"),
+            })]
+        );
+        let old = fkey("pet", 'f', FactStatus::Superseded);
+        a.on_event(Event::FactHistoryInfo {
+            history: FactHistory {
+                group: fgroup("pet"),
+                attr: AttrInfo {
+                    name: "pet".into(),
+                    multi: false,
+                },
+                items: vec![FactHistoryRow {
+                    key: old.clone(),
+                    value: "柴犬".into(),
+                    superseded_at: Timestamp::from_millis(0),
+                    private: false,
+                }],
+            },
+        });
+        assert!(panel(&a).contains("H1 柴犬 ("), "{}", panel(&a));
+        assert_eq!(
+            run(&mut a, "/memory revert 1"),
+            vec![Action::Command(Command::RevertFact { target: old })]
+        );
+        assert!(run(&mut a, "/memory revert H2").is_empty());
+        assert!(a.notices.last().unwrap().contains("H2"));
+    }
+
+    /// 指した行が変わっていたときは「一覧が更新されました」と出し、新しい一覧を出して番号をそれに結び付ける
+    /// (04 §7.1)。操作が済んだときも、新しい一覧を出す。
+    ///
+    /// verifies: AC-FR-310-2
+    #[test]
+    fn an_outdated_list_is_replaced_and_numbers_follow_the_new_one() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        let mut fresh = sample_list();
+        fresh.groups.remove(0);
+        a.on_event(Event::FactOpRejected {
+            error: evorag_types::Message::new(MessageKey::FactsOutdated),
+            list: Some(fresh),
+        });
+        let body = panel(&a);
+        assert!(body.starts_with("一覧が更新されました。"), "{body}");
+        assert!(body.contains("F1 あなた・食べないもの: えび"), "{body}");
+        // 番号は新しい一覧のもの。
+        assert!(run(&mut a, "/private off F1").is_empty());
+        assert!(matches!(
+            &a.mode,
+            Mode::ConfirmPrivateOff { label, .. } if label == "あなた・食べないもの: えび"
+        ));
+        a.mode = Mode::Chat;
+        a.on_event(Event::FactsUpdated {
+            op: evorag_types::api::FactOp::Accept,
+            list: sample_list(),
+            slow_next_turn: true,
+        });
+        let body = panel(&a);
+        assert!(body.starts_with("その値を今の値にしました。"), "{body}");
+        assert!(a.notices.join("\n").contains("少し長くかかります"));
+        assert!(run(&mut a, "/memory accept F2").len() == 1);
+    }
+
+    /// 一覧の知らせが確認の画面の間に届いても、確認の画面を閉じない (番号の対応だけが新しくなる)。
+    #[test]
+    fn fact_events_do_not_replace_a_confirmation() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        run(&mut a, "/private F1");
+        assert!(matches!(a.mode, Mode::ConfirmPrivate { .. }));
+        let mut fresh = sample_list();
+        fresh.groups.remove(0);
+        a.on_event(Event::FactsUpdated {
+            op: evorag_types::api::FactOp::PrivateOff,
+            list: fresh.clone(),
+            slow_next_turn: true,
+        });
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivate { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_eq!(a.facts.list.as_ref(), Some(&fresh), "the numbers follow");
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(matches!(a.mode, Mode::ConfirmPrivate { .. }));
+        // 開いていた窓は、新しい一覧に替える。
+        a.mode = Mode::Chat;
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert!(matches!(a.mode, Mode::Panel { .. }));
+    }
+
+    /// `/memory` で事実の一覧を出せなかったときも、想起の答えは出す。
+    #[test]
+    fn the_recall_part_of_memory_shows_when_the_facts_fail() {
+        let mut a = app();
+        a.session = Some(session());
+        run(&mut a, "/memory");
+        a.on_event(Event::MemoryInfo {
+            report: evorag_types::api::MemoryReport {
+                answer: None,
+                items: Vec::new(),
+                degraded: Vec::new(),
+                recall: RecallState::Simple,
+                sources: Vec::new(),
+            },
+        });
+        a.on_event(Event::FactOpRejected {
+            error: evorag_types::Message::new(MessageKey::FactsNotSaved).arg("detail", "x"),
+            list: None,
+        });
+        assert!(panel(&a).contains("まだ応答がありません"), "{}", panel(&a));
+        assert!(!a.facts.awaiting);
+    }
+
+    /// 忘れた事実の一覧は値を出さず、`X` の番号で印を解ける (04 §7.6)。
+    #[test]
+    fn forgotten_facts_are_listed_without_values_and_unblocked_by_number() {
+        let mut a = app();
+        assert!(run(&mut a, "/memory unblock X1").is_empty());
+        assert!(a.notices.last().unwrap().contains("/memory forgotten"));
+        assert_eq!(
+            run(&mut a, "/memory forgotten"),
+            vec![Action::Command(Command::ShowForgotten)]
+        );
+        let target = ForgottenRef { directive: id(70) };
+        a.on_event(Event::ForgottenInfo {
+            items: vec![ForgottenFact {
+                target,
+                subject: FactSubject::Named("妻".into()),
+                attr: AttrInfo {
+                    name: "hobby".into(),
+                    multi: true,
+                },
+                at: Timestamp::from_millis(0),
+                values: 2,
+                redacted: false,
+                sessions: vec!["旅行".into()],
+                deleted_turns: 1,
+            }],
+        });
+        let body = panel(&a);
+        assert!(body.contains("X1 妻・趣味 ("), "{body}");
+        assert!(
+            body.contains("値 2 件、発話はそのまま) 出典: 旅行、消したターン 1 件"),
+            "{body}"
+        );
+        assert_eq!(
+            run(&mut a, "/memory unblock X1"),
+            vec![Action::Command(Command::UnblockFact { target })]
+        );
+        a.on_event(Event::FactsUpdated {
+            op: evorag_types::api::FactOp::Unblock,
+            list: sample_list(),
+            slow_next_turn: false,
+        });
+        assert_eq!(a.mode, Mode::Chat, "no list for an unblock");
+        assert!(a.facts.forgotten.is_none(), "the X numbers are gone");
+    }
+
+    // 忘れる (`/forget`、04 §7.1〜§7.3、07 §3)。
+
+    use evorag_types::api::{
+        ForgetOptions, ForgetPlanHash, ForgetPreview, ForgetSample, ForgetWarning, TurnMark,
+        TurnMarkKind,
+    };
+
+    fn forget_preview(target: FactKey, options: ForgetOptions, hash: &str) -> ForgetPreview {
+        ForgetPreview {
+            target,
+            options,
+            samples: vec![ForgetSample {
+                turn: id(1),
+                role: Role::User,
+                before: "私は大阪に住んでいます".into(),
+                after: if options.redact {
+                    "私は[伏せ字]に住んでいます".into()
+                } else {
+                    "私は[非表示]に住んでいます".into()
+                },
+            }],
+            other_turns: 2,
+            other_matches: 3,
+            history_values: 1,
+            affected: vec![fkey("dietary", 'd', FactStatus::Live)],
+            unredacted_sources: 0,
+            source_outside: 0,
+            whole_turns: 0,
+            mismatched_turns: 0,
+            skipped_unreadable: 1,
+            plan: Ok(ForgetPlanHash::new(hash.into())),
+        }
+    }
+
+    fn confirm(a: &App) -> &crate::forget::ForgetConfirm {
+        match &a.mode {
+            Mode::ConfirmForget(f) => f,
+            other => panic!("not the forget confirmation: {other:?}"),
+        }
+    }
+
+    /// `/forget F<n>` は確認の画面を開いて見本を求め、届くまでは「数えています」と出す。選択は畳んで置き、変える
+    /// たびに見本を求め直す (古い選択の見本は使わない)。既定のまま Enter で、見本の計画のハッシュを添えて実行する。
+    /// 見本が古くなっていたら新しい見本に置き換え、もう一度 Enter を待つ。忘れた後は新しい一覧に番号を結び付け
+    /// 直し、`broken/` にファイルがあれば消すかを尋ねる。
+    ///
+    /// verifies: 04 §7.1 (確認の画面、見本と計画)、07 §3 (`/forget`)
+    #[test]
+    fn forget_confirms_with_a_preview_and_sends_the_plan_hash() {
+        let mut a = app();
+        assert!(run(&mut a, "/forget F1").is_empty());
+        assert!(a.notices.last().unwrap().contains("/memory"), "list first");
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        let target = fkey("residence", 'a', FactStatus::Live);
+        let defaults = ForgetOptions::default();
+        assert_eq!(
+            run(&mut a, "/forget 1"),
+            vec![Action::Command(Command::PreviewForget {
+                target: target.clone(),
+                options: defaults,
+            })]
+        );
+        let text = a.forget_text(confirm(&a));
+        assert!(text.contains("あなた・住んでいる所: 大阪"), "{text}");
+        assert!(text.contains("数えています"), "{text}");
+        assert!(
+            text.contains("Tab で開く"),
+            "the choices are folded: {text}"
+        );
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert!(a.notices.last().unwrap().contains("数えています"));
+
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target.clone(), defaults, "h1"),
+        });
+        let text = a.forget_text(confirm(&a));
+        assert!(
+            text.contains("前 (あなた): 私は大阪に住んでいます"),
+            "{text}"
+        );
+        assert!(text.contains("後: 私は[伏せ字]に住んでいます"), "{text}");
+        assert!(
+            text.contains("2 件 (3 箇所)") && text.contains("1 件"),
+            "{text}"
+        );
+        assert!(text.contains("F4 あなた・食べないもの: かに"), "{text}");
+        assert!(text.contains("? で開く"), "the promise is folded: {text}");
+        a.on_key(Key::Char('?'));
+        let text = a.forget_text(confirm(&a));
+        assert!(text.contains("約束しない範囲"), "{text}");
+
+        // 選択を開き、「伏せ字にする」を外すと、見本を求め直す。古い選択の見本は使わない。
+        a.on_key(Key::Tab);
+        let kept = ForgetOptions {
+            redact: false,
+            ..defaults
+        };
+        assert_eq!(
+            a.on_key(Key::Char(' ')),
+            vec![Action::Command(Command::PreviewForget {
+                target: target.clone(),
+                options: kept,
+            })]
+        );
+        assert!(confirm(&a).preview.is_none());
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target.clone(), defaults, "h1"),
+        });
+        assert!(confirm(&a).preview.is_none(), "a stale preview is ignored");
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target.clone(), kept, "h2"),
+        });
+        let text = a.forget_text(confirm(&a));
+        assert!(text.contains("[ ] 出典の発話を伏せ字にする"), "{text}");
+        assert!(text.contains("そのまま残ります"), "{text}");
+        // 戻して既定のまま実行する。
+        a.on_key(Key::Char(' '));
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target.clone(), defaults, "h1"),
+        });
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ForgetFact {
+                target: target.clone(),
+                options: defaults,
+                plan: ForgetPlanHash::new("h1".into()),
+            })]
+        );
+        assert!(confirm(&a).sending);
+        assert!(
+            a.on_key(Key::Enter { newline: false }).is_empty(),
+            "sent once"
+        );
+        // 結果を待つ間は、発話を送らずに入力欄に残す。
+        a.mode = Mode::Chat;
+        type_text(&mut a, "次の話");
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert_eq!(a.input.text(), "次の話");
+        assert!(a.notices.last().unwrap().contains("忘れています"));
+        a.input.take();
+        a.mode = Mode::ConfirmForget(Box::new(crate::forget::ForgetConfirm {
+            sending: true,
+            preview: Some(forget_preview(target.clone(), defaults, "h1")),
+            ..crate::forget::ForgetConfirm::new(target.clone(), "あなた・住んでいる所: 大阪".into())
+        }));
+
+        // 見本が古くなっていた: 新しい見本に置き換えて、もう一度 Enter を待つ。
+        a.on_event(Event::ForgetRejected {
+            error: evorag_types::Message::new(MessageKey::ForgetOutdated),
+            preview: Some(forget_preview(target.clone(), defaults, "h3")),
+            list: None,
+        });
+        assert!(!confirm(&a).sending);
+        assert!(a.notices.last().unwrap().contains("新しい見本"));
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![Action::Command(Command::ForgetFact {
+                target,
+                options: defaults,
+                plan: ForgetPlanHash::new("h3".into()),
+            })]
+        );
+
+        // 忘れた: 新しい一覧に番号を結び付け直し、broken/ のファイルを消すかを尋ねる。
+        let mut after = sample_list();
+        after.groups[0].rows.remove(0);
+        a.facts.history = Some(FactHistory {
+            group: fgroup("residence"),
+            attr: AttrInfo {
+                name: "residence".into(),
+                multi: false,
+            },
+            items: Vec::new(),
+        });
+        a.on_event(Event::FactForgotten {
+            list: Some(after.clone()),
+            redacted: 1,
+            journal_pending: true,
+            broken: 2,
+            slow_next_turn: true,
+        });
+        assert_eq!(a.mode, Mode::ConfirmBroken { n: 2 });
+        assert_eq!(a.facts.list, Some(after));
+        assert!(a.facts.history.is_none());
+        assert!(a.notices.iter().any(|n| n.contains("忘れました")));
+        assert!(a.notices.iter().any(|n| n.contains("ジャーナル")));
+        assert!(a.notices.iter().any(|n| n.contains("少し長く")));
+        // 問いは y か n (Esc) だけを受ける。
+        assert!(a.on_key(Key::Char('x')).is_empty());
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert_eq!(a.mode, Mode::ConfirmBroken { n: 2 });
+        assert_eq!(
+            a.on_key(Key::Char('y')),
+            vec![Action::Command(Command::DiscardBroken)]
+        );
+        assert_eq!(a.mode, Mode::Chat);
+        // 送れるようになった。
+        type_text(&mut a, "次の話");
+        assert_eq!(
+            a.on_key(Key::Enter { newline: false }),
+            vec![
+                Action::Command(Command::NewSession {
+                    title: a.catalog.key(MessageKey::UiDefaultSessionTitle)
+                }),
+                Action::Command(Command::Send {
+                    text: "次の話".into()
+                })
+            ]
+        );
+    }
+
+    /// 実行の後に Esc で確認の画面を閉じたら、忘れるは続いていると知らせる。画面の外で済んだら、ほかの画面を問い
+    /// で上書きせず、`broken/` は次に事実の一覧を開いたときに尋ねる。一覧を読み直せなければ、前の番号を使えなく
+    /// する。
+    ///
+    /// verifies: 04 §7.2 (`broken/` の行)、07 §3 (`/forget`)
+    #[test]
+    fn a_forget_finished_outside_the_confirmation_asks_about_broken_later() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        let target = fkey("residence", 'a', FactStatus::Live);
+        run(&mut a, "/forget F1");
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: forget_preview(target, ForgetOptions::default(), "h"),
+        });
+        assert_eq!(a.on_key(Key::Enter { newline: false }).len(), 1);
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+        assert!(a.notices.last().unwrap().contains("続けています"));
+        a.mode = Mode::Help;
+        a.on_event(Event::FactForgotten {
+            list: None,
+            redacted: 1,
+            journal_pending: false,
+            broken: 1,
+            slow_next_turn: true,
+        });
+        assert_eq!(a.mode, Mode::Help, "another screen is not replaced");
+        assert!(a.facts.list.is_none(), "old numbers are dropped");
+        assert!(a.notices.iter().any(|n| n.contains("読み直せなかった")));
+        assert!(a.notices.last().unwrap().contains("次に /memory"));
+        a.mode = Mode::Chat;
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        assert_eq!(a.mode, Mode::ConfirmBroken { n: 1 });
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+    }
+
+    /// 伏せ字にできない見本では実行せず、事実だけを消す選択を勧める。値の行でない行と生成中は断る。
+    ///
+    /// verifies: 04 §7.1 (中止、受け付けないとき)
+    #[test]
+    fn forget_refuses_a_blocked_plan_other_rows_and_generation() {
+        let mut a = app();
+        a.on_event(Event::FactsInfo {
+            list: sample_list(),
+        });
+        let target = fkey("residence", 'b', FactStatus::Contested);
+        run(&mut a, "/forget F2");
+        let mut p = forget_preview(target, ForgetOptions::default(), "h");
+        p.plan = Err(ForgetWarning::ValueMismatch);
+        a.on_event(Event::ForgetPreviewInfo { preview: p });
+        let text = a.forget_text(confirm(&a));
+        assert!(text.contains("伏せ字にできません"), "{text}");
+        assert!(text.contains("事実だけを消せます"), "{text}");
+        assert!(a.on_key(Key::Enter { newline: false }).is_empty());
+        assert!(a.notices.last().unwrap().contains("伏せ字にできない"));
+        assert!(a.on_key(Key::Esc).is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+
+        run(&mut a, "/forget F5");
+        assert_eq!(a.mode, Mode::Chat, "a vacant row has no value");
+        assert!(a.notices.last().unwrap().contains("できません"));
+
+        a.streaming = Some(Streaming {
+            reply_to: id(1),
+            text: String::new(),
+            thinking: false,
+        });
+        assert!(run(&mut a, "/forget F1").is_empty());
+        assert_eq!(a.mode, Mode::Chat);
+        assert!(a.notices.last().unwrap().contains("応答を生成している間"));
+    }
+
+    /// 伏せたターンが知らされたら、読み直したターン (本文・印・帯) に置き換える。伏せ字の範囲はそのまま、`[非表示]` の範囲は印に置き
+    /// 換えて見分けられる表示にし、確かめられないターンは本文の代わりにそのことを示す。
+    ///
+    /// verifies: 04 §7.3 (画面への印の範囲)、07 §2.1
+    #[test]
+    fn redacted_turns_are_replaced_and_drawn_with_their_marks() {
+        use ratatui::style::Modifier;
+        let mut a = app();
+        a.on_event(Event::SessionOpened {
+            session: session(),
+            turns: vec![
+                turn(1, Role::User, TurnStatus::Confirmed, None),
+                turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1))),
+                turn(3, Role::User, TurnStatus::Confirmed, None),
+            ],
+            unreadable: 0,
+        });
+        a.turns[1].irrelevant = vec![id(9)];
+        let user = "私は[伏せ字]に住む";
+        let reply = "大阪ですね";
+        let mut t1 = turn(1, Role::User, TurnStatus::Confirmed, None);
+        t1.text = user.into();
+        let at = user.find('[').unwrap();
+        t1.marks = vec![TurnMark {
+            range: at..at + "[伏せ字]".len(),
+            kind: TurnMarkKind::Redacted,
+        }];
+        let mut t2 = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        t2.text = reply.into();
+        t2.marks = vec![TurnMark {
+            range: 0.."大阪".len(),
+            kind: TurnMarkKind::Hidden,
+        }];
+        let mut t3 = turn(3, Role::User, TurnStatus::Confirmed, None);
+        t3.text = String::new();
+        t3.unverified = true;
+        a.on_event(Event::TurnsRedacted {
+            session: id(0),
+            turns: vec![t1, t2, t3],
+        });
+        assert_eq!(a.turns[0].text, user);
+        assert!(
+            a.turns[1].irrelevant.is_empty(),
+            "the whole re-read view (with its band) replaces the old one"
+        );
+        assert!(a.turns[2].unverified);
+
+        let lines = crate::render::conversation_lines(&a, 60);
+        let flat: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let all = flat.join("|");
+        assert!(!all.contains("大阪"), "a hidden range is replaced: {all}");
+        assert!(all.contains("[非表示]ですね"), "{all}");
+        assert!(all.contains("本文を確かめられません"), "{all}");
+        let styled = |text: &str| {
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .find(|s| s.content == text)
+                .map(|s| s.style)
+                .unwrap_or_else(|| panic!("no span {text}: {all}"))
+        };
+        let red = styled("[伏せ字]");
+        let hid = styled("[非表示]");
+        assert!(red.add_modifier.contains(Modifier::REVERSED));
+        assert!(hid.add_modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(red, hid, "the two kinds look different");
+        // 範囲が本文と合わなければ、本文を出さない。
+        assert!(
+            crate::render::marked_text(
+                "abc",
+                &[TurnMark {
+                    range: 1..9,
+                    kind: TurnMarkKind::Hidden,
+                }],
+                &a.catalog
+            )
+            .is_none()
+        );
+    }
+
+    /// 伏せ字の範囲は、UI の言語の印で表示する。ja のデータ根 (本文の印は `[伏せ字]`) を英語の UI で描くと
+    /// `[redacted]` になり、日本語の文字が出ない。保存した本文は変えない (04 §7.3)。
+    ///
+    /// verifies: AC-FR-908-1 (画面の層: 伏せ字の印も UI の言語で出す)
+    #[test]
+    fn redacted_ranges_are_shown_with_the_marker_of_the_ui_language() {
+        let mut a = App::new(Catalog::load("en"), Status::default());
+        let text = "I live in [伏せ字] now";
+        let at = text.find('[').unwrap();
+        let mut t = turn(1, Role::User, TurnStatus::Confirmed, None);
+        t.text = text.into();
+        t.marks = vec![TurnMark {
+            range: at..at + "[伏せ字]".len(),
+            kind: TurnMarkKind::Redacted,
+        }];
+        let mut r = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        r.text = "[伏せ字], noted.".into();
+        r.marks = vec![TurnMark {
+            range: 0.."[伏せ字]".len(),
+            kind: TurnMarkKind::Redacted,
+        }];
+        a.turns = vec![t, r];
+        let lines = crate::render::conversation_lines(&a, 60);
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(all.contains("I live in [redacted] now"), "{all}");
+        assert!(all.contains("[redacted], noted."), "{all}");
+        assert!(!evorag_types::has_cjk(&all), "{all}");
+        assert_eq!(a.turns[0].text, text, "the stored text is unchanged");
+        // 同じ言語なら、本文の印と同じ表示。
+        a.catalog = Catalog::load("ja");
+        let lines = crate::render::conversation_lines(&a, 60);
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(all.contains("I live in [伏せ字] now"), "{all}");
+    }
+
+    /// 描いた画面の文字 (全角の文字の次の桁の空白も含めて、そのまま)。
+    fn drawn(a: &App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(160, 60)).unwrap();
+        term.draw(|f| crate::render::draw(a, f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    /// 描いた画面と、窓の本文 (スクロールの外も) と、通知の欄に、日本語が無い。
+    fn assert_english(a: &App, label: &str) {
+        let screen = drawn(a);
+        assert!(!evorag_types::has_cjk(&screen), "{label}:\n{screen}");
+        let body = match &a.mode {
+            Mode::Panel { title, body, .. } => format!("{title}\n{body}"),
+            Mode::ConfirmForget(fc) => a.forget_text(fc),
+            Mode::Detail { title, body, .. } => format!("{title}\n{body}"),
+            _ => String::new(),
+        };
+        assert!(!evorag_types::has_cjk(&body), "{label}:\n{body}");
+        for n in &a.notices {
+            assert!(!evorag_types::has_cjk(n), "{label}: notice {n}");
+        }
+    }
+
+    /// 英語のカタログ (`ui.language = "en"`) で、主な画面と窓 (会話・状態の行・ヘルプ・セッションの一覧・
+    /// 削除の確認・答え方・出典の詳細・メモリ・事実の一覧・履歴・忘れた事実・private とその解除・忘れるの確認・
+    /// broken/ の確認) を描くと、日本語の文字が 1 つも出ない。利用者のデータ (題名・本文・値) は ASCII にする。
+    ///
+    /// verifies: AC-FR-908-1 (画面の層: `ui.language = "en"` で全画面が英語になる)
+    #[test]
+    fn every_screen_is_english_with_the_english_catalog() {
+        use evorag_types::api::{
+            BandItem, ForgetState, MemoryItem, MemoryPlace, MemoryReport, MemorySource,
+        };
+        use evorag_types::{Message, Timestamp};
+
+        let mut a = App::new(
+            Catalog::load("en"),
+            Status {
+                endpoint: "127.0.0.1:8080".into(),
+                model: "qwen".into(),
+                n_ctx: 8192,
+                limited: true,
+                recall: Some(RecallState::CandidatesOnly {
+                    calibrating: true,
+                    failed: false,
+                }),
+                background: Some(BackgroundState::Working),
+                remote_llm: true,
+                forget: Some(ForgetState {
+                    mismatched: 2,
+                    journal_pending: true,
+                    key_missing: true,
+                }),
+            },
+        );
+        assert_english(&a, "empty");
+
+        // 会話: 発話・応答・中断・失敗・応答なし・帯・[hidden] の印・確かめられない本文。
+        let mut answer = turn(2, Role::Assistant, TurnStatus::Completed, Some(id(1)));
+        answer.text = "Osaka, I think.".into();
+        answer.sources = 1;
+        answer.band = vec![BandItem {
+            target: id(20),
+            title: "plants".into(),
+            at: Timestamp::from_millis(0),
+            head: "watering".into(),
+        }];
+        answer.irrelevant = vec![id(20)];
+        answer.marks = vec![TurnMark {
+            range: 0.."Osaka".len(),
+            kind: TurnMarkKind::Hidden,
+        }];
+        let mut cut = turn(4, Role::Assistant, TurnStatus::Interrupted, Some(id(3)));
+        cut.text = "partial".into();
+        let failed = turn(6, Role::Assistant, TurnStatus::Failed, Some(id(5)));
+        let mut unverified = turn(7, Role::User, TurnStatus::Confirmed, None);
+        unverified.unverified = true;
+        let pending = turn(8, Role::User, TurnStatus::Pending, None);
+        a.on_event(Event::SessionOpened {
+            session: SessionView {
+                title: "trip".into(),
+                ..session()
+            },
+            turns: vec![
+                turn(1, Role::User, TurnStatus::Confirmed, None),
+                answer,
+                turn(3, Role::User, TurnStatus::Confirmed, None),
+                cut,
+                turn(5, Role::User, TurnStatus::Confirmed, None),
+                failed,
+                unverified,
+                pending,
+            ],
+            unreadable: 1,
+        });
+        a.on_event(Event::ProbeIssues {
+            role: "chat".into(),
+            thinking_not_off: true,
+            structured_broken: true,
+        });
+        a.on_event(Event::FactsChanged {
+            added: 1,
+            replaced: 2,
+            contested: 1,
+        });
+        a.on_event(Event::Rejected {
+            error: Message::new(MessageKey::LlmHttp)
+                .arg("status", "503")
+                .arg("detail", "busy"),
+        });
+        assert_english(&a, "conversation");
+        let screen = drawn(&a);
+        for want in [
+            "Session: trip",
+            "(no reply)",
+            "(interrupted)",
+            "[hidden]",
+            "Organizing",
+        ] {
+            assert!(screen.contains(want), "{want}:\n{screen}");
+        }
+        for state in [
+            RecallState::Standard,
+            RecallState::Simple,
+            RecallState::Rebuilding { percent: 40 },
+            RecallState::CandidatesOnly {
+                calibrating: false,
+                failed: true,
+            },
+        ] {
+            a.status.recall = Some(state);
+            assert_english(&a, &format!("status {state:?}"));
+        }
+        for state in [
+            BackgroundState::PausedBattery,
+            BackgroundState::PausedLowSpace,
+        ] {
+            a.status.background = Some(state);
+            assert_english(&a, &format!("status {state:?}"));
+        }
+        type_text(&mut a, "/nope");
+        a.on_key(Key::Enter { newline: false });
+        assert_english(&a, "unknown command");
+
+        run(&mut a, "/help");
+        assert_eq!(a.mode, Mode::Help);
+        assert_english(&a, "help");
+        assert!(drawn(&a).contains("Help (Esc to close)"));
+
+        a.mode = Mode::Chat;
+        a.show_sessions(vec![session()]);
+        assert_english(&a, "sessions");
+        a.show_sessions(Vec::new());
+        assert_english(&a, "no sessions");
+
+        run(&mut a, "/delete");
+        assert_eq!(a.mode, Mode::ConfirmDelete);
+        assert_english(&a, "delete");
+
+        run(&mut a, "/style");
+        a.on_event(Event::StyleInfo {
+            values: ["en".into(), "short".into(), "plain".into()],
+            changed: false,
+        });
+        assert!(matches!(a.mode, Mode::Style { .. }), "{:?}", a.mode);
+        assert_english(&a, "style");
+
+        a.mode = Mode::Chat;
+        a.on_event(Event::SourceDetail {
+            n: 1,
+            answer: id(2),
+            target: id(20),
+            irrelevant: true,
+            title: "plants".into(),
+            at: Timestamp::from_millis(0),
+            lines: vec![
+                (Role::User, "how often?".into()),
+                (Role::Assistant, "weekly".into()),
+            ],
+        });
+        assert!(matches!(a.mode, Mode::Detail { .. }), "{:?}", a.mode);
+        assert_english(&a, "source detail");
+
+        a.mode = Mode::Chat;
+        let item = |place, n, score, delta| MemoryItem {
+            target: id(20),
+            place,
+            n,
+            title: "plants".into(),
+            head: "watering".into(),
+            score_milli: score,
+            delta_milli: delta,
+        };
+        let report = MemoryReport {
+            answer: Some(id(2)),
+            items: vec![
+                item(MemoryPlace::Attached, Some(1), Some(4200), Some(1200)),
+                item(MemoryPlace::Band, None, Some(2600), Some(-400)),
+                item(MemoryPlace::Below, None, Some(-5000), None),
+            ],
+            degraded: [
+                "no_embed",
+                "embed_deadline",
+                "no_rerank",
+                "rerank_slow",
+                "rerank_deadline",
+                "rerank_error",
+                "no_threshold",
+                "no_index",
+                "mystery",
+            ]
+            .map(String::from)
+            .to_vec(),
+            recall: RecallState::Simple,
+            sources: vec![MemorySource {
+                n: 1,
+                title: "plants".into(),
+                head: "watering".into(),
+            }],
+        };
+        let memory = a.memory_text(&report);
+        assert!(!evorag_types::has_cjk(&memory), "{memory}");
+
+        // 事実の一覧 (値は ASCII に置き換える)、履歴、忘れた事実。
+        let mut list = sample_list();
+        for (g, values) in list.groups.iter_mut().zip([
+            &["Osaka", "Tokyo"][..],
+            &["shrimp", "crab"][..],
+            &[][..],
+            &[][..],
+        ]) {
+            for (r, v) in g.rows.iter_mut().zip(values) {
+                if let FactRow::Value { value, .. } = r {
+                    *value = (*v).to_owned();
+                }
+            }
+            for h in &mut g.private_history {
+                h.value = "octopus".into();
+            }
+        }
+        run(&mut a, "/memory");
+        a.on_event(Event::MemoryInfo {
+            report: report.clone(),
+        });
+        a.on_event(Event::FactsInfo { list: list.clone() });
+        assert!(matches!(a.mode, Mode::Panel { .. }), "{:?}", a.mode);
+        assert_english(&a, "facts");
+        for note in [
+            FactsUnavailable::SleepTimeOff,
+            FactsUnavailable::StoppedByProbe,
+            FactsUnavailable::KeyUnavailable,
+        ] {
+            let text = a.facts_text(
+                &FactList {
+                    groups: Vec::new(),
+                    note: Some(note),
+                },
+                Some(&list),
+            );
+            assert!(!evorag_types::has_cjk(&text), "{text}");
+        }
+        let history = a.history_text(&FactHistory {
+            group: fgroup("residence"),
+            attr: AttrInfo {
+                name: "residence".into(),
+                multi: false,
+            },
+            items: vec![FactHistoryRow {
+                key: fkey("residence", 'e', FactStatus::Superseded),
+                value: "Kyoto".into(),
+                superseded_at: Timestamp::from_millis(0),
+                private: true,
+            }],
+        });
+        assert!(!evorag_types::has_cjk(&history), "{history}");
+        let forgotten = a.forgotten_text(&[ForgottenFact {
+            target: ForgottenRef { directive: id(70) },
+            subject: FactSubject::Named("wife".into()),
+            attr: AttrInfo {
+                name: "hobby".into(),
+                multi: true,
+            },
+            at: Timestamp::from_millis(0),
+            values: 2,
+            redacted: true,
+            sessions: vec!["trip".into(), "work".into()],
+            deleted_turns: 1,
+        }]);
+        assert!(!evorag_types::has_cjk(&forgotten), "{forgotten}");
+
+        run(&mut a, "/private 1");
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivate { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_english(&a, "private");
+        if let Mode::ConfirmPrivate { multi, .. } = &mut a.mode {
+            *multi = true;
+        }
+        assert_english(&a, "private (multi)");
+        run(&mut a, "/private off 3");
+        assert!(
+            matches!(a.mode, Mode::ConfirmPrivateOff { .. }),
+            "{:?}",
+            a.mode
+        );
+        assert_english(&a, "private off");
+
+        // 忘れるの確認: 数えている間・見本・選択と約束を開いたところ・伏せ字にできないとき。
+        run(&mut a, "/forget 1");
+        assert_english(&a, "forget (counting)");
+        let target = fkey("residence", 'a', FactStatus::Live);
+        let mut preview = ForgetPreview {
+            target: target.clone(),
+            options: ForgetOptions::default(),
+            samples: vec![ForgetSample {
+                turn: id(1),
+                role: Role::User,
+                before: "I live in Osaka".into(),
+                after: "I live in [redacted]".into(),
+            }],
+            other_turns: 2,
+            other_matches: 3,
+            history_values: 1,
+            affected: vec![fkey("dietary", 'd', FactStatus::Live)],
+            unredacted_sources: 1,
+            source_outside: 1,
+            whole_turns: 1,
+            mismatched_turns: 1,
+            skipped_unreadable: 1,
+            plan: Ok(ForgetPlanHash::new("h1".into())),
+        };
+        a.on_event(Event::ForgetPreviewInfo {
+            preview: preview.clone(),
+        });
+        assert_english(&a, "forget (preview)");
+        a.on_key(Key::Tab);
+        a.on_key(Key::Char('?'));
+        assert_english(&a, "forget (choices and promise open)");
+        for warning in [
+            ForgetWarning::UnreadableTurn,
+            ForgetWarning::StaleSource,
+            ForgetWarning::ValueMismatch,
+            ForgetWarning::MismatchedTurn,
+        ] {
+            if let Mode::ConfirmForget(fc) = &a.mode {
+                preview.options = fc.options;
+            }
+            preview.plan = Err(warning);
+            a.on_event(Event::ForgetPreviewInfo {
+                preview: preview.clone(),
+            });
+            assert_english(&a, &format!("forget ({warning:?})"));
+        }
+
+        a.mode = Mode::ConfirmBroken { n: 2 };
+        assert_english(&a, "broken");
     }
 }

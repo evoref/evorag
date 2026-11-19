@@ -14,9 +14,15 @@ evorag-store = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-# 配布物のハッシュと署名の検証 (cargo xtask dist / verify-release、12 §5)。xtask だけの依存。
-sha2 = { workspace = true }
-minisign-verify = "0.2"
+# 配布物の release.json・署名・実行ファイルの検証 (cargo xtask dist / verify-release、12 §5)。本体の更新と
+# 同じ読み手を使う。
+evorag-update = { workspace = true, features = ["unverified-dist"] }
+
+[dev-dependencies]
+# 試験の配布物を作る。
+zip = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

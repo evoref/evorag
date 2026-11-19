@@ -354,3 +354,291 @@ fn there_is_only_one_writer_per_store() {
     ));
     assert!(store.take_write_token().is_none());
 }
+
+/// ジャーナルに書く種類 (会話と明示の操作の代わり)。
+const NOTED: KindSpec = KindSpec {
+    journaled: true,
+    ..KindSpec::new("noted", 1)
+};
+
+#[derive(Serialize)]
+struct Turnish {
+    text: String,
+    state: String,
+    rev: u32,
+}
+
+fn open_noted(root: &Path) -> Arc<Store> {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+    let (store, _) = Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.2".into(),
+        kinds: vec![SAMPLE, NOTED],
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 7)),
+        config_file: None,
+    })
+    .unwrap();
+    Arc::new(store)
+}
+
+fn noted(store: &Store, id: Id, body: &Turnish) -> Envelope {
+    let mut e = Envelope::new(id, "noted", 1, store.clock().now(), "");
+    e.set_body(body).unwrap();
+    e
+}
+
+fn start(store: &Arc<Store>) -> (evorag_store::WriterHandle, std::thread::JoinHandle<()>) {
+    let (writer, handle) = Writer::new(store.clone()).unwrap();
+    (handle, std::thread::spawn(move || writer.run()))
+}
+
+/// 消した記録の古い封筒を `put` し直しても蘇らない。このプロセスで消したものも、ジャーナルの削除の行で
+/// 消したもの (開き直した後) も断る。
+/// verifies: 04 §7.7 の 3 (書き戻させない)
+#[test]
+fn a_deleted_record_is_not_put_back() {
+    let dir = TempDir::new("writer-deleted");
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let id = store.ids().next_id();
+    let stale = noted(
+        &store,
+        id,
+        &Turnish {
+            text: "架空の発話".into(),
+            state: "pending".into(),
+            rev: 0,
+        },
+    );
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(
+        stale.clone(),
+    )]))
+    .unwrap();
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Delete {
+        kind: "noted".into(),
+        id,
+    }]))
+    .unwrap();
+    // 消す前に読んだ封筒を書き戻す (応答の経路が古い発話を「確定」にするなど)。
+    let other = record(&store, "ほかの記録");
+    let r = h.submit_wait(WriteRequest::conversation(vec![
+        WriteOp::Put(other.clone()),
+        WriteOp::Put(stale.clone()),
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Deleted { id: got, .. })) if got == id),
+        "{r:?}"
+    );
+    let rtx = store.read().unwrap();
+    assert_eq!(rtx.get("noted", id).unwrap(), None);
+    assert_eq!(rtx.get("sample", other.id).unwrap(), None, "all or nothing");
+    drop(rtx);
+    h.shutdown();
+    t.join().unwrap();
+    drop(store);
+
+    // 開き直しても、ジャーナルの削除の行から断る。
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let r = h.submit_wait(WriteRequest::background(vec![WriteOp::Put(stale)]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Deleted { .. }))),
+        "{r:?}"
+    );
+    assert_eq!(store.read().unwrap().get("noted", id).unwrap(), None);
+    h.shutdown();
+    t.join().unwrap();
+}
+
+/// 差し替え (`Patch`) は書き手のトランザクションの中で読み直すので、その間の伏せ字 (本文と改訂の番号) を
+/// 上書きしない。ジャーナルには差し替えた後の封筒が残る。無い記録への差し替えは依頼ごと断る。
+/// verifies: 04 §7.7 の 3 (ターンは読み直してから更新する)
+#[test]
+fn a_patch_rereads_the_record_and_keeps_concurrent_changes() {
+    let dir = TempDir::new("writer-patch");
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let id = store.ids().next_id();
+    let read_before = noted(
+        &store,
+        id,
+        &Turnish {
+            text: "架空の秘密の値".into(),
+            state: "pending".into(),
+            rev: 0,
+        },
+    );
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(read_before)]))
+        .unwrap();
+    // 応答を作っている間に伏せ字になった。
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(noted(
+        &store,
+        id,
+        &Turnish {
+            text: "架空の[伏せ字]".into(),
+            state: "pending".into(),
+            rev: 1,
+        },
+    ))]))
+    .unwrap();
+    // 応答の経路は、前に読んだ発話の状態だけを差し替える。
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Patch {
+        kind: "noted".into(),
+        id,
+        fields: evorag_store::BodyPatch::new()
+            .set("state", &"confirmed")
+            .unwrap(),
+        updated_at: Some(Timestamp::from_millis(1_762_650_001_000)),
+    }]))
+    .unwrap();
+    let check = |store: &Store| {
+        let Some(Read::Ok(e)) = store.read().unwrap().get("noted", id).unwrap() else {
+            panic!("the record is gone");
+        };
+        let v: serde_json::Value = e.body_as().unwrap();
+        assert_eq!(v["text"], "架空の[伏せ字]");
+        assert_eq!(v["rev"], 1);
+        assert_eq!(v["state"], "confirmed");
+        assert_eq!(e.updated_at, Timestamp::from_millis(1_762_650_001_000));
+    };
+    check(&store);
+    // 無い記録への差し替えは、依頼の全体を断る。
+    let other = record(&store, "ほかの記録");
+    let r = h.submit_wait(WriteRequest::conversation(vec![
+        WriteOp::Put(other.clone()),
+        WriteOp::Patch {
+            kind: "noted".into(),
+            id: store.ids().next_id(),
+            fields: evorag_store::BodyPatch::new(),
+            updated_at: None,
+        },
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Stale { .. }))),
+        "{r:?}"
+    );
+    assert_eq!(store.read().unwrap().get("sample", other.id).unwrap(), None);
+    h.shutdown();
+    t.join().unwrap();
+    drop(store);
+
+    // DB を失っても、ジャーナルから差し替えた後の封筒が戻る。
+    std::fs::remove_file(dir.path().join(evorag_store::DB_FILE)).unwrap();
+    let store = open_noted(dir.path());
+    check(&store);
+}
+
+/// 派生の記録を書く前提 (`Expect`): 出典が残っていて改訂の番号が読んだときと合わなければ、依頼ごと断る。
+/// verifies: 04 §7.7 の 4 (派生物は出典を確かめてから書く)
+#[test]
+fn an_expectation_on_the_source_guards_the_whole_request() {
+    let dir = TempDir::new("writer-expect");
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let source = store.ids().next_id();
+    // `rev` の無い本体は 0 として読む (03 §3.3)。
+    let mut e = Envelope::new(source, "noted", 1, store.clock().now(), "");
+    e.set_body(&Body {
+        text: "架空の出典".into(),
+    })
+    .unwrap();
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(e)]))
+        .unwrap();
+    let expect = |rev: u64| WriteOp::Expect {
+        kind: "noted".into(),
+        id: source,
+        field: Some(("rev".into(), rev)),
+    };
+    let first = record(&store, "派生 1");
+    h.submit_wait(WriteRequest::background(vec![
+        expect(0),
+        WriteOp::Put(first.clone()),
+    ]))
+    .unwrap();
+    // 番号が変わった (伏せ字) 後は、前の番号で作った派生の記録を書かない。
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(noted(
+        &store,
+        source,
+        &Turnish {
+            text: "架空の[伏せ字]".into(),
+            state: "confirmed".into(),
+            rev: 1,
+        },
+    ))]))
+    .unwrap();
+    let second = record(&store, "派生 2");
+    let r = h.submit_wait(WriteRequest::background(vec![
+        expect(0),
+        WriteOp::Put(second.clone()),
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Stale { .. }))),
+        "{r:?}"
+    );
+    // 出典が消えた後も書かない。
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Delete {
+        kind: "noted".into(),
+        id: source,
+    }]))
+    .unwrap();
+    let r = h.submit_wait(WriteRequest::background(vec![
+        WriteOp::Expect {
+            kind: "noted".into(),
+            id: source,
+            field: None,
+        },
+        WriteOp::Put(second.clone()),
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Stale { .. }))),
+        "{r:?}"
+    );
+    let rtx = store.read().unwrap();
+    assert!(matches!(
+        rtx.get("sample", first.id).unwrap(),
+        Some(Read::Ok(_))
+    ));
+    assert_eq!(rtx.get("sample", second.id).unwrap(), None);
+    drop(rtx);
+    h.shutdown();
+    t.join().unwrap();
+}
+
+/// 前に消した ID は、同じ依頼の中で消してから作り直しても蘇らない。
+/// verifies: 04 §7.7 の 3 (書き戻させない)
+#[test]
+fn a_delete_then_put_in_one_request_does_not_resurrect_a_deleted_id() {
+    let dir = TempDir::new("writer-delete-put");
+    let store = open_noted(dir.path());
+    let (h, t) = start(&store);
+    let id = store.ids().next_id();
+    let env = noted(
+        &store,
+        id,
+        &Turnish {
+            text: "架空の発話".into(),
+            state: "confirmed".into(),
+            rev: 0,
+        },
+    );
+    h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(env.clone())]))
+        .unwrap();
+    let delete = || WriteOp::Delete {
+        kind: "noted".into(),
+        id,
+    };
+    h.submit_wait(WriteRequest::conversation(vec![delete()]))
+        .unwrap();
+    let r = h.submit_wait(WriteRequest::conversation(vec![
+        delete(),
+        WriteOp::Put(env),
+    ]));
+    assert!(
+        matches!(r, Err(WriteError::Store(StoreError::Deleted { .. }))),
+        "{r:?}"
+    );
+    assert_eq!(store.read().unwrap().get("noted", id).unwrap(), None);
+    h.shutdown();
+    t.join().unwrap();
+}

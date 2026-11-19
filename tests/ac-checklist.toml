@@ -225,9 +225,9 @@ id = "AC-FR-309-1"
 requirement = "FR-309"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart", "crates/evorag-memory/tests/conversation.rs::deleting_a_session_removes_its_turns_signals_and_links"]
+tests = ["crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart", "crates/evorag-memory/tests/conversation.rs::deleting_a_session_removes_its_turns_signals_and_links", "crates/evorag-store/tests/journal_rewrite.rs::a_delete_rewrites_the_journal_and_reports_it"]
 manual = ""
-note = "v0.1 の分 (ターン・ジャーナル・語彙の索引)。ジャーナルの行の消去の判定は未確認。"
+note = "v0.1 の分 (ターン・ジャーナル・語彙の索引)。ジャーナルの行の消去は、ストアの層 (削除した ID の `put` の行だけを除き、ほかの行はバイト列のまま残す) で判定する。"
 
 [[ac]]
 id = "AC-FR-311-1"
@@ -390,6 +390,24 @@ status = "test"
 tests = ["bins/evorag/src/config.rs::an_old_config_is_backed_up_and_rewritten"]
 manual = ""
 note = ""
+
+[[ac]]
+id = "AC-FR-805-1"
+requirement = "FR-805"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/src/swap/tests.rs::apply_rollback_apply_round_trips_by_sha256", "crates/evorag-update/src/swap/tests.rs::a_prev_without_a_record_is_identified_by_its_version_output", "crates/evorag-update/tests/flow.rs::apply_then_rollback_restores_the_files_and_keeps_the_data", "crates/evorag-update/tests/flow.rs::rollback_tells_how_to_restore_when_the_old_version_cannot_write", "bins/evorag/src/update.rs::rollback_shows_the_pre_op_backup_and_restore_and_ends_with_0"]
+manual = ""
+note = "置き換えの核 (swap) で apply → rollback → apply の SHA-256 と記録を、更新の流れ (flow) で apply の後の rollback が evorag(.exe)・evorag.prev を SHA-256 で戻し、データ根の中身 (ロックのファイルを除く) を変えず、戻した版が書けない・開けないときに移行の前の退避のパス (無ければ無いこと) と設定の写しを返すことを判定する。偽の Releases と偽の --version を使う。示す文言 (移行の前の退避のパスと evorag restore のコマンド) と終了コード 0 は、bin の表示の関数と終了コードを決める関数で判定する (rollback を実行ファイルで動かす試験は、zip の配布物のビルドが要るので自動では行わない)。"
+
+[[ac]]
+id = "AC-FR-805-2"
+requirement = "FR-805"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/src/swap/tests.rs::crashing_after_any_step_is_recovered_on_the_next_run", "crates/evorag-update/src/swap/tests.rs::the_gap_is_recovered_by_the_displayed_steps", "crates/evorag-update/tests/flow.rs::an_interrupted_apply_is_finished_by_the_startup_cleanup"]
+manual = ""
+note = "自動で判定するもの: 置き換えの核で、apply・rollback・元に戻す途中の各操作の後で止めたことにして (試験の差し込みで、そこから後の処理をしない。同期は直前の操作に含める)、次の続き (Installation::resume。update の始める前の確かめの 4 と起動の片付けが、どちらもこれを呼ぶ) と名前での片付けの後に、evorag(.exe) が置き換えの前か後の版 (SHA-256) で、evorag.prev が役割どおりであること。Windows の隙間は、案内の手順で戻せること。更新の流れでは、置き換えの後の確かめの最中に止めて (panic で模擬)、TUI の起動の片付け (swap::startup) が続きを済ませること。自動で判定しないもの: 09 §4 の、子プロセスを実際に強制終了する試験 (プロセスの途中の停止と、OS のファイルの状態) は無い。差し込みの停止は同じ点で止まるが、プロセスの終了は模擬であり、AC の「強制終了」の全体を自動で覆うものではない。status を test のままにするのは、AC が求める状態 (前か後の版で起動でき、evorag.prev が正しい) を、各段の停止の後のファイルの状態として判定しているため。子プロセスでの試験は 09 §4 の段として別に足す。"
 
 [[ac]]
 id = "AC-FR-901-1"
@@ -666,7 +684,7 @@ id = "AC-NFR-506-1"
 requirement = "NFR-506"
 level = "Must"
 status = "test"
-tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-core/tests/chat_path.rs::deleting_a_session_purges_it_from_the_backups", "crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart"]
+tests = ["crates/evorag-core/tests/chat_path.rs::sessions_can_be_renamed_and_deleted", "crates/evorag-core/tests/chat_path.rs::deleting_a_session_purges_it_from_the_backups", "crates/evorag-core/tests/chat_path.rs::a_purge_that_cannot_open_a_backup_keeps_its_job", "crates/evorag-core/tests/recall_path.rs::a_deleted_session_is_no_longer_recalled_even_after_a_restart"]
 manual = ""
 note = "AC-FR-105-1 と AC-FR-309-1 が通ること。削除の確認の文言が範囲を示すことの判定は未確認。"
 
@@ -1116,3 +1134,194 @@ status = "test"
 tests = ["crates/evorag-core/tests/embeddings.rs::switching_the_embedding_model_rebuilds_and_keeps_one_previous_generation", "crates/evorag-core/tests/embeddings.rs::chunks_are_embedded_in_the_background_and_the_index_is_rebuilt_from_the_database", "crates/evorag-core/tests/model_binding.rs"]
 manual = ""
 note = "記録と違う埋め込みのモデルでは役割を使わない (model_binding の試験、M2.2)。切り替えると全件を作り直し、前のモデルの索引を 1 世代残す。作り直しの間の状態の行は「想起: 作り直し中 N%」。ベクトルの検索を想起に使うのは M2.6 (それまでは語彙の候補とリランクで答える)。"
+
+# ---- v0.3 で足した AC のうち、要件が v0.2 までに Must のもの (v0.3 の段で試験を足す) ----
+
+[[ac]]
+id = "AC-FR-309-3"
+requirement = "FR-309"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_table.rs::deleting_a_session_removes_its_facts_and_their_keys_at_once", "crates/evorag-core/tests/fact_table.rs::a_successor_stays_private_after_its_restating_session_is_deleted", "crates/evorag-memory/src/fold_cases.rs::consolidation_cases_hold_on_the_pure_core", "crates/evorag-core/tests/orphans.rs::facts_left_by_an_older_version_lose_the_deleted_sources"]
+manual = ""
+note = "セッションだけを出典とする事実は消え、他の出典を持つ事実は出典だけを外す。消えた今の値の置き換えの連鎖は 04 §7.4 のとおり (回帰ケース C21〜C23)。消した事実の検索の鍵は削除の直後に索引から除き、退避からも除く。古い版で消したセッションの事実は、起動時の突き合わせで同じく扱う (規則 12)。"
+
+[[ac]]
+id = "AC-FR-310-2"
+requirement = "FR-310"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_ops.rs::an_outdated_row_or_a_wrong_precondition_is_rejected", "crates/evorag-tui/src/app.rs::the_fact_list_opens_in_a_panel_with_numbers_and_marks", "crates/evorag-tui/src/app.rs::an_outdated_list_is_replaced_and_numbers_follow_the_new_one"]
+manual = ""
+note = "一覧と番号、/private と /memory accept・history・revert・forgotten・unblock、一覧を表示した後に変わった行の拒否と新しい一覧。/forget の番号での操作は /forget を足すときに試験を足す。"
+
+[[ac]]
+id = "AC-FR-308-1"
+requirement = "FR-308"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_table.rs::private_facts_stay_out_of_the_table_and_the_keys", "crates/evorag-memory/src/mask.rs::a_private_value_is_hidden_in_its_exchange_only", "crates/evorag-tui/src/app.rs::private_asks_with_the_scope_and_sends_the_row_reference"]
+manual = ""
+note = "事実の表・検索の鍵・添えた往復 ([非表示])。リプレイと回帰台帳の事例 (13 §4) は v0.4 で足すときに同じ置き換えを当てる。"
+
+[[ac]]
+id = "AC-FR-308-2"
+requirement = "FR-308"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/fact_ops.rs::private_hides_the_value_everywhere_and_private_off_restores_it", "crates/evorag-core/tests/fact_ops.rs::private_off_of_a_successors_rule_clears_every_row_it_covers", "crates/evorag-tui/src/app.rs::private_off_lists_the_other_rows_sharing_a_directive"]
+manual = ""
+note = "/private off は行に効いているすべての private の指示を解く。後継まで効く指示を解くと、同じ指示で private だったほかの行も外れる。"
+
+[[ac]]
+id = "AC-NFR-506-3"
+requirement = "NFR-506"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.3 の M3.4 (忘れるの確認の文言) で確かめる。"
+
+[[ac]]
+id = "AC-FR-307-1"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::after_the_forget_command_the_value_is_gone_from_requests_and_files", "crates/evorag-core/tests/forget_wiring.rs::a_forget_cut_short_before_its_commit_is_replayed_at_the_next_start", "crates/evorag-core/tests/forget_wiring.rs::the_backup_job_rewrites_daily_weekly_and_pre_op_backups", "crates/evorag-core/tests/forget_wiring.rs::export_is_refused_until_the_forget_is_replayed"]
+manual = ""
+note = "/forget の命令 (見本の計画のハッシュを添えた実行) の後に、次のターンの llama-server への要求 (偽の llama-server で記録する。忘れる前の起動の裏の処理の要求は数えない)・ジャーナル・索引・退避と、再起動 (compact) の後のデータ根のすべてのファイルに値が出ないことで判定する。移行と作り直しの前の退避は退避の写し直しの試験で、書き出しは書き出しの試験で判定する。回帰台帳は v0.4 で足す種類なので、その版で足す。"
+
+[[ac]]
+id = "AC-FR-307-4"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-store/src/forget.rs::applying_twice_is_the_same_as_once", "crates/evorag-store/src/forget.rs::several_directives_apply_in_order_and_report_gaps", "crates/evorag-store/tests/forget_backups.rs::a_backup_is_rewritten_with_the_turn_redacted_and_targets_dropped", "crates/evorag-memory/src/fold_cases.rs::forget_cases_hold_in_the_store_and_replay_the_same", "crates/evorag-memory/src/forget.rs::replay_drops_stale_derived_records_and_reports_mismatches", "crates/evorag-core/tests/forget_wiring.rs::a_forget_cut_short_before_its_commit_is_replayed_at_the_next_start", "crates/evorag-core/tests/forget_wiring.rs::restoring_an_older_backup_replays_forgets_and_rewrites_the_backups", "crates/evorag-core/tests/forget_wiring.rs::a_failed_journal_swap_is_retried_in_sleep_time"]
+manual = ""
+note = "純粋な核 (04 §7.2 の apply_forget)、退避の写し直し (03 §7.3 の forget_backups)、生きている DB の層 (replay_forgets。回帰ケース F01〜F15 で、忘れるの直後の当て直しが何も変えないこと、指示と伏せ字の行だけを取り込んで当て直すと操作と同じ事実とターンになること) で判定する。コアの層は、起動時 (取り込みと restore の後を含む) と sleep-time の当て直し、ジャーナルの書き直しの試し直しで判定する。"
+
+[[ac]]
+id = "AC-FR-307-5"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/src/fold_cases.rs::forget_cases_hold_in_the_store_and_replay_the_same", "crates/evorag-memory/src/forget.rs::unreadable_or_stale_sources_abort_a_redacting_forget"]
+manual = ""
+note = "メモリの層の計画 (plan_forget) で判定する。本文が記録と食い違うターン (回帰ケース F11)、読めない出典のターン、出典の改訂の番号が今と合わないときは、操作の全体を中止し、何も書かない。画面の見本の警告は、コアと画面の層で足す。"
+
+[[ac]]
+id = "AC-FR-307-2"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::a_forget_cut_short_before_its_commit_is_replayed_at_the_next_start"]
+manual = ""
+note = "操作の行をジャーナルに書いた後、DB のコミットの前に止まった状態 (09 §3.5 の止める点の 1 つ) から、次の起動の当て直しと、その次の起動の compact の後に、DB のファイル・ジャーナル・退避に値が残らないことで判定する。ほかの止める点は /forget の命令 (M3.4c の後半) で足す。"
+
+[[ac]]
+id = "AC-FR-307-3"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::restoring_an_older_backup_replays_forgets_and_rewrites_the_backups", "crates/evorag-core/tests/forget_wiring.rs::the_backup_job_rewrites_daily_weekly_and_pre_op_backups"]
+manual = ""
+note = "restore の後の起動で、忘れた事実が蘇らず、すべての忘れるの指示の forget_backups の job を作り直して退避からも値が消えることで判定する。rebuild --facts の後と private は、それぞれの経路の試験 (rebuild・fact_ops) で足す。"
+
+[[ac]]
+id = "AC-FR-804-1"
+requirement = "FR-804"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/flow.rs::a_tampered_or_wrongly_signed_release_is_refused_with_5"]
+manual = ""
+note = "検証の核で署名の合わない release.json・legacy の署名・鍵の違う署名を断ることを、更新の流れで apply が 5 で断り、配布物を取得せず、インストール先を変えないことを判定する。"
+
+[[ac]]
+id = "AC-NFR-505-1"
+requirement = "NFR-505"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::the_same_or_an_older_version_is_refused", "crates/evorag-update/tests/flow.rs::the_same_or_an_older_version_cannot_be_applied"]
+manual = ""
+note = "検証の核で今と同じ版・古い版の release.json を断ることを、更新の流れで指定した版が今と同じか古ければ通信の前 (通信の前の確かめの前) に 1 で断り、版を省いて今が最新なら 0 で何も変えないことを判定する。"
+
+[[ac]]
+id = "AC-NFR-505-2"
+requirement = "NFR-505"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/tests/verify.rs::a_tampered_release_json_is_refused_before_it_is_read", "crates/evorag-update/tests/verify.rs::wrong_keys_and_legacy_signatures_are_refused", "crates/evorag-update/tests/verify.rs::the_trusted_comment_must_match_exactly", "crates/evorag-update/tests/verify.rs::name_tag_and_requested_version_must_match", "crates/evorag-update/tests/verify.rs::a_release_older_than_the_current_release_date_is_refused", "crates/evorag-update/tests/verify.rs::a_current_version_below_upgrade_from_is_told_which_version_to_apply_first", "crates/evorag-update/tests/verify.rs::an_unknown_schema_is_refused_before_other_fields", "crates/evorag-update/tests/verify.rs::exactly_one_archive_must_match_the_target", "crates/evorag-update/tests/verify.rs::malformed_fields_are_refused", "crates/evorag-update/tests/archive.rs::an_archive_with_the_wrong_size_or_sha256_is_refused_before_it_is_unpacked", "crates/evorag-update/tests/archive.rs::an_exe_with_the_wrong_sha256_is_refused", "crates/evorag-update/tests/flow.rs::a_tampered_or_wrongly_signed_release_is_refused_with_5", "crates/evorag-update/tests/flow.rs::unusable_releases_are_refused_with_1", "crates/evorag-update/tests/flow.rs::an_archive_that_does_not_match_is_refused_with_5"]
+manual = ""
+note = "検証の核で、断る理由ごとの分け方 (改ざんを疑うものは 5、使えないものは 1) と、署名の前に JSON として読まず、大きさと SHA-256 の前に展開しないこと (型で強制し、試験で確かめる) を判定する。更新の流れで apply の終了コードと、どの場合もインストール先のファイルが変わらないことを判定する。"
+
+[[ac]]
+id = "AC-FR-211-1"
+requirement = "FR-211"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::repair_restores_lost_turns_and_lookups_and_replays_forgets", "crates/evorag-store/tests/repair.rs::missing_and_broken_records_come_back_from_the_journal_without_lowering_the_revision", "crates/evorag-store/tests/repair.rs::deleted_ids_are_not_restored_and_stale_records_are_removed", "crates/evorag-store/tests/repair.rs::intact_records_get_their_relations_back_and_unknown_names_are_kept", "crates/evorag-store/tests/repair.rs::relations_of_records_that_cannot_be_rederived_are_kept", "crates/evorag-store/tests/repair.rs::meta_lines_come_back_and_bad_lines_are_counted", "crates/evorag-store/tests/repair.rs::forget_recheck_is_set_whenever_a_forget_directive_exists", "crates/evorag-memory/src/kinds.rs::written_and_derived_names_are_declared_on_the_kind", "bins/evorag/tests/cli.rs::repair_backs_up_first_and_refuses_while_the_data_root_is_in_use", "bins/evorag/tests/cli.rs::repair_refuses_a_missing_data_root_and_points_a_broken_database_to_restore"]
+manual = ""
+note = "DB から消したターンと忘れるの指示がジャーナルから戻り (改訂の番号を下げる行は当てない)、消した副索引が作り直され、失った事実の取り消しとジャーナルの伏せ字の前の行の除去が当て直され、実行の前に退避が作られることで判定する。ストアの層は、壊れた記録の隔離、記録の無い ID の関係の除去、削除の行と cleanup.pending_deletes の ID を戻さないこと (DB に残っていた削除済みの記録が消えること)、失った関係の作り直し、作り直せない記録 (知らない種類・新しい版・読めない本体・壊れた記録) の関係と、知らない関係・副索引の項目を残すこと (03 §4.2 の規則 6・11)、ジャーナルの meta の行を戻すこと、忘れるの指示があれば forget.recheck を立てることも確かめる。種類の宣言 (derived_rels・derived_lookups) と derive・書き込みの経路が合うことは kinds.rs の試験で確かめる。CLI は、データ根が無いときに何も作らずに断ること、壊れた DB で restore を案内することも確かめる。"
+
+[[ac]]
+id = "AC-FR-213-1"
+requirement = "FR-213"
+level = "Must"
+status = "test"
+tests = ["bins/evorag/tests/cli.rs::backups_purge_asks_first_and_removes_every_backup", "crates/evorag-store/tests/purge.rs::purge_removes_every_backup_and_partial_backups", "crates/evorag-store/tests/purge.rs::purge_covers_the_backup_dir_and_the_data_roots_pre_op", "crates/evorag-store/tests/purge.rs::purge_refuses_folders_that_look_like_a_data_root", "crates/evorag-store/tests/purge.rs::purge_does_not_follow_links"]
+manual = ""
+note = "確かめに n と答える・入力が終わると何も消さず、TUI がデータ根を持っている間は終了コード 2 で断り (backups list も)、y と答えるとすべての退避が消えることで判定する。ストアの層は、日次・週次・移行と作り直しの前の退避と作りかけの退避を消し、storage.backup_dir を指定したときはデータ根の backups/pre-op/ も消し、退避が 0 個でも作りかけの退避を消し、リンク (Unix のシンボリックリンク・Windows のジャンクション) をたどらずに残し、データ根に見えるフォルダ (journal/ かロックのファイルを持つ・データ根そのもの) を消さないことを確かめる。"
+
+[[ac]]
+id = "AC-FR-305-2"
+requirement = "FR-305"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-memory/src/fold_cases.rs::consolidation_cases_hold_on_the_pure_core"]
+manual = ""
+note = "統合の回帰ケース C22 (置き換えの連鎖の新しい側のセッションを消しても、古い値は Superseded のまま、事実の表は空) で判定する。"
+
+[[ac]]
+id = "AC-FR-307-6"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::forgets_survive_a_round_trip_through_v0_2"]
+manual = "docs/compat/0.3.0/acceptance.md §1 (09 §3.6 の「忘れると古い版」を、配布物の v0.2.x で確かめる)"
+note = "v0.2.x は、形式の版 0.2 と v0.2 の種類だけを知り、改訂の番号を知らないストアとして開いてまねる (伏せ字の前の写しを書き戻し、別のセッションのターンとセッションだけを消す)。v0.3 で開き直した後に、事実への指示が残り、ターンが伏せ字に戻り、忘れた値が事実・ジャーナル・退避・compact の後の DB に無く、消したセッションのチャンクが規則 12 で消え、forget.recheck が消えることで判定する。配布物どうしの通しは、09 §3.6 の手動の受入で確かめる。"
+
+[[ac]]
+id = "AC-FR-307-7"
+requirement = "FR-307"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-core/tests/forget_wiring.rs::an_unredacted_forget_hides_the_value_from_facts_keys_and_attached_exchanges"]
+manual = ""
+note = "伏せ字にしないで忘れた後に、/memory の一覧・事実から作った検索の鍵・次の要求 (事実の表を含む) に値が出ず、添えた往復の中で [非表示] になり、本文は変わらないことで判定する。"
+
+[[ac]]
+id = "AC-FR-803-1"
+requirement = "FR-803"
+level = "Must"
+status = "test"
+tests = ["crates/evorag-update/tests/flow.rs::check_shows_the_newest_verified_release_and_touches_nothing", "crates/evorag-update/tests/flow.rs::check_without_a_newer_version_says_so"]
+manual = ""
+note = "更新の流れで、偽の Releases (試験の鍵で署名したもの) に今より新しい版があれば semver でいちばん大きい版の検証した版・日付・除いた要点を、無ければ無いことを示して 0 で終わり、ロックを取らず、状態のフォルダ・データ根・インストール先を作らず変えず、固定の接続先だけを要求することを判定する。"
+
+[[ac]]
+id = "AC-FR-806-1"
+requirement = "FR-806"
+level = "Should"
+status = "test"
+tests = ["crates/evorag-update/tests/flow.rs::a_non_zip_install_refuses_apply_and_rollback_without_network", "bins/evorag/tests/cli.rs::update_apply_and_rollback_refuse_a_non_zip_build"]
+manual = ""
+note = "更新の流れで、入れ方が zip でなければ apply と rollback が通信の前の確かめも要求もせず、更新のロックを取らず、インストール先を変えずに断ることを、実行ファイル (開発のビルドは cargo) で、断る文言 (入れたときの仕組みでの更新と check の案内) と終了コード 1 を判定する。check が使えることは check_without_a_newer_version_says_so で判定する。"
+
+[[ac]]
+id = "AC-FR-908-1"
+requirement = "FR-908"
+level = "Must"
+status = "test"
+tests = [".github/workflows/ci.yml#i18n", "xtask/src/i18n.rs::the_bundled_catalogs_match_the_code_and_each_other", "crates/evorag-tui/src/catalog.rs::the_english_catalog_has_no_japanese_text", "crates/evorag-tui/src/app.rs::every_screen_is_english_with_the_english_catalog", "crates/evorag-tui/src/app.rs::redacted_ranges_are_shown_with_the_marker_of_the_ui_language", "bins/evorag/src/main.rs::every_argument_and_subcommand_has_help_in_every_language", "bins/evorag/tests/cli.rs::the_cli_speaks_english_when_ui_language_is_en", "bins/evorag/tests/cli.rs::update_speaks_english_when_ui_language_is_en"]
+manual = ""
+note = "前半 (キーの差分がゼロ) は cargo xtask i18n (CI の i18n の job) で判定する。ja と en がそれぞれ MessageKey と属性の一覧にちょうど合い、キーごとの引数の名前が ja と同じで、en の文言に漢字・仮名・全角の文字が無いこと。後半 (全画面が英語) は、英語のカタログで会話・状態の行・ヘルプ・セッションの一覧・削除の確認・答え方・出典の詳細・メモリ・事実の一覧・履歴・忘れた事実・private とその解除・忘れるの確認・broken/ の確認を描いて日本語の文字が無いこと、ja のデータ根の伏せ字の範囲を [redacted] で出すこと、--help (下位の命令も) の文がカタログから当たること、ui.language = \"en\" で --help・doctor・backups list・設定の誤り・llama-server に繋がらないときの案内と、update の --help・通信の前に断る誤り (zip でない入れ方・読めない版・足した鍵の誤り) に日本語の文字が無いことで判定する。利用者のデータ (題名・本文・値) は ASCII にする。"

@@ -47,6 +47,388 @@ pub enum Command {
     /// `/memory` (FR-310、07 §3): 直前の応答に添えたメモリ、候補の帯、リランクの値、縮退の理由と、
     /// このセッションの出典の番号と往復の対応を照会する。
     Memory,
+    /// 事実の一覧を照会する (04 §7.1、07 §3 の `/memory`)。データ根の全体のものなので、セッションを開いて
+    /// いなくてよい。答えは [`Event::FactsInfo`]。
+    ShowFacts,
+    /// (主語, 属性) の置き換えの履歴を照会する (`/memory history`、04 §7.4)。答えは [`Event::FactHistoryInfo`]。
+    ShowFactHistory { group: FactGroupKey },
+    /// 忘れた事実の一覧を照会する (`/memory forgotten`、04 §7.6)。答えは [`Event::ForgottenInfo`]。
+    ShowForgotten,
+    /// 値の行を private にする (`/private`、04 §7.5)。画面が確認した後に送る。
+    SetFactPrivate {
+        target: FactKey,
+        scope: PrivateScope,
+    },
+    /// 行に効いているすべての private の指示を解く (`/private off`、04 §7.5)。画面が確認した後に送る。
+    UnsetFactPrivate { target: FactRowRef },
+    /// `Contested` の値を今の値にする (`/memory accept`、04 §7.4)。
+    AcceptFact { target: FactKey },
+    /// 履歴の値を今の値に戻す (`/memory revert`、04 §7.4)。
+    RevertFact { target: FactKey },
+    /// 再び覚えない印を解く (`/memory unblock`、04 §7.6)。
+    UnblockFact { target: ForgottenRef },
+    /// 忘れるの見本を求める (`/forget` の確認の画面、04 §7.1)。記録は変えない。答えは
+    /// [`Event::ForgetPreviewInfo`]。画面は選択を変えるたびに求め直す。
+    PreviewForget {
+        target: FactKey,
+        options: ForgetOptions,
+    },
+    /// 値の行を忘れる (`/forget`、04 §7.1〜§7.3)。`plan` は見本の計画のハッシュ。コアは書く直前に計画を作り
+    /// 直し、違えば実行せずに新しい見本を返す。答えは [`Event::FactForgotten`] か [`Event::ForgetRejected`]。
+    ForgetFact {
+        target: FactKey,
+        options: ForgetOptions,
+        plan: ForgetPlanHash,
+    },
+    /// `broken/` に移した壊れた DB のファイルを消す (忘れるの後に尋ねて、利用者が選んだとき、04 §7.2)。
+    DiscardBroken,
+}
+
+/// 忘れるの選択 (04 §7.1 の確認の画面)。既定は [`ForgetOptions::default`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForgetOptions {
+    /// 出典の発話を伏せ字にする (既定)。偽なら事実だけを消し、選んだ範囲を想起での `[非表示]` にする。
+    pub redact: bool,
+    /// 同じ (主語, 属性) の置き換えの履歴の値もまとめて忘れる。
+    pub history: bool,
+    /// 同じ往復の応答の中で値の鍵が一致する範囲も伏せる (既定)。出典の発話の根拠の外の一致も含む。
+    pub echo: bool,
+    /// ほかのターンで値の鍵が一致する範囲も伏せる。
+    pub others: bool,
+}
+
+impl Default for ForgetOptions {
+    fn default() -> Self {
+        Self {
+            redact: true,
+            history: false,
+            echo: true,
+            others: false,
+        }
+    }
+}
+
+/// 忘れるの計画のハッシュ (04 §7.1 の「見本と計画」。16 進の文字列)。実行の命令に添える。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForgetPlanHash(String);
+
+impl ForgetPlanHash {
+    pub fn new(hex: String) -> Self {
+        Self(hex)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 見本の 1 件: 伏せ字 (か `[非表示]`) にするターンの、前と後の本文を 1 行ずつ (変わる箇所の周り)。`Debug` は
+/// 本文を出さない (ログに忘れる値を残さないため)。
+#[derive(Clone, PartialEq, Eq)]
+pub struct ForgetSample {
+    pub turn: Id,
+    pub role: Role,
+    pub before: String,
+    pub after: String,
+}
+
+impl std::fmt::Debug for ForgetSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgetSample")
+            .field("turn", &self.turn)
+            .field("role", &self.role)
+            .field("before_len", &self.before.len())
+            .field("after_len", &self.after.len())
+            .finish()
+    }
+}
+
+/// 伏せ字にできない理由 (04 §7.1 の「中止」、§7.3)。見本では警告に示し、伏せ字にしないで忘れることを勧める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetWarning {
+    /// 伏せ字にするターンが読めない (読めない記録・新しい版の記録)。
+    UnreadableTurn,
+    /// 取り消す事実の出典の改訂の番号が、今のターンと合わない。
+    StaleSource,
+    /// 伏せ字にする範囲の本文が、忘れる値と合わない (本文が記録と食い違う)。
+    ValueMismatch,
+    /// 伏せ字にするターンが、前の忘れるの指示と合わない。
+    MismatchedTurn,
+}
+
+/// 忘れるの見本 (04 §7.1 の「見本と計画」)。値は見本の本文の中にだけある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetPreview {
+    pub target: FactKey,
+    /// 見本を作った選択 (画面は、今の選択と同じ見本だけを使う)。
+    pub options: ForgetOptions,
+    /// 伏せ字 (か `[非表示]`) にするターンの見本 (ターンの順)。
+    pub samples: Vec<ForgetSample>,
+    /// ほかのターンで値の鍵が一致したターンの数と、範囲の数 (選んでいなくても数える)。
+    pub other_turns: usize,
+    pub other_matches: usize,
+    /// まとめて忘れられる履歴の値の数 (選んでいなくても数える)。
+    pub history_values: usize,
+    /// 伏せ字の範囲に span が重なる、ほかの事実の行 (自動では忘れない、04 §7.1 の「影響するほかの事実」)。
+    pub affected: Vec<FactKey>,
+    /// 根拠の範囲に値の一致が無いので伏せ字にしない出典のターンの数。
+    pub unredacted_sources: usize,
+    /// 出典の発話の、根拠の範囲の外で値の鍵が一致した範囲の数 (`echo` と同じ選択で伏せる)。
+    pub source_outside: usize,
+    /// 位置を戻せないので全体を `[非表示]` にするターンの数 (伏せ字にしないとき)。
+    pub whole_turns: usize,
+    /// 前の忘れるの指示と合わないので飛ばしたターンの数 (伏せ字にしないとき)。
+    pub mismatched_turns: usize,
+    /// 探さずに飛ばした読めないターンの数。
+    pub skipped_unreadable: usize,
+    /// 実行できる計画のハッシュ。伏せ字にできなければ、その理由 (計画は無い)。
+    pub plan: Result<ForgetPlanHash, ForgetWarning>,
+}
+
+/// 忘れるの状態 (状態の行、04 §7.2・§7.8)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForgetState {
+    /// 忘れるの指示と合わないターンの数 (想起・裏の処理・書き出しに使わず、画面は本文を出さない)。
+    pub mismatched: usize,
+    /// ジャーナルに、伏せ字の前の行が残っている (書き直しの入れ替えに失敗した。sleep-time に試し直す)。
+    pub journal_pending: bool,
+    /// `memory.forget_key` が使えないので、忘れた値に当たる事実の取り消しを保留している。
+    pub key_missing: bool,
+}
+
+/// 事実の主語 (04 §5.1)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FactSubject {
+    /// 利用者本人 (`self`)。
+    User,
+    /// 発話にある呼び名 (正規化 v1 の後)。
+    Named(String),
+}
+
+/// 事実の時制 (04 §5.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactTense {
+    Current,
+    Past,
+    Planned,
+}
+
+/// 一覧に示した行の状態の種類 (04 §7.1 の行の参照)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactStatus {
+    Live,
+    Contested,
+    Superseded,
+}
+
+/// 値の行の参照 (04 §7.1): 事実への指示と同じ鍵 (主語, 属性, 値の鍵) と、表示したときの状態の種類と時制。
+///
+/// 等しさとハッシュは `fact` を見ない (事実の ID は作り直すと変わるので照合に使わない。参考として持つ)。
+#[derive(Debug, Clone)]
+pub struct FactKey {
+    pub subject: FactSubject,
+    pub attribute: String,
+    /// 値の鍵 (64 桁の小文字の 16 進)。
+    pub vk: String,
+    pub status: FactStatus,
+    pub tense: FactTense,
+    /// 表示したときの事実の ID (参考)。
+    pub fact: Option<Id>,
+}
+
+impl FactKey {
+    fn parts(&self) -> (&FactSubject, &str, &str, FactStatus, FactTense) {
+        (
+            &self.subject,
+            &self.attribute,
+            &self.vk,
+            self.status,
+            self.tense,
+        )
+    }
+
+    /// 行が属する (主語, 属性)。
+    pub fn group(&self) -> FactGroupKey {
+        FactGroupKey {
+            subject: self.subject.clone(),
+            attribute: self.attribute.clone(),
+        }
+    }
+}
+
+impl PartialEq for FactKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for FactKey {}
+
+impl std::hash::Hash for FactKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parts().hash(state);
+    }
+}
+
+/// (主語, 属性) の参照 (今の値が消えた属性・後継まで効く private の指示だけが残る属性の行、履歴の照会)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FactGroupKey {
+    pub subject: FactSubject,
+    pub attribute: String,
+}
+
+/// `/private off` の対象の行。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FactRowRef {
+    /// 値の行。
+    Value(FactKey),
+    /// 値が 1 つも無く、後継まで効く private の指示だけが残る属性の行。
+    RuleOnly(FactGroupKey),
+}
+
+/// 忘れた事実の一覧の行の参照 (忘れるの指示の ID)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForgottenRef {
+    pub directive: Id,
+}
+
+/// 属性の名前と、多値か (表示名は画面がカタログの表で引く。知らない属性は名前のまま出す)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrInfo {
+    pub name: String,
+    pub multi: bool,
+}
+
+/// private の効く範囲 (04 §7.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrivateScope {
+    /// 指定した値と、同じ (主語, 属性) にあとで入る値 (既定)。
+    Successors,
+    /// この値だけ。
+    ValueOnly,
+}
+
+/// 値が private である理由 (04 §7.5 の「private の理由の表示」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateCause {
+    /// 利用者がこの値を選んだ。
+    Chosen { scope: PrivateScope },
+    /// 後継まで効く指示の後に言われた値。
+    Successor,
+    /// セッションの削除で後継でなくなったので、削除のときに足した指示。
+    KeptAfterDelete,
+}
+
+/// 値の行の private の印。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateInfo {
+    /// 理由 (重ならない。表示の順)。
+    pub causes: Vec<PrivateCause>,
+    /// 効いている private の指示 (`/private off` で解くもの。ほかの行と共有していれば、確認の画面で示す)。
+    pub directives: Vec<Id>,
+}
+
+/// 事実の一覧の 1 行 (04 §7.1 の「番号を振る行」)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactRow {
+    /// 今の値・予定の値・`Contested` の値。
+    Value {
+        key: FactKey,
+        value: String,
+        private: Option<PrivateInfo>,
+    },
+    /// 今の値が消えた属性 (04 §7.4)。履歴に届く。
+    Vacant { group: FactGroupKey },
+    /// 値が 1 つも無く、後継まで効く private の指示だけが残る属性。
+    RuleOnly {
+        group: FactGroupKey,
+        directives: Vec<Id>,
+    },
+}
+
+/// (主語, 属性) ごとの行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactGroup {
+    pub group: FactGroupKey,
+    pub attr: AttrInfo,
+    pub rows: Vec<FactRow>,
+    /// 履歴 (`Superseded`) の値の数。
+    pub history: usize,
+    /// 履歴の値のうち private のもの (`/private off` の確認で、一緒に印が外れる履歴の値を示すため、04 §7.5)。
+    pub private_history: Vec<PrivateHistoryValue>,
+}
+
+/// private の履歴の値 1 つと、それに効いている private の指示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateHistoryValue {
+    pub value: String,
+    pub directives: Vec<Id>,
+}
+
+/// 事実を作っていない・止めている理由 (07 §3 の `/memory`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactsUnavailable {
+    /// `memory.sleep_time = false`。
+    SleepTimeOff,
+    /// 点検で型縛りの補助の呼び出しを止めた (06 §3.3)。
+    StoppedByProbe,
+    /// `memory.forget_key` が使えない (03 §3.1.1)。事実への操作もできない。
+    KeyUnavailable,
+}
+
+/// 事実の一覧 (`/memory`、04 §7.1)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactList {
+    /// 属性の一覧の順 → 主語 (`self` が先) の順。
+    pub groups: Vec<FactGroup>,
+    pub note: Option<FactsUnavailable>,
+}
+
+/// 置き換えの履歴の 1 件 (`/memory history`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactHistoryRow {
+    /// 状態は `Superseded`。
+    pub key: FactKey,
+    pub value: String,
+    /// 置き換えた・終えた出来事の時刻。
+    pub superseded_at: Timestamp,
+    pub private: bool,
+}
+
+/// (主語, 属性) の置き換えの履歴 (新しい順)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactHistory {
+    pub group: FactGroupKey,
+    pub attr: AttrInfo,
+    pub items: Vec<FactHistoryRow>,
+}
+
+/// 忘れた事実の一覧の 1 件 (`/memory forgotten`、値は持たない、04 §7.6)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgottenFact {
+    pub target: ForgottenRef,
+    pub subject: FactSubject,
+    pub attr: AttrInfo,
+    /// 忘れた日時。
+    pub at: Timestamp,
+    /// 忘れた値の数 (再び覚えない印の数)。
+    pub values: usize,
+    /// 出典の発話を伏せ字にしたか。
+    pub redacted: bool,
+    /// 出典のセッションの題名 (残っているもの)。
+    pub sessions: Vec<String>,
+    /// 消えた出典のターンの数 (消えたターンからはセッションが分からないので、ターンで数える)。
+    pub deleted_turns: usize,
+}
+
+/// 事実への操作 (結果の知らせを選ぶため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactOp {
+    Private,
+    PrivateOff,
+    Accept,
+    Revert,
+    Unblock,
 }
 
 /// 答え方の既定の項目 (07 §3)。
@@ -189,6 +571,27 @@ pub struct TurnView {
     pub band_nearby: bool,
     /// この応答で「無関係」の印を付けた往復 (出典・帯の代表のターン)。
     pub irrelevant: Vec<Id>,
+    /// 伏せ字と `[非表示]` の印の範囲 (04 §7.3 の「画面への印の範囲」。始まりの順、重ならない)。
+    pub marks: Vec<TurnMark>,
+    /// 本文が忘れるの指示と合わないので、本文を確かめられない (04 §7.2 の「合わないターン」)。`text` は空。
+    /// 画面は本文の代わりに、確かめられないことを示す。
+    pub unverified: bool,
+}
+
+/// 画面への印 1 つ (04 §7.3)。範囲は今の本文の UTF-8 のバイト位置で、書記素の境界にある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnMark {
+    pub range: std::ops::Range<usize>,
+    pub kind: TurnMarkKind,
+}
+
+/// 印の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMarkKind {
+    /// 本文のその範囲が、すでに伏せ字の印の文字列。そのまま見分けられる表示で出す。
+    Redacted,
+    /// 本文には値が残っている。画面は、その範囲を `[非表示]` の印に置き換えて出す。
+    Hidden,
 }
 
 /// 帯の 1 件 (05 §5.2): セッション名・日時・利用者の発話の冒頭。
@@ -337,10 +740,65 @@ pub enum Event {
         /// 型縛りの出力が空、または型に合わない (型縛りの補助の呼び出しを止める)。
         structured_broken: bool,
     },
+    /// 1 回の裏の処理で事実が増えた・置き換わった・矛盾になった (04 §5.2.1・§5.3 の「知らせ」)。
+    /// 件数だけを持ち、値は持たない。
+    FactsChanged {
+        added: usize,
+        replaced: usize,
+        contested: usize,
+    },
     /// embed・rerank の役割の状態が変わった (繋がった、記録と違った、記録した、06 §3)。
     RoleChanged {
         info: ModelRoleInfo,
         /// この変化でモデルを初めて記録した。
         recorded_now: bool,
     },
+    /// 事実の一覧 (`ShowFacts` の答え)。
+    FactsInfo { list: FactList },
+    /// 置き換えの履歴 (`ShowFactHistory` の答え)。
+    FactHistoryInfo { history: FactHistory },
+    /// 忘れた事実の一覧 (`ShowForgotten` の答え)。
+    ForgottenInfo { items: Vec<ForgottenFact> },
+    /// 事実への操作をした。`list` は操作の後の一覧 (前の番号は使えなくなる)。`slow_next_turn` は、次の応答の前に
+    /// 事実の表を作り直すので、始まるまで少し長くかかるか (04 §5.4)。
+    FactsUpdated {
+        op: FactOp,
+        list: FactList,
+        slow_next_turn: bool,
+    },
+    /// 事実への操作をしなかった。指した行が変わっていたときは、同じ読み取りで作った新しい一覧を持つ
+    /// (04 §7.1。「一覧が更新されました」)。
+    FactOpRejected {
+        error: Message,
+        list: Option<FactList>,
+    },
+    /// 忘れるの見本 (`PreviewForget` の答え)。
+    ForgetPreviewInfo { preview: ForgetPreview },
+    /// 事実を忘れた (`ForgetFact`)。`list` は操作の後の一覧 (前の番号は使えなくなる。読み直せなければ `None`:
+    /// 忘れるは済んでいる)。`redacted` は伏せ字か `[非表示]` の範囲を足したターンの数。`journal_pending` は、
+    /// ジャーナルの書き直しが済んでいない (sleep-time に試し直す、04 §7.8)。`broken` は `broken/` に残っている
+    /// 壊れた DB の置き場所 (`broken/<日時>/` のフォルダ) の数 (消すかを尋ねる、04 §7.2)。`slow_next_turn` は、
+    /// 次の応答の前に事実の表を作り直すので、始まるまで少し長くかかるか (04 §5.4)。
+    FactForgotten {
+        list: Option<FactList>,
+        redacted: usize,
+        journal_pending: bool,
+        broken: usize,
+        slow_next_turn: bool,
+    },
+    /// 忘れるの見本を作れなかった・実行しなかった。見本の後に計画が変わったときは、新しい見本を持つ (04 §7.1。
+    /// 利用者が見ていない範囲を伏せないため)。指した行が変わっていたときは、新しい一覧を持つ。
+    ForgetRejected {
+        error: Message,
+        preview: Option<ForgetPreview>,
+        list: Option<FactList>,
+    },
+    /// 開いているセッションのターンに、伏せ字か `[非表示]` の範囲ができた (04 §7.3)。`turns` は読み直したターン
+    /// (印の範囲と帯を持つ。伏せたターンと、帯に伏せたターンを含む応答)。画面は同じ ID のターンを置き換えて
+    /// 描き直す。
+    TurnsRedacted { session: Id, turns: Vec<TurnView> },
+    /// 忘れるの状態が変わった (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
+    ForgetState { state: ForgetState },
+    /// `broken/` の置き場所 (フォルダ) を消した (`DiscardBroken` の答え)。`failed` は消せなかった数。
+    BrokenDiscarded { removed: usize, failed: usize },
 }

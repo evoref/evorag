@@ -16,7 +16,7 @@ use evorag_types::Id;
 
 use crate::power::Power;
 use crate::sleep::OnBattery;
-use crate::{Inner, context, prompt};
+use crate::{Inner, context};
 
 /// 先に済ませる処理の task。
 #[derive(Default)]
@@ -83,11 +83,9 @@ pub(crate) fn warm_next(inner: &Arc<Inner>, session: Id) {
         let reserve = context::reserve_for_output(n_ctx, worker.reserve);
         // 今の応答までを履歴に入れる (まだ無い発話より後の ID で切る)。
         let conv = crate::conversation(&worker, session, Id::from_bytes([0xff; 16]));
+        // 応答と同じシステムプロンプト (事実の表を含む) にする。
         let defaults = *worker.answer.lock().unwrap_or_else(|e| e.into_inner());
-        let system = ChatMessage::new(
-            Role::System,
-            prompt::system_prompt(worker.language, &defaults),
-        );
+        let (system, _) = crate::system_message(&worker, session, &defaults).await;
         // 今の発話の枠は空にする (次の発話の見出しまでが同じ先頭になる)。
         let assembled = context::assemble(
             &*llm,
@@ -133,7 +131,7 @@ fn start_idle(inner: &Arc<Inner>, text: String) {
     if !inner.precompute || on_battery(inner).is_some_and(|b| b != OnBattery::Normal) {
         return;
     }
-    if text.trim().is_empty() || crate::is_running(inner) {
+    if text.trim().is_empty() || crate::is_running(inner) || crate::forgetting(inner) {
         return;
     }
     let Some(session) = crate::current_session(inner) else {

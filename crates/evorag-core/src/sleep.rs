@@ -3,7 +3,8 @@
 //! 手順は 2 種類ある。
 //! - **起動後の点検** (モデルの点検 06 §3.3、リランカーの較正 05 §3.7): TUI を開いた後に、入力が途切れ
 //!   (`CHECK_QUIET`)、応答を作っていない間に流す。`memory.sleep_time` と `idle_seconds` には縛らない。
-//! - **sleep-time の手順** (埋め込み、ノートなど。M2.5 から): 操作の無い時間が `idle` を過ぎてから。
+//! - **sleep-time の手順** (埋め込み、ノート、事実の抽出と統合など。M2.5 から): 操作の無い時間が `idle` を
+//!   過ぎてから。
 //!
 //! どちらも、利用者が操作したら ([`super::Core::touch`]) 動いている手順の future を落とす。LLM の要求は
 //! 接続ごと閉じるので、llama-server の処理も止まる (06 §4)。止めたところまでの結果は、作り直せるものだけを
@@ -88,8 +89,22 @@ pub(crate) enum Step {
     Embed,
     /// ノートの検索の鍵を作る (04 §2、04 §4 の手順 2)。sleep-time の手順。
     Notes,
+    /// 事実の候補を抽出して統合する (04 §5.2.1、04 §4 の手順 3・5)。訂正の候補もここで見つける (04 §6)。
+    /// sleep-time の手順。
+    Extract,
+    /// 訂正の候補を検証し、検証済みの訂正を統合する (04 §6、04 §4 の手順 4・5)。抽出の後に置く (抽出の呼び出しを
+    /// すべて終えてから検証に移る)。sleep-time の手順。
+    Verify,
+    /// 事実の検索の鍵を索引に合わせ、事実の表を作り直す (04 §5.4・§5.5、04 §4 の手順 6・7)。sleep-time の手順。
+    FactTable,
     /// 自動の退避 (03 §7.1、04 §4 の手順 7)。日をまたいで動いているとき。sleep-time の手順。
     Backup,
+    /// 済まなかった整理の job (消した ID を索引と退避から除く、03 §7.3、04 §7.7 の 2・5) を試し直す。
+    /// sleep-time の手順。
+    Cleanup,
+    /// 忘れるの当て直しの残り (DB の層と、入れ替えに失敗したジャーナルの書き直し) を確かめ直す (04 §7.2)。
+    /// sleep-time のほかの手順の前に置く。
+    Forget,
 }
 
 /// sleep-time の手順を動かせる状態か。
@@ -123,11 +138,29 @@ fn sleep_ready(inner: &Inner) -> Result<(), BackgroundState> {
 /// 要る sleep-time の手順 (状態から求める)。
 fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     let waiting = |s: Step| skip.get(&s).is_some_and(|t| t.elapsed() < BACKOFF);
+    if !waiting(Step::Forget) && crate::forgets::needed(inner) {
+        return Some(Step::Forget);
+    }
     if !waiting(Step::Embed) && crate::embedding::needed(inner) {
         return Some(Step::Embed);
     }
     if !waiting(Step::Notes) && crate::notes::needed(inner) {
         return Some(Step::Notes);
+    }
+    if !waiting(Step::Extract) && crate::extraction::needed(inner) {
+        return Some(Step::Extract);
+    }
+    if !waiting(Step::Verify) && crate::correction::needed(inner) {
+        return Some(Step::Verify);
+    }
+    if !waiting(Step::FactTable) && crate::fact_table::needed(inner) {
+        return Some(Step::FactTable);
+    }
+    if !waiting(Step::Cleanup)
+        && inner.startup_done.load(Ordering::SeqCst)
+        && crate::cleanup_needed(inner)
+    {
+        return Some(Step::Cleanup);
     }
     if !waiting(Step::Backup)
         && inner.startup_done.load(Ordering::SeqCst)
@@ -305,6 +338,14 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
             }
             Step::Embed => crate::embedding::run(inner).await,
             Step::Notes => crate::notes::run(inner).await,
+            Step::Extract => crate::extraction::run(inner).await,
+            Step::Verify => crate::correction::run(inner).await,
+            Step::FactTable => crate::fact_table::run(inner).await,
+            Step::Cleanup => crate::run_cleanup_jobs(inner).await,
+            Step::Forget => {
+                crate::forgets::recheck(inner).await;
+                false
+            }
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

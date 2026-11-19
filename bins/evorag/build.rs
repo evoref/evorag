@@ -3,6 +3,10 @@
 //! - 入れ方は、ビルドのときの環境変数 `EVORAG_CHANNEL` で埋め込む (配布物は `zip`。無ければ `cargo`)。
 //!   パスから推測しない。
 //! - コミットは `git` で得る (得られなければ `unknown`)。
+//! - リリースの日付は、環境変数 `EVORAG_RELEASE_DATE` (`YYYY-MM-DD`、UTC) で埋め込む (12 §5.3)。
+//!   `cargo xtask dist` がタグの指すコミットの committer の日時から求めて渡す。`EVORAG_CHANNEL=zip`
+//!   なのに無ければ、ビルドを失敗させる (12 §7.4)。開発のビルドでは埋め込まない
+//!   (`option_env!("EVORAG_RELEASE_DATE")` が `None`)。
 
 use std::path::Path;
 use std::process::Command;
@@ -14,6 +18,11 @@ fn output(cmd: &str, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
 }
+
+// リリースの日付の確かめ。evorag-update の試験が、ReleaseDate と同じ条件であることを確かめる。
+mod build_date;
+
+use build_date::is_date;
 
 fn main() {
     let commit =
@@ -29,6 +38,24 @@ fn main() {
     println!("cargo:rustc-env=EVORAG_TARGET={target}");
     println!("cargo:rustc-env=EVORAG_CHANNEL={channel}");
     println!("cargo:rerun-if-env-changed=EVORAG_CHANNEL");
+    println!("cargo:rerun-if-env-changed=EVORAG_RELEASE_DATE");
+    match std::env::var("EVORAG_RELEASE_DATE")
+        .ok()
+        .filter(|d| !d.is_empty())
+    {
+        Some(date) if is_date(&date) => {
+            println!("cargo:rustc-env=EVORAG_RELEASE_DATE={date}");
+        }
+        Some(date) => {
+            panic!(
+                "EVORAG_RELEASE_DATE must be a real date YYYY-MM-DD (UTC), not `{date}` (12 §5.3)"
+            )
+        }
+        None if channel == "zip" => panic!(
+            "EVORAG_CHANNEL=zip needs EVORAG_RELEASE_DATE (YYYY-MM-DD, UTC; 12 §7.4); build the release with `cargo xtask dist`"
+        ),
+        None => {}
+    }
     // コミットが変わったら作り直す (無いパスを渡すと毎回作り直すので、あるものだけ)。
     let git = Path::new("../../.git");
     if let Ok(head) = std::fs::read_to_string(git.join("HEAD")) {

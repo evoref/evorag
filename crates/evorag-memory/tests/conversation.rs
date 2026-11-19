@@ -218,7 +218,7 @@ fn deleting_a_session_removes_its_turns_signals_and_links() {
 
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(gone)).unwrap()
+        delete_session(&rtx, &env.session(gone), &env.writes()).unwrap()
     };
     env.write(ops);
 
@@ -290,7 +290,7 @@ fn the_conversation_is_rebuilt_from_the_journal_alone() {
         env.write(ops);
         let ops = {
             let rtx = env.store.read().unwrap();
-            delete_session(&rtx, &env.session(gone)).unwrap()
+            delete_session(&rtx, &env.session(gone), &env.writes()).unwrap()
         };
         env.write(ops);
         env.write(vec![evorag_store::WriteOp::SetMetaOnce {
@@ -372,7 +372,7 @@ fn deleting_a_session_removes_its_text_from_the_journal() {
     assert!(journal_text(dir.path()).contains("秘密の本文"));
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(sid)).unwrap()
+        delete_session(&rtx, &env.session(sid), &env.writes()).unwrap()
     };
     env.write(ops);
     let text = journal_text(dir.path());
@@ -569,7 +569,7 @@ fn a_turn_this_version_cannot_read_is_counted_and_the_rest_of_the_session_opens(
     // セッションを消すと、読めないターンも一緒に消える (FR-309)。
     let ops = {
         let rtx = env.store.read().unwrap();
-        delete_session(&rtx, &env.session(sid)).unwrap()
+        delete_session(&rtx, &env.session(sid), &env.writes()).unwrap()
     };
     env.write(ops);
     let rtx = env.store.read().unwrap();
@@ -634,4 +634,76 @@ fn unreadable_turns_and_signals_keep_their_links_when_rebuilt_from_the_journal()
     let read = session_turns_counted(&rtx, sid).unwrap();
     assert_eq!(read.turns.len(), 1);
     assert_eq!(read.unreadable, 1);
+}
+
+fn session_lookups(env: &Env) -> Vec<evorag_types::Id> {
+    env.store
+        .read()
+        .unwrap()
+        .lookup(
+            KIND_SESSION,
+            "updated_at",
+            &evorag_store::LookupRange::Between {
+                from: None,
+                to: None,
+            },
+            false,
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|l| l.id)
+        .collect()
+}
+
+/// セッションの更新時刻の副索引は、書き手が読み直したセッションから付け替える。外で読んだ古い封筒で書いても
+/// 古い項目が残らず、削除で副索引も消える。
+/// verifies: 04 §7.7 の 3 (外で読んだ封筒を書き戻さない)
+#[test]
+fn the_session_lookup_follows_the_reread_session_and_goes_with_it() {
+    let dir = TempDir::new("conv-lookup-reread");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("架空の題").unwrap();
+    env.write(ops);
+    let stale = env.session(sid);
+    for text in ["一つ目", "二つ目"] {
+        env.clock.advance(10);
+        // 応答の経路は、前に読んだ (古い更新時刻の) セッションで書く。
+        let (_, ops) = env.writes().user_turn(&stale, text).unwrap();
+        env.write(ops);
+    }
+    assert_eq!(session_lookups(&env), [sid], "one entry per session");
+    let rtx = env.store.read().unwrap();
+    let s = load_session(&rtx, sid).unwrap();
+    let ops = delete_session(&rtx, &s.envelope, &env.writes()).unwrap();
+    drop(rtx);
+    env.write(ops);
+    assert!(session_lookups(&env).is_empty());
+}
+
+/// セッションだけが消えて残ったターン (開くときに当て直した削除の後、古い版が書き足していたもの) を数える。
+/// verifies: 03 §6
+#[test]
+fn turns_left_without_their_session_are_counted() {
+    let dir = TempDir::new("conv-orphan-turns");
+    let env = Env::open(dir.path());
+    let (sid, ops) = env.writes().create_session("架空の題").unwrap();
+    env.write(ops);
+    let (_, ops) = env
+        .writes()
+        .user_turn(&env.session(sid), "架空の発話")
+        .unwrap();
+    env.write(ops);
+    assert_eq!(
+        turns_without_session(&env.store.read().unwrap()).unwrap(),
+        0
+    );
+    env.write(vec![evorag_store::WriteOp::Delete {
+        kind: KIND_SESSION.into(),
+        id: sid,
+    }]);
+    assert_eq!(
+        turns_without_session(&env.store.read().unwrap()).unwrap(),
+        1
+    );
 }

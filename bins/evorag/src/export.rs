@@ -4,7 +4,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use evorag_store::export::{ExportError, export};
+use evorag_core::export_checks::ExportFilter;
+use evorag_store::export::{ExportError, ExportOptions, export};
 use evorag_tui::catalog::Catalog;
 use evorag_types::MessageKey;
 
@@ -49,19 +50,36 @@ fn copy_config(config_file: &Path, out: &Path) -> std::io::Result<bool> {
 pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms: i64) -> ExitCode {
     // 書き出すのは 03 §11 の「含めるもの」だけ。作り直せる派生の記録 (チャンク・埋め込み・点検の結果) と
     // 手順の記録 (job) は書き出さない。ノートは含める (OQ-37 の 9)。
-    let report = match export(
-        data_root,
-        out,
-        env!("CARGO_PKG_VERSION"),
+    // 当て直しの済んでいない忘れると、出典の無い・出典の改訂の番号が合わない派生の記録、忘れるの指示と合わない
+    // ターンの確かめは、コアのメモリの層の判定を `checks` に渡す (03 §11、04 §7.2)。
+    let checks = ExportFilter::new();
+    let opts = ExportOptions {
+        evorag_version: env!("CARGO_PKG_VERSION"),
         now_ms,
-        &[
+        exclude: &[
             evorag_memory::KIND_MODEL_PROBE,
             evorag_memory::KIND_CHUNK,
             evorag_memory::KIND_EMBEDDING,
             evorag_memory::KIND_JOB,
         ],
-    ) {
+        checks: &checks,
+    };
+    let report = match export(data_root, out, &opts) {
         Ok(r) => r,
+        Err(ExportError::PendingJournal { lines }) => {
+            eprintln!(
+                "{}",
+                c.with(
+                    MessageKey::CliExportRefusedJournal,
+                    &[("count", &lines.to_string())]
+                )
+            );
+            return ExitCode::from(1);
+        }
+        Err(ExportError::PendingForget) => {
+            eprintln!("{}", c.key(MessageKey::CliExportRefusedForget));
+            return ExitCode::from(1);
+        }
         Err(ExportError::NotEmpty(p)) => {
             eprintln!(
                 "{}",
@@ -107,8 +125,8 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
         .kinds
         .iter()
         .map(|(k, n)| format!("{k} {n}"))
-        .collect::<Vec<_>>()
-        .join("、");
+        .collect::<Vec<_>>();
+    let kinds = c.join_comma(&kinds);
     println!(
         "{}",
         c.with(
@@ -129,15 +147,6 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
                     ("newer", &report.skipped_newer.to_string()),
                     ("corrupt", &report.skipped_corrupt.to_string()),
                 ],
-            )
-        );
-    }
-    if report.pending_journal > 0 {
-        eprintln!(
-            "{}",
-            c.with(
-                MessageKey::CliExportPending,
-                &[("count", &report.pending_journal.to_string())]
             )
         );
     }

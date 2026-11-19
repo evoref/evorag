@@ -28,6 +28,25 @@ style_unknown_value = "/style {item} に「{value}」は選べません。選べ
 band_not_latest = "帯の記録を添えて作り直せるのは、最新の応答の帯だけです。"
 band_unknown = "その記録は、この応答の帯にありません。"
 feedback_not_saved = "印を記録できませんでした。もう一度試してください。"
+mask_unavailable = "記録を読めず、伏せる値 (private・忘れた値) を確かめられないので、表示しませんでした。"
+
+[error.facts]
+list_outdated = "一覧が更新されました。指した行が、一覧を表示した後に変わったので、実行しませんでした。新しい一覧の番号で選び直してください。"
+not_allowed = "その行には、その操作はできません (private でない行への /private off、矛盾でない行への /memory accept など)。"
+disabled = "忘れるの鍵 (memory.forget_key) が使えないので、事実への操作はできません (evorag doctor で詳しく見られます)。"
+blocked = "その値は忘れた値なので、戻せません。/memory forgotten と /memory unblock で、再び覚えない印を先に解いてください。"
+not_saved = "事実への操作を記録できませんでした ({detail})。"
+no_list = "番号の付いた一覧がまだありません。先に {list} を打ってください。"
+bad_number = "番号「{n}」は、表示した一覧にありません (事実は F1、履歴は H1、忘れた事実は X1 の形。頭の文字は省けます)。"
+
+[error.forget]
+busy = "応答を生成している間は、忘れられません。応答が終わるか中断してから、もう一度 /forget を打ってください。"
+outdated = "見本を出した後に記録が変わったので、実行しませんでした。新しい見本を確かめて、もう一度 Enter を押してください。"
+aborted = "伏せ字にできないので、忘れるを中止しました。本文も事実も変えていません。見本の警告を確かめてください (伏せ字にしないで、事実だけを消すこともできます)。"
+blocked = "この選択では伏せ字にできないので、実行しません。選択の「出典の発話を伏せ字にする」を外すと、発話はそのままで事実だけを消せます。"
+counting = "見本を数えています。数え終わってから Enter を押してください。"
+in_progress = "事実を忘れています。終わるまで少し待ってから、もう一度送ってください。入力した文章は残してあります。"
+not_saved = "忘れるを記録できませんでした ({detail})。本文も事実も変えていません。"
 
 [response]
 interrupted = "中断しました。受け取ったところまでを保存しました。"
@@ -44,6 +63,9 @@ default_session_title = "新しい会話"
 interrupted = "(中断)"
 failed = "(失敗)"
 no_reply = "(応答なし)"
+unverified = "(本文を確かめられません。忘れた内容と本文が合わないので、表示しません)"
+hidden = "[非表示]"
+redacted = "[伏せ字]"
 
 [ui.status]
 idle = "待機中"
@@ -59,6 +81,8 @@ recall_failed = "想起: 候補だけ → evorag setup"
 recall_rebuilding = "想起: 作り直し中 {percent}%"
 generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
+forget_mismatched = "確かめられない本文 {count} 件"
+forget_journal = "ジャーナルの書き直し待ち"
 
 [ui.title]
 session = "セッション: {title}"
@@ -83,9 +107,14 @@ Enter 送信 / Shift+Enter・Alt+Enter 改行 / Esc 生成の中断 / Ctrl+E 外
 /delete          今のセッションを消す (確認あり)
 /retry           直前の応答を作り直す
 /good, /bad [理由]  直前の応答を評価する
-/model [名前]    使っているモデルの表示と、設定にある候補への切り替え
+/model           記録したモデルと繋がっているモデルの表示 (切り替えは evorag setup)
 /sources [on|off]  以前の会話を応答に添えるか (このセッションだけ)
-/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由と、このセッションの出典
+/memory          直前の応答に添えた記録・候補の帯・リランクの値・縮退の理由、このセッションの出典、事実の一覧 (F1…)
+/memory accept F1    矛盾の値を今の値にする
+/memory history F1   その属性の置き換えの履歴 (H1…)。/memory revert H1 で今の値に戻す
+/memory forgotten    忘れた事実の一覧 (X1…)。/memory unblock X1 で再び覚えない印を解く
+/private F1      事実を応答に添えないようにする (確認あり)。/private off F1 で解く
+/forget F1       事実を忘れる (確認あり。既定では出典の発話を伏せ字にする)
 /style [項目 値]  答え方の既定 (言語・長さ・書式)。値なしで選ぶ窓を開く (すべてのセッションに効く)
 /quit            終了
 //...            / で始まる文をそのまま送る"""
@@ -112,6 +141,131 @@ calibrated = "リランカーの較正が終わりました。以前の会話を
 calibration_failed = "リランカーが較正の基準に届かなかったので、以前の会話は自動では添えず、候補として示します。別のリランカーを evorag setup で選べます。"
 probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
+
+[ui.notice.facts]
+changed = "覚えた事実: {parts}"
+added = "事実 +{n}"
+replaced = "置き換え {n}"
+contested = "矛盾 {n}"
+
+[ui.facts]
+title = "メモリ"
+label = "{subject}・{attr}"
+header = "事実の一覧 (利用者の発言から作ったもの):"
+empty = "  まだ事実はありません。"
+self = "あなた"
+row = "  F{n} {subject}・{attr}: {value}{marks}"
+vacant = "  F{n} {subject}・{attr}: (今の値なし。履歴 {history} 件、/memory history F{n} で見られます)"
+rule_only = "  F{n} {subject}・{attr}: (値なし。この属性にあとで入る値も private にする指示だけが残っています)"
+mark_contested = " [矛盾]"
+mark_planned = " [予定]"
+mark_changed = " ← 前に見てから変わりました"
+mark_private_successors = " [private: 選んだ値 (後の値にも効く)]"
+mark_private_value_only = " [private: 選んだ値]"
+mark_private_successor = " [private: 指示の後に言われた値]"
+mark_private_kept = " [private: セッションの削除で残した]"
+mark_history = " (履歴 {n} 件)"
+mark_private = " [private]"
+note_sleep_off = "  事実を新しく作っていません (memory.sleep_time = false)。"
+note_probe = "  モデルの点検で型縛りの出力が使えなかったので、事実を新しく作っていません (evorag doctor)。"
+note_key = "  忘れるの鍵 (memory.forget_key) が使えないので、事実の機能を止めています。事実への操作もできません (evorag doctor)。"
+hint = "/forget F1・/private F1・/private off F1・/memory accept F1・/memory history F1 で操作します。番号はこの一覧のものです。"
+history_title = "{subject}・{attr} の置き換えの履歴:"
+history_row = "  H{n} {value} ({at} まで){marks}"
+history_empty = "  履歴はありません。"
+history_hint = "/memory revert H1 で、その値を今の値に戻します。"
+forgotten_title = "忘れた事実 (値は表示しません):"
+forgotten_row = "  X{n} {subject}・{attr} ({at} に忘れた、値 {values} 件、{how}) 出典: {sessions}"
+forgotten_redacted = "発話を伏せ字にした"
+forgotten_kept = "発話はそのまま"
+forgotten_deleted = "消したターン {n} 件"
+forgotten_empty = "  忘れた事実はありません。"
+forgotten_hint = "/memory unblock X1 で再び覚えない印を解くと、同じ値をまた覚えられるようになります。"
+done_private = "private にしました。事実の表と検索の鍵から外し、想起で添える往復の中の値を伏せます。"
+done_private_off = "private を解きました。"
+done_accept = "その値を今の値にしました。"
+done_revert = "その値を今の値に戻しました。"
+done_unblock = "再び覚えない印を解きました。"
+slow_next = "次の応答は、事実の表を作り直すので、始まるまで少し長くかかります。"
+
+[ui.panel]
+hint = "↑↓・PageUp・PageDown でスクロール、Esc で閉じる"
+
+[ui.private]
+title = "private にする"
+body = """{label}
+
+この値を事実の表と検索の鍵から外し、想起で添える往復の中の値を [非表示] にします。
+・記録は消しません (/private off で解けます)。
+・今のセッションのこれまでのやり取りには残ります。
+・llama-server には今の値を送らなくなるだけです (llama-server が覚えているものは消えません)。"""
+multi = "・この属性は値を並べて持つので、すでにある兄弟の値 (同じ属性のほかの値) は対象になりません。"
+remote = "・llm.allow_remote の構成では、発話の本文が裏の処理の呼び出しで外の機械に出ることがあります。"
+scope_successors = "この値と、同じ属性にあとで入る値 (既定)"
+scope_value_only = "この値だけ"
+hint = "↑↓ で効く範囲を選び、Enter で実行、Esc でやめる"
+
+[ui.private_off]
+title = "private を解く"
+body = "{label}\n\nこの行に効いているすべての private の指示を解きます。"
+others = "次の行の private の印も外れます:"
+history = "履歴の値 {n} 件の private の印も外れます:"
+hint = "Enter で実行、Esc でやめる"
+
+[ui.forget]
+title = "事実を忘れる"
+target = "忘れる事実: {label}"
+counting = "数えています…"
+samples_redact = "出典の発話を伏せ字にします (前 → 後):"
+samples_hide = "発話はそのままで、想起で添える本文の中の値を [非表示] にします (前 → 後):"
+sample_before = "  前 ({who}): {text}"
+sample_after = "  後: {text}"
+no_samples = "  伏せる本文はありません (事実だけを消します)。"
+others = "ほかのターンで値が一致: {turns} 件 ({matches} 箇所)"
+history = "まとめて忘れられる履歴の値: {n} 件"
+skipped = "読めずに飛ばしたターン: {n} 件 (新しい版の記録など)"
+unredacted = "値が見つからず、伏せ字にしない出典の発話: {n} 件"
+source_outside = "出典の発話の、根拠の外で値が一致した箇所: {n} 箇所 (同じ往復の応答と同じ選択で伏せます)"
+whole = "位置を戻せないので全体を [非表示] にするターン: {n} 件"
+mismatched = "忘れた内容と本文が合わないので飛ばしたターン: {n} 件"
+affected = "伏せ字に掛かるほかの事実 (自動では忘れません。忘れるときは、その行を /forget で選んでください):"
+warning = "伏せ字にできません: {reason}\n選択の「出典の発話を伏せ字にする」を外すと、発話はそのままで事実だけを消せます。"
+warn_unreadable = "伏せ字にする発話が読めません (新しい版の記録など)"
+warn_stale = "事実の出典の位置が、今の発話と合いません"
+warn_value = "発話の中の値が、記録した事実と合いません"
+warn_mismatched = "発話が、前に忘れた内容と合いません"
+kept_note = "発話は記録・ジャーナル・退避にそのまま残ります。このセッションで会話を続けると、これまでのやり取りとして、発話はそのままモデルに送られます。事実の表と検索の鍵からは消え、想起で添える本文の中の値は [非表示] になります。"
+choices_folded = "選択: {summary} (Tab で開く)"
+choice_redact = "出典の発話を伏せ字にする"
+choice_history = "置き換えの履歴の値もまとめて忘れる"
+choice_echo = "同じ往復の応答の中の値も伏せる"
+choice_others = "ほかのターンの値も伏せる"
+promise_folded = "約束する範囲・しない範囲 (? で開く)"
+promise = """約束する範囲 (すぐに取り除きます):
+・evorag の DB (事実を取り消し、発話を伏せ字にし、そこから作った記録を消します。次の起動で DB のファイルを詰め直します)
+・会話のジャーナル (伏せ字にする前の行を書き直します)
+・検索の索引、自動の退避 (退避は裏で写し直します)、隔離した記録
+・llama-server の応答のスロットのキャッシュ (消去を求めます。既定の構成では断られます)
+
+約束しない範囲:
+・書き出したファイル、OS のバックアップ・スナップショット、SSD の物理的な消去
+・llama-server のログと、主記憶のプロンプトのキャッシュ (llama-server を再起動するまで残りえます)・スロットの保存
+・次の起動までの DB のファイルの空き領域、書き直せずに残ったジャーナルの行 (状態の行と evorag doctor で知らせます)
+・Windows で消せずに残った索引のセグメント (次の起動時に消します)
+・消すかを尋ねて残した broken/ のファイル
+・古い版 (v0.2.x) で開いている間のこと、/bad に添えた理由、セッションの題名
+・伏せ字に掛かったほかの事実 (選んで忘れるまで残ります)、伏せ字の長さから分かる値の長さ、再び覚えない印から値を推測されうること"""
+hint = "Enter で忘れる、Esc でやめる、Tab で選択を開く、? で約束の範囲、↑↓・PageUp・PageDown・Home でスクロール"
+hint_open = "↑↓ で選び Space で切り替え、Tab で閉じる、Enter で忘れる、Esc でやめる"
+sending = "忘れています…"
+done = "忘れました。伏せ字か [非表示] にしたターン: {n} 件。"
+done_kept = "忘れました。発話はそのまま残しています。"
+broken = "broken/ に、壊れて移した DB の置き場所 (フォルダ) が {n} 個あります。忘れた値が残っているかもしれません (中身を読まないので、伏せ字にはできません)。消しますか? y で消す / n (Esc) で残す"
+broken_removed = "broken/ の置き場所 (フォルダ) を {n} 個消しました。"
+broken_failed = "broken/ の置き場所 (フォルダ) を {n} 個消せませんでした (evorag doctor で残りを確かめられます)。"
+broken_later = "broken/ に、壊れて移した DB の置き場所 (フォルダ) が {n} 個あります。次に /memory で事実の一覧を開いたときに、消すかを尋ねます。"
+list_unreadable = "忘れました。事実の一覧を読み直せなかったので、/memory で開き直してください (前の番号は使えません)。"
+continues = "確認の画面を閉じました。忘れるは続けています (終わったら知らせます)。"
 
 [ui.band]
 related = "関係しそうな記録 (この応答には使っていません)"
@@ -142,6 +296,12 @@ unknown_command = "知らないコマンドです: {name} (/help で一覧を表
 not_yet = "{name} は、この版ではまだ使えません。"
 editor = "外部のエディタで開けませんでした ({detail})。環境変数 VISUAL か EDITOR でエディタを指定できます。"
 
+# 並べた語・項目・文の区切り。
+[ui.sep]
+comma = "、"
+dot = "・"
+sentence = "。"
+
 [cli]
 model_mismatch = """応答のモデルが、このデータ根に記録したモデルと違います。
   記録したモデル: {recorded}
@@ -165,10 +325,12 @@ llm_unauthorized = "llama-server ({url}) が API キーを受け付けません�
 data_root_in_use = "データ根 ({path}) は、ほかの evorag (pid {pid}) が使っています。\n会話のデータは無事です。先に起動した evorag を終えてから、もう一度実行してください。"
 data_root_unusable = "データ根を使えません: {detail}"
 config_error = "設定ファイルに誤りがあります: {detail}"
+config_newer_hint = "この設定は、より新しい版の evorag のものです。古い版に戻す途中で止まったなら evorag update rollback を、新しい版に上げるなら evorag update apply を実行してください。"
 config_ignored = "設定のキー {key} は、この版ではまだ使いません (無視します)。"
 config_migrated = "設定ファイル {path} を今の版の形に書き換えました (元のファイルは {backup} に残しました)。"
 prompt_language_fixed = "プロンプトの言語は、このデータ根では {recorded} に決まっています。設定の prompt.language は使いません。"
 error = "エラー: {detail}"
+env_unset = "(未設定)"
 unsafe_location = "データ根か退避先が危ない置き場所です: {detail}\n同期フォルダやネットワークの上では、データが壊れることがあります。別の場所を --data-root か設定の storage.data_root で指定してください。どうしても使うときは、設定に storage.allow_unsafe_location = true を書くと警告だけになります。"
 location_warning = "置き場所の注意: {detail}"
 broken = "データベースのファイルが壊れていたので、消さずに {moved_to} へ移しました ({reason})。"
@@ -177,11 +339,41 @@ restored = "退避 {from} から戻しました。その後の会話はジャー
 rebuilt = "派生データを作り直しました (退避: {backup}、消した派生の記録 {removed} 件、語彙の索引の項目 {docs} 件)。ノート・埋め込み・モデルの点検は、次に evorag を開いたときに裏の処理で作ります。"
 rebuilt_index = "索引を作り直しました (退避: {backup}、語彙の索引の項目 {docs} 件)。ベクトルの索引は、次に evorag を開いたときに埋め込みの記録から作り直します。"
 rebuild_failed = "作り直せませんでした: {detail}"
+rebuilding_facts = "事実を会話から抽出し直しています。llama-server を使うので、時間がかかることがあります。"
+rebuilt_facts = "事実を作り直しました (退避: {backup}、発話 {utterances} 件から事実 {facts} 件、前の事実 {old} 件を消しました。当て直した検証済みの訂正 {corrections} 件、送らなかった発話 {skipped} 件 (短い・挨拶など {filtered} 件、長すぎる {too_long} 件、本文が記録と合わない {mismatch} 件))。事実への指示 (忘れる・private・採る・戻す) は当て直しました。続けて、派生データも作り直しました (消した派生の記録 {removed} 件、語彙の索引の項目 {docs} 件)。ノート・埋め込み・モデルの点検は、次に evorag を開いたときに裏の処理で作ります。"
+rebuilt_facts_partial = "注意: 抽出できずに飛ばした発話が {lost} 件あり、作り直しは部分的です (出力が上限で切れた {truncated} 件、出力が型に合わない {invalid} 件)。\nこれらの発話からは事実を作っていません。llama-server の状態とログを確かめてから、もう一度 evorag rebuild --facts を実行すると取り直せます。"
+rebuild_facts_unreachable = "llama-server ({url}) に接続できないので、事実を作り直せませんでした: {detail}\n事実と派生データは前のまま変えていません。llama-server を起動してから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_facts_model_mismatch = "応答のモデルが、このデータ根に記録したモデルと違うので、事実を作り直しませんでした (記録: {recorded}、今: {connected})。\n事実と派生データは前のまま変えていません。記録したモデルで llama-server を起動し直すか、evorag setup で切り替えてから実行してください。"
+rebuild_facts_no_probe = "接続しているモデルの点検の結果が無いので、事実を作り直せませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動してモデルの点検を済ませてから、もう一度実行してください。"
+rebuild_facts_probe_failed = "接続しているモデルは、点検で型縛りの出力か思考を切ることが通らなかったので、事実を抽出できません。\n事実と派生データは前のまま変えていません。"
+rebuild_facts_context_too_small = "llama-server のスロットの文脈 ({n_ctx} トークン) が、事実の抽出には足りません。\n事実と派生データは前のまま変えていません。"
+rebuild_facts_key_unusable = "忘れるの鍵 (memory.forget_key) を使えないので、事実を作り直せませんでした ({detail})。\n事実と派生データは前のまま変えていません。evorag doctor で状態を確かめてください。"
+rebuild_facts_forget_pending = "忘れるの当て直しが済んでいないので、事実を作り直しませんでした。\n事実と派生データは前のまま変えていません。evorag を一度起動して終了してから、もう一度実行してください。"
+rebuild_facts_newer = "このデータ根には、新しい版の evorag が書いた事実が {count} 件あるので、事実を作り直しませんでした (新しい版の記録を消さずに残すため)。\n事実と派生データは前のまま変えていません。作り直すときは、新しい版の evorag で実行してください。"
+rebuild_facts_rejected = "llama-server ({url}) が事実の抽出の要求を断ったので、作り直しを止めました: {detail}\n事実と派生データは前のまま変えていません。llama-server のログと設定 (文脈の長さ・型縛りの出力) を確かめてから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_facts_failed = "llama-server ({url}) への事実の抽出の要求が {attempts} 回続けて失敗した (締切切れか 5xx) ので、作り直しを止めました: {detail}\n事実と派生データは前のまま変えていません。llama-server の状態を確かめてから、もう一度 evorag rebuild --facts を実行してください。"
+rebuild_failed_after_facts = "事実は作り直して入れ替えましたが、続く派生データ (チャンク・索引など) の作り直しに失敗しました: {detail}\n入れ替える前のデータは退避 {backup} にあります。evorag rebuild (--facts なし) をもう一度実行すると、派生データを作り直せます。事実を前に戻したいときは evorag restore {backup} で戻せます。"
 restored_from_journal = "退避が無いので、ジャーナルだけから会話を作り直します。"
+repaired = "直しました (退避: {backup})。\n- 開くときにジャーナルから取り込んだ行 {replayed} 件、削除の行から消した記録 {deletes} 件\n- ジャーナルから戻した記録 {restored} 件 (改訂の番号を下げるので当てなかった行 {lower} 件、壊れていて隔離した記録 {quarantined} 件)、戻したデータ根の値 (プロンプトの言語など) {metas} 件、チェックサムが合わず読まなかったジャーナルの行 {bad_lines} 行\n- 関係: 足した {links_added} 件、消した {links_removed} 件 / 副索引: 足した {lookups_added} 件、消した {lookups_removed} 件\n索引と退避の整理は、次に evorag を開いたときに行います。"
+repaired_forgets = "忘れるを当て直しました (伏せ字にしたターン {patched} 件、取り消した事実 {retracted} 件、消した派生の記録 {deleted} 件、指示と合わないターン {mismatched} 件)。"
+repair_journal_pending = "ジャーナルから伏せ字の前の行を除けませんでした。次に evorag を開いたときに試し直します。"
+repair_key_missing = "忘れるの鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しを保留しました。"
+repair_failed = "直せませんでした: {detail}"
+repair_failed_after_store = "ジャーナルから記録 {restored} 件を戻し、関係と副索引を作り直しました (関係: 足した {links_added} 件、消した {links_removed} 件 / 副索引: 足した {lookups_added} 件、消した {lookups_removed} 件) が、続く処理に失敗しました: {detail}\n直す前のデータは退避 {backup} にあります。もう一度 evorag repair を実行すると、続きの処理をやり直せます。前に戻したいときは evorag restore {backup} で戻せます。"
+repair_broken_hint = "repair は壊れた DB のファイルを直せません。evorag backups list で退避を確かめてから、evorag restore <退避のフォルダ> で戻してください (退避の後の会話はジャーナルから足します)。"
+data_root_missing = "データ根 ({path}) がありません。何も作らずに終えました。--data-root か設定の storage.data_root の場所を確かめてください。"
+read_only_newer_format = "このデータ根は新しい版の evorag が書いた形式 (書き込みに要る形式の版 {min_write} 以上) なので、この版では書き換えません。何も変えていません。新しい版の evorag で実行してください。"
+read_only_migration_failed = "古い形式のデータ根を今の形式に移せなかったので、読むだけで開きました ({reason})。何も変えていません。evorag doctor で状態を確かめてください。"
 exported = "{count} 件の記録 ({kinds}) を {path} に書き出しました。設定は API キーを除いて config.toml に写しました。"
 export_skipped = "読めないので書き出さなかった記録: 新しい版の形 {newer} 件、壊れた記録 {corrupt} 件"
-export_pending = "ジャーナルに、まだデータベースに入っていない {count} 行があります。evorag を一度起動して終了してから書き出すと、それも含まれます。"
 export_not_empty = "{path} は空ではありません。空のフォルダか、まだ無いフォルダを指定してください。"
+export_refused_journal = "ジャーナルに、まだデータベースに入っていない {count} 行があるので、書き出しませんでした。evorag を一度起動して終了してから、もう一度書き出してください。"
+export_refused_forget = "忘れるの当て直しが済んでいないので、書き出しませんでした。evorag を一度起動して終了してから、もう一度書き出してください。"
+compact_low_space = "空きが足りないので、消した記録の跡をデータベースのファイルから除く処理 (compact) を見送りました (空き {free} MiB、必要 {need} MiB)。空きを作ると、次の起動で行います。"
+compact_failed = "消した記録の跡をデータベースのファイルから除く処理 (compact) ができませんでした ({detail})。次の起動でやり直します。"
+forget_mismatched = "忘れた内容と本文が合わない発言が {count} 件あります。想起・裏の処理・書き出しには使いません (evorag doctor で件数を確かめられます)。"
+forget_key_missing = "忘れるの鍵 (memory.forget_key) が使えないので、忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています。発言の伏せ字とジャーナルの書き直しは済ませました (evorag doctor で確かめられます)。"
+forget_journal_pending = "忘れた発言の伏せ字にする前の行が、会話のジャーナルに残っています (ほかのプログラムがファイルを開いているため、書き直せませんでした)。手が空いたときに書き直しを試します。"
 setup_guide = """
 llama-server が見つかりませんでした (探した接続先: {tried})。設定ファイルは書いていません。
 次の手順で llama-server を用意してから、もう一度 evorag setup を実行してください。
@@ -195,11 +387,17 @@ llama-server が見つかりませんでした (探した接続先: {tried})。�
    別のポートで起動したときは --url http://127.0.0.1:<ポート> を付けます。"""
 setup_needs_key = "llama-server ({url}) は API キーを求めています。キーを入れた環境変数の名前を --api-key-env で指定して、もう一度実行してください。"
 setup_found = "llama-server を見つけました: {url} (モデル {model}、n_ctx {n_ctx}、{build})"
-setup_ask_language = "システムプロンプトの言語を選んでください。このデータ根では後から変えられません [ja/en] (Enter で ja):"
+setup_ask_language = "システムプロンプトの言語を選んでください [ja/en] (Enter で {default})。このデータ根では後から変えられません。答える言語だけを変えたいときは /style language で変えられます:"
 setup_ask_overwrite = "設定ファイル {path} を書き換えますか? 元のファイルは {backup} に残します [y/N]:"
 setup_written = "設定を {path} に書きました。evorag で会話を始められます。"
 setup_unchanged = "設定 {path} は今のままで使えます。"
 setup_not_written = "設定 {path} は書き換えませんでした。"
+
+[cli.facts_key]
+conflict = "ジャーナルの鍵が DB の鍵と違うか、2 つ以上あります"
+missing = "事実への指示があるのに、鍵が DB にもジャーナルにもありません"
+malformed = "記録した鍵の形が正しくありません"
+read_only = "データ根を読むだけで開いたので、鍵を作れません"
 
 [cli.setup]
 tui_running = "evorag が動いています (このデータ根を使っています)。設定ファイルだけを書けます。モデルの記録を書き換えるには、evorag を閉じてから evorag setup を実行し直してください。"
@@ -242,6 +440,228 @@ calibrating = "リランカーのしきい値を、同梱の事例で求めて�
 calibrated = "リランカーのしきい値を記録しました: {threshold} (帯の下限 {band})。順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。"
 calibration_failed = "リランカーが較正の基準に届きませんでした (順位 {rank_ok}/{rank_n}、語の重なる問い {value_ok}/{value_n}。どちらも 8 割以上が要ります)。以前の会話は自動では添えず、候補として示します。別のリランカーを勧めます。"
 probing = "{role} のモデルの性質を点検しています (速さ・使える機能。数十秒かかることがあります)…"
+# evorag setup が書く設定ファイルの説明 (TOML のコメント。各行を "# " で始める)。
+config_header = "# evorag の設定 (evorag setup が書いた。キーの説明は docs/07-tui-config.md §4)"
+config_prompt_language = "# システムプロンプトの言語 (このデータ根では後から変えられない)"
+config_router_model = "# ルーターモードのモデルの名前 (プリセットの節の名前)"
+config_api_key_env = "# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書く"
+
+# evorag --help の文 (clap が足す --help・--version の文と見出しは英語のまま)。
+[cli.help]
+about = "ローカルの llama-server と、長期のメモリを持って会話する"
+data_root = "データ根 (設定の storage.data_root より優先する)"
+config = "設定ファイル"
+setup = "llama-server を探して能力を確かめ、設定ファイルを書く"
+setup_url = "接続先 (省くと、設定の llm.chat.url と 127.0.0.1:8080・8081 を探す)"
+setup_api_key_env = "API キーを入れた環境変数の名前 (llama-server を --api-key で起動したとき)"
+setup_yes = "尋ねずに進める (プロンプトの言語は、prompt.language が無ければ UI の言語。設定ファイルは書き換える)"
+doctor = "設定・接続・データ根・ジャーナル・退避を、読むだけで点検する"
+backups = "退避の操作"
+backups_list = "退避の一覧 (新しい順)"
+backups_purge = "すべての退避 (日次・週次・移行と作り直しの前の退避) を消す"
+backups_purge_yes = "尋ねずに消す"
+export = "記録を種類ごとの JSON Lines に書き出す (設定は API キーを除いて写す)"
+export_out = "書き出すフォルダ (空か、まだ無いフォルダ)"
+rebuild = "派生データ (チャンク・ノート・埋め込み・索引・点検の結果) を、会話と明示の操作から作り直す (先に退避する)"
+rebuild_index = "索引だけを作り直す"
+rebuild_facts = "事実も会話から抽出し直す (llama-server を使う。事実への指示と検証済みの訂正は当て直す)"
+restore = "退避から戻す (その後の会話はジャーナルから足す)"
+restore_backup = "退避のフォルダ (backups/daily/<日付> など) か、その中の evorag.redb"
+repair = "副索引と関係を記録から作り直し、ジャーナルにあって DB に無い記録を戻し、忘れる・削除を当て直す (先に退避する)"
+update = "本体の更新 (新しい版の確認・置き換え・巻き戻し)"
+update_check = "新しい版があるかを確かめる (何も書き換えない)"
+update_apply = "新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)"
+update_apply_version = "入れる版 (省くと、いちばん新しい版)"
+update_rollback = "evorag.prev に戻す (通信しない)"
+
+[cli.update]
+up_to_date = "新しい版はありません (今の版 {current} が最新です)。"
+available = "新しい版があります: evorag {version} (リリースの日付 {date})"
+target = "更新の先: evorag {version} (リリースの日付 {date})"
+notes_header = "変更の要点:"
+notes_page = "変更の要点: {url}"
+llama_min_build = "この版が対応する llama-server は、build {build} 以降です。"
+db_min_write = "注意: この版はデータの形式を {min_write} に上げます。移行した後に今の版 ({current}) へ戻すと、今の版ではデータが読むだけになります (書けるようにするには、移行の前の退避から戻します)。"
+added_key = "注意: 設定 update.trusted_keys で足した鍵 (ID {key_id}) で署名を確かめました。心当たりが無ければ、更新せずに設定を確かめてください。"
+apply_hint = "更新するには evorag update apply を実行してください。"
+upgrade_first = "この版へは、今の版 ({current}) から直接は更新できません。先に evorag update apply {upgrade_from} を実行してください。"
+downloading = "配布物 {name} ({size} バイト) を取得しています。"
+gap_apply = "置き換えの途中で止まって {dir} に evorag.exe が無くなったときは、evorag.new があればそれを、無ければ evorag.prev を evorag.exe に改名してください。"
+gap_rollback = "入れ替えの途中で止まって {dir} に evorag.exe が無くなったときは、evorag.prev を evorag.exe に改名してください。"
+resumed_completed = "前回の途中で止まった更新 ({op}) の続きを済ませました。"
+resumed_reverted = "前回の途中で止まった更新 ({op}) を、元に戻しました。"
+resume_untouched = "更新のファイルに当たらないので、触れなかったファイル: {files}"
+resume_missing = "見つからなかったファイル: {files} (記録は済みにしました)"
+cleaned = "前回の更新の残りを片付けました: {files}"
+applied = """
+evorag を {from} から {to} に更新しました。前の版は evorag.prev に残しています (evorag update rollback で戻せます)。
+新しい版の初回の起動で、データの移行が要るときは、退避してから移行します。"""
+left = "消せずに残ったファイル: {files} (次の起動で片付けます)。"
+rolled_back = "evorag を {to} に戻しました ({from} は evorag.prev に残しています)。"
+data_usable = "データ根は、戻した版でそのまま使えます。"
+data_read_only = "注意: データ根は新しい版の形式 (書くのに要る形式 {min_write}) なので、戻した版 (形式 {format}) は読むだけで起動します。書けるようにするには、移行の前の退避から戻します。"
+data_unopenable = "注意: データ根は、戻した版 (形式 {format}) では開けません (読むのに要る形式 {min_read})。移行の前の退避から戻す必要があります。"
+data_unknown = "戻した版がデータ根を書けるかは分かりません。新しい版で移行した後なら、移行の前の退避 (backups/pre-op/) から evorag restore で戻せます。戻さなければ、古い版は読むだけで起動します。"
+data_backup = """
+  移行の前の退避: {path}
+    戻すとき (戻した版で実行): evorag restore "{path}""""
+data_journal = "退避の後の会話は、戻すときにジャーナルから足します。"
+data_no_backup = "移行の前の退避が見つかりません。データは新しい版でなら使えます (evorag update apply で戻れます)。"
+config_backup = "戻した版が今の設定を読めないときは、設定の写し {path} を使えます。"
+not_zip = "この evorag は {channel} で入れたので、evorag update apply と rollback は使えません。入れたときの仕組みで更新してください (cargo なら cargo install --locked --git https://github.com/evoref/evorag --tag vX.Y.Z evorag)。新しい版は evorag update check で確かめられます。"
+exe_name = "動いている実行ファイルの名前が {found} です。evorag update は {expected} という名前のときだけ使えます。名前を戻してから実行してください。"
+busy = "ほかの evorag update が動いています。終わってから、もう一度実行してください。"
+data_root_in_use = "evorag が動いています (データ根 {path}、pid {pid})。evorag を閉じてから、もう一度実行してください。"
+data_root_lock = "データ根 {path} のロックを取れません。"
+not_newer = "指定した版 {requested} は、今の版 {current} と同じか古いので入れません。前の版に戻すときは evorag update rollback を使います。"
+bad_version = "版 {version} を読めません (例: 0.4.0)。"
+cpu = "この CPU には、更新の通信に要る機能 ({missing}) がありません。通信せずに止めました。手作業で更新してください: {url} (手順は同梱の README の「更新と巻き戻し」)"
+arch = "この CPU ({arch}) では、更新の通信を使えません。手作業で更新してください: {url} (手順は同梱の README の「更新と巻き戻し」)"
+no_roots = "証明書のルートが見つかりません。通信せずに止めました。OS の証明書 (ca-certificates など) を入れるか、手作業で更新してください: {url}"
+network = """
+GitHub の Releases から取得できませんでした: {reason}
+プロキシを使う環境なら、環境変数 HTTPS_PROXY を設定してください (http:// か https:// のプロキシだけに対応します。URL に書いた Basic 認証のほかのプロキシの認証 (NTLM など) と SOCKS には対応しません)。通信できない環境では、手作業で更新してください: {url}"""
+rate_limited = "GitHub の API の呼び出しの回数の制限に当たりました。{reset} 以降に、もう一度実行してください。"
+rate_limited_unknown = "GitHub の API の呼び出しの回数の制限に当たりました。しばらく待ってから、もう一度実行してください。"
+missing_file = "版 {version} の {what} がありません (無い版か、取り下げた版です)。"
+list_unreadable = "リリースの一覧を読めませんでした。時間をおいて実行するか、手作業で更新してください: {url}"
+tampered = "改ざんの疑いがあるので、更新を断りました ({reason})。インストール先は変えていません。"
+unusable = "この版には更新できません ({reason})。インストール先は変えていません。"
+unknown_schema = "この版の release.json の形式を、今の evorag は読めません。インストール先は変えていません。手作業で更新してください: {url}"
+failed = "更新できませんでした: {reason}"
+reverted = """
+置き換えに失敗したので、元に戻しました: {reason}
+evorag は前の版のままです。"""
+not_recorded = "実行ファイルの入れ替えは済みましたが、状態のファイルに記録できませんでした ({reason})。次の evorag の起動か evorag update の片付けが、記録を整えます。"
+reverted_not_recorded = "元に戻しましたが、状態のファイルに記録できませんでした ({reason})。evorag は前の版のままです。次の evorag の起動か evorag update の片付けが、記録を整えます。"
+foreign_plan = "別のフォルダ ({dir}) の evorag の更新が、途中で止まっています。そのフォルダの evorag で evorag update apply か rollback を実行して、続きを済ませてください。"
+no_prev = "戻す先の evorag.prev がありません。"
+prev_not_evorag = "evorag.prev は evorag の実行ファイルではないようです (--version の 1 行目: {line})。戻しませんでした。"
+leftover = "前回の更新の残りのファイル {name} を消せません。ほかのプログラムが開いていないかを確かめ、手で消すか移してから、もう一度実行してください。"
+unrelated_leftover = "インストール先に、evorag とも evorag.prev とも中身の違う {name} があります。利用者のファイルかもしれないので消していません。移すか消してから、もう一度実行してください。"
+not_writable = "インストール先 {dir} に書き込めません。何も変えていません。{advice}"
+others_can_write = "{path} には、ほかの利用者も書き込めます。何も変えていません。{advice}"
+no_state_dir = "状態のフォルダ (更新のロックと記録を置く場所) を決められません (ホームのフォルダが分かりません)。"
+manual = """
+手で戻す手順:
+  1. evorag を終了します。
+  2. インストール先の evorag(.exe)・evorag.new・evorag.tmp・evorag.prev・evorag.prev.old・evorag.rejected を、それぞれ --version を付けて動かし、版を確かめます。Windows では、拡張子の無いファイル (evorag.new など) は、別のフォルダに evorag.exe という名前で写してから動かします。
+  3. 使いたい版のファイルを evorag(.exe) に、前の版のファイルを evorag.prev に改名し、残りを消します。
+  4. {state} を消します (巻き戻しの記録も無くなります)。"""
+startup_restart = "前回の更新の続きを整えたので (元に戻した場合を含む)、evorag をもう一度起動してください。動いている evorag はインストール先の evorag と違うので、データにも設定にも触れずに止めました。"
+startup_failed = """
+前回の更新の片付けができませんでした: {reason}
+evorag はそのまま起動します。"""
+startup_failed_restart = """
+前回の更新の続きを整える途中で失敗しました: {reason}
+動いている evorag がインストール先の evorag と違う (または同じと確かめられない) ので、データにも設定にも触れずに止めました。evorag をもう一度起動してください。"""
+startup_kept = "インストール先に、更新の残りとは中身の違うファイルがあるので残しました: {files}"
+unsupported_proxy_socks = "環境変数 {var} の SOCKS のプロキシは使えません (evorag update は http:// と https:// のプロキシだけに対応します)。通信せずに止めました。{var} を直すか、手作業で更新してください: {url}"
+unsupported_proxy_scheme = "環境変数 {var} のプロキシは使えません (evorag update は http:// と https:// で始まるプロキシだけに対応します。スキームを省いた書き方にも対応しません)。通信せずに止めました。{var} を直すか、手作業で更新してください: {url}"
+unsupported_proxy_invalid = "環境変数 {var} の値を、プロキシの URL として読めません。通信せずに止めました。{var} を http://<ホスト>:<ポート> の形に直すか、手作業で更新してください: {url}"
+run_again = "前回の途中で止まった更新 ({op}) の続きを整えたので (元に戻した場合を含む)、動いている evorag はインストール先の evorag と違います。先に進めずに止めました。同じコマンドをもう一度実行してください。"
+reinstall = "更新するには、次のコマンドで入れ直してください: {command}"
+reinstall_steps = "次のコマンドを順に実行して、入れ直してください:"
+reinstall_channel = "この evorag は {channel} で入れたので、入れたときの仕組みで evorag {version} に更新してください。"
+upgrade_first_reinstall = "この版へは、今の版 ({current}) から直接は更新できません。先に evorag {upgrade_from} を入れてください。"
+owned_by_other = "{path} の持ち主が、ほかの利用者です。何も変えていません。{advice}"
+unsafe_owner = "{path} の持ち主が、動かしている利用者ではありません。何も変えていません。{advice}"
+advice_windows = "%LOCALAPPDATA%\\Programs\\evorag など、自分だけが書き込めるフォルダに入れ直してください。"
+advice_unix = "~/.local/bin など、自分だけが書き込めるフォルダに入れ直してください。"
+detail = "  詳細: {detail}"
+revert_failed = "置き換えに失敗し ({cause})、元に戻すのにも失敗しました ({reason})。"
+reverted_not_recorded_cause = "置き換えに失敗したので ({cause}) 元に戻しましたが、状態のファイルに記録できませんでした ({reason})。evorag は前の版のままです。次の evorag の起動か evorag update の片付けが、記録を整えます。"
+
+[cli.update.op]
+open = "オープン"
+create = "作成"
+lock = "ロック"
+read = "読み込み"
+write = "書き込み"
+rename = "改名"
+remove = "削除"
+sync = "同期"
+other = "操作"
+
+[cli.update.reason]
+exe_name = "動いている実行ファイルの名前が {found} です ({expected} のときだけ使えます)"
+busy = "ほかの evorag update が動いています"
+state_unreadable = "更新の状態のファイルを読めません"
+foreign_plan = "別のフォルダ ({dir}) の更新が、途中で止まっています"
+plan_pending = "途中で止まった更新が残っています"
+unknown_role = "evorag(.exe) が、途中で止まった更新のどのファイルとも違います"
+foreign_file = "{name} は今回の更新のファイルではないので、触れずに止めました"
+nothing_to_restore = "evorag(.exe) に戻せるファイルがありません"
+leftover = "前回の更新の残りのファイル {name} を消せません"
+unrelated_leftover = "{name} の中身が、evorag とも evorag.prev とも違います"
+blocking_file = "更新のファイルではない {path} が、更新を妨げています"
+others_can_write = "{path} には、ほかの利用者も書き込めます"
+owned_by_other = "{path} の持ち主が、ほかの利用者です"
+not_writable = "インストール先 {dir} に書き込めません"
+not_regular_file = "{name} がシンボリックリンク・リパースポイントか、通常のファイルではありません"
+unsafe_owner = "{path} の持ち主が、動かしている利用者ではありません"
+no_prev = "戻す先の evorag.prev がありません"
+prev_not_evorag = "evorag.prev は evorag の実行ファイルではないようです (--version の 1 行目: {line})"
+prev_probe = "evorag.prev の版を確かめられません ({reason})"
+changed = "{name} が、確かめた後に変わりました"
+same_file = "置くファイルが、今の evorag(.exe) と同じです"
+written_digest = "書いた evorag.new を読み直すと、SHA-256 が合いません"
+copied_digest = "写した {name} を読み直すと、写したもとと合わないので、写しを消しました"
+reverted = "置き換えに失敗したので、元に戻しました ({reason})"
+not_recorded = "入れ替えは済みましたが、記録できませんでした ({reason})"
+reverted_not_recorded = "元に戻しましたが、記録できませんでした ({reason})"
+revert_failed = "置き換えに失敗し ({cause})、元に戻すのにも失敗しました ({reason})"
+file = "{name} の{op}に失敗しました"
+io = "{path} の{op}に失敗しました"
+state = "状態のファイルを書けませんでした ({reason})"
+check_version = "新しい evorag の --version の 1 行目が「{line}」でした (evorag {expected} のはず)"
+probe_spawn = "--version を付けて動かせませんでした"
+probe_timeout = "--version が {seconds} 秒以内に終わりませんでした"
+probe_failed = "--version が失敗の終了コード ({status}) で終わりました"
+probe_output = "--version の出力が多すぎます"
+unknown = "理由が分かりません"
+
+[cli.update.verify]
+signature_malformed = "署名が minisign の署名の形ではありません"
+legacy_signature = "prehash でない古い形の署名です"
+unknown_key = "署名の鍵 (ID {key_id}) を知りません"
+bad_signature = "鍵 (ID {key_id}) で署名を確かめられません"
+trusted_comment = "署名の trusted comment が、この release.json のものと違います"
+unknown_schema = "release.json の形式 (schema) を読めません"
+malformed = "release.json の項目が欠けているか、形が違います"
+name_mismatch = "release.json が evorag のものではありません"
+version_mismatch = "release.json の版 {found} が、{source} ({expected}) と違います"
+source_comment = "署名のコメントの版"
+source_tag = "タグの版"
+source_requested = "指定した版"
+not_newer = "版 {version} は、今の版 {current} より新しくありません"
+date_too_old = "リリースの日付 {date} が、今の版の日付 {current} より古いです"
+below_upgrade_from = "今の版からは直接更新できません (先に {upgrade_from} を入れます)"
+no_artifact = "この環境 ({target}) の配布物がありません"
+ambiguous_artifact = "この環境 ({target}) の配布物が {count} 個あります"
+too_large = "{what} が {limit} バイトを超えます"
+archive = "配布物"
+build_date = "この配布物の版に、読めるリリースの日付が埋め込まれていません"
+archive_size = "配布物の大きさが {actual} バイトで、署名した {expected} バイトと違います"
+archive_longer = "配布物が、署名した大きさ {size} バイトより長く届きました"
+archive_digest = "配布物の SHA-256 が合いません"
+archive_unreadable = "配布物を展開できません"
+exe_missing = "配布物に実行ファイルがありません"
+exe_not_regular = "配布物の実行ファイルが、通常のファイルではありません"
+duplicate_entries = "配布物に、同じ名前の項目が 2 つ以上あります"
+exe_too_large = "配布物の実行ファイルが {limit} バイトを超えます"
+unpacked_too_large = "展開した配布物が {limit} バイトを超えます"
+exe_digest = "取り出した実行ファイルの SHA-256 が合いません"
+
+[cli.update.net]
+refused = "許していない接続先への転送を断りました"
+too_many_redirects = "転送が多すぎます"
+bad_redirect = "転送の応答に、転送先がありません"
+connect = "接続できませんでした"
+timed_out = "{seconds} 秒以内に終わりませんでした"
+too_large = "応答が {limit} バイトを超えました"
+not_found = "見つかりません (404)"
+status = "サーバーが {status} を返しました"
 
 [doctor]
 config = "設定: {path} (読めました)"
@@ -266,13 +686,23 @@ probe_rerank = "モデルの点検 (rerank): 往復 6 件のリランク {ms} ms
 probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
 probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
+compact_pending = "データベースのファイルの空きの領域に、消した記録の跡が残っています。次の起動で除きます (compact。空きが足りなければ見送ります)"
+forget_mismatched = "忘れた内容と本文が合わない発言: {count} 件 (想起・裏の処理・書き出しには使いません)"
+forget_pending = "忘れるの当て直しが済んでいません。evorag を一度起動すると当て直します"
+forget_journal_lines = "ジャーナルに、忘れた発言の伏せ字にする前の行が {lines} 行残っています (忘れるの指示 {directives} 件)。evorag を一度起動すると書き直します"
+forget_key_missing = "忘れるの鍵 (memory.forget_key) が使えません。忘れた値に当たる事実の取り消しと、退避の中の事実の写し直しを保留しています"
 index_ok = "語彙の索引: {docs} 件 (セグメント {segments} 個)"
 index_missing = "語彙の索引: まだありません (起動したときに会話から作ります)"
 index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で会話から作り直します"
+probe_issues = "{issues}。"
 
 [backups]
 item = "{kind}  {dir}  (ジャーナルの連番 {seq})"
 none = "退避はありません。"
+purge_ask = "退避 {count} 個 (日次・週次・移行と作り直しの前の退避) をすべて消します。消した退避からは戻せません。消しますか?"
+purge_declined = "消しませんでした。"
+purged = "退避 {count} 個を消しました。"
+purge_failed = "退避 {count} 個を消しましたが、消せなかったものがあります: {detail}"
 
 [notice]
 low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"
@@ -302,3 +732,27 @@ degraded_rerank_error = "縮退: リランカーが答えなかったので、�
 degraded_no_threshold = "縮退: リランカーのしきい値が無いので、自動では添えず候補だけを出しました。→ 較正が終わるのを待つか、evorag setup を使います。"
 degraded_no_index = "縮退: 以前の会話の索引を使えませんでした。→ evorag rebuild --index で作り直せます。"
 degraded_other = "縮退: {reason}"
+
+# 属性の表示名 (`/memory` の事実の一覧、07 §3)。文言キーではなく、属性の一覧
+# (crates/evorag-memory/attributes.toml) と同じ名前を持つ (`cargo xtask i18n` で検査する)。
+[attr]
+name = "名前"
+relation = "関係"
+residence = "住んでいる所"
+dietary = "食べないもの"
+occupation = "仕事"
+age = "年齢"
+household = "同居の家族"
+pet = "ペット"
+spoken_language = "話す言語"
+hometown = "出身地"
+birthday = "誕生日"
+education = "学んだこと"
+skill = "技能"
+device = "機器"
+software = "ソフト"
+hobby = "趣味"
+likes = "好きなもの"
+dislikes = "苦手なもの"
+goal = "目標"
+event = "予定"

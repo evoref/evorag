@@ -1,19 +1,26 @@
-//! `evorag rebuild [--index]` (03 §10、FR-212)。派生データを、会話の本文と明示の操作から作り直す。
+//! `evorag rebuild [--index] [--facts]` (03 §10、FR-212)。派生データを、会話の本文と明示の操作から作り直す。
 //!
 //! - 実行の前に退避する (`backups/pre-op/`)。
-//! - `--index` は索引だけ: 語彙の索引をチャンクとノートの記録から作り直し、ベクトルの索引は消す (次の起動で
-//!   埋め込みの記録から作り直す)。
+//! - `--index` は索引だけ: 語彙の索引をチャンク・ノート・事実 (事実の検索の鍵、04 §5.5) の記録から作り直し、
+//!   ベクトルの索引は消す (次の起動で埋め込みの記録から作り直す)。
 //! - 全体: チャンク・ノート・埋め込み・点検の結果の記録を消し、チャンクと語彙の索引をその場で作る。ノートと
 //!   埋め込みと点検は、次に TUI を開いたときの裏の処理が、状態との差から進める (LLM のサーバを使うため。
 //!   job は書かない、04 §4)。
-//! - 正本 (会話・明示の操作・モデルの記録・しきい値・想起への操作) は変えない。
+//! - `--facts` (v0.3): 全体の作り直しの前に、事実を抽出からやり直す ([`facts`] の手順。llama-server を使う)。
+//!   事実を入れ替えてから索引を作るので、語彙の索引の事実の検索の鍵も新しい事実から作る。
+//! - 正本 (会話・明示の操作・モデルの記録・しきい値・想起への操作・事実への指示) は変えない。
+
+mod facts;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use evorag_llm::LlmError;
 use evorag_memory::{KIND_CHUNK, KIND_EMBEDDING, KIND_MODEL_PROBE, KIND_NOTE, Writes};
 use evorag_store::{OpenError, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer};
 use evorag_types::{Clock, IdGen};
+
+pub use facts::{ExtractionStop, FactsRebuilt, FactsSource, FactsUnavailable, LOST_REASONS};
 
 /// 作り直しの設定。
 pub struct RebuildOptions {
@@ -21,8 +28,10 @@ pub struct RebuildOptions {
     pub evorag_version: String,
     /// 退避に含める `config.toml`。
     pub config_file: Option<PathBuf>,
-    /// 索引だけを作り直す (`--index`)。
+    /// 索引だけを作り直す (`--index`)。`facts` とは一緒に使えない。
     pub index_only: bool,
+    /// 事実も抽出からやり直す (`--facts`)。
+    pub facts: Option<FactsSource>,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<dyn IdGen>,
 }
@@ -32,10 +41,12 @@ pub struct RebuildOptions {
 pub struct RebuildReport {
     /// 実行の前に作った退避。
     pub backup: PathBuf,
-    /// 消した派生の記録の数 (`--index` では 0)。
+    /// 消した派生の記録の数 (`--index` では 0。事実は数えない)。
     pub removed: usize,
     /// 語彙の索引の項目の数 (チャンクと鍵)。
     pub docs: usize,
+    /// 事実の作り直しの結果 (`--facts` のときだけ)。
+    pub facts: Option<FactsRebuilt>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,10 +57,43 @@ pub enum RebuildError {
     ReadOnly(String),
     #[error("backup failed: {0}")]
     Backup(String),
+    #[error("read failed: {0}")]
+    Read(String),
     #[error("write failed: {0}")]
     Write(String),
     #[error("index failed: {0}")]
     Index(String),
+    /// `--index` と `--facts` を一緒に指定した。
+    #[error("--index and --facts cannot be used together")]
+    IndexWithFacts,
+    /// 確かめの段階で llama-server に繋がらない (退避も作らず、事実は変えていない)。
+    #[error("llama-server is unreachable: {0}")]
+    LlmUnreachable(LlmError),
+    /// 抽出の途中で llama-server が失敗した (繋がらない・4xx・締切切れか 5xx が続いた)。何も書かずに止めた
+    /// (事実は前のまま。退避は作ってある)。
+    #[error("{0}")]
+    Extraction(ExtractionStop),
+    /// 応答のモデルが、データ根に記録したモデルと違う (06 §3.1。事実は変えていない)。
+    #[error(
+        "the chat model differs from the recorded one (recorded: {recorded}, connected: {connected})"
+    )]
+    ModelMismatch { recorded: String, connected: String },
+    /// 事実を作り直せない (事実は変えていない)。
+    #[error("facts cannot be rebuilt: {0}")]
+    FactsUnavailable(FactsUnavailable),
+    /// 事実を入れ替えた後の、派生データの作り直しに失敗した (事実はもう新しい。入れ替える前のデータは `backup`)。
+    #[error("facts were replaced, but rebuilding the derived data failed: {source}")]
+    AfterFacts {
+        facts: FactsRebuilt,
+        backup: PathBuf,
+        source: Box<RebuildError>,
+    },
+}
+
+impl From<FactsUnavailable> for RebuildError {
+    fn from(e: FactsUnavailable) -> Self {
+        Self::FactsUnavailable(e)
+    }
 }
 
 /// 消す派生の記録の種類 (点検の結果を含む。しきい値は正本として残す、03 §10)。
@@ -58,7 +102,20 @@ const DERIVED: [&str; 4] = [KIND_CHUNK, KIND_NOTE, KIND_EMBEDDING, KIND_MODEL_PR
 const OPS_PER_WRITE: usize = 2_000;
 
 /// 作り直す。データ根を開けない (ほかの evorag が使っている) ときは `Open` のエラー。
-pub fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
+///
+/// `--facts` では、退避の前に llama-server と応答のモデルと値の鍵を確かめ、抽出をすべて終えてから事実を
+/// 1 つの書き込みで入れ替える。途中で止めたとき (確かめに外れた・llama-server が失敗した) は、事実も派生データも
+/// 変えない。
+///
+/// CLI (`evorag rebuild`) の専用。DB を開く・退避する・索引を作るなどの同期の I/O を、そのまま async の中で
+/// 行う (ほかの task と同じ実行器で並べて使わない。CLI は 1 つの `block_on` で呼ぶ)。
+///
+/// # Errors
+/// データ根を開けない・読むだけで開いた・退避や書き込みや索引に失敗した・事実を作り直せないとき。
+pub async fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
+    if o.index_only && o.facts.is_some() {
+        return Err(RebuildError::IndexWithFacts);
+    }
     let (store, _) = Store::open(OpenOptions {
         data_root: o.data_root.clone(),
         evorag_version: o.evorag_version.clone(),
@@ -70,6 +127,11 @@ pub fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
     if let Some(r) = store.read_only() {
         return Err(RebuildError::ReadOnly(format!("{r:?}")));
     }
+    // 事実の作り直しに要るものを、退避の前に確かめる (使えない退避で、残す 3 世代を押し出さないため)。
+    let checked = match &o.facts {
+        Some(src) => Some(facts::check(&store, src, &*o.clock, &*o.ids).await?),
+        None => None,
+    };
     let extra: Vec<&std::path::Path> = o.config_file.as_deref().into_iter().collect();
     let backup = store
         .pre_op_backup("rebuild", &extra)
@@ -81,15 +143,57 @@ pub fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
         .name("evorag-writer".into())
         .spawn(move || writer.run())
         .map_err(|e| RebuildError::Write(e.to_string()))?;
-    let result = rebuild(&store, &handle, &o);
+    let result = async {
+        let facts = match (&o.facts, &checked) {
+            (Some(src), Some(checked)) => {
+                Some(rebuild_facts(&store, &handle, src, checked, &o).await?)
+            }
+            _ => None,
+        };
+        let (removed, docs) = rebuild(&store, &handle, &o).map_err(|e| match &facts {
+            // 事実はもう入れ替えたので、そのことと退避の場所を示す。
+            Some(f) => RebuildError::AfterFacts {
+                facts: f.clone(),
+                backup: backup.clone(),
+                source: Box::new(e),
+            },
+            None => e,
+        })?;
+        Ok::<_, RebuildError>((removed, docs, facts))
+    }
+    .await;
     handle.shutdown();
     let _ = thread.join();
-    let (removed, docs) = result?;
+    let (removed, docs, facts) = result?;
     Ok(RebuildReport {
         backup,
         removed,
         docs,
+        facts,
     })
+}
+
+/// 事実を抽出からやり直し、1 つの書き込みで入れ替える。
+async fn rebuild_facts(
+    store: &Store,
+    handle: &evorag_store::WriterHandle,
+    src: &FactsSource,
+    checked: &facts::Checked,
+    o: &RebuildOptions,
+) -> Result<FactsRebuilt, RebuildError> {
+    let key = facts::key(store, handle, checked)?;
+    let mut out = FactsRebuilt::default();
+    let extracted = facts::extract(store, src, checked, &key, &mut out).await?;
+    facts::swap(
+        store,
+        handle,
+        &key,
+        checked,
+        extracted,
+        (&*o.clock, &*o.ids),
+        &mut out,
+    )?;
+    Ok(out)
 }
 
 fn rebuild(

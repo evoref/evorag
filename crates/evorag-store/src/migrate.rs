@@ -43,12 +43,22 @@ impl std::fmt::Debug for Migration {
 }
 
 /// この版の evorag が持つ移行 (v0.1〜v0.4 は直前の版の分だけ、03 §12.1)。
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    from: "0.1",
-    to: "0.2",
-    run: copy_all,
-    counts_change: &[],
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: "0.1",
+        to: "0.2",
+        run: copy_all,
+        counts_change: &[],
+    },
+    // 0.2 → 0.3: 種類 (`fact`・`correction`・`fact_directive`) と任意の項目と `meta` のキー
+    // (`memory.forget_key`) を足すだけなので、記録は書き換えない (03 §12.1)。
+    Migration {
+        from: "0.2",
+        to: "0.3",
+        run: copy_all,
+        counts_change: &[],
+    },
+];
 
 /// 0.1 → 0.2: 種類と任意の項目を足すだけなので、記録は書き換えずに表をそのまま写す (03 §12.1)。
 /// 新しい種類 (`setting` など) は書いたときに増える。古い版の索引の片付けや派生の記録の作り直しは、
@@ -188,11 +198,15 @@ fn is_complete_db(path: &Path) -> bool {
             .is_some_and(|s| s == meta::MIGRATION_NONE)
 }
 
-/// 移行の跡のファイルで、残っているもの (無ければ `None`)。
-pub(crate) fn leftover(root: &Path) -> Option<&'static str> {
-    [MIGRATING_FILE, PRE_MIGRATION_FILE]
-        .into_iter()
-        .find(|f| root.join(f).exists())
+/// 移行と compact の跡のファイルで、残っているもの (無ければ `None`)。
+pub fn leftover(root: &Path) -> Option<&'static str> {
+    [
+        MIGRATING_FILE,
+        PRE_MIGRATION_FILE,
+        crate::compact::COMPACTING_FILE,
+    ]
+    .into_iter()
+    .find(|f| root.join(f).exists())
 }
 
 /// 前の移行が途中で止まった跡を片付ける。データ根を開く前 (ロックを取った後) に呼ぶ。
@@ -238,6 +252,15 @@ enum StepError {
     /// 元の DB のまま。
     Kept(Database, String),
     Fatal(String),
+}
+
+/// 2 つの形式の版の小さい方 (読めない版は、もう一方を採る)。
+fn lower_version<'a>(a: &'a str, b: &'a str) -> &'a str {
+    match (a.parse::<Version>(), b.parse::<Version>()) {
+        (Ok(x), Ok(y)) if y < x => b,
+        (Ok(_), _) => a,
+        (Err(_), _) => b,
+    }
 }
 
 fn chain<'p>(plan: &'p FormatPlan, from: &Version) -> Option<Vec<&'p Migration>> {
@@ -294,10 +317,15 @@ pub(crate) fn run(
     let mut db = db;
     let last = steps.len() - 1;
     for (i, step) in steps.into_iter().enumerate() {
+        // 途中の段では、その段の形式の版と全体の下限の小さい方を書く。項目を足すだけの移行の列で、
+        // 途中で止まったときに古い版が開けなくなる (下限が上がる) のを防ぐため。
         let (min_read, min_write) = if i == last {
             (plan.min_read.as_str(), plan.min_write.as_str())
         } else {
-            (step.to, step.to)
+            (
+                lower_version(step.to, &plan.min_read),
+                lower_version(step.to, &plan.min_write),
+            )
         };
         match migrate_step(db, root, step, i, min_read, min_write) {
             Ok(next) => db = next,

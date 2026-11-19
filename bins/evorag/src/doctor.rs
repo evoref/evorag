@@ -135,6 +135,57 @@ pub fn run(
                 MessageKey::DoctorQuarantine,
                 &[("count", &report.quarantined().to_string())],
             );
+            // 空きが足りずに見送った compact も、次の起動でやり直すまで知らせる (03 §8、04 §7.8)。
+            if report.compact_pending() {
+                say(c, MessageKey::DoctorCompactPending, &[]);
+            }
+            // 忘れるの指示と合わないターンと、当て直しの残り (04 §7.2)。
+            let lang = report
+                .meta
+                .get(evorag_store::meta::PROMPT_LANGUAGE)
+                .cloned();
+            let key_ok = report
+                .meta
+                .get(evorag_store::meta::FORGET_KEY)
+                .is_some_and(|k| evorag_memory::ForgetKey::from_hex(k).is_some());
+            if let Ok(Some(Some(f))) = evorag_store::inspect::with_view(data_root, |v| {
+                evorag_core::export_checks::forget_check(v, lang.as_deref())
+            }) {
+                if f.mismatched > 0 {
+                    say(
+                        c,
+                        MessageKey::DoctorForgetMismatched,
+                        &[("count", &f.mismatched.to_string())],
+                    );
+                }
+                if f.pending {
+                    say(c, MessageKey::DoctorForgetPending, &[]);
+                }
+                if f.directives > 0 && !key_ok {
+                    say(c, MessageKey::DoctorForgetKeyMissing, &[]);
+                }
+                // ジャーナルに残っている伏せ字の前の行 (書き直しの済んでいない忘れる、04 §7.2)。
+                if f.directives > 0
+                    && let Ok(revs) = evorag_store::inspect::journal_revs(
+                        data_root,
+                        evorag_memory::KIND_TURN,
+                        evorag_memory::TURN_REV_FIELD,
+                    )
+                    && let Ok(Some(Some(j))) = evorag_store::inspect::with_view(data_root, |v| {
+                        evorag_core::export_checks::journal_leftovers(v, &revs)
+                    })
+                    && j.lines > 0
+                {
+                    say(
+                        c,
+                        MessageKey::DoctorForgetJournalLines,
+                        &[
+                            ("lines", &j.lines.to_string()),
+                            ("directives", &j.directives.to_string()),
+                        ],
+                    );
+                }
+            }
         }
     }
     let j = &report.journal;
@@ -239,7 +290,10 @@ pub fn probe_lines(c: &Catalog, role: &str, p: &ModelProbeBody) -> Vec<String> {
             let issues = if issues.is_empty() {
                 c.key(MessageKey::DoctorProbeNoIssue)
             } else {
-                issues.join("。") + "。"
+                c.with(
+                    MessageKey::DoctorProbeIssues,
+                    &[("issues", &issues.join(&c.key(MessageKey::UiSepSentence)))],
+                )
             };
             out.push(c.with(
                 MessageKey::DoctorProbeChat,

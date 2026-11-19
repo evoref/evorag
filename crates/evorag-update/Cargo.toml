@@ -1,0 +1,47 @@
+[package]
+name = "evorag-update"
+description = "evorag: 本体の更新 (確認・取得・検証・置き換え・巻き戻し、12 §5・§7)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# cargo xtask dist・verify-release が、署名の前の release.json と自分で作った配布物を、同じ規則で読む。
+# 検証を飛ばす入口なので、xtask のほかは有効にしない (cargo xtask check-deps が確かめる)。
+unverified-dist = []
+# 試験のための結果の型を作る口 (bin の evorag の試験が、表示と終了コードを確かめる)。dev 依存だけで有効にする。
+test-util = []
+
+[dependencies]
+# 置き換えのファイルの操作 (上書きしない改名・書き切り・権限、12 §7.3)。
+evorag-store = { workspace = true }
+minisign-verify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# 配布物の読み手。どちらで読むかは配布物の名前の末尾で決める (12 §5.3。cfg では決めない)。
+zip = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+# 取得 (12 §7.5、S-06)。転送先の確かめに url を使う (evorag-llm と同じ crate)。
+ureq = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+rustls-graviola = { workspace = true }
+# 版を固定するためだけの直接の依存 (CPU の機能の一覧が版に結び付く、12 §7.5)。
+graviola = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+# 試験の鍵で minisign の署名を作る (Ed25519 と、prehash の BLAKE2b-512)。試験だけの依存。
+ed25519-compact = { version = "2.1.1", default-features = false }
+blake2 = "0.10.6"
+# 試験のデータ根を作る (rollback のデータの案内)。
+evorag-types = { workspace = true }
+
+[lints]
+workspace = true

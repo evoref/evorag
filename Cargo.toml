@@ -1,5 +1,5 @@
 # evorag の workspace (docs/11-dev-workflow.md §1、crate の構成は docs/02-architecture.md §4)。
-# v0.1 で入る crate だけを置く。evorag-learn (v0.4)・evorag-cartridge (v0.5)・evorag-update (v0.3) は、その版で足す。
+# その版で入る crate だけを置く。evorag-learn (v0.4)・evorag-cartridge (v0.5) は、その版で足す。
 
 [workspace]
 resolver = "3"
@@ -12,13 +12,14 @@ members = [
     "crates/evorag-retrieval",
     "crates/evorag-core",
     "crates/evorag-tui",
+    "crates/evorag-update",
     "bins/evorag",
     "xtask",
 ]
 
 [workspace.package]
 # v0.1.0 のリリースまでは内部カウンタ 0.0.x (docs/11-dev-workflow.md §9.1)。
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # rust-toolchain.toml の版と同じにする (docs/11-dev-workflow.md §1.1)。
 rust-version = "1.99"
@@ -37,10 +38,13 @@ evorag-memory = { path = "crates/evorag-memory" }
 evorag-retrieval = { path = "crates/evorag-retrieval" }
 evorag-core = { path = "crates/evorag-core" }
 evorag-tui = { path = "crates/evorag-tui" }
+evorag-update = { path = "crates/evorag-update" }
 
 # 外部の crate (版は workspace で 1 か所に決める)。
 serde = { version = "1.0.228", features = ["derive"] }
 ciborium = "0.2.2"
+# memory.forget_key を作る OS の乱数 (03 §3.1.1)。
+getrandom = "0.4.3"
 redb = "4.5.0"
 # TLS・プロキシ・HTTP/2 を切る (02 §4.3 の R3、06 §1)。
 reqwest = { version = "0.13.5", default-features = false }
@@ -55,12 +59,37 @@ unicode-segmentation = "1.12.0"
 unicode-width = "0.2.2"
 # 語彙の索引の正規化 (NFKC と Unicode の一般カテゴリ、05 §2.1)。
 unicode-normalization = "0.1.24"
+# 値の鍵の完全な case folding (04 §5.6)。依存なし。
+unicase = "2.9.0"
 unicode-properties = { version = "0.1.3", default-features = false, features = ["general-category"] }
+# 関門 6 の文字体系の混在 (Unicode の Script、UTS #39 の組み合わせ、04 §5.2)。依存なし。
+unicode-script = "0.5.9"
 thiserror = "2.0.17"
 # ログ (02 §7)。状態のフォルダの logs/ に、本文を含めずに書く。
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt", "std"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+# 更新の署名 (minisign、prehash の形だけを通す、12 §5.2)。依存なし。
+minisign-verify = "0.3.0"
+# 配布物の読み手 (02 §4.1)。zip は deflate だけ (既定の機能を切る)、tar.gz は tar + flate2 (純 Rust の miniz_oxide)。
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# 更新の確認と取得の通信 (12 §7.5、S-06)。TLS は evorag-update の中だけに閉じる (02 §4.3 の R3・R5)。
+# ureq は圧縮・Cookie・同梱のルートの一覧を入れない (Accept-Encoding を送らない、ライセンス)。証明書は OS の検証器。
+ureq = { version = "3.5.2", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "logging"] }
+rustls-platform-verifier = { version = "0.7.1", default-features = false }
+# 純 Rust の暗号の実装 (OQ-05)。graviola は、CPU の機能の一覧 (12 §7.5) が版に結び付くので = で固定する。
+rustls-graviola = "0.4.0"
+graviola = "=0.4.5"
+
+# evorag の作業の設定 (cargo は読まない)。
+[workspace.metadata.evorag]
+# `evorag update apply` でこの版へ更新できる、今の版の下限 (release.json の upgrade_from、12 §5.3)。
+# v0.1〜v0.4 は直前の機能リリースの `.0` 以上で、この版より小さい (cargo xtask verify-release が確かめる)。
+# 版上げの PR で、直前の機能リリースの `.0` に直す (例: 0.3.0 なら "0.2.0")。
+upgrade_from = "0.2.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

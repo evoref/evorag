@@ -89,11 +89,12 @@ pub(crate) fn current(inner: &Inner) -> Option<(String, Arc<VecIndex>)> {
 }
 
 /// 足りないチャンク (語彙の索引にあって、今のモデルのベクトルの索引に無く、飛ばしていないもの) と、全体の数。
+/// 事実の検索の鍵は埋め込まない (語彙の索引だけ、fact_table.rs) ので数えない。
 fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
     let Some(lex) = &inner.index else {
         return (Vec::new(), 0);
     };
-    let all = lex.snapshot().ids();
+    let all = lex.snapshot().ids_where(|d| !crate::recall::is_fact_key(d));
     let have: HashSet<Id> = match current(inner) {
         Some((k, ix)) if k == key => ix.snapshot().ids(),
         _ => HashSet::new(),
@@ -157,6 +158,27 @@ pub(crate) async fn open(inner: &Arc<Inner>) {
         tracing::warn!("vector index could not be checked");
         return;
     };
+    if !plan.unsynced.is_empty() {
+        // 同じ行を除く job が残っていれば、足さない (起動のたびに増やさない)。
+        let want: HashSet<Id> = plan.unsynced.iter().copied().collect();
+        let queued = inner
+            .store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::pending_cleanup_jobs(&r).ok())
+            .unwrap_or_default()
+            .iter()
+            .any(|j| !j.backups && j.ids.iter().copied().collect::<HashSet<Id>>() == want);
+        if !queued
+            && let Ok((_, job)) = evorag_memory::index_job(&writes(inner), plan.unsynced.clone())
+            && let Err(e) = write_derived(inner, vec![job]).await
+        {
+            tracing::warn!(error = %e, "the index cleanup job could not be written");
+        }
+        inner
+            .cleanup_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     if !plan.stale.is_empty() {
         let w = writes(inner);
         let ops: Vec<_> = plan
@@ -188,6 +210,8 @@ struct OpenPlan {
     stale: Vec<Id>,
     /// 突き合わせた索引 (今のモデルの記録が無ければ `None`)。
     index: Option<Arc<VecIndex>>,
+    /// 前の世代の索引から除けなかった行 (索引の整理の job に残す)。
+    unsynced: Vec<Id>,
 }
 
 fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPlan> {
@@ -239,13 +263,24 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
             stale.push(id);
         }
     }
+    let unsynced = match previous {
+        Some(p) => {
+            let want: HashSet<Id> = prev.keys().map(|(t, _)| *t).collect();
+            sync_previous(&vec_dir(&root, p), &want)
+        }
+        None => Vec::new(),
+    };
     let dir = vec_dir(&root, key);
     let Some(dim) = mine.values().next().map(|(_, b)| b.dim as usize) else {
         // 今のモデルの記録が無い: 索引のフォルダがあっても、中身は信用できないので消す (作り直す)。
         if dir.is_dir() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        return Some(OpenPlan { stale, index: None });
+        return Some(OpenPlan {
+            stale,
+            index: None,
+            unsynced,
+        });
     };
     let (ix, opened) = VecIndex::open(&dir, dim).ok()?;
     let want: HashSet<Id> = mine.keys().map(|(t, _)| *t).collect();
@@ -285,21 +320,32 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
     Some(OpenPlan {
         stale,
         index: Some(Arc::new(ix)),
+        unsynced,
     })
 }
 
-/// 消した会話のチャンクの行を、今と前の世代のベクトルの索引から除く (04 §7、AC-FR-309-1)。
-/// 呼び手は `index_lock` を持つ。
-pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
+/// 消した記録の行を、今と前の世代のすべてのベクトルの索引から除く (04 §7.7 の 2、AC-FR-309-1)。呼び手は
+/// `index_lock` を持つ。すべて除けたら `true` (除けなかった分は、呼び手が job に残して試し直す)。開けない前の
+/// 世代の索引は、使えないので消す (使うときに DB から作り直す、05 §2.2)。
+pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) -> bool {
     if gone.is_empty() {
-        return;
+        return true;
     }
+    let mut ok = true;
     let current = current(inner);
-    if let Some((_, ix)) = &current {
-        let _ = ix.remove(gone);
+    if let Some((_, ix)) = &current
+        && let Err(e) = ix.remove(gone)
+    {
+        tracing::warn!(error = %e, "deleted rows could not be removed from the vector index");
+        ok = false;
     }
-    let Ok(entries) = std::fs::read_dir(memory_dir(inner.store.data_root())) else {
-        return;
+    let entries = match std::fs::read_dir(memory_dir(inner.store.data_root())) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ok,
+        Err(e) => {
+            tracing::warn!(error = %e, "the vector indexes could not be listed");
+            return false;
+        }
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -309,8 +355,54 @@ pub(crate) fn remove_everywhere(inner: &Inner, gone: &HashSet<Id>) {
         if current.as_ref().is_some_and(|(k, _)| k == key) {
             continue;
         }
-        if let Some(ix) = VecIndex::open_existing(&e.path()) {
-            let _ = ix.remove(gone);
+        ok &= remove_from_generation(&e.path(), gone);
+    }
+    ok
+}
+
+/// 前の世代 (今開いていない) のベクトルの索引から行を除く。開けなければフォルダごと消す。
+fn remove_from_generation(dir: &std::path::Path, gone: &HashSet<Id>) -> bool {
+    match VecIndex::open_existing(dir) {
+        Some(ix) => match ix.remove(gone) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "deleted rows could not be removed from a previous vector index");
+                false
+            }
+        },
+        None => match std::fs::remove_dir_all(dir) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %dir.display(), "an unreadable vector index could not be removed");
+                false
+            }
+        },
+    }
+}
+
+/// 前の世代の索引を、DB の記録と突き合わせる (起動時の突き合わせをすべての世代に当てる、04 §7.7 の 2)。
+/// `want` は、DB に記録のある前のモデルの埋め込みの対象。それ以外の行を除く。除けなかった行を返す (呼び手が
+/// 索引の整理の job に残す)。読めない索引を消せないときは、次の起動でもう一度試す。
+fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) -> Vec<Id> {
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let Some(ix) = VecIndex::open_existing(dir) else {
+        // 読めない索引は使えないので消す (戻したときに DB から作り直す)。
+        if let Err(e) = std::fs::remove_dir_all(dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "an unreadable vector index could not be removed");
+        }
+        return Vec::new();
+    };
+    let extra: HashSet<Id> = ix.snapshot().ids().difference(want).copied().collect();
+    match ix.remove(&extra) {
+        Ok(()) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "the previous vector index could not be synced");
+            let mut left: Vec<Id> = extra.into_iter().collect();
+            left.sort();
+            left
         }
     }
 }
@@ -322,6 +414,8 @@ struct Item {
     /// ノートの鍵の位置 (チャンクは `None`)。
     key: Option<u32>,
     text: String,
+    /// チャンクの出典のターンの改訂の番号 (03 §3.3 の `src_rev`)。ノートの鍵は `None` (ノートの `src_revs` で判定)。
+    src_rev: Option<u32>,
 }
 
 /// 埋め込む本文を読む。チャンクは範囲を元のターンの本文から取り、ノートは鍵のそれぞれを 1 件にする。
@@ -329,6 +423,9 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
     let Ok(r) = inner.store.read() else {
         return Vec::new();
     };
+    // 忘れるの指示と合わないターンのチャンクは埋め込まない (04 §7.2。伏せる前の本文かもしれないため)。確かめ
+    // られなければ、この回はチャンクを埋め込まない (どちらも、このプロセスの間は飛ばす)。
+    let hide = crate::masking::Hide::load(&r, inner.language);
     let mut out = Vec::new();
     for id in ids {
         if let Ok(Some(Read::Ok(e))) = r.get(KIND_NOTE, *id)
@@ -340,6 +437,7 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
                     session: n.session,
                     key: Some(i as u32),
                     text: k.clone(),
+                    src_rev: None,
                 });
             }
             continue;
@@ -353,6 +451,9 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
         let Ok(Some(Read::Ok(t))) = r.get(KIND_TURN, c.turn) else {
             continue;
         };
+        if hide.as_ref().is_none_or(|h| h.excluded(&t)) {
+            continue;
+        }
         let Ok(tb) = t.body_as::<TurnBody>() else {
             continue;
         };
@@ -365,6 +466,7 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
             session: c.session,
             key: None,
             text: evorag_retrieval::chunk::slice(&tb.text, span),
+            src_rev: Some(c.src_rev()),
         });
     }
     out
@@ -449,11 +551,13 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if keep.is_empty() {
             continue;
         }
-        // 記録と索引への反映は、鍵の下の落とされない task で行う。
+        // 記録と索引への反映は、鍵の下の落とされない task で行う。鍵は spawn の前に取る (終了の処理が鍵を
+        // 取れたら、出した保存は終わっている)。
+        let lock = inner.index_lock.clone().lock_owned().await;
         let worker = inner.clone();
         let key2 = key.clone();
         let saved = tokio::spawn(async move {
-            let _lock = worker.index_lock.lock().await;
+            let _lock = lock;
             save(&worker, &key2, keep, done).await
         })
         .await;
@@ -489,6 +593,10 @@ async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<
             if !matches!(r.get(kind, id), Ok(Some(Read::Ok(_)))) {
                 continue;
             }
+            // 書き手のトランザクションの中でも、対象が残っていることを確かめる (04 §7.7 の 4)。
+            if !cleared.contains(&id) {
+                ops.push(evorag_memory::expect_record(kind, id));
+            }
             if cleared.insert(id) {
                 for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {
                     ops.extend(w.delete_embedding(old));
@@ -506,6 +614,7 @@ async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<
                 model_key: key.to_owned(),
                 dim: v.len() as u32,
                 key: item.key,
+                src_rev: item.src_rev,
             };
             match w.embedding(&body, &v) {
                 Ok((_, o)) => ops.extend(o),

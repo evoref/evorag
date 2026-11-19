@@ -4,9 +4,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use evorag_store::export::{EXPORT_FORMAT, ExportError, export};
-use evorag_store::testutil::{TempDir, raw_corrupt_record};
-use evorag_store::{Durability, Envelope, KindSpec, OpenOptions, Store, envelope_from_json};
+use evorag_store::export::{
+    EXPORT_FORMAT, ExportChecks, ExportError, ExportOptions, ExportView, NoChecks, export,
+};
+use evorag_store::testutil::{TempDir, raw_corrupt_record, raw_set_meta};
+use evorag_store::{
+    Durability, Envelope, KindSpec, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer,
+    envelope_from_json, meta,
+};
 use evorag_types::{Id, ManualClock, Timestamp, UuidV7Gen};
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +65,34 @@ fn open(root: &Path) -> Store {
     .0
 }
 
+/// `NoChecks` で `exclude` を除いて書き出す。
+fn export_plain(
+    root: &Path,
+    out: &Path,
+    now_ms: i64,
+    exclude: &[&str],
+) -> Result<evorag_store::export::ExportReport, ExportError> {
+    export(
+        root,
+        out,
+        &ExportOptions {
+            evorag_version: "0.0.6",
+            now_ms,
+            exclude,
+            checks: &NoChecks,
+        },
+    )
+}
+
+fn out_dir(root: &Path) -> std::path::PathBuf {
+    let out = root.join("..").join(format!(
+        "{}-out",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = std::fs::remove_dir_all(&out);
+    out
+}
+
 fn write_records(store: &Store) -> Vec<Envelope> {
     let tok = store.take_write_token().unwrap();
     let mut out = Vec::new();
@@ -95,7 +128,7 @@ fn every_record_is_written_once_as_an_envelope() {
         dir.path().file_name().unwrap().to_string_lossy()
     ));
     let _ = std::fs::remove_dir_all(&out);
-    let report = export(dir.path(), &out, "0.0.6", 1, &[]).unwrap();
+    let report = export_plain(dir.path(), &out, 1, &[]).unwrap();
     assert_eq!(report.kinds.get("note"), Some(&2));
     assert_eq!(report.kinds.get("mark"), Some(&1));
     assert_eq!(report.skipped_corrupt, 1);
@@ -134,7 +167,7 @@ fn every_record_is_written_once_as_an_envelope() {
 
     // 中身のあるフォルダには書かない。
     assert!(matches!(
-        export(dir.path(), &out, "0.0.6", 2, &[]),
+        export_plain(dir.path(), &out, 2, &[]),
         Err(ExportError::NotEmpty(_))
     ));
     let _ = std::fs::remove_dir_all(&out);
@@ -142,7 +175,7 @@ fn every_record_is_written_once_as_an_envelope() {
     // 使っているプロセスがあれば断る。
     let store = open(dir.path());
     assert!(matches!(
-        export(dir.path(), &out, "0.0.6", 3, &[]),
+        export_plain(dir.path(), &out, 3, &[]),
         Err(ExportError::Open(_))
     ));
     drop(store);
@@ -160,8 +193,112 @@ fn excluded_kinds_are_not_written() {
         dir.path().file_name().unwrap().to_string_lossy()
     ));
     let _ = std::fs::remove_dir_all(&out);
-    let report = export(dir.path(), &out, "0.0.6", 1, &["mark"]).unwrap();
+    let report = export_plain(dir.path(), &out, 1, &["mark"]).unwrap();
     assert_eq!(report.kinds.get("note"), Some(&3));
     assert_eq!(report.kinds.get("mark"), None);
     assert!(!out.join("mark.jsonl").exists());
+}
+
+const TURN: KindSpec = KindSpec {
+    journaled: true,
+    ..KindSpec::new("turn", 1)
+};
+
+/// 取り込んでいないジャーナルの行があれば書き出しを断り、出力先に何も作らない。一度開いて取り込めば書き出せる。
+/// verifies: 03 §11 (取り込んでいないジャーナルの行があれば断る)
+#[test]
+fn export_refuses_while_journal_lines_are_not_imported() {
+    let dir = TempDir::new("export-pending-journal");
+    let open_turns = || {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
+        Store::open(OpenOptions {
+            data_root: dir.path().to_path_buf(),
+            evorag_version: "0.0.6".into(),
+            kinds: vec![TURN],
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock, 3)),
+            config_file: None,
+        })
+        .unwrap()
+        .0
+    };
+    let store = Arc::new(open_turns());
+    let (writer, h) = Writer::new(store.clone()).unwrap();
+    let t = std::thread::spawn(move || writer.run());
+    for i in 0..2 {
+        let mut e = Envelope::new(store.ids().next_id(), "turn", 1, store.clock().now(), "");
+        e.set_body(&Body {
+            text: format!("ターン {i}"),
+            n: 0.0,
+            raw: serde_bytes_like::Bytes(vec![]),
+        })
+        .unwrap();
+        h.submit_wait(WriteRequest::conversation(vec![WriteOp::Put(e)]))
+            .unwrap();
+    }
+    h.shutdown();
+    t.join().unwrap();
+    drop(store);
+    // DB がジャーナルの行を取り込む前に止まった状態 (取り込んだ連番を戻す)。
+    raw_set_meta(dir.path(), meta::JOURNAL_LAST_SEQ, "0");
+
+    let out = out_dir(dir.path());
+    assert!(matches!(
+        export_plain(dir.path(), &out, 1, &[]),
+        Err(ExportError::PendingJournal { lines: 2 })
+    ));
+    assert!(!out.exists(), "nothing is created when refused");
+
+    // evorag を一度起動すると取り込まれ、書き出せる。
+    drop(open_turns());
+    let report = export_plain(dir.path(), &out, 2, &[]).unwrap();
+    assert_eq!(report.kinds.get("turn"), Some(&2));
+}
+
+/// メモリの層の確かめ: 当て直しの済んでいない忘れるがあれば断り、外すと言われた記録は書かずに数える。
+/// verifies: 03 §11 (当て直しの済んでいない忘れるがあれば断る、派生の記録の確かめ)
+#[test]
+fn export_follows_the_checks_of_the_upper_layers() {
+    struct Pending;
+    impl ExportChecks for Pending {
+        fn pending_forget(&self, view: &ExportView<'_>) -> bool {
+            let mut n = 0;
+            view.for_each("note", |_| {
+                n += 1;
+                true
+            })
+            .unwrap();
+            n > 0
+        }
+    }
+    struct DropMarks;
+    impl ExportChecks for DropMarks {
+        fn include(&self, view: &ExportView<'_>, env: &Envelope) -> bool {
+            assert!(matches!(
+                view.get(&env.kind, env.id).unwrap(),
+                Some(Read::Ok(_))
+            ));
+            env.kind != "mark"
+        }
+    }
+    let dir = TempDir::new("export-checks");
+    let store = open(dir.path());
+    write_records(&store);
+    drop(store);
+    let out = out_dir(dir.path());
+    let opts = |checks: &'static dyn ExportChecks| ExportOptions {
+        evorag_version: "0.0.6",
+        now_ms: 1,
+        exclude: &[],
+        checks,
+    };
+    assert!(matches!(
+        export(dir.path(), &out, &opts(&Pending)),
+        Err(ExportError::PendingForget)
+    ));
+    assert!(!out.exists(), "nothing is created when refused");
+    let report = export(dir.path(), &out, &opts(&DropMarks)).unwrap();
+    assert_eq!(report.kinds.get("note"), Some(&3));
+    assert_eq!(report.kinds.get("mark"), None);
+    assert_eq!(report.skipped_by_check, 1);
 }

@@ -39,8 +39,15 @@ only_in = ["evorag-store"]
 
 [[direct_only_in]]
 rule = "R3"
-crates = ["reqwest", "ureq", "hyper", "hyper-util", "isahc", "attohttpc", "minreq"]
-only_in = ["evorag-llm", "evorag-update"]
+# evorag-llm と evorag-update は別の HTTP のクライアントを使う。同じ crate だと、配布物の中で機能がまとまり、
+# evorag-llm にも TLS が入る (S-06)。
+crates = ["reqwest", "hyper", "hyper-util", "isahc", "attohttpc", "minreq"]
+only_in = ["evorag-llm"]
+
+[[direct_only_in]]
+rule = "R3"
+crates = ["ureq"]
+only_in = ["evorag-update"]
 
 [[direct_only_in]]
 rule = "R6"
@@ -52,8 +59,36 @@ only_in = ["evorag-tui"]
 [[tree_only_in]]
 rule = "R3, R5"
 # TLS を持ってよいのは evorag-update だけ。evorag-llm は TLS を持たない。
-crates = ["rustls", "rustls-graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "rustls-platform-verifier", "rustls-native-certs"]
+crates = ["ureq", "rustls", "rustls-graviola", "graviola", "tokio-rustls", "hyper-rustls", "webpki-roots", "webpki-root-certs", "rustls-platform-verifier", "rustls-native-certs"]
 only_in = ["evorag-update"]
+
+# 配布物 (bin の evorag) の依存の木で、crate に有効にしてはいけない機能 (末尾の * は前方一致)。
+[[features_forbidden]]
+rule = "R3, R5"
+crate = "reqwest"
+# reqwest は配布物の中で 1 つなので、どこかが TLS の機能を入れると evorag-llm の reqwest にも TLS が入る (S-06 §2.4・§6.1)。
+features = ["__rustls*", "__tls", "__native-tls*", "rustls*", "native-tls*", "default-tls", "default"]
+reason = "evorag-llm has no TLS; only evorag-update may (via ureq)"
+
+[[features_forbidden]]
+rule = "R3, R5"
+crate = "ureq"
+# 名前は ureq 3.5.2 の Cargo.toml の [features] のとおり。使ってよいのは rustls-no-provider (暗号は
+# rustls-graviola) と platform-verifier (OS の検証器) だけ (S-06、12 §7.5)。
+# - default・rustls・_ring: ring を暗号に使う (C を含む、R5)。rustls-webpki-roots・native-tls-webpki-roots: 同梱の
+#   ルートの一覧。native-tls*・vendored: OS や OpenSSL の TLS。_doc: aws-lc-rs。
+# - cookies: Cookie を持たない。gzip・brotli: 圧縮を受けない (Accept-Encoding を送らない)。charset: 本文の文字コードを
+#   変えない。json・multipart: 使わない。socks-proxy: SOCKS に対応しない。win-system-proxy: WinINET の設定を読まない。
+features = ["default", "rustls", "_ring", "_doc", "rustls-webpki-roots", "native-tls*", "vendored", "cookies", "gzip", "brotli", "charset", "json", "multipart", "socks-proxy", "win-system-proxy"]
+reason = "evorag-update uses ureq with rustls-graviola and the OS verifier only (12 §7.5)"
+
+[[features_forbidden]]
+rule = "dist"
+crate = "evorag-update"
+# test-util は試験のための結果の型を作る口、unverified-dist は署名と配布物の検証を飛ばす入口。どちらも dev 依存と
+# xtask だけが有効にする (配布物の bin の evorag の依存の木には入れない)。
+features = ["test-util", "unverified-dist"]
+reason = "test-only and verification-skipping entry points must not ship"
 
 # workspace の crate ごとに、直接の依存として使ってよいものを列挙する規則。
 [[direct_allow]]

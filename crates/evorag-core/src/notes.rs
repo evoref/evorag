@@ -38,7 +38,7 @@ pub(crate) fn touch(inner: &Inner) {
 
 /// 今の応答のモデルで、型縛りの補助の呼び出しを使えるか (06 §3.3 の点検で通ったか)。
 /// 点検がまだなら使わない (点検を待つ)。
-fn usable(inner: &Inner) -> bool {
+pub(crate) fn usable(inner: &Inner) -> bool {
     let (_, server, _) = inner.conn();
     inner
         .store
@@ -82,6 +82,8 @@ struct Work {
 struct Plan {
     work: Vec<Work>,
     due_at: Option<i64>,
+    /// 往復を読んだときに見えていた、最も新しい忘れるの指示 (ノートの `forgets_seen`、04 §7.2)。
+    forgets_seen: Option<Id>,
 }
 
 fn embeddings_of(r: &evorag_store::ReadTxn<'_>, note: Id) -> Vec<Id> {
@@ -90,9 +92,12 @@ fn embeddings_of(r: &evorag_store::ReadTxn<'_>, note: Id) -> Vec<Id> {
         .unwrap_or_default()
 }
 
-/// 区切りと記録したノートを突き合わせる。
-fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
+/// 区切りと記録したノートを突き合わせる。往復の本文は、private の値と伏せ字にしないで忘れた範囲を `[非表示]` に
+/// してから区切る (鍵を作る呼び出しに忘れた値を渡さない、04 §7.1・§7.5)。伏せる材料を読めなければ作らない。
+fn plan(store: &Store, now_ms: i64, lang: crate::prompt::PromptLanguage) -> Option<Plan> {
     let r = store.read().ok()?;
+    let hide = crate::masking::Hide::load(&r, lang)?;
+    let forgets_seen = evorag_memory::latest_forget(&r).ok()?;
     let mut notes: HashMap<Id, Vec<(Id, NoteBody)>> = HashMap::new();
     r.for_each(KIND_NOTE, |x| {
         if let Read::Ok(e) = x
@@ -107,17 +112,21 @@ fn plan(store: &Store, now_ms: i64) -> Option<Plan> {
     let mut p = Plan {
         work: Vec::new(),
         due_at: None,
+        forgets_seen,
     };
     for s in evorag_memory::list_sessions(&r, usize::MAX).ok()? {
         let sid = s.envelope.id;
-        let turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        let mut turns = evorag_memory::session_turns(&r, sid).unwrap_or_default();
+        // 忘れるの指示と合わないターンは、鍵を作る呼び出しに渡さない (04 §7.2)。
+        turns.retain(|t| !hide.excluded(&t.envelope));
+        hide.apply(&r, &mut turns);
         let have = notes.get(&sid).map(Vec::as_slice).unwrap_or_default();
         for seg in evorag_memory::segments(&turns, now_ms) {
             let ids = seg.ids();
-            if have
-                .iter()
-                .any(|(_, n)| n.exchanges == ids && n.rules == NOTE_RULES)
-            {
+            // 出典の改訂の番号が今と合わないノート (伏せ字の前の本文から作ったもの) は作り直す (04 §7.7 の 4)。
+            if have.iter().any(|(_, n)| {
+                n.exchanges == ids && n.rules == NOTE_RULES && evorag_memory::note_is_current(&r, n)
+            }) {
                 continue;
             }
             if !seg.closed {
@@ -163,7 +172,7 @@ enum KeysError {
 }
 
 /// 応答のスロット (0) が処理中か (06 §4)。`/slots` が使えなければ見ない。
-async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
+pub(crate) async fn response_slot_busy(llm: &dyn LlmClient) -> bool {
     llm.slots()
         .await
         .is_ok_and(|s| s.iter().any(|x| x.id == 0 && x.is_processing))
@@ -226,7 +235,8 @@ async fn make_keys(
     Err(KeysError::Invalid)
 }
 
-/// ノートを書き (消し)、語彙の索引に鍵を足し、消したノートの項目を語彙とベクトルの索引から除く。
+/// ノートを書き (消し)、語彙の索引に鍵を足し、消したノートの項目を語彙とベクトルの索引から除く。書けなければ
+/// (出典が消えた・変わったときを含む) 何も変えずに `false`。
 /// チャンクと索引を変える処理の鍵の下の、落とされない task で行う (embedding.rs の冒頭)。鍵の埋め込みは、
 /// 埋め込みの手順が語彙の索引との差から作る。
 async fn save(
@@ -235,9 +245,11 @@ async fn save(
     gone: Vec<Id>,
     made: Option<(Id, NoteBody)>,
 ) -> bool {
+    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した保存は終わっている)。
+    let lock = inner.index_lock.clone().lock_owned().await;
     let worker = inner.clone();
     let task = tokio::spawn(async move {
-        let _lock = worker.index_lock.lock().await;
+        let _lock = lock;
         if crate::write_derived(&worker, ops).await.is_err() {
             return false;
         }
@@ -273,7 +285,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         .version;
     let store = inner.store.clone();
     let now = inner.clock.now().as_millis();
-    let Ok(Some(plan)) = tokio::task::spawn_blocking(move || plan(&store, now)).await else {
+    let lang = inner.language;
+    let Ok(Some(plan)) = tokio::task::spawn_blocking(move || plan(&store, now, lang)).await else {
         return false;
     };
     inner.notes.lock().unwrap_or_else(|e| e.into_inner()).due_at = plan.due_at;
@@ -315,7 +328,11 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             keys,
             model_key: server.model_key.clone(),
             rules: NOTE_RULES,
+            src_revs: w.segment.src_revs(),
+            forgets_seen: plan.forgets_seen,
         };
+        // 書き手が、読んだ出典 (発話と応答) が残っていて改訂の番号が合うことを確かめてから書く。呼び出しの間に
+        // セッションが消えた・伏せ字になったら書かない (04 §7.7 の 4)。
         let Ok((id, ops)) = crate::writes(inner).note(&w.old, &w.old_embeddings, &body) else {
             return progressed;
         };

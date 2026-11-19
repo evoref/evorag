@@ -63,6 +63,45 @@ pub enum BodyError {
     NotAMap,
 }
 
+/// 本体の項目の差し替え ([`crate::WriteOp::Patch`])。書き手のトランザクションの中で読み直した記録に当てる
+/// (外で読んだ本体を丸ごと書き戻さない、04 §7.3)。
+#[derive(Debug, Clone, Default)]
+pub struct BodyPatch {
+    fields: Vec<(Value, Value)>,
+}
+
+impl BodyPatch {
+    /// 何も差し替えない (更新時刻だけを変えるときなど)。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 項目 `name` を `value` にする (同じ名前を 2 度渡せば後のものを採る)。
+    ///
+    /// # Errors
+    /// 値を CBOR にできないとき。
+    pub fn set<T: Serialize>(mut self, name: &str, value: &T) -> Result<Self, BodyError> {
+        let v = Value::serialized(value).map_err(|e| BodyError::Serialize(e.to_string()))?;
+        let key = Value::Text(name.to_owned());
+        self.fields.retain(|(k, _)| *k != key);
+        self.fields.push((key, v));
+        Ok(self)
+    }
+}
+
+/// 本体 (map) の整数の項目 `name`。項目が無いか null なら 0 (03 §4.2 の規則 1 の既定値)、整数でない・本体が
+/// map でないなら `None`。
+pub(crate) fn map_uint(body: &Value, name: &str) -> Option<u64> {
+    let Value::Map(map) = body else {
+        return None;
+    };
+    match map.iter().find(|(k, _)| k.as_text() == Some(name)) {
+        None | Some((_, Value::Null)) => Some(0),
+        Some((_, Value::Integer(i))) => u64::try_from(*i).ok(),
+        Some(_) => None,
+    }
+}
+
 fn checksum(key: &[u8], cbor: &[u8]) -> u64 {
     let mut h = xxhash_rust::xxh3::Xxh3::new();
     h.update(key);
@@ -113,6 +152,28 @@ impl Envelope {
         Ok(())
     }
 
+    /// 本体に差し替えを当てる。ほかの項目 (知らない項目を含む) はそのまま残す。
+    ///
+    /// # Errors
+    /// 本体が map でないとき。
+    pub fn apply_patch(&mut self, patch: &BodyPatch) -> Result<(), BodyError> {
+        let Value::Map(map) = &mut self.body else {
+            return Err(BodyError::NotAMap);
+        };
+        for (k, v) in &patch.fields {
+            match map.iter_mut().find(|(old, _)| old == k) {
+                Some((_, old)) => *old = v.clone(),
+                None => map.push((k.clone(), v.clone())),
+            }
+        }
+        Ok(())
+    }
+
+    /// 本体の整数の項目 `name`。項目が無ければ 0 (03 §4.2 の規則 1 の既定値)、整数でなければ `None`。
+    pub fn body_uint(&self, name: &str) -> Option<u64> {
+        map_uint(&self.body, name)
+    }
+
     /// `records` の値のバイト列にする。`key` は表のキー (チェックサムが覆う)。
     pub fn encode(&self, key: &[u8]) -> Vec<u8> {
         let mut map: Vec<(Value, Value)> = vec![
@@ -133,6 +194,16 @@ impl Envelope {
         out.extend_from_slice(&checksum(key, &cbor).to_le_bytes());
         out.extend_from_slice(&cbor);
         out
+    }
+
+    /// 値の配置の版を知っていて、チェックサムが合うか (本体を復号しない。退避の写し直しの下見に使う)。
+    pub(crate) fn is_intact(key: &[u8], value: &[u8]) -> bool {
+        match value.split_first() {
+            Some((&LAYOUT_V1, rest)) => rest
+                .split_first_chunk::<8>()
+                .is_some_and(|(sum, cbor)| u64::from_le_bytes(*sum) == checksum(key, cbor)),
+            _ => false,
+        }
     }
 
     /// `records` の値のバイト列を読む。チェックサムは復号の前に確かめる。

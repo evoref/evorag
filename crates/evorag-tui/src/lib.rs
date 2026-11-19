@@ -4,7 +4,9 @@
 
 pub mod app;
 pub mod catalog;
+pub mod clipboard;
 pub mod draft;
+pub mod forget;
 pub mod input;
 pub mod markdown;
 pub mod render;

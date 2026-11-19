@@ -1,0 +1,388 @@
+# 忘れると伏せ字、想起での伏せ (04 §7.1〜§7.3・§7.5)。書式は README.md。会話はすべて架空 (11 §9.7)。
+# 伏せ字の印は ja の `[伏せ字]`、想起での伏せは `[非表示]`。
+# 伏せる範囲は、根拠の範囲の中の、値に一致する箇所 (04 §7.3。README の「04 に決めたこと」)。
+# どの事例も、忘れるを 2 回当てた結果が 1 回と同じになること (apply_forget の冪等、AC-FR-307-4) も確かめる。
+
+[[case]]
+id = "F01"
+title = "既定の忘れる: 出典の発話と、同じ往復の応答の中の値を伏せ字にし、印を残す"
+spec = "04 §7.1・§7.2・§7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "大阪にお住まいなんですね" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます" },
+  { id = "a2", text = "[伏せ字]にお住まいなんですね" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }], table = [] }
+
+[[case]]
+id = "F02"
+title = "応答の中の一致を伏せない選択では、利用者の発話だけを伏せ字にする"
+spec = "04 §7.1"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "大阪にお住まいなんですね" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます" },
+  { id = "a2", text = "大阪にお住まいなんですね" },
+] }
+
+[[case]]
+id = "F03"
+title = "伏せ字にしないで忘れると、本文は残し、想起で添えるときは値を [非表示] にする"
+spec = "04 §7.1 の伏せ字にしないで忘れたとき"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "大阪にお住まいなんですね" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, redact = false }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は大阪に住んでいます" },
+  { id = "a2", text = "大阪にお住まいなんですね" },
+], recall = [
+  { turn = "a1", text = "私は[非表示]に住んでいます" },
+  { turn = "a2", text = "[非表示]にお住まいなんですね" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }] }
+
+[[case]]
+id = "F04"
+title = "同じターンに 2 回目の忘れるを当てても、前の伏せ字で動いた位置を正しく扱う"
+spec = "04 §7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいて、柴犬を飼っています" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいて" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "pet", v = "柴犬", e = "柴犬を飼っています" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "pet", v = "柴犬" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "pet", state = "Retracted", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいて、[伏せ字]を飼っています" },
+] }
+
+[[case]]
+id = "F05"
+title = "履歴もまとめて忘れると、置き換えた古い値の出典も伏せ字にする"
+spec = "04 §7.1"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "私は東京に引っ越しました" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "私は東京に引っ越しました" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "東京" }, history = true, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "residence", state = "Retracted", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます" },
+  { id = "b1", text = "私は[伏せ字]に引っ越しました" },
+], blocked = [
+  { s = "self", a = "residence", v = "大阪" },
+  { s = "self", a = "residence", v = "東京" },
+], table = [] }
+
+[[case]]
+id = "F06"
+title = "選んだ値だけを忘れると、置き換えた古い値は残し、今の値なしになる (古い値を今の値に戻さない)"
+spec = "04 §7.1・§7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "私は東京に引っ越しました" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "私は東京に引っ越しました" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "東京" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "(retracted)", sources = ["a1"] },
+  { s = "self", a = "residence", state = "Retracted", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "私は大阪に住んでいます" },
+  { id = "b1", text = "私は[伏せ字]に引っ越しました" },
+], table = [] }
+
+[[case]]
+id = "F07"
+title = "ほかのターンで同じ値を言っていても、既定ではそのターンを伏せ字にしない (件数だけを示す)"
+spec = "04 §7.1"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "大阪のおすすめの店を教えて" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます" },
+  { id = "b1", text = "大阪のおすすめの店を教えて" },
+] }
+
+[[case]]
+id = "F08"
+title = "ほかのターンもまとめて伏せる選択では、そのターンの一致も伏せ字にする"
+spec = "04 §7.1"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "大阪のおすすめの店を教えて" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false, others = true }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます" },
+  { id = "b1", text = "[伏せ字]のおすすめの店を教えて" },
+] }
+
+[[case]]
+id = "F09"
+title = "private の値は、想起で添える往復の中で [非表示] にする (本文は変えない)"
+spec = "04 §7.5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "えびアレルギーがあります" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "えびを使わない献立にしましょう" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "dietary", v = "えび", e = "えびアレルギーがあります" }
+[[case.step]]
+op = { kind = "private", target = { s = "self", a = "dietary", v = "えび" } }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "えびアレルギーがあります" },
+], recall = [
+  { turn = "a1", text = "[非表示]アレルギーがあります" },
+  { turn = "a2", text = "[非表示]を使わない献立にしましょう" },
+], table = [] }
+
+[[case]]
+id = "F10"
+title = "セッションを消すと、その事実と出典のターンが消える"
+spec = "04 §7.1、AC-FR-309-3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "ラーメンが好き" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+op = { kind = "delete_session", session = "A" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["b1"] },
+], table = ["self/likes/ラーメン"] }
+
+[[case]]
+id = "F11"
+title = "伏せ字の範囲の本文が忘れる値と合わなければ、操作の全体を中止し、本文も事実も変えない"
+spec = "04 §7.3、AC-FR-307-5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+tamper = { id = "a1", text = "私は京都に住んでいます" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { aborted = true, facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "私は京都に住んでいます" },
+], blocked = [] }
+
+# ---- M3.4c の仕様の細目 (2026-11-17) ----
+
+[[case]]
+id = "F12"
+title = "伏せ字の範囲に値が掛かるほかの事実は、自動では取り消さずに残す (span は写し直す)"
+spec = "04 §7.1 の影響するほかの事実、§7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪のたこ焼きが好きで、大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪のたこ焼きが好きで、大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "大阪のたこ焼き", e = "大阪のたこ焼きが好き" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "likes", v = "大阪のたこ焼き", state = "Live", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "[伏せ字]のたこ焼きが好きで、[伏せ字]に住んでいます" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }], table = ["self/likes/大阪のたこ焼き"] }
+
+[[case]]
+id = "F13"
+title = "忘れた今の値より前の矛盾の値は、作り直すと今の値になる (作り直しの差を受け入れる)"
+spec = "04 §7.5 の作り直しで変わりうること、§7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-01T09:00:00Z", text = "大阪に住んでるから近いよ" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでる" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, redact = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1", "c1"] },
+  { s = "self", a = "residence", v = "東京", state = "Contested", against = "(retracted)", sources = ["b1"] },
+], table = [] }
+[[case.step]]
+op = { kind = "rebuild_facts" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+], table = ["self/residence/東京"], blocked = [{ s = "self", a = "residence", v = "大阪" }] }
+
+[[case]]
+id = "F14"
+title = "履歴もまとめて忘れても、矛盾の値は含めない (今の値を忘れた後に繰り上がる)"
+spec = "04 §7.1 の確認の画面、§7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, history = true, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "[伏せ字]に住んでます" },
+  { id = "b1", text = "東京に住んでるよ" },
+], blocked = [{ s = "self", a = "residence", v = "大阪" }], table = ["self/residence/東京"] }
+
+[[case]]
+id = "F15"
+title = "伏せ字にしないで忘れるときも、ほかのターンの一致を選べば、想起で添えるときに [非表示] にする"
+spec = "04 §7.1 の確認の画面"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "大阪のおすすめの店を教えて" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, redact = false, echo = false, others = true }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は大阪に住んでいます" },
+  { id = "b1", text = "大阪のおすすめの店を教えて" },
+], recall = [
+  { turn = "a1", text = "私は[非表示]に住んでいます" },
+  { turn = "b1", text = "[非表示]のおすすめの店を教えて" },
+] }
+
+[[case]]
+id = "F16"
+title = "応答の中の、漢字・かなの間の空白だけが違う写しも伏せ字にする (照合の形で探す)"
+spec = "04 §5.6 の照合の順、§7.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "誕生日は7 月 22 日ですね。7月22日、覚えました" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "birthday", state = "Retracted", sources = ["a1"] },
+], turns = [
+  { id = "a1", text = "誕生日は[伏せ字]です" },
+  { id = "a2", text = "誕生日は[伏せ字]ですね。[伏せ字]、覚えました" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }], table = [] }
+
+[[case]]
+id = "F17"
+title = "伏せ字にしないで忘れたときも、応答の中の空白を挟んだ写しを想起で [非表示] にする"
+spec = "04 §5.6 の照合の順、§7.5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:00:10Z", role = "assistant", text = "誕生日は7 月 22 日ですね" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" }, redact = false }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "誕生日は7月22日です" },
+  { id = "a2", text = "誕生日は7 月 22 日ですね" },
+], recall = [
+  { turn = "a1", text = "誕生日は[非表示]です" },
+  { turn = "a2", text = "誕生日は[非表示]ですね" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }] }
+
+[[case]]
+id = "F18"
+title = "空白の有無だけが違う書き方の事実も、照合の鍵が vks にあるので一緒に取り消す"
+spec = "04 §7.1 の取り消す事実、§7.2 の 2"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "誕生日は7月22日です" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "birthday", v = "7月22日", e = "誕生日は7月22日です" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "誕生日は 7 月 22 日だよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "birthday", v = "7 月 22 日", e = "誕生日は 7 月 22 日だよ" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "birthday", v = "7月22日" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "birthday", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "birthday", state = "Retracted", sources = ["b1"] },
+], turns = [
+  { id = "a1", text = "誕生日は[伏せ字]です" },
+  { id = "b1", text = "誕生日は [伏せ字]だよ" },
+], blocked = [{ s = "self", a = "birthday", v = "7月22日" }], table = [] }

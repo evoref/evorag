@@ -8,7 +8,7 @@
 version = 1
 
 [ui]
-# 画面の言語 (v0.1 は ja だけ)。
+# 画面の言語 (ja / en。en は v0.3 から)。いつでも変えられます (次の起動から効きます)。
 language = "ja"
 
 [prompt]

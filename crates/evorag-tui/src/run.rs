@@ -2,6 +2,8 @@
 //!
 //! - raw mode・代替画面・bracketed paste を有効にし、終わるとき (パニックを含む) に元に戻す。
 //! - IME の確定の文字列は `Char` の連続か `Paste` で来るので、たまった分をまとめて処理してから描画する。
+//! - Windows の端末は貼り付けも `Char` の連続 (改行は Enter) で渡すので、まとめて届いた中の Enter は
+//!   改行にする (07 §2.1、S-16)。
 //! - キーを離したときのイベント (Windows の crossterm は届ける) は入力として扱わない。
 
 use std::io;
@@ -31,6 +33,8 @@ fn key_of(ev: TermEvent) -> Option<Key> {
                 KeyCode::Char('c') if ctrl => Key::CtrlC,
                 KeyCode::Char('q') if ctrl => Key::CtrlQ,
                 KeyCode::Char('e') if ctrl => Key::CtrlE,
+                // 端末が貼り付けを受け持たないとき (conhost) は、Ctrl+V がキーで届く (07 §2.1)。
+                KeyCode::Char('v') if ctrl => Key::Paste(crate::clipboard::text()?),
                 KeyCode::Char(_) if ctrl => return None,
                 KeyCode::Char(c) => Key::Char(c),
                 KeyCode::Enter => Key::Enter {
@@ -55,6 +59,20 @@ fn key_of(ev: TermEvent) -> Option<Key> {
             })
         }
         _ => None,
+    }
+}
+
+/// 一度にまとめて届いたキーに文字が 2 つ以上あれば貼り付けとみなし、その中の Enter を改行にする
+/// (07 §2.1)。Windows の端末は貼り付けを 1 文字ずつのキーで渡し、改行も Enter で届く (S-16)。
+pub fn fold_paste_burst(keys: &mut [Key]) {
+    let chars = keys.iter().filter(|k| matches!(k, Key::Char(_))).count();
+    if chars < 2 {
+        return;
+    }
+    for k in keys.iter_mut() {
+        if let Key::Enter { newline } = k {
+            *newline = true;
+        }
     }
 }
 
@@ -138,21 +156,19 @@ fn event_loop(
         term.draw(|f| render::draw(app, f))?;
         // トークンの受信から描画までを短く保つ (NFR-104 の 50 ms)。
         if event::poll(Duration::from_millis(16))? {
-            let mut actions = Vec::new();
-            let mut touched = false;
-            if let Some(k) = key_of(event::read()?) {
-                touched = true;
-                actions.extend(app.on_key(k));
-            }
+            // たまった分をまとめて読んでから処理する (貼り付けの見分けに使う。07 §2.1)。
+            let mut keys: Vec<Key> = key_of(event::read()?).into_iter().collect();
             while event::poll(Duration::ZERO)? {
-                if let Some(k) = key_of(event::read()?) {
-                    touched = true;
-                    actions.extend(app.on_key(k));
-                }
+                keys.extend(key_of(event::read()?));
             }
             // キー入力は裏の処理を止める (04 §4、FR-301)。
-            if touched {
+            if !keys.is_empty() {
                 core.touch();
+            }
+            fold_paste_burst(&mut keys);
+            let mut actions = Vec::new();
+            for k in keys {
+                actions.extend(app.on_key(k));
             }
             for a in actions {
                 match a {
@@ -183,6 +199,47 @@ fn event_loop(
                     Action::Quit => return Ok(()),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(s: &str) -> Vec<Key> {
+        s.chars()
+            .map(|c| match c {
+                '\n' => Key::Enter { newline: false },
+                c => Key::Char(c),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enter_inside_a_paste_burst_becomes_a_newline() {
+        let mut k = keys("一行目\nsecond\n");
+        fold_paste_burst(&mut k);
+        assert!(
+            k.iter()
+                .all(|k| !matches!(k, Key::Enter { newline: false }))
+        );
+        assert_eq!(
+            k.iter()
+                .filter(|k| matches!(k, Key::Enter { newline: true }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_typed_enter_still_sends() {
+        // 1 回の読み取りに Enter だけ、または 1 文字と Enter (人の打鍵) は送信のまま。
+        for s in ["\n", "a\n", "\n\n"] {
+            let mut k = keys(s);
+            let before = k.clone();
+            fold_paste_burst(&mut k);
+            assert_eq!(k, before, "{s:?}");
         }
     }
 }

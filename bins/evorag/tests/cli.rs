@@ -335,7 +335,120 @@ fn backups_list_shows_the_backups() {
     assert!(text.contains("daily"), "{text}");
 }
 
-/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)
+/// データ根を書き込みで開いて持つ (TUI が動いている状態をまねる)。
+fn hold_data_root(root: &Path) -> Store {
+    let clock = Arc::new(SystemClock);
+    Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: "0.0.5".into(),
+        kinds: Vec::new(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    })
+    .unwrap()
+    .0
+}
+
+/// `evorag backups purge` は、確かめてから (または `--yes` で) すべての退避を消す。断られたら何も消さない。TUI が
+/// 動いているときは、終了コード 2 で断る (03 §9)。
+///
+/// verifies: AC-FR-213-1 (CLI の層)
+#[test]
+fn backups_purge_asks_first_and_removes_every_backup() {
+    let dir = TempDir::new("cli-purge");
+    let data = dir.path().join("data");
+    make_data_root_with_backup(&data);
+    let count = || evorag_store::restore::list_backups(&data, None).len();
+    // 日次と、週の最初の日次を写した週次。
+    let made = count();
+    assert!(made >= 1);
+
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "n\n");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("戻せません"),
+        "the prompt says what is lost: {err}"
+    );
+    assert_eq!(count(), made, "nothing is removed without a yes");
+    // 入力の終わり (端末でない) は n。
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(count(), made, "end of input means no");
+
+    {
+        let _held = hold_data_root(&data);
+        let out = evorag_with_stdin(dir.path(), "", &["backups", "purge", "--yes"], "");
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(count(), made);
+        // 一覧も、データ根を使っている間は断る。
+        let out = evorag_with_stdin(dir.path(), "", &["backups", "list"], "");
+        assert_eq!(out.status.code(), Some(2));
+    }
+
+    let out = evorag_with_stdin(dir.path(), "", &["backups", "purge"], "y\n");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(count(), 0);
+}
+
+/// `evorag repair` は、実行の前に退避してから直し、したことを示す。TUI が動いているときは、終了コード 2 で断る。
+///
+/// verifies: AC-FR-211-1 (CLI の層: 実行の前の退避と、使っているデータ根を断ること)
+#[test]
+fn repair_backs_up_first_and_refuses_while_the_data_root_is_in_use() {
+    let dir = TempDir::new("cli-repair");
+    let data = dir.path().join("data");
+    make_data_root_with_backup(&data);
+    {
+        let _held = hold_data_root(&data);
+        let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+        assert_eq!(out.status.code(), Some(2));
+    }
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("直しました"), "{err}");
+    let pre = data.join("backups").join("pre-op");
+    let made: Vec<String> = std::fs::read_dir(pre)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(made.iter().any(|n| n.contains("repair")), "{made:?}");
+}
+
+/// `evorag repair` は、データ根が無ければ何も作らずに終了コード 2 で断り、DB のファイルが壊れていれば (broken/ へ
+/// 移した) restore を案内して終了コード 2 で終える。
+///
+/// verifies: AC-FR-211-1 (CLI の層: データ根が無い・壊れた DB)
+#[test]
+fn repair_refuses_a_missing_data_root_and_points_a_broken_database_to_restore() {
+    let dir = TempDir::new("cli-repair-refused");
+    let data = dir.path().join("data");
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!data.exists(), "nothing is created");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ありません"), "{err}");
+
+    make_data_root_with_backup(&data);
+    std::fs::write(data.join("evorag.redb"), b"garbage").unwrap();
+    let out = evorag_with_stdin(dir.path(), "", &["repair"], "");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("broken"), "{err}");
+    assert!(err.contains("evorag restore"), "{err}");
+    assert_eq!(std::fs::read_dir(data.join("broken")).unwrap().count(), 1);
+}
+
+/// verifies: AC-FR-209-1 (CLI: 書き出しのファイルと、API キーを除いた設定。ノートは含め、チャンクと job は含めない)、
+/// 03 §11 (取り込んでいないジャーナルの行があれば断る)
 #[test]
 fn export_writes_records_and_the_config_without_api_keys() {
     use evorag_store::{WriteRequest, Writer};
@@ -362,21 +475,33 @@ fn export_writes_records_and_the_config_without_api_keys() {
         let mut session = None;
         for title in ["一つ目", "二つ目"] {
             let (id, ops) = writes.create_session(title).unwrap();
+            let env = ops
+                .iter()
+                .find_map(|op| match op {
+                    evorag_store::WriteOp::Put(e) if e.id == id => Some(e.clone()),
+                    _ => None,
+                })
+                .unwrap();
             h.submit_wait(WriteRequest::conversation(ops)).unwrap();
-            session = Some(id);
+            session = Some((id, env));
         }
-        // 派生の記録: ノートは書き出し、チャンクと job は書き出さない (03 §11)。
-        let session = session.unwrap();
+        let (session, env) = session.unwrap();
+        let (turn, ops) = writes.user_turn(&env, "こんにちは").unwrap();
+        h.submit_wait(WriteRequest::conversation(ops)).unwrap();
+        // 派生の記録: ノートは書き出し、チャンクと job は書き出さない (03 §11)。出典の往復が DB にあるノート
+        // だけを書き出す (出典の無い派生の記録は書き出さない、03 §4.2 の規則 12)。
         let (_, ops) = writes
             .note(
                 &[],
                 &[],
                 &evorag_memory::NoteBody {
                     session,
-                    exchanges: vec![session],
+                    exchanges: vec![turn],
                     keys: vec!["鍵".into()],
                     model_key: "k".into(),
                     rules: 1,
+                    src_revs: Vec::new(),
+                    forgets_seen: None,
                 },
             )
             .unwrap();
@@ -390,6 +515,7 @@ fn export_writes_records_and_the_config_without_api_keys() {
                     start: 0,
                     end: 1,
                     rules: 1,
+                    src_rev: None,
                 }],
             )
             .unwrap();
@@ -409,7 +535,7 @@ fn export_writes_records_and_the_config_without_api_keys() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
-    assert!(stdout.contains("3 件の記録"), "{stdout}");
+    assert!(stdout.contains("4 件の記録"), "{stdout}");
     assert!(out.join("note.jsonl").is_file());
     assert!(!out.join("chunk.jsonl").exists());
     assert!(!out.join("job.jsonl").exists());
@@ -428,6 +554,21 @@ fn export_writes_records_and_the_config_without_api_keys() {
         "",
     );
     assert_eq!(again.status.code(), Some(1));
+
+    // 取り込んでいないジャーナルの行があれば断り、何も作らない (03 §11)。
+    evorag_store::testutil::raw_set_meta(&root, evorag_store::meta::JOURNAL_LAST_SEQ, "0");
+    let refused_out = dir.path().join("out-refused");
+    let refused = evorag_with_stdin(
+        dir.path(),
+        "version = 1
+",
+        &["export", refused_out.to_str().unwrap()],
+        "",
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("書き出しませんでした"), "{stderr}");
+    assert!(!refused_out.exists());
 }
 
 fn evorag_raw(dir: &Path, args: &[&str], stdin: &str) -> Output {
@@ -542,7 +683,306 @@ fn version_shows_the_build_and_how_it_was_installed() {
         text.starts_with(&format!("evorag {}", env!("CARGO_PKG_VERSION"))),
         "{text}"
     );
-    for label in ["commit: ", "target: ", "rustc: ", "installed via: "] {
+    for label in [
+        "commit: ",
+        "target: ",
+        "rustc: ",
+        "installed via: ",
+        "db format: ",
+    ] {
         assert!(text.contains(label), "{label} in {text}");
+    }
+}
+
+/// 03 §10: `evorag rebuild --facts` は、llama-server に繋がらなければ、退避も作らずに終了コード 3 で止める
+/// (事実と派生データは変えない)。`--index` とは一緒に使えない。
+#[test]
+fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
+    let dir = TempDir::new("cli-rebuild-facts");
+    make_data_root_with_backup(&dir.path().join("data"));
+    let url = closed_port();
+    let config = format!("[llm.chat]\nurl = \"{url}\"\n");
+    let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--facts"], "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(err.contains("前のまま変えていません"), "{err}");
+    assert!(err.contains("evorag rebuild --facts"), "{err}");
+    let pre = dir.path().join("data").join("backups").join("pre-op");
+    assert!(!pre.exists(), "no backup is made before the checks pass");
+
+    let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--index", "--facts"], "");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!pre.exists());
+}
+
+/// `evorag update …` を、状態のフォルダを試験のフォルダに向けて動かす。
+///
+/// 誤って本物の GitHub に繋がないように、プロキシを閉じたポート (`http://127.0.0.1:1`) に向け、
+/// `NO_PROXY` を消す (通信に進んでも、プロキシへの接続で失敗する)。
+fn evorag_update(dir: &Path, config: &str, args: &[&str]) -> Output {
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let mut cmd = Command::new(exe);
+    cmd.arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--data-root")
+        .arg(dir.join("data"))
+        .arg("update")
+        .args(args)
+        .env("LOCALAPPDATA", dir.join("local"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_DATA_HOME", dir.join("share"));
+    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        cmd.env(var, "http://127.0.0.1:1");
+    }
+    for var in ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] {
+        cmd.env_remove(var);
+    }
+    cmd.output().unwrap()
+}
+
+/// verifies: AC-FR-806-1 (入れ方が zip でない evorag では、`update apply` と `update rollback` が通信せず、
+/// インストール先を変えずに断り、その管理の仕組みでの更新を案内する)
+#[test]
+fn update_apply_and_rollback_refuse_a_non_zip_build() {
+    // 配布物と同じ作り方 (EVORAG_CHANNEL=zip) で試験を作ったときは、この試験の前提に合わない。
+    if option_env!("EVORAG_CHANNEL") == Some("zip") {
+        return;
+    }
+    let dir = TempDir::new("cli-update-channel");
+    let exe = std::path::PathBuf::from(
+        std::env::var_os("NEXTEST_BIN_EXE_evorag")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into()),
+    );
+    let install = exe.parent().unwrap();
+    let names = |d: &Path| -> Vec<std::ffi::OsString> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().starts_with("evorag."))
+            .collect();
+        v.sort();
+        v
+    };
+    let before = names(install);
+    for args in [&["apply"][..], &["apply", "9.9.9"], &["rollback"]] {
+        let out = evorag_update(
+            dir.path(),
+            "version = 1
+",
+            args,
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(
+            err.contains("evorag update apply と rollback は使えません"),
+            "{err}"
+        );
+        assert!(err.contains("evorag update check"), "{err}");
+    }
+    assert_eq!(names(install), before, "the install folder changed");
+    for d in ["local", "state", "data"] {
+        assert!(!dir.path().join(d).exists(), "{d} was created");
+    }
+}
+
+/// `update.trusted_keys` の誤りは、設定の誤りとして通信の前に 4 で止める (07 §5)。
+#[test]
+fn update_with_a_bad_trusted_key_exits_with_4() {
+    let dir = TempDir::new("cli-update-keys");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+}
+
+/// 版として読めない指定は、通信の前に 1 で断る。
+#[test]
+fn update_apply_refuses_an_unreadable_version() {
+    let dir = TempDir::new("cli-update-version");
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+",
+        &["apply", "latest"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
+}
+
+/// `evorag update` は設定を移行しない (03 §12.3 の移行は TUI と、ほかのサブコマンドだけが行う)。版の
+/// 指定の先頭の `v` は省いてよい (読めない版として断らない)。
+#[test]
+fn update_never_migrates_the_config_and_accepts_a_leading_v() {
+    let dir = TempDir::new("cli-update-no-migrate");
+    // 版 0 の設定 (`version` が無い)。
+    let old = "[storage]
+allow_unsafe_location = false
+";
+    for args in [&["check"][..], &["apply", "v9.9.9"], &["rollback"]] {
+        let out = evorag_update(dir.path(), old, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(4), "{args:?}: {err}");
+        assert!(!err.contains("を読めません (例: 0.4.0)"), "{args:?}: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            old,
+            "{args:?}: the config was rewritten"
+        );
+        assert!(
+            !dir.path().join("config.toml.bak-v0").exists(),
+            "{args:?}: a migration backup was made"
+        );
+    }
+}
+
+/// この版の読めない新しい形式の設定でも、`evorag update` は更新に要るキーだけを読んで動く。足した鍵の誤りは
+/// 4 のまま。
+#[test]
+fn update_works_with_a_config_of_a_newer_format() {
+    let dir = TempDir::new("cli-update-newer-config");
+    let newer = "version = 99
+[storage]
+future_key = 1
+[future]
+x = 1
+";
+    let out = evorag_update(dir.path(), newer, &["apply", "latest"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // 設定は読めたので、版の指定を読むところまで進む (1)。
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("latest"), "{err}");
+    let out = evorag_update(
+        dir.path(),
+        "version = 99
+[update]
+trusted_keys = [\"not-a-key\"]
+",
+        &["check"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{err}");
+    assert!(err.contains("update.trusted_keys"), "{err}");
+    // 今の形式の設定の誤りは、これまでどおり 4。
+    let out = evorag_update(
+        dir.path(),
+        "version = 1
+unknown = 1
+",
+        &["check"],
+    );
+    assert_eq!(out.status.code(), Some(4));
+}
+
+/// 漢字・仮名・全角の文字 (英語の UI に出てはいけない文字)。
+fn has_cjk(text: &str) -> bool {
+    evorag_types::has_cjk(text)
+}
+
+/// 標準出力と標準エラーをつないだ文字。
+fn all_output(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `ui.language = "en"` では、`--help` (下位の命令も)・`doctor`・`backups`・設定の誤り・llama-server に繋がらない
+/// ときの案内が英語で、日本語の文字が出ない。既定 (`ja`) の `--help` は日本語のまま。
+///
+/// verifies: AC-FR-908-1 (実行ファイルの層: 英語の UI でヘルプと CLI の出力が英語になる)
+#[test]
+fn the_cli_speaks_english_when_ui_language_is_en() {
+    let dir = TempDir::new("cli-en");
+    let en = format!(
+        "[ui]\nlanguage = \"en\"\n[llm.chat]\nurl = \"{}\"\n",
+        closed_port()
+    );
+    let check = |args: &[&str], config: &str, code: i32, want: &str| {
+        let out = evorag_with_stdin(dir.path(), config, args, "n\n");
+        let text = all_output(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        assert!(!has_cjk(&text), "{args:?}:\n{text}");
+        assert!(text.contains(want), "{args:?}: want {want:?}:\n{text}");
+    };
+    check(&["--help"], &en, 0, "Chat with a local llama-server");
+    check(&["setup", "--help"], &en, 0, "Proceed without asking");
+    check(
+        &["backups", "purge", "--help"],
+        &en,
+        0,
+        "Delete without asking",
+    );
+    check(&["rebuild", "--help"], &en, 0, "Rebuild only the indexes");
+    check(&["doctor"], &en, 0, "Data root:");
+    check(&["backups", "list"], &en, 0, "There are no backups.");
+    // llama-server に繋がらない (終了コード 3)。
+    check(&[], &en, 3, "is safe");
+    // 引数の誤りは clap の英語。
+    check(&["--no-such-flag"], &en, 2, "unexpected argument");
+    // 設定の誤り (終了コード 4) も英語。
+    check(
+        &["doctor"],
+        "[ui]\nlanguage = \"en\"\n[llm]\nallow_remote = \"yes\"\n",
+        4,
+        "The configuration file has an error",
+    );
+
+    // 既定は日本語。知らない言語は、行番号つきの設定の誤り。
+    let out = evorag_with_stdin(dir.path(), "", &["--help"], "");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("設定ファイル"),
+        "{}",
+        all_output(&out)
+    );
+    let out = evorag_with_stdin(dir.path(), "[ui]\nlanguage = \"fr\"\n", &["doctor"], "");
+    let text = all_output(&out);
+    assert_eq!(out.status.code(), Some(4), "{text}");
+    assert!(
+        text.contains("line 2") && text.contains("ui.language"),
+        "{text}"
+    );
+}
+
+/// `ui.language = "en"` では、`evorag update` のヘルプと、通信の前に断る誤り (zip でない入れ方・読めない版・
+/// 足した鍵の誤り) も英語で、日本語の文字が出ない。
+///
+/// verifies: AC-FR-908-1 (実行ファイルの層: 英語の UI で `update` のヘルプと出力が英語になる)
+#[test]
+fn update_speaks_english_when_ui_language_is_en() {
+    let dir = TempDir::new("cli-update-en");
+    let en = "version = 1\n[ui]\nlanguage = \"en\"\n";
+    let check = |args: &[&str], config: &str, code: i32, want: &str| {
+        let out = evorag_update(dir.path(), config, args);
+        let text = all_output(&out);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {text}");
+        assert!(!has_cjk(&text), "{args:?}:\n{text}");
+        assert!(text.contains(want), "{args:?}: want {want:?}:\n{text}");
+    };
+    check(&["--help"], en, 0, "Update evorag");
+    check(&["apply", "--help"], en, 0, "The version to install");
+    check(&["rollback", "--help"], en, 0, "evorag.prev");
+    check(&["apply", "latest"], en, 1, "latest");
+    check(
+        &["check"],
+        "version = 1\n[ui]\nlanguage = \"en\"\n[update]\ntrusted_keys = [\"not-a-key\"]\n",
+        4,
+        "update.trusted_keys",
+    );
+    // 配布物と同じ作り方 (EVORAG_CHANNEL=zip) で試験を作ったときは、入れ方で断らない。
+    if option_env!("EVORAG_CHANNEL") != Some("zip") {
+        check(&["rollback"], en, 1, "evorag update check");
     }
 }

@@ -347,9 +347,14 @@ impl Snapshot {
 
     /// 入っている文書の ID。
     pub fn ids(&self) -> HashSet<Id> {
+        self.ids_where(|_| true)
+    }
+
+    /// 入っている文書のうち、`keep` が真のものの ID (セッションで絞るなど)。
+    pub fn ids_where(&self, keep: impl Fn(&Doc) -> bool) -> HashSet<Id> {
         self.segments
             .iter()
-            .flat_map(|s| s.docs.iter().map(|d| d.id))
+            .flat_map(|s| s.docs.iter().filter(|d| keep(d)).map(|d| d.id))
             .collect()
     }
 

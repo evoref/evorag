@@ -71,6 +71,7 @@ fn config(root: &Path, rerank: Option<Arc<ReplayClient>>) -> CoreConfig {
         config_file: None,
         evorag_version: "0.0.6".into(),
         prompt_language: PromptLanguage::Ja,
+        prompt_language_explicit: true,
         generation: Generation::default(),
         request_extra: Default::default(),
         reserve_for_output: None,
@@ -130,7 +131,7 @@ fn prepare(root: &Path, threshold: Option<(bool, f64, f64)>, rerank6_ms: Option<
 async fn until(rx: &mut UnboundedReceiver<Event>, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
     let mut got = Vec::new();
     loop {
-        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(30), rx.recv())
             .await
             .expect("timed out waiting for an event")
             .expect("event channel closed");

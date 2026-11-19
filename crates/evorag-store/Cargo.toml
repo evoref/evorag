@@ -14,7 +14,13 @@ ciborium = { workspace = true }
 redb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 伏せ字の後の本文のハッシュ (04 §7.3)。
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+# 呼ぶ側の誤り (別のデータ根のロックを渡した) をログに残す (02 §7)。
+tracing = { workspace = true }
+# 伏せ字の範囲を書記素の境界に合わせる (04 §7.3)。
+unicode-segmentation = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

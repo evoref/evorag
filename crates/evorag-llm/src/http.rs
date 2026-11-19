@@ -422,6 +422,29 @@ impl LlmClient for HttpClient {
         })
     }
 
+    fn erase_slot(&self, id: u32) -> BoxFuture<'_, Result<(), LlmError>> {
+        Box::pin(async move {
+            // POST なので、ルーターならモデルの名前を本文に付ける (06 §2)。断られる (501) のが既定の構成なので、
+            // 再試行しない。
+            let mut url = self.endpoint.join(&format!("/slots/{id}"));
+            url.query_pairs_mut().append_pair("action", "erase");
+            let rb = self.auth(self.http.post(url)).json(&self.body(json!({})));
+            let r = rb
+                .send()
+                .await
+                .map_err(|e| LlmError::Connect(e.to_string()))?;
+            if r.status().is_success() {
+                return Ok(());
+            }
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            Err(LlmError::Http {
+                status,
+                body: body.chars().take(500).collect(),
+            })
+        })
+    }
+
     fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
         Box::pin(async move {
             let body = self.body(chat_body(&req));

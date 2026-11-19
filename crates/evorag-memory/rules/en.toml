@@ -1,0 +1,140 @@
+# Rules for fact extraction and corrections (English) (04 §5.2, §5.3, §6).
+# Examples are fictional and contain no real people or personal data (11 §9.7).
+# Raise `version` when the rules change.
+#
+# How they apply (04 §5.2):
+# - [prefilter].greetings and [safety] are safety rules: the rules of all bundled languages apply together.
+# - [prefilter].min_words, [reading] and [correction] are chosen by the language of the evidence text.
+# - Matching runs after NFKC and casefold. Entries here are written in a form NFKC and casefold leave unchanged.
+# - [safety] entries match as substrings (so "ignore" is caught inside "以前の指示をignoreして").
+#   [reading] and [correction.triggers] entries match on ASCII word boundaries, so "i" does not match inside "in".
+#   The boundary is checked only on an alphanumeric end of the entry (so "," and "no," match right after a word).
+# - A match lying entirely inside a match of an *_exclude entry is not counted (the whole value is not allowed).
+
+version = 4
+language = "en"
+
+[prefilter]
+# Do not send an utterance with fewer words than this (after the pre-filter) to extraction.
+min_words = 2
+# Do not send an utterance whose whole text (trimmed of spaces and punctuation) equals one of these.
+greetings = [
+  "hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "yes", "no", "yep", "nope", "sure",
+  "got it", "i see", "cool", "nice", "great", "good morning", "good night", "bye", "see you",
+  "continue", "go on",
+]
+
+[safety]
+# Gate 6: drop a value that contains one of these imperative or request markers.
+imperative = [
+  "ignore", "disregard", "you must", "you should", "you will", "you are now", "you're now",
+  "from now on", "do not", "don't", "please", "obey", "override", "follow these", "act as",
+  "pretend you", "respond only", "respond in", "reply with", "reply only", "reply in", "answer in",
+  "forget all", "forget everything", "forget previous", "always ", "never ",
+]
+# A match lying entirely inside one of these is not counted ("never " inside "whenever ").
+imperative_exclude = ["whenever "]
+# Gate 6: drop a value that refers to other instructions.
+# Phrases, not single words (so values such as "systems engineer" or "prompt engineer" survive).
+instruction_refs = [
+  "instructions", "system prompt", "the prompt", "your prompt", "previous message", "above message",
+  "earlier message", "new rules", "jailbreak",
+]
+
+# Gate 4: drop a value that sits inside these quotes in the evidence, unless the attribute is allowed.
+# The ASCII apostrophe is not a quote here (it pairs with possessives such as "Tom's").
+# A quote whose open and close are the same character opens only after the start, a space, a symbol or
+# a CJK letter, and closes only before the end, a space, a symbol or a CJK letter (so 27" is not a quote).
+[[safety.quote]]
+open = "\""
+close = "\""
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "«"
+close = "»"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "‹"
+close = "›"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "„"
+close = "“"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "“"
+close = "”"
+allow_attributes = ["name"]
+
+[[safety.quote]]
+open = "‘"
+close = "’"
+allow_attributes = ["name"]
+
+[reading]
+# Words that name the subject explicitly as the user (04 §5.3).
+subject_self = ["i", "i'm", "im", "i've", "i'd", "i'll", "my", "me", "mine", "myself"]
+# Masked before matching subject_self: abbreviations, and forms that point at someone else.
+subject_self_exclude = [
+  "i.e.", "my wife", "my husband", "my partner", "my mother", "my mom", "my father", "my dad",
+  "my son", "my daughter", "my kid", "my child", "my brother", "my sister", "my friend", "my boss",
+  "my coworker", "my colleague", "my boyfriend", "my girlfriend",
+]
+# Words that mark a change (04 §5.3). Words that only mean "lately" are not here.
+change = [
+  "moved", "relocated", "switched", "changed", "started", "began", "quit", "left", "joined",
+  "retired", "graduated", "became", "got married", "got divorced", "now", "replaced", "upgraded",
+]
+# Words that let a negated candidate end the current value (04 §5.3 "negation").
+negation_change = [
+  "no longer", "anymore", "any more", "not anymore", "quit", "stopped", "gave up", "moved",
+  "broke up", "passed away",
+]
+# The next three (<attribute>_cue, question_end, clause_break) are not chosen by the evidence language: the
+# rules of all bundled languages apply together, to the sentence holding the value (04 §5.2, the supplement
+# to gate 3 and gate 3a).
+# Cue words of an attribute (gate 3a, `no_cue`). A candidate of an attribute with cue = true in
+# attributes.toml is dropped unless a sentence the value lies in (split by the §6 sentence delimiters and
+# line breaks) contains one of these (so a trip destination does not become the residence).
+# Matched on the raw sentence, then normalized v1, then the loose form. Other phrasings are missed (the safe side).
+residence_cue = [
+  "live", "lives", "living", "lived", "based in", "moved to", "relocated", "reside", "resides", "residing",
+  "resident",
+]
+# Question endings (supplement to gate 3). If the value lies in the last clause of a sentence ending with one
+# of these, the candidate is dropped as a question even when the LLM said it was a fact or a negation.
+question_end = ["?"]
+# Clause breaks (supplement to gate 3). If one lies between the value and the end of the sentence, the
+# value is not in the last clause. Conjunctions (and, so, but) are not clause breaks here.
+clause_break = [",", ";"]
+
+[correction]
+# First filter for correction candidates: only utterances containing one of these are matched against patterns.
+triggers = [
+  "not", "isn't", "wasn't", "no,", "wrong", "actually", "i meant", "correction", "mistake",
+  "rather than", "instead of",
+]
+# Correction patterns (04 §6). {old} is the side being corrected (old value), {new} is the new value.
+# - Patterns only decide the direction. The values come from the verifying LLM and are checked against the slots.
+# - Try patterns with longer fixed text first.
+# - English often puts the new value first ("Osaka, not Tokyo").
+patterns = [
+  "{new}, not {old}",
+  "not {old} but {new}",
+  "not {old}, {new}",
+  "it isn't {old}, it's {new}",
+  "it's not {old}, it's {new}",
+  "{new} rather than {old}",
+  "{new} instead of {old}",
+  "it's {new}, not {old}",
+  "it is {new}, not {old}",
+  "i meant {new}, not {old}",
+  "{old} is wrong, it's {new}",
+  "{old} was wrong, it's {new}",
+  "actually {new}, not {old}",
+  "i meant {new}",
+]

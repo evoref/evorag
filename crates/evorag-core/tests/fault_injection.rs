@@ -8,7 +8,10 @@
 //! - 壊れた記録・読めない記録が無い (書きかけが無い)。
 //! - 応答の対象の発話がある。
 //!
-//! 回数は `EVORAG_FAULT_RUNS` (既定 100。v0.1 のリリースゲートは 1,000、09 §8.2)。
+//! 回数は `EVORAG_FAULT_RUNS` (既定 100。v0.1 のリリースゲートは 1,000、v0.2 から 10,000、09 §8.2)。
+//! `EVORAG_FAULT_SHARD` (`<番号>/<数>`、例 `2/4`) を渡すと、乱数の種をその番号で変える (長い版を
+//! 複数の job に分けて流すため、09 §6.1)。回数はその job の分を渡す。100 回ごとに、済んだ回数と
+//! 経過の時間を標準エラーに出す (`--nocapture` で見える)。
 //! 強制終了の時点は、起動 (退避・ジャーナルの取り込みを含む)・発話の保存・応答の保存の最中に散らばる。
 //! 4 回に 1 回は起動してからの時間で、ほかは READY からの時間で殺す (起動の速さが機械で違っても、
 //! 保存の最中に殺す回が必ずあるように)。
@@ -64,6 +67,7 @@ fn fault_child() {
             config_file: None,
             evorag_version: "0.0.5".into(),
             prompt_language: PromptLanguage::Ja,
+            prompt_language_explicit: true,
             generation: Generation::default(),
             request_extra: Default::default(),
             reserve_for_output: None,
@@ -139,6 +143,22 @@ enum KillFrom {
     Spawn,
     /// READY を知らせてから (保存の最中に殺す回)。起動の速さ (CI の機械の速さ) に左右されない。
     Ready,
+    /// 最初の SAVED を知らせてから (応答の生成と保存の最中に殺す回)。保存の速さに左右されずに、保存の後を突く。
+    Saved,
+    /// 最初の ANSWERED を知らせてから (次の発話の保存と、裏の処理の最中に殺す回)。
+    Answered,
+}
+
+impl KillFrom {
+    /// この時点の合図になる行の頭 (`Spawn` は合図を待たない)。
+    fn signal(self) -> Option<&'static str> {
+        match self {
+            Self::Spawn => None,
+            Self::Ready => Some("READY"),
+            Self::Saved => Some("SAVED "),
+            Self::Answered => Some("ANSWERED "),
+        }
+    }
 }
 
 /// 子を起動し、`from` から `kill_after` で強制終了する。子が知らせた行を返す。
@@ -161,14 +181,15 @@ fn run_and_kill(root: &Path, from: KillFrom, kill_after: Duration) -> Vec<String
     );
     let stdout = child.0.stdout.take().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
     let reader = {
         let lines = lines.clone();
+        let signal = from.signal();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let line = line.trim().to_owned();
-                if line == "READY" {
-                    let _ = ready_tx.send(());
+                if signal.is_some_and(|s| line.starts_with(s)) {
+                    let _ = signal_tx.send(());
                 }
                 if !line.is_empty() {
                     lines.lock().unwrap().push(line);
@@ -176,14 +197,11 @@ fn run_and_kill(root: &Path, from: KillFrom, kill_after: Duration) -> Vec<String
             }
         })
     };
-    match from {
-        KillFrom::Spawn => std::thread::sleep(kill_after),
-        KillFrom::Ready => {
-            // READY が来ないまま止まった子も、待ちすぎずに殺す。
-            let _ = ready_rx.recv_timeout(Duration::from_secs(30));
-            std::thread::sleep(kill_after);
-        }
+    if from.signal().is_some() {
+        // 合図が来ないまま止まった子も、待ちすぎずに殺す。
+        let _ = signal_rx.recv_timeout(Duration::from_secs(30));
     }
+    std::thread::sleep(kill_after);
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     reader.join().unwrap();
@@ -217,6 +235,20 @@ fn next(state: &mut u64) -> u64 {
     *state >> 33
 }
 
+/// `EVORAG_FAULT_SHARD` (`<番号>/<数>`) を読む。無ければ `1/1`。
+fn shard() -> (u32, u32) {
+    let Ok(text) = std::env::var("EVORAG_FAULT_SHARD") else {
+        return (1, 1);
+    };
+    let parsed = text
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.trim().parse().ok()?, n.trim().parse().ok()?)));
+    match parsed {
+        Some((i, n)) if n >= 1 && (1..=n).contains(&i) => (i, n),
+        _ => panic!("EVORAG_FAULT_SHARD must be <index>/<count> with 1 <= index <= count: {text}"),
+    }
+}
+
 #[test]
 fn committed_turns_survive_kills_at_random_points() {
     if std::env::var_os(CHILD_ENV).is_some() {
@@ -226,17 +258,22 @@ fn committed_turns_survive_kills_at_random_points() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(100);
+    let shard = shard();
     // データ根は回をまたいで使い続ける (前の回の強制終了の後始末も試す)。
     let dir = TempDir::new("fault");
-    let mut seed = 0x6576_6f72_6167_u64;
+    // 分けた job ごとに、殺す時点の並びを変える。
+    let mut seed = 0x6576_6f72_6167_u64 ^ u64::from(shard.0).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let started = Instant::now();
     let (mut saved_total, mut answered_total) = (0usize, 0usize);
     for run in 0..runs {
         let kill_after = Duration::from_millis(next(&mut seed) % 400);
-        // 4 回に 1 回は起動の最中 (退避・ジャーナルの取り込み・索引の突き合わせ) に殺す。
-        let from = if run % 4 == 0 {
-            KillFrom::Spawn
-        } else {
-            KillFrom::Ready
+        // 起動の最中 (退避・ジャーナルの取り込み・索引の突き合わせ)、保存の最中、最初の保存の後、最初の応答の
+        // 後を順に突く。後の 2 つは合図から測るので、CI の機械が遅くても、保存の後に殺す回が必ずある。
+        let from = match run % 4 {
+            0 => KillFrom::Spawn,
+            1 => KillFrom::Ready,
+            2 => KillFrom::Saved,
+            _ => KillFrom::Answered,
         };
         let lines = run_and_kill(dir.path(), from, kill_after);
         let saved: BTreeSet<String> = lines
@@ -290,6 +327,15 @@ fn committed_turns_survive_kills_at_random_points() {
         }
         for a in &answered {
             assert!(replied.contains(a), "run {run}: lost reply to {a}");
+        }
+        let done = run + 1;
+        if done % 100 == 0 || done == runs {
+            eprintln!(
+                "fault injection (shard {}/{}): {done}/{runs} runs, {saved_total} saved, {answered_total} answered, {:?} elapsed",
+                shard.0,
+                shard.1,
+                started.elapsed()
+            );
         }
     }
     // 殺す時点が、保存の前後に散らばっていること (試験そのものの確かめ)。

@@ -1,0 +1,819 @@
+# 統合と、事実への操作 (04 §5.3・§5.4・§7.4〜§7.6)。書式は README.md。
+# 会話はすべて架空 (11 §9.7)。候補は関門を通ったもの (抽出の LLM の出力を固定したもの)。
+
+# ---- 単値の属性 ----
+
+[[case]]
+id = "C01"
+title = "今の値が無ければ、主語を省いた言い切りでも今の値になる"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+] }
+
+[[case]]
+id = "C02"
+title = "主語を明示した言い直しで、今の値を置き換える"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "私は今、東京に住んでいます" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "私は今、東京に住んでいます" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C03"
+title = "主語も変化の語も無い言い直しは矛盾として保留し、別のターンでもう一度言われたら置き換える"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Contested", against = "大阪", sources = ["b1"] },
+], table = ["self/residence/大阪"] }
+[[case.step]]
+turn = { id = "b2", session = "B", at = "2026-02-01T09:05:00Z", text = "東京に住んでるんだけど、おすすめの公園ある？" }
+[[case.step]]
+candidate = { turn = "b2", s = "self", a = "residence", v = "東京", e = "東京に住んでるんだけど" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1", "b2"] },
+], table = ["self/residence/東京"] }
+
+[[case]]
+id = "C04"
+title = "変化を示す語 (丁寧語の引っ越しました) があれば、主語を省いても置き換える"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-03-01T09:00:00Z", text = "先月、東京に引っ越しました" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "先月、東京に引っ越しました" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C05"
+title = "主語が他人の言い切り (私の妻は) で、self の値を置き換えない"
+spec = "04 §5.3、rules/ja.toml の subject_self_exclude"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:02:00Z", text = "私の妻は京都に住んでいます" }
+[[case.step]]
+candidate = { turn = "a2", s = "妻", a = "residence", v = "京都", e = "私の妻は京都に住んでいます" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+  { s = "妻", a = "residence", v = "京都", state = "Live", sources = ["a2"] },
+] }
+
+[[case]]
+id = "C06"
+title = "変化の語の無い否定は捨てる (今の値は変わらない)"
+spec = "04 §5.3 の否定"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:03:00Z", text = "大阪には住んでいないけど、よく行く" }
+[[case.step]]
+candidate = { turn = "a2", s = "self", a = "residence", v = "大阪", e = "大阪には住んでいない", m = "negated" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+] }
+
+[[case]]
+id = "C07"
+title = "変化の語 (もう) のある否定は、今の値を終える (今の値なし)"
+spec = "04 §5.3 の否定"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-01T09:00:00Z", text = "もう大阪には住んでいないんだ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "大阪", e = "もう大阪には住んでいない", m = "negated" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", sources = ["a1", "b1"] },
+], table = [] }
+
+[[case]]
+id = "C08"
+title = "値の鍵が同じ言い方 (大文字・小文字) は 1 つの事実にまとめ、最初の書き方を残す"
+spec = "04 §5.3、§5.6"
+lang = "en"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "I live in Tokyo." }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "Tokyo", e = "I live in Tokyo." }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "i live in TOKYO btw" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "TOKYO", e = "i live in TOKYO" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "Tokyo", state = "Live", sources = ["a1", "b1"] },
+] }
+
+[[case]]
+id = "C09"
+title = "値の鍵はかなを統一しない (東京と、とうきょうは別の値)"
+spec = "04 §5.6"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "東京に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "東京", e = "東京に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "とうきょうに住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "とうきょう", e = "とうきょうに住んでるよ" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["a1"] },
+  { s = "self", a = "residence", v = "とうきょう", state = "Contested", against = "東京", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C10"
+title = "矛盾が 2 つあるときに今の値が替わったら、残りの矛盾の相手を新しい値に付け替える"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-01T09:00:00Z", text = "名古屋に住んでるよ" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "名古屋", e = "名古屋に住んでるよ" }
+[[case.step]]
+turn = { id = "d1", session = "D", at = "2026-04-01T09:00:00Z", text = "私は福岡に住んでいます" }
+[[case.step]]
+candidate = { turn = "d1", s = "self", a = "residence", v = "福岡", e = "私は福岡に住んでいます" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "福岡", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Contested", against = "福岡", sources = ["b1"] },
+  { s = "self", a = "residence", v = "名古屋", state = "Contested", against = "福岡", sources = ["c1"] },
+  { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["d1"] },
+] }
+
+# ---- 時制 ----
+
+[[case]]
+id = "C11"
+title = "過去の言い方は、今の値を終える (置き換えではない)"
+spec = "04 §5.3 の時制"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は会社員です" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "occupation", v = "会社員", e = "私は会社員です" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-05-01T09:00:00Z", text = "以前は会社員でした" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "occupation", v = "会社員", e = "以前は会社員でした", tn = "past" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "occupation", v = "会社員", state = "Superseded", sources = ["a1", "b1"] },
+], table = [] }
+
+[[case]]
+id = "C12"
+title = "今の値でない過去の値は、履歴として足す (今の値は変えない)"
+spec = "04 §5.3 の時制"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は看護師です" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "occupation", v = "看護師", e = "私は看護師です" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:02:00Z", text = "昔は教師だった" }
+[[case.step]]
+candidate = { turn = "a2", s = "self", a = "occupation", v = "教師", e = "昔は教師だった", tn = "past" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "occupation", v = "看護師", state = "Live", sources = ["a1"] },
+  { s = "self", a = "occupation", v = "教師", state = "Superseded", tn = "past", sources = ["a2"] },
+] }
+
+[[case]]
+id = "C13"
+title = "予定の値は今の値と別に持ち、実現したら今の値に移す"
+spec = "04 §5.3 の時制"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "来月、東京に引っ越す予定です" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "来月、東京に引っ越す予定です", tn = "planned" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", tn = "planned", sources = ["b1"] },
+] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-10T09:00:00Z", text = "東京に引っ越しました" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "東京", e = "東京に引っ越しました" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1", "c1"] },
+] }
+
+# ---- 多値の属性 ----
+
+[[case]]
+id = "C14"
+title = "多値の属性で old が今の値の 1 件と一致したら、その 1 件だけを置き換える"
+spec = "04 §5.3 の多値の属性"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "寿司", e = "ラーメンと寿司が好き" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "ラーメンじゃなくてうどんが好きになった" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "うどん", e = "ラーメンじゃなくてうどんが好きになった", old = "ラーメン" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Superseded", by = "うどん", sources = ["a1"] },
+  { s = "self", a = "likes", v = "寿司", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C15"
+title = "多値の属性で old が無ければ、並べて足し、兄弟の値に触れない"
+spec = "04 §5.3 の多値の属性"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "うどんも好きなんだ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "うどん", e = "うどんも好きなんだ" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C16"
+title = "多値の属性で old が今の値のどれとも一致しなければ、並べて足すだけにする"
+spec = "04 §5.3 の多値の属性"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "そばじゃなくてうどんが好き" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "うどん", e = "そばじゃなくてうどんが好き", old = "そば" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C17"
+title = "多値の属性の否定は、一致する 1 件だけを終える"
+spec = "04 §5.3 の否定"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "寿司", e = "ラーメンと寿司が好き" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "もうラーメンは好きじゃない" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "ラーメン", e = "もうラーメンは好きじゃない", m = "negated" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Superseded", sources = ["a1", "b1"] },
+  { s = "self", a = "likes", v = "寿司", state = "Live", sources = ["a1"] },
+] }
+
+# ---- 検証済みの訂正 ----
+
+[[case]]
+id = "C18"
+title = "検証済みの訂正は、今の値から新しい値への向きで置き換える"
+spec = "04 §5.3、§6"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", role = "assistant", text = "大阪にお住まいなんですね" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "大阪じゃなくて東京です" }
+[[case.step]]
+correction = { turn = "a3", old = "大阪", new = "東京" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1", "a3"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["a3"] },
+] }
+
+[[case]]
+id = "C19"
+title = "古い値が今の値と一致しない訂正は、事実を変えない (学習にだけ使う)"
+spec = "04 §6 の事実への効き方"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", role = "assistant", text = "京都の紅葉は11月下旬が見頃です" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "京都じゃなくて奈良の話です" }
+[[case.step]]
+correction = { turn = "a3", old = "京都", new = "奈良" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+] }
+
+[[case]]
+id = "C20"
+title = "多値の属性への検証済みの訂正は、一致する 1 件だけを置き換える"
+spec = "04 §5.3、§6"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンと寿司が好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "寿司", e = "ラーメンと寿司が好き" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", role = "assistant", text = "ラーメンがお好きなんですね" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "ラーメンじゃなくてうどんです" }
+[[case.step]]
+correction = { turn = "a3", old = "ラーメン", new = "うどん" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Superseded", by = "うどん", sources = ["a1", "a3"] },
+  { s = "self", a = "likes", v = "寿司", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["a3"] },
+] }
+
+# ---- 削除と置き換えの連鎖 (§7.4) ----
+
+[[case]]
+id = "C21"
+title = "今の値のセッションを消すと、それより新しい矛盾の値が今の値になる"
+spec = "04 §7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "delete_session", session = "A" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C22"
+title = "置き換えの連鎖の新しい側のセッションを消しても、古い値を今の値に戻さない。利用者が戻せる"
+spec = "04 §7.4、OQ-49"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "私は東京に引っ越しました" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "私は東京に引っ越しました" }
+[[case.step]]
+op = { kind = "delete_session", session = "B" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "(deleted)", sources = ["a1"] },
+], table = [] }
+[[case.step]]
+op = { kind = "revert", target = { s = "self", a = "residence", v = "大阪" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+], table = ["self/residence/大阪"] }
+
+[[case]]
+id = "C23"
+title = "出典が 2 つある事実は、片方のセッションを消すとその出典だけを外す"
+spec = "04 §7.1"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "やっぱりラーメンが好きだな" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+op = { kind = "delete_session", session = "A" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C24"
+title = "矛盾の値を利用者が採ると、今の値になる"
+spec = "04 §7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "accept", target = { s = "self", a = "residence", v = "東京" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+] }
+
+# ---- private (§7.5) ----
+
+[[case]]
+id = "C25"
+title = "private は既定で後継の値にも効き、事実の表から外れる"
+spec = "04 §7.5、OQ-47"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "えびは食べられないんです" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "dietary", v = "えび", e = "えびは食べられない" }
+[[case.step]]
+op = { kind = "private", target = { s = "self", a = "dietary", v = "えび" } }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "かにも食べられないです" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "dietary", v = "かに", e = "かにも食べられない" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "dietary", v = "えび", state = "Live", private = true, sources = ["a1"] },
+  { s = "self", a = "dietary", v = "かに", state = "Live", private = true, sources = ["b1"] },
+], table = [] }
+
+[[case]]
+id = "C26"
+title = "「この値だけ」の private は、後継の値に効かない"
+spec = "04 §7.5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "えびは食べられないんです" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "dietary", v = "えび", e = "えびは食べられない" }
+[[case.step]]
+op = { kind = "private", target = { s = "self", a = "dietary", v = "えび" }, scope = "value_only" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "かにも食べられないです" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "dietary", v = "かに", e = "かにも食べられない" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "dietary", v = "えび", state = "Live", private = true, sources = ["a1"] },
+  { s = "self", a = "dietary", v = "かに", state = "Live", sources = ["b1"] },
+], table = ["self/dietary/かに"] }
+
+[[case]]
+id = "C27"
+title = "private を解くと、事実の表に戻る"
+spec = "04 §7.5"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "えびは食べられないんです" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "dietary", v = "えび", e = "えびは食べられない" }
+[[case.step]]
+op = { kind = "private", target = { s = "self", a = "dietary", v = "えび" } }
+[[case.step]]
+op = { kind = "private_off", target = { s = "self", a = "dietary", v = "えび" } }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "dietary", v = "えび", state = "Live", sources = ["a1"] },
+], table = ["self/dietary/えび"] }
+
+# ---- 再び覚えない印 (§7.6) ----
+
+[[case]]
+id = "C28"
+title = "伏せ字にしないで忘れた値は印で止まり、印を解けば再び覚える"
+spec = "04 §7.6、OQ-48"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "趣味は登山です" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "hobby", v = "登山", e = "趣味は登山です" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "hobby", v = "登山" }, redact = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "hobby", state = "Retracted", sources = ["a1"] },
+], blocked = [{ s = "self", a = "hobby", v = "登山" }], turns = [{ id = "a1", text = "趣味は登山です" }] }
+[[case.step]]
+op = { kind = "unblock", target = { s = "self", a = "hobby", v = "登山" } }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-03-01T09:00:00Z", text = "やっぱり趣味は登山だな" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "hobby", v = "登山", e = "趣味は登山だな" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "hobby", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "hobby", v = "登山", state = "Live", sources = ["b1"] },
+], blocked = [] }
+
+# ---- 作り直しと入力の順 ----
+
+[[case]]
+id = "C29"
+title = "事実を作り直しても (rebuild --facts)、採った値・private・忘れたものが保たれる"
+spec = "04 §7.5、03 §10、AC-FR-307-3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", text = "えびは食べられないんです" }
+[[case.step]]
+candidate = { turn = "a2", s = "self", a = "dietary", v = "えび", e = "えびは食べられない" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "趣味は登山です" }
+[[case.step]]
+candidate = { turn = "a3", s = "self", a = "hobby", v = "登山", e = "趣味は登山です" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "accept", target = { s = "self", a = "residence", v = "東京" } }
+[[case.step]]
+op = { kind = "private", target = { s = "self", a = "dietary", v = "えび" } }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "hobby", v = "登山" }, redact = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+  { s = "self", a = "dietary", v = "えび", state = "Live", private = true, sources = ["a2"] },
+  { s = "self", a = "hobby", state = "Retracted", sources = ["a3"] },
+], table = ["self/residence/東京"] }
+[[case.step]]
+op = { kind = "rebuild_facts" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+  { s = "self", a = "dietary", v = "えび", state = "Live", private = true, sources = ["a2"] },
+], table = ["self/residence/東京"], blocked = [{ s = "self", a = "hobby", v = "登山" }] }
+
+[[case]]
+id = "C30"
+title = "候補を渡す順を入れ替えても、結果が同じ"
+spec = "04 §5.3 の入力の順、AC-FR-304-3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+turn = { id = "b2", session = "B", at = "2026-02-01T09:05:00Z", text = "東京に住んでるんだけど" }
+[[case.step]]
+candidate = { turn = "b2", s = "self", a = "residence", v = "東京", e = "東京に住んでるんだけど" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1", "b2"] },
+] }
+[[case.step]]
+op = { kind = "shuffle" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1", "b2"] },
+] }
+
+[[case]]
+id = "C31"
+title = "同じ候補を 2 回当てても、出典は増えない (冪等)"
+spec = "04 §5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Live", sources = ["a1"] },
+] }
+
+# ---- 英語と事実の表 ----
+
+[[case]]
+id = "C32"
+title = "英語の変化の語 (moved) で置き換え、家族の主語 (my wife) は self の値を置き換えない"
+spec = "04 §5.3、rules/en.toml"
+lang = "en"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "I live in Tokyo." }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "Tokyo", e = "I live in Tokyo." }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", text = "My wife lives in Kyoto." }
+[[case.step]]
+candidate = { turn = "a2", s = "wife", a = "residence", v = "Kyoto", e = "My wife lives in Kyoto." }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "Moved to Osaka last month." }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "Osaka", e = "Moved to Osaka last month." }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "Tokyo", state = "Superseded", by = "Osaka", sources = ["a1"] },
+  { s = "wife", a = "residence", v = "Kyoto", state = "Live", sources = ["a2"] },
+  { s = "self", a = "residence", v = "Osaka", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C33"
+title = "事実の表は、属性の優先の順 → 主語 (self が先) → 記録した順に並ぶ"
+spec = "04 §5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好き" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好き" }
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-01-05T10:01:00Z", text = "妻は京都に住んでいます" }
+[[case.step]]
+candidate = { turn = "a2", s = "妻", a = "residence", v = "京都", e = "妻は京都に住んでいます" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-01-05T10:02:00Z", text = "私は大阪に住んでいます" }
+[[case.step]]
+candidate = { turn = "a3", s = "self", a = "residence", v = "大阪", e = "私は大阪に住んでいます" }
+[[case.step]]
+turn = { id = "a4", session = "A", at = "2026-01-05T10:03:00Z", text = "ケンと呼んでください" }
+[[case.step]]
+candidate = { turn = "a4", s = "self", a = "name", v = "ケン", e = "ケンと呼んでください" }
+[[case.step]]
+expect = { table = ["self/name/ケン", "self/residence/大阪", "妻/residence/京都", "self/likes/ラーメン"] }
+
+# ---- 点検で足した事例 ----
+
+[[case]]
+id = "C34"
+title = "今の値を忘れると、それより新しい矛盾の値が今の値になる"
+spec = "04 §7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Live", sources = ["b1"] },
+], table = ["self/residence/東京"] }
+
+[[case]]
+id = "C35"
+title = "消えた今の値の方が後に言われていれば、矛盾の値を今の値にしない"
+spec = "04 §7.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-01T09:00:00Z", text = "大阪に住んでるから近いよ" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでる" }
+[[case.step]]
+op = { kind = "forget", target = { s = "self", a = "residence", v = "大阪" }, echo = false }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", state = "Retracted", sources = ["a1", "c1"] },
+  { s = "self", a = "residence", v = "東京", state = "Contested", against = "(retracted)", sources = ["b1"] },
+], table = [] }
+
+[[case]]
+id = "C36"
+title = "利用者が採った値も、後で置き換えの条件を満たす値が来れば、通常どおり置き換える"
+spec = "04 §7.5 の表"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "大阪に住んでます" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "大阪", e = "大阪に住んでます" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "東京に住んでるよ" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "東京", e = "東京に住んでるよ" }
+[[case.step]]
+op = { kind = "accept", target = { s = "self", a = "residence", v = "東京" } }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-04-01T09:00:00Z", text = "私は福岡に引っ越しました" }
+[[case.step]]
+candidate = { turn = "c1", s = "self", a = "residence", v = "福岡", e = "私は福岡に引っ越しました" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "大阪", state = "Superseded", by = "東京", sources = ["a1"] },
+  { s = "self", a = "residence", v = "東京", state = "Superseded", by = "福岡", sources = ["b1"] },
+  { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["c1"] },
+] }
+
+[[case]]
+id = "C37"
+title = "ほかの発話の値を old に写した言い直しも、old を空として扱い、変化の語 (今は) で今の値を置き換える"
+spec = "04 §5.2 の関門 2 (old_ignored)、§5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "名古屋に住んでいます。休日に行ける日帰り温泉を探しています。" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "residence", v = "名古屋", e = "名古屋に住んでいます。" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "先月、福岡に引っ越しました。今は福岡に住んでいます。近所でおいしいうどん屋を探しています。" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "residence", v = "福岡", e = "今は福岡に住んでいます。", old = "名古屋" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "residence", v = "名古屋", state = "Superseded", by = "福岡", sources = ["a1"] },
+  { s = "self", a = "residence", v = "福岡", state = "Live", sources = ["b1"] },
+] }
+
+[[case]]
+id = "C38"
+title = "多値の属性で、ほかの発話の値を old に写した候補は、old を空として並べて足す (今の値を置き換えない)"
+spec = "04 §5.2 の関門 2 (old_ignored)、§5.3 の多値の属性"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-05T10:00:00Z", text = "ラーメンが好きです" }
+[[case.step]]
+candidate = { turn = "a1", s = "self", a = "likes", v = "ラーメン", e = "ラーメンが好きです" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-01T09:00:00Z", text = "最近はうどんが好きです" }
+[[case.step]]
+candidate = { turn = "b1", s = "self", a = "likes", v = "うどん", e = "最近はうどんが好きです", old = "ラーメン" }
+[[case.step]]
+expect = { facts = [
+  { s = "self", a = "likes", v = "ラーメン", state = "Live", sources = ["a1"] },
+  { s = "self", a = "likes", v = "うどん", state = "Live", sources = ["b1"] },
+] }

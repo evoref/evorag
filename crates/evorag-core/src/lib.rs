@@ -10,12 +10,22 @@
 
 pub mod calibration;
 pub(crate) mod embedding;
+pub mod forget_key;
 pub mod power;
 mod sleep;
 pub use sleep::{OnBattery, SleepConfig};
 mod context;
+mod correction;
+pub mod export_checks;
+mod extraction;
+mod fact_ops;
+mod fact_table;
+mod forget_ops;
+mod forgets;
+pub use forgets::ForgetStatus;
 pub mod localtime;
 pub mod logging;
+mod masking;
 mod notes;
 mod orphans;
 mod precompute;
@@ -24,6 +34,7 @@ mod prompt;
 pub mod rebind;
 pub mod rebuild;
 mod recall;
+pub mod repair;
 mod roles;
 mod views;
 
@@ -51,8 +62,11 @@ pub struct CoreConfig {
     /// `config.toml` (移行の前の退避に含める、03 §7.2)。
     pub config_file: Option<PathBuf>,
     pub evorag_version: String,
-    /// 設定 `prompt.language`。データ根に記録が無いときだけ使う (07 §6.1)。
+    /// 設定 `prompt.language` (書いていなければ UI の言語)。データ根に記録が無いときだけ使う (07 §6.1)。
     pub prompt_language: PromptLanguage,
+    /// `prompt_language` を設定に明示したか。明示した値が記録と違うときだけ知らせる (UI の言語からの既定では
+    /// 知らせない、07 §6.1)。
+    pub prompt_language_explicit: bool,
     pub generation: Generation,
     /// 設定 `llm.chat.request_extra` (07 §4.2)。思考を切る `chat_template_kwargs` など。
     pub request_extra: evorag_llm::RequestExtra,
@@ -182,7 +196,7 @@ pub struct StartReport {
     pub server: ServerInfo,
     pub store: evorag_store::OpenReport,
     pub prompt_language: PromptLanguage,
-    /// 設定の `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
+    /// 設定に明示した `prompt.language` が記録と違った (記録した言語のまま動く、07 §6.1)。
     pub prompt_language_mismatch: bool,
     /// 置き場所の注意 (FAT / exFAT、または設定で許した危ない置き場所)。
     pub location_warnings: Vec<String>,
@@ -197,6 +211,12 @@ pub struct StartReport {
     pub recorded_roles: Vec<String>,
     /// 想起の状態 (07 §2.1)。
     pub recall: evorag_types::api::RecallState,
+    /// 事実の機能を止めた理由 (`memory.forget_key` が使えない、03 §3.1.1)。`None` なら使える。
+    pub facts_disabled: Option<forget_key::FactsKeyProblem>,
+    /// この起動で `memory.forget_key` を作った。
+    pub forget_key_created: bool,
+    /// 起動時の忘れるの当て直しの後の状態 (合わないターン、ジャーナルの書き直しの残り。状態の行に示す、04 §7.2)。
+    pub forget: ForgetStatus,
 }
 
 /// 生成の取り消しの理由。
@@ -217,6 +237,9 @@ struct Running {
 struct State {
     session: Option<Id>,
     running: Option<Running>,
+    /// `/forget` を実行している (命令を受けてから結果を知らせるまで。04 §7.1 の「受け付けないとき」の裏返しで、
+    /// その間は発話・作り直し・先に済ませる処理を始めない)。
+    forgetting: bool,
 }
 
 struct Inner {
@@ -250,7 +273,9 @@ struct Inner {
     vectors_opened: Mutex<Option<String>>,
     /// チャンクと索引を変える処理の鍵 (起動時の突き合わせ、チャンクの作り直し、削除、ベクトルの索引を
     /// 開く、埋め込みの保存。互いの間に入り込まないように、embedding.rs の冒頭)。
-    index_lock: tokio::sync::Mutex<()>,
+    /// 落とされない保存の task には、spawn の前に取った鍵 (`lock_owned`) を渡す (終了のときに、この鍵を
+    /// 取れたら、出した保存は終わっている)。
+    index_lock: Arc<tokio::sync::Mutex<()>>,
     /// 問いの埋め込みのキャッシュ (05 §3.1 の 4)。
     query_cache: Arc<recall::QueryCache>,
     /// リランクの結果のキャッシュ (05 §4.5)。
@@ -260,6 +285,16 @@ struct Inner {
     precompute: bool,
     /// ノートの手順の状態 (04 §2)。
     notes: Mutex<notes::State>,
+    /// 事実の抽出の手順の状態 (04 §5.2.1)。
+    extraction: Mutex<extraction::State>,
+    /// 訂正の候補の検証の手順の状態 (04 §6)。
+    correction: Mutex<correction::State>,
+    /// 事実の表と事実の検索の鍵の状態 (04 §5.4・§5.5)。
+    fact_table: Mutex<fact_table::State>,
+    /// 事実を書く経路のロック (04 §5.2.1 の「書き込みの直列化」)。記録を読む前に取り、書き手が書き終えるまで
+    /// 放さない。統合のほか、事実への指示・出典の無い事実の掃除・忘れる・`rebuild --facts` も取る。
+    /// 落とされない保存の task には、spawn の前に取った鍵 (`lock_owned`) を渡す。
+    facts_lock: Arc<tokio::sync::Mutex<()>>,
     /// 埋め込みのサーバに断られた・読めないチャンク (このプロセスの間は飛ばす)。
     embed_skip: Mutex<std::collections::HashSet<Id>>,
     /// 終えたのにまだ要るので待たせている裏の処理の手順と、その時刻 (04 §4 の「繰り返しを防ぐ」)。
@@ -275,6 +310,8 @@ struct Inner {
     /// 語彙の索引 (開けなければ `None`。想起は Skip になる)。
     index: Option<Arc<evorag_index::lex::LexIndex>>,
     memory_enabled: bool,
+    /// 値の鍵と再び覚えない印の鍵 (03 §3.1.1)。使えなければ事実の機能を止める。
+    facts_key: forget_key::FactsKey,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     events: mpsc::UnboundedSender<Event>,
@@ -290,8 +327,24 @@ struct Inner {
     probe: Probe,
     /// 裏で走らせている退避・退避の整理の task (終了のときに待つ。ストアを持ったまま戻らないように)。
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// 済んでいない整理の job (消した ID を索引と退避から除く、03 §7.3、04 §7.7 の 2・5) がある。sleep-time の
+    /// 手順で試し直す。
+    cleanup_pending: std::sync::atomic::AtomicBool,
+    /// 整理の job を行う処理の鍵 (同時に 1 つ)。落とされない整理の task には、spawn の前に取った鍵を渡す (終了の
+    /// ときに、この鍵を取れたら、出した整理は終わっている)。鍵の順は cleanup_lock → index_lock。
+    cleanup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 終了を始めた (退避の整理は、次の退避に移る前に止める。job から次の起動で続ける)。
+    shutting_down: std::sync::atomic::AtomicBool,
+    /// 試験のための注入: 索引から除くのを、この回数だけ失敗させる。
+    fail_index_removal: std::sync::atomic::AtomicUsize,
     /// 命令の待ち行列を回す task と、その止め方。
     command_loop: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
+    /// 忘れるの状態 (合わないターン、ジャーナルの書き直しの残り、04 §7.2)。
+    forget: Mutex<forgets::State>,
+    /// 忘れるの退避の写し直しの回 (動いている間に足された job は、次の回にまとめる)。
+    forget_batch: Mutex<forgets::Batch>,
+    /// 最後に求められた忘れるの見本の番号 (古い求めの見本は知らせない)。
+    forget_preview_seq: std::sync::atomic::AtomicU64,
 }
 
 /// 途中まで済んだ較正の、問いごとの結果。
@@ -380,6 +433,17 @@ impl Core {
         cfg: CoreConfig,
         llm: Arc<dyn LlmClient>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Event>, StartReport), StartError> {
+        Self::start_locked(cfg, llm, None).await
+    }
+
+    /// [`Self::start`] の、呼ぶ側が先に取ったデータ根のロック `lock` を持ったまま開く形 (起動の更新の
+    /// 片付けから、ロックを放さずにストアを開く、12 §7.3)。`lock` が `None` なら、ストアが取る。開く前に
+    /// 止めたとき (llama-server に繋がらないなど) は、`lock` を放す。
+    pub async fn start_locked(
+        cfg: CoreConfig,
+        llm: Arc<dyn LlmClient>,
+        lock: Option<evorag_store::lock::DataRootLock>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Event>, StartReport), StartError> {
         llm.health().await.map_err(StartError::LlmUnreachable)?;
         let server = llm
             .server_info()
@@ -405,17 +469,26 @@ impl Core {
 
         let mut kinds = evorag_memory::kinds();
         kinds.sort_by_key(|k| k.name);
-        let (store, open_report) = Store::open(OpenOptions {
+        let opts = OpenOptions {
             data_root: cfg.data_root,
             evorag_version: cfg.evorag_version,
             kinds,
             clock: cfg.clock.clone(),
             ids: cfg.ids.clone(),
             config_file: cfg.config_file,
-        })?;
+        };
+        let (store, mut open_report) = match lock {
+            Some(lock) => Store::open_locked(opts, lock)?,
+            None => Store::open(opts)?,
+        };
         if let Some(r) = store.read_only() {
             return Err(StartError::ReadOnly(format!("{r:?}")));
         }
+        // 起動の順 (03 §8、04 §7.2): ジャーナルの取り込みと開くときの削除 (`Store::open` の中) → compact → 書き手を
+        // 作る → 忘れるの当て直し → 照会と命令の受け付け。compact は DB のファイルを置き換えるので、書き手を作る前に
+        // 行う。当て直しが記録を書き換えたら印が立ち、次の起動で compact する。空きが足りなければ見送り、結果を
+        // 画面に知らせる。
+        let store = store.compact_if_pending(&mut open_report, cfg.probe.free_bytes)?;
         let store = Arc::new(store);
 
         // 応答のモデルを、記録と照合する (06 §3.1)。違えば、何も書かずに止める。
@@ -444,6 +517,21 @@ impl Core {
             .spawn(move || writer.run())
             .map_err(|e| StartError::Storage(e.to_string()))?;
 
+        // 開くときにジャーナルから当てた削除 (restore・取り込みの当て直し、03 §6) の ID は、ストアが同じ
+        // トランザクションで残している。起動時の整理 (`run_cleanup_jobs`) が整理の job にして、索引と退避からも
+        // 除く (04 §7.2 の「当て直し」)。派生の記録は、起動時の突き合わせ (規則 12) が消して、同じく job に書く。
+        // 当て直した削除でセッションを失ったターン (古い版が、消したセッションに書き足したもの) は、消さずに残す
+        // (03 §6)。数えて知らせる。
+        if !open_report.journal_deletes.is_empty()
+            && let Ok(n) = store
+                .read()
+                .map_err(|e| e.to_string())
+                .and_then(|r| evorag_memory::turns_without_session(&r).map_err(|e| e.to_string()))
+            && n > 0
+        {
+            tracing::warn!(n, "turns whose session was deleted are kept");
+        }
+
         // プロンプトの言語: 記録があればそれを使い、無ければ設定の値を記録する (07 §6.1)。
         let recorded = store
             .meta(meta::PROMPT_LANGUAGE)
@@ -461,6 +549,15 @@ impl Core {
                 cfg.prompt_language
             }
         };
+
+        // 値の鍵と再び覚えない印の鍵 (03 §3.1.1)。ジャーナルの取り込みの後、裏の処理の前に確かめる。
+        let facts_key = forget_key::ensure(&store, Some(&handle)).map_err(StartError::Storage)?;
+        if let Some(problem) = facts_key.problem() {
+            tracing::warn!(
+                ?problem,
+                "facts are disabled: memory.forget_key is not usable"
+            );
+        }
 
         // 記録が無ければ (新しいデータ根、v0.1 のデータ根)、繋がっているモデルを記録する (06 §3.1)。
         let mut chat_model_recorded = None;
@@ -550,12 +647,16 @@ impl Core {
             calib_progress: Mutex::new(None),
             vectors: Mutex::new(None),
             vectors_opened: Mutex::new(None),
-            index_lock: tokio::sync::Mutex::new(()),
+            index_lock: Arc::new(tokio::sync::Mutex::new(())),
             embed_skip: Mutex::new(std::collections::HashSet::new()),
             query_cache: Arc::new(recall::QueryCache::default()),
             rerank_cache: Arc::new(recall::RerankCache::default()),
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
+            extraction: Mutex::new(extraction::State::default()),
+            correction: Mutex::new(correction::State::default()),
+            fact_table: Mutex::new(fact_table::State::default()),
+            facts_lock: Arc::new(tokio::sync::Mutex::new(())),
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
@@ -565,6 +666,7 @@ impl Core {
 
             index,
             memory_enabled: cfg.memory_enabled,
+            facts_key,
             clock: cfg.clock,
             ids: cfg.ids,
             events,
@@ -578,8 +680,18 @@ impl Core {
             backup_dir: cfg.backup_dir,
             probe: cfg.probe,
             background: Mutex::new(Vec::new()),
+            cleanup_pending: std::sync::atomic::AtomicBool::new(false),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
+            cleanup_lock: Arc::new(tokio::sync::Mutex::new(())),
+            fail_index_removal: std::sync::atomic::AtomicUsize::new(0),
             command_loop: Mutex::new(None),
+            forget: Mutex::new(forgets::State::default()),
+            forget_batch: Mutex::new(forgets::Batch::default()),
+            forget_preview_seq: std::sync::atomic::AtomicU64::new(0),
         });
+        // 忘れるの当て直し (04 §7.2 の「起動の順」): 書き手を作った後、照会と命令を受け付ける前。`Core` を返す
+        // のはこの後なので、照会と命令は当て直しを終えてから届く。
+        forgets::startup(&inner).await;
         let core = Self { inner, commands };
         let worker = core.inner.clone();
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
@@ -608,23 +720,12 @@ impl Core {
             // 古い版で消した会話の派生の記録を、DB・索引・退避から除く (03 §4.2 の規則 12)。
             orphans::reconcile(&worker, gone).await;
             embedding::open(&worker).await;
+            // 事実の表を作っておく (最初の応答の経路で数えないように、04 §5.4)。
+            fact_table::prepare(&worker).await;
+            // 前の起動で済まなかった整理の job (強制終了・索引や退避を除けなかった分) を続ける (04 §7.7 の 2・5)。
+            run_cleanup_jobs(&worker).await;
             let done = worker.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let jobs = worker
-                    .store
-                    .read()
-                    .ok()
-                    .and_then(|r| evorag_memory::pending_purge_jobs(&r).ok())
-                    .unwrap_or_default();
-                if !enough_space(&worker) {
-                    return;
-                }
-                for (job, ids) in jobs {
-                    purge(&worker, job, &ids);
-                }
-                backup_now(&worker);
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || backup_now(&worker)).await;
             done.startup_done
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             done.activity.kick();
@@ -647,13 +748,20 @@ impl Core {
             server,
             store: open_report,
             prompt_language: language,
-            prompt_language_mismatch: language != cfg.prompt_language,
+            prompt_language_mismatch: cfg.prompt_language_explicit
+                && language != cfg.prompt_language,
             location_warnings,
             chat_model_recorded,
             ignored_config,
             roles: role_infos,
             recorded_roles,
             recall: core.inner.recall_state(),
+            facts_disabled: core.inner.facts_key.problem(),
+            forget_key_created: matches!(
+                core.inner.facts_key,
+                forget_key::FactsKey::Ready { created: true, .. }
+            ),
+            forget: forgets::status(&core.inner),
         };
         // 裏の処理 (04 §4)。利用者が操作していない間に、要る手順を動かす。
         let worker = core.inner.clone();
@@ -710,16 +818,75 @@ impl Core {
             .collect()
     }
 
-    /// 照会: セッションのターン (元の順)。
+    /// 照会: セッションのターン (元の順)。伏せ字と `[非表示]` の印の範囲を添える (04 §7.3)。
+    /// 忘れるの指示と合わないターンは、本文を出さずに「確かめられない」とする (04 §7.2)。
     pub fn turns(&self, session: Id) -> Vec<evorag_types::api::TurnView> {
         let Ok(rtx) = self.inner.store.read() else {
             return Vec::new();
         };
+        let hide = masking::Hide::load(&rtx, self.inner.language);
         evorag_memory::session_turns(&rtx, session)
             .unwrap_or_default()
             .iter()
-            .map(views::turn)
+            .map(|t| views::display(hide.as_ref(), t))
             .collect()
+    }
+
+    /// 試験のための注入: 次の `n` 回、消した ID を索引から除くのを失敗させる (04 §7.7 の 2)。
+    #[doc(hidden)]
+    pub fn inject_index_removal_failure(&self, n: usize) {
+        self.inner
+            .fail_index_removal
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 済んでいない整理の job (索引と退避から消した ID を除く、04 §7.7 の 2・5) の数。`doctor` は `job` の
+    /// 記録の数として報告する。
+    pub fn pending_cleanup_jobs(&self) -> usize {
+        let forget = self
+            .inner
+            .store
+            .read()
+            .map_or(0, |r| forgets::pending_backup_jobs(&r));
+        pending_cleanup(&self.inner).len() + forget
+    }
+
+    /// 忘れるの状態 (忘れるの指示と合わないターン、ジャーナルの書き直しの残り、04 §7.2)。状態の行に示す。
+    pub fn forget_status(&self) -> ForgetStatus {
+        forgets::status(&self.inner)
+    }
+
+    /// 試験のため: 忘れるを実行する (04 §7.1〜§7.3。見本を確かめずに、既定の計画で書く)。画面からの操作は
+    /// `/forget` の命令 (`Command::ForgetFact`) が同じ経路を通す。書いたら忘れるの指示の ID。
+    ///
+    /// # Errors
+    /// 応答を生成している、中止した (04 §7.1 の「中止」)、記録を読めない・書けないとき (理由の文)。
+    #[doc(hidden)]
+    pub async fn forget_now(
+        &self,
+        target: evorag_types::api::FactKey,
+        options: evorag_memory::ForgetOptions,
+    ) -> Result<Id, String> {
+        match forgets::execute(&self.inner, target, options, None).await {
+            forgets::Executed::Done { directive, .. } => Ok(directive),
+            forgets::Executed::Changed { hash, .. } => Err(format!("the plan changed ({hash})")),
+            forgets::Executed::Aborted(a) => Err(a.to_string()),
+            forgets::Executed::Busy => Err("a reply is being generated".into()),
+            forgets::Executed::Failed(e) => Err(e),
+        }
+    }
+
+    /// 試験のため: 索引を書き換える経路の鍵を取って持つ (落とすまで、忘れる・削除などがロックを待つ。忘れるの
+    /// 途中の操作をまねる)。
+    #[doc(hidden)]
+    pub async fn hold_index_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.inner.index_lock.clone().lock_owned().await
+    }
+
+    /// 試験のための注入: 次のジャーナルの書き直しを、決まった点で失敗させる (09 §3.5)。
+    #[doc(hidden)]
+    pub fn inject_journal_rewrite_fault(&self, fault: evorag_store::RewriteFault) {
+        self.inner.store.inject_journal_rewrite_fault(fault);
     }
 
     /// 試験のための注入: 次のジャーナルの書き込みを失敗させる (AC-FR-202-1)。
@@ -748,9 +915,45 @@ impl Core {
         }
     }
 
+    /// 試験のため: ターンの改訂の番号を 1 つ進める (伏せ字 (04 §7.3、M3.4) が本文を書き換えたことをまねる)。
+    /// 伏せ字と同じく、事実を書く経路のロックの下で書く。書けたら `true`。
+    #[doc(hidden)]
+    pub async fn bump_turn_revision(&self, turn: Id) -> bool {
+        let _lock = self.inner.facts_lock.lock().await;
+        let Some(mut env) = read_env(&self.inner, evorag_memory::KIND_TURN, turn) else {
+            return false;
+        };
+        let rev = evorag_memory::turn_rev(&env) + 1;
+        env.updated_at = self.inner.clock.now();
+        env.set_body(&serde_json::json!({ "rev": rev })).is_ok()
+            && write(&self.inner, vec![WriteOp::Put(env)]).await.is_ok()
+    }
+
+    /// 試験のため: 事実を private にする (事実への指示を足し、次のターンの前に事実の表を作り直させる、
+    /// 04 §7.5・§5.4)。画面からの操作は `Command::SetFactPrivate`。書けたら `true`。
+    #[doc(hidden)]
+    pub async fn make_fact_private(&self, subject: &str, attribute: &str, value: &str) -> bool {
+        fact_table::make_private(&self.inner, subject, attribute, value).await
+    }
+
+    /// 試験のため: 語彙の索引に今ある事実の検索の鍵の数 (04 §5.5)。
+    #[doc(hidden)]
+    pub fn indexed_fact_keys(&self) -> usize {
+        self.inner
+            .index
+            .as_deref()
+            .map_or(0, |ix| recall::indexed_fact_keys(ix).len())
+    }
+
     /// `/tokenize` を呼んだ回数 (キャッシュの試験のため)。
     pub fn tokenize_calls(&self) -> usize {
         self.inner.tokens.calls()
+    }
+
+    /// 事実の機能 (抽出・統合・事実の表) が使えるか。`memory.forget_key` が使えないときは止める
+    /// (03 §3.1.1 のフェイルクローズ)。
+    pub fn facts_enabled(&self) -> bool {
+        self.inner.facts_key.key().is_some()
     }
 
     /// embed・rerank の役割が使える (記録と同じモデルに繋がっている) か (06 §3)。
@@ -811,6 +1014,18 @@ impl Core {
     pub fn turn_body(&self, turn: Id) -> Option<evorag_memory::TurnBody> {
         read_env(&self.inner, evorag_memory::KIND_TURN, turn)
             .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
+    }
+
+    /// 試験のため: 待たせている裏の処理の手順 (終えたのにまだ要る手順、sleep.rs の `BACKOFF`) を、待たずに
+    /// 次の見直しで試し直させる。
+    #[doc(hidden)]
+    pub fn retry_background_now(&self) {
+        self.inner
+            .backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.inner.activity.kick();
     }
 
     /// 試験のため: 裏の処理の要る手順が無くなるまで待つ (10 秒で終わらなければ panic する)。
@@ -891,6 +1106,10 @@ impl Core {
     /// 終了する。生成中なら中断として書き、書き手の待ち行列の会話の追記を書き切ってから戻る (02 §5)。
     /// 戻った後、ほかに複製した `Core` が無ければ、データ根のロックも外れている。
     pub async fn shutdown(self) {
+        // 退避の整理を、次の退避に移る前に止めさせる (終わるまで待たせない。job から次の起動で続ける)。
+        self.inner
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // 新しい命令を受け付けない (処理中の命令は終わるまで待つ)。
         let command_loop = self
             .inner
@@ -912,6 +1131,10 @@ impl Core {
         }
         // 落とされない保存 (埋め込み) が終わるのを待つ (書き手を止める前に、ストアを手放させるため)。
         drop(self.inner.index_lock.lock().await);
+        // 落とされない事実の書き込み (抽出・統合) も同じく待つ。
+        drop(self.inner.facts_lock.lock().await);
+        // 落とされない整理 (索引と退避から消した ID を除く) も待つ。
+        drop(self.inner.cleanup_lock.lock().await);
         let running = {
             let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.running.take()
@@ -1497,6 +1720,14 @@ pub(crate) async fn write_derived(inner: &Inner, ops: Vec<WriteOp>) -> Result<()
 }
 
 async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
+    write_outcome(inner, req).await.map(|_| ())
+}
+
+/// 書き手に送り、結果 (ジャーナルの書き直しの成否を含む) を待つ。
+pub(crate) async fn write_outcome(
+    inner: &Inner,
+    req: WriteRequest,
+) -> Result<evorag_store::WriteOutcome, String> {
     let (tx, rx) = oneshot::channel();
     inner
         .writer
@@ -1508,7 +1739,12 @@ async fn write_with(inner: &Inner, req: WriteRequest) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     match rx.await {
-        Ok(Ok(_)) => Ok(()),
+        Ok(Ok(out)) => {
+            if let Some(e) = &out.quarantine_failed {
+                tracing::warn!(error = %e, "broken records could not be quarantined; the write went ahead");
+            }
+            Ok(out)
+        }
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("the writer stopped".into()),
     }
@@ -1536,6 +1772,15 @@ fn is_running(inner: &Inner) -> bool {
         .running
         .as_ref()
         .is_some_and(|r| !r.done && !r.task.is_finished())
+}
+
+/// `/forget` を実行しているか (その間は生成を始めない)。
+fn forgetting(inner: &Inner) -> bool {
+    inner
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forgetting
 }
 
 fn current_session(inner: &Inner) -> Option<Id> {
@@ -1599,6 +1844,25 @@ async fn handle_command(inner: &Arc<Inner>, cmd: Command) {
         Command::Style { set } => style(inner, set).await,
         Command::InputIdle { text } => precompute::input_idle(inner, text),
         Command::Memory => show_memory(inner),
+        Command::ShowFacts => fact_ops::show_facts(inner),
+        Command::ShowFactHistory { group } => fact_ops::show_history(inner, &group),
+        Command::ShowForgotten => fact_ops::show_forgotten(inner),
+        Command::SetFactPrivate { target, scope } => {
+            fact_ops::run(inner, fact_ops::Request::Private { target, scope });
+        }
+        Command::UnsetFactPrivate { target } => {
+            fact_ops::run(inner, fact_ops::Request::PrivateOff(target));
+        }
+        Command::AcceptFact { target } => fact_ops::run(inner, fact_ops::Request::Accept(target)),
+        Command::RevertFact { target } => fact_ops::run(inner, fact_ops::Request::Revert(target)),
+        Command::UnblockFact { target } => fact_ops::run(inner, fact_ops::Request::Unblock(target)),
+        Command::PreviewForget { target, options } => forget_ops::preview(inner, target, options),
+        Command::ForgetFact {
+            target,
+            options,
+            plan,
+        } => forget_ops::run(inner, target, options, plan),
+        Command::DiscardBroken => forget_ops::discard_broken(inner),
         _ => {}
     }
 }
@@ -1648,38 +1912,72 @@ async fn delete(inner: &Arc<Inner>) {
     // 関係を読んでから索引から除くまでを、チャンクと索引の鍵の下で行う (保存中の埋め込みや、作り直し中の
     // チャンクが、消した会話に残らないように)。
     let _lock = inner.index_lock.lock().await;
-    let ops = inner.store.read().ok().and_then(|rtx| {
-        let s = evorag_memory::load_session(&rtx, sid).ok()?;
-        evorag_memory::delete_session(&rtx, &s.envelope).ok()
-    });
-    let Some(mut ops) = ops else {
-        reject(inner, MessageKey::NoSession);
-        return;
-    };
-    // 退避からも除く (03 §7.3)。途中で止まっても続けられるように、job を同じ依頼で書く。
-    let ids = evorag_memory::deleted_ids(&ops);
-    let Ok((job, put)) = evorag_memory::purge_job(&writes(inner), ids.clone()) else {
-        return;
-    };
-    ops.push(put);
-    if let Err(e) = write(inner, ops).await {
+    // 事実を書く経路のロックも取る (統合が出典の改訂の番号を照合してから書き終えるまでの間に、出典のターンを
+    // 消さないように、04 §4)。鍵の順は index_lock → facts_lock (逆の順で取る経路は無い)。
+    // 事実は、そのセッションの出典を外し、出典の無くなった事実を同じ依頼で消す (04 §7.1・§7.4)。private で
+    // なくなる値には、その値だけの private の指示を同じ依頼で足す (04 §7.5)。消した事実の ID (= 事実の検索の
+    // 鍵の ID、04 §5.5) は、下で退避と索引から除く ID に入る。
+    let facts_guard = inner.facts_lock.lock().await;
+    let failed = |detail: String| {
         emit(
             inner,
             Event::Rejected {
-                error: Message::new(MessageKey::DeleteFailed).arg("detail", e),
+                error: Message::new(MessageKey::DeleteFailed).arg("detail", detail),
             },
         );
+    };
+    // 記録を読んで操作を組み立てるのは、裏のスレッドで行う (事実の全件を読むため)。
+    let worker = inner.clone();
+    let planned = tokio::task::spawn_blocking(move || {
+        let rtx = worker.store.read().map_err(|e| e.to_string())?;
+        let s = match evorag_memory::load_session(&rtx, sid) {
+            Ok(s) => s,
+            Err(evorag_memory::MemoryError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        evorag_memory::delete_session(&rtx, &s.envelope, &writes(&worker))
+            .map(Some)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    let mut ops = match planned {
+        Ok(Ok(Some(ops))) => ops,
+        Ok(Ok(None)) => {
+            reject(inner, MessageKey::NoSession);
+            return;
+        }
+        Ok(Err(detail)) => {
+            failed(detail);
+            return;
+        }
+        Err(e) => {
+            failed(e.to_string());
+            return;
+        }
+    };
+    // 索引と退避から除く ID を、整理の job に同じ依頼で書く (03 §7.3、04 §7.7 の 2)。途中で止まっても、
+    // 次の起動 (と sleep-time) に job から続ける。
+    let ids = evorag_memory::deleted_ids(&ops);
+    let (job, put) = match evorag_memory::purge_job(&writes(inner), ids.clone()) {
+        Ok(x) => x,
+        Err(e) => {
+            failed(e.to_string());
+            return;
+        }
+    };
+    ops.push(put);
+    if let Err(e) = write(inner, ops).await {
+        failed(e);
         return;
     }
-    // 以後の想起に出ないよう、知らせる前に索引から除く (AC-FR-309-1)。
-    let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
-    if let Some(ix) = inner.index.clone() {
-        let gone = gone.clone();
-        let _ = tokio::task::spawn_blocking(move || ix.remove(&gone)).await;
-    }
-    // 今と前の世代のベクトルの索引から除く (04 §7)。
+    drop(facts_guard);
+    // 以後の想起に出ないよう、知らせる前に、今と前の世代のすべての索引から除く (AC-FR-309-1、04 §7.7 の 2)。
+    // 消した事実の検索の鍵もここで除く (04 §5.5)。除けなかった分は job に残る (読み出しでも DB で確かめて除く)。
     let worker = inner.clone();
-    let _ = tokio::task::spawn_blocking(move || embedding::remove_everywhere(&worker, &gone)).await;
+    let gone: std::collections::HashSet<Id> = ids.iter().copied().collect();
+    let indexes_done = tokio::task::spawn_blocking(move || remove_from_indexes(&worker, &gone))
+        .await
+        .unwrap_or(false);
     drop(_lock);
     inner
         .state
@@ -1687,9 +1985,31 @@ async fn delete(inner: &Arc<Inner>) {
         .unwrap_or_else(|e| e.into_inner())
         .session = None;
     notes::touch(inner);
-    emit(inner, Event::SessionDeleted { id: sid });
+    extraction::touch(inner);
+    // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
+    fact_table::invalidate(inner);
+    // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。知らせる前に `background` に
+    // 載せる (知らせを受けてから裏の処理を待つ呼び手が、この task を見落とさないため)。
     let worker = inner.clone();
-    let task = tokio::task::spawn_blocking(move || purge(&worker, job, &ids));
+    let erase = tokio::spawn(async move { forget_ops::erase_slots(&worker).await });
+    inner
+        .background
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(erase);
+    emit(inner, Event::SessionDeleted { id: sid });
+    // 整理の鍵は task の中で取る (長い整理の後ろで、次の命令を待たせない)。終了の処理は、この task を
+    // `background` で待つ。
+    let worker = inner.clone();
+    let task = tokio::spawn(async move {
+        let _guard = worker.cleanup_lock.lock().await;
+        let job = evorag_memory::CleanupJob {
+            job,
+            ids,
+            backups: true,
+        };
+        run_cleanup_job(&worker, &job, indexes_done).await;
+    });
     inner
         .background
         .lock()
@@ -1697,9 +2017,181 @@ async fn delete(inner: &Arc<Inner>) {
         .push(task);
 }
 
+/// 消した ID を、語彙の索引と、今と前の世代のすべてのベクトルの索引から除く (04 §7.7 の 2)。呼び手は
+/// `index_lock` を持つ。すべて除けたら `true`。v0.1 の索引 (`lex/`) は開くときに消すので、ここでは見ない
+/// (`recall::open_index`)。
+pub(crate) fn remove_from_indexes(inner: &Inner, gone: &std::collections::HashSet<Id>) -> bool {
+    if gone.is_empty() {
+        return true;
+    }
+    let injected = inner
+        .fail_index_removal
+        .try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| n.checked_sub(1),
+        )
+        .is_ok();
+    if injected {
+        tracing::warn!("index removal failed (injected)");
+        return false;
+    }
+    let lex = inner.index.as_ref().is_none_or(|ix| match ix.remove(gone) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "deleted entries could not be removed from the lexical index");
+            false
+        }
+    });
+    let vectors = embedding::remove_everywhere(inner, gone);
+    lex && vectors
+}
+
+/// 残っている整理の job。
+fn pending_cleanup(inner: &Inner) -> Vec<evorag_memory::CleanupJob> {
+    inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::pending_cleanup_jobs(&r).ok())
+        .unwrap_or_default()
+}
+
+/// 残っている整理の job をすべて行う (起動時と sleep-time)。すべて済んだら `true`。
+///
+/// 落とされない task で行い、その終わりを待つ (sleep-time の手順は利用者の操作で落とされるが、整理は途中で
+/// 止めない。索引の鍵を持ったまま止まる・旗を下ろしたまま job が残る、を防ぐ)。鍵は spawn の前に取る (終了の
+/// 処理が鍵を取れたら、出した整理は終わっている)。
+pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
+    let guard = inner.cleanup_lock.clone().lock_owned().await;
+    let worker = inner.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        // 一覧を読む前に旗を下ろす (読んだ後に足された job は、その job の整理が旗を立て直す)。
+        worker
+            .cleanup_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        adopt_pending_deletes(&worker).await;
+        let reader = worker.clone();
+        let jobs = tokio::task::spawn_blocking(move || pending_cleanup(&reader))
+            .await
+            .unwrap_or_default();
+        let mut all = true;
+        for job in jobs {
+            all &= run_cleanup_job(&worker, &job, false).await;
+        }
+        // 忘れるの退避の写し直し (03 §7.3)。残っている job をまとめて 1 回の写しにする。
+        if !forgets::run_backup_jobs(&worker).await {
+            flag_cleanup(&worker);
+            all = false;
+        }
+        all
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// 開くときにストアが残した「索引と退避から除く ID」(ジャーナルから当て直した削除) を、整理の job にする。
+/// job を書くのと同じ依頼で、ストアの印を消す (その間に落ちても失わない)。書けなければ旗を立て、sleep-time と
+/// 次の起動で試し直す (起動は止めない)。
+async fn adopt_pending_deletes(inner: &Arc<Inner>) {
+    let ids = match inner.store.pending_deletes() {
+        Ok(p) => {
+            if p.unreadable > 0 {
+                tracing::warn!(
+                    n = p.unreadable,
+                    "some deletes replayed at open could not be read"
+                );
+            }
+            if p.ids.is_empty() {
+                return;
+            }
+            p.ids
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "deletes replayed at open could not be read");
+            inner
+                .cleanup_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+    };
+    let written = match evorag_memory::purge_job(&writes(inner), ids) {
+        Ok((_, job)) => write(inner, vec![job, WriteOp::ClearPendingDeletes]).await,
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "deletes replayed at open could not be queued for cleanup");
+        inner
+            .cleanup_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 整理の job を書いた・残した (sleep-time に試し直す)。
+pub(crate) fn flag_cleanup(inner: &Inner) {
+    inner
+        .cleanup_pending
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// sleep-time に試し直す整理の job があるか。
+pub(crate) fn cleanup_needed(inner: &Inner) -> bool {
+    inner
+        .cleanup_pending
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 整理の job を 1 つ行う: 消した ID を索引から除き (`indexes_done` なら済んでいる)、退避の整理の job なら退避
+/// からも除く (03 §7.3)。両方が済んだときだけ job を消す (04 §7.7 の 2・5)。済まなければ job を残し、
+/// sleep-time に試し直させる (次の起動でも続ける)。済んだら `true`。呼び手は `cleanup_lock` を持つ。
+async fn run_cleanup_job(
+    inner: &Arc<Inner>,
+    job: &evorag_memory::CleanupJob,
+    indexes_done: bool,
+) -> bool {
+    let indexes = indexes_done || {
+        let _lock = inner.index_lock.lock().await;
+        let worker = inner.clone();
+        let gone: std::collections::HashSet<Id> = job.ids.iter().copied().collect();
+        tokio::task::spawn_blocking(move || remove_from_indexes(&worker, &gone))
+            .await
+            .unwrap_or(false)
+    };
+    let backups = !job.backups || {
+        let worker = inner.clone();
+        let list = job.ids.clone();
+        tokio::task::spawn_blocking(move || purge(&worker, &list))
+            .await
+            .unwrap_or(false)
+    };
+    let done = indexes
+        && backups
+        && write_derived(
+            inner,
+            vec![WriteOp::Delete {
+                kind: evorag_memory::KIND_JOB.into(),
+                id: job.job,
+            }],
+        )
+        .await
+        .is_ok();
+    if !done {
+        tracing::warn!(
+            indexes,
+            backups,
+            "cleanup job kept; it will be retried (doctor counts it as a job record)"
+        );
+        inner
+            .cleanup_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    done
+}
+
 /// 退避と退避の整理の前に、空きが DB の大きさ以上あるかを確かめる (03 §7.1、§8)。足りなければ
 /// 裏の処理を止めて知らせる (会話の追記は続ける、FR-217)。
-fn enough_space(inner: &Inner) -> bool {
+pub(crate) fn enough_space(inner: &Inner) -> bool {
     let (free, need) = space(inner);
     match free {
         Some(free) if free < need => {
@@ -1734,19 +2226,26 @@ fn space(inner: &Inner) -> (Option<u64>, u64) {
     ((inner.probe.free_bytes)(&place), need)
 }
 
-/// 退避の整理の job を行い、終えたら job を消す。失敗したら job を残す (次の起動で続ける)。
-fn purge(inner: &Inner, job: Id, ids: &[Id]) {
+/// 消した ID を保持している退避から除く (03 §7.3)。退避を作る処理と同じ順序で通す (`Store::purge_backups`)。
+/// 済んだら `true` (空きが足りない・開けない退避があれば `false`。job を残して試し直す)。
+fn purge(inner: &Inner, ids: &[Id]) -> bool {
     if !enough_space(inner) {
-        return;
+        return false;
     }
-    let root = inner.store.data_root().to_path_buf();
-    if evorag_store::restore::purge_backups(&root, inner.backup_dir.as_deref(), ids).is_ok() {
-        let _ = inner
-            .writer
-            .submit_wait(WriteRequest::background(vec![WriteOp::Delete {
-                kind: evorag_memory::KIND_JOB.into(),
-                id: job,
-            }]));
+    let stop = || {
+        inner
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    match inner
+        .store
+        .purge_backups(inner.backup_dir.as_deref(), ids, &stop)
+    {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "backups could not be purged");
+            false
+        }
     }
 }
 
@@ -1793,6 +2292,8 @@ fn open_session(inner: &Inner, id: Id) {
     };
     // この版では読めないターンは読み飛ばし、件数を画面に知らせる (03 §4.2 の規則 11)。
     let read = evorag_memory::session_turns_counted(&rtx, id).unwrap_or_default();
+    // 印の範囲を添え、忘れるの指示と合わないターンは本文を出さない (04 §7.2・§7.3)。
+    let hide = masking::Hide::load(&rtx, inner.language);
     inner
         .state
         .lock()
@@ -1807,7 +2308,7 @@ fn open_session(inner: &Inner, id: Id) {
                 read.turns
                     .iter()
                     .map(|t| {
-                        let mut v = views::turn(t);
+                        let mut v = views::display(hide.as_ref(), t);
                         decorate(inner, &mut v, &t.body, &hidden);
                         v
                     })
@@ -1821,6 +2322,17 @@ fn open_session(inner: &Inner, id: Id) {
 async fn send(inner: &Arc<Inner>, text: String) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    // 忘れるの途中は送らない (伏せ字にする往復が生成の途中にならないため)。発話は入力欄に戻す。
+    if forgetting(inner) {
+        emit(
+            inner,
+            Event::SendRejected {
+                text,
+                error: Message::new(MessageKey::ForgetInProgress),
+            },
+        );
         return;
     }
     let Some(sid) = current_session(inner) else {
@@ -1881,6 +2393,10 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
         reject(inner, MessageKey::Busy);
         return;
     }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
+        return;
+    }
     let Some(sid) = current_session(inner) else {
         reject(inner, MessageKey::NoSession);
         return;
@@ -1916,8 +2432,9 @@ async fn regenerate(inner: &Arc<Inner>, retry: bool) {
 
 /// 書いたターンを裏でチャンクに分け、チャンクを記録して語彙の索引に足す (05 §2.3・§2.4)。
 fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
-    // 話題の区切りが変わったかもしれない (04 §2)。
+    // 話題の区切りが変わったかもしれない (04 §2)。事実を抽出する発話が増えたかもしれない (04 §5.2.1)。
     notes::touch(inner);
+    extraction::touch(inner);
     if inner.index.is_none() {
         return;
     }
@@ -1935,19 +2452,20 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
     };
     for &id in ids {
         let _lock = inner.index_lock.lock().await;
-        let Some((body, old)) = inner.store.read().ok().and_then(|r| {
+        let Some((body, rev, old)) = inner.store.read().ok().and_then(|r| {
             let e = match r.get(evorag_memory::KIND_TURN, id).ok()?? {
                 evorag_store::Read::Ok(e) => e,
                 _ => return None,
             };
             let b = e.body_as::<evorag_memory::TurnBody>().ok()?;
             let old = evorag_memory::chunks_of(&r, id).ok()?;
-            Some((b, old))
+            // 改訂の番号を読めないターンは、書き手の前提が合わないので作らない。
+            Some((b, evorag_memory::turn_rev_checked(&e)?, old))
         }) else {
             continue;
         };
         let new = if recall::indexable(&body) {
-            recall::chunk_bodies(id, &body)
+            recall::chunk_bodies(id, rev, &body)
         } else {
             Vec::new()
         };
@@ -1977,6 +2495,8 @@ async fn chunk_turns(inner: &Arc<Inner>, ids: &[Id]) {
             .unwrap_or_default();
         let w = writes(inner);
         ops.extend(embeddings.iter().flat_map(|e| w.delete_embedding(*e)));
+        // 読んだ本文が今のまま (ターンが残っていて改訂の番号が合う) のときだけ書く (04 §7.7 の 4)。
+        ops.push(evorag_memory::expect_turn(id, rev));
         if write_derived(inner, ops).await.is_err() {
             continue;
         }
@@ -2081,7 +2601,11 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
             ms = started.elapsed().as_millis() as u64,
             "lexical index synced"
         ),
-        _ => tracing::warn!("lexical index sync failed"),
+        _ => {
+            tracing::warn!("lexical index sync failed");
+            // 事実の鍵は、sleep-time の手順で索引の中身から合わせ直す (04 §5.5)。
+            fact_table::touch(inner);
+        }
     }
     gone
 }
@@ -2183,12 +2707,30 @@ async fn style(inner: &Arc<Inner>, set: Option<(evorag_types::api::StyleItem, St
     emit(inner, Event::StyleInfo { values, changed });
 }
 
+/// 伏せる値 (private・忘れた値) を確かめられるか。確かめられなければ、短い知らせを出して `false`
+/// (往復の本文を出さない、04 §7.5)。
+fn can_hide(inner: &Inner) -> bool {
+    let ok = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| masking::Hide::load(&r, inner.language))
+        .is_some();
+    if !ok {
+        reject(inner, MessageKey::MaskUnavailable);
+    }
+    ok
+}
+
 /// 応答の出典の詳細 (FR-110)。
 fn show_source(inner: &Inner, turn: Id, n: usize) {
+    if !can_hide(inner) {
+        return;
+    }
     let marks = irrelevant_marks(inner, turn);
     let found = read_env(inner, evorag_memory::KIND_TURN, turn)
         .and_then(|e| e.body_as::<evorag_memory::TurnBody>().ok())
-        .and_then(|b| recall::source_turns(&inner.store, &b, n));
+        .and_then(|b| recall::source_turns(&inner.store, &b, n, inner.language));
     let Some(turns) = found else {
         emit(
             inner,
@@ -2268,6 +2810,14 @@ fn decorate(
         .degraded
         .iter()
         .any(|d| d == evorag_memory::DEGRADED_NO_THRESHOLD);
+    // 帯の発話の冒頭にも `[非表示]` の置き換えを当てる (05 §3.4)。
+    let rtx = (!obs.band.is_empty())
+        .then(|| inner.store.read().ok())
+        .flatten();
+    // 伏せる値を確かめられなければ、冒頭を出さない。
+    let hide = rtx
+        .as_ref()
+        .and_then(|r| masking::Hide::load(r, inner.language));
     view.band = obs
         .band
         .iter()
@@ -2276,6 +2826,15 @@ fn decorate(
         .filter_map(|&target| {
             let e = read_env(inner, evorag_memory::KIND_TURN, target)?;
             let b = e.body_as::<evorag_memory::TurnBody>().ok()?;
+            let mut t = evorag_memory::Turn {
+                envelope: e,
+                body: b,
+            };
+            t.body.text = match (rtx.as_ref(), hide.as_ref()) {
+                (Some(r), Some(h)) => h.text(r, &t),
+                _ => String::new(),
+            };
+            let (e, b) = (t.envelope, t.body);
             let head: String = b
                 .text
                 .lines()
@@ -2330,7 +2889,8 @@ fn show_memory(inner: &Inner) {
         let count = t.body.recall.as_ref().map_or(0, |r| r.sources.len()) as u32;
         let base = recall::source_base(&t.body);
         for n in base..base + count {
-            let Some(st) = recall::source_turns(&inner.store, &t.body, n as usize) else {
+            let Some(st) = recall::source_turns(&inner.store, &t.body, n as usize, inner.language)
+            else {
                 continue;
             };
             let rep = st
@@ -2363,11 +2923,22 @@ fn show_memory(inner: &Inner) {
         let mine: Vec<&(u32, Id, Vec<Id>, MemorySource)> =
             sources.iter().filter(|s| s.1 == t.envelope.id).collect();
         let source_of = |id: Id| mine.iter().find(|s| s.2.contains(&id)).map(|s| s.0);
+        // 帯と下の往復の冒頭にも `[非表示]` の置き換えを当てる (04 §7.5)。
+        let rtx = inner.store.read().ok();
+        let hide = rtx
+            .as_ref()
+            .and_then(|r| masking::Hide::load(r, inner.language));
         let head_of = |id: Id| {
             read_env(inner, evorag_memory::KIND_TURN, id)
                 .and_then(|e| {
                     let body = e.body_as::<evorag_memory::TurnBody>().ok()?;
-                    Some(evorag_memory::Turn { envelope: e, body })
+                    let mut t = evorag_memory::Turn { envelope: e, body };
+                    // 伏せる値を確かめられなければ、冒頭を出さない。
+                    t.body.text = match (rtx.as_ref(), hide.as_ref()) {
+                        (Some(r), Some(h)) => h.text(r, &t),
+                        _ => String::new(),
+                    };
+                    Some(t)
                 })
                 .map(|x| exchange_head(inner, &x))
                 .unwrap_or_default()
@@ -2437,7 +3008,10 @@ fn show_memory(inner: &Inner) {
 
 /// 帯の往復の詳細 (05 §5.2)。
 fn show_band(inner: &Inner, answer: Id, target: Id) {
-    let Some(turns) = recall::exchange_turns(&inner.store, target) else {
+    if !can_hide(inner) {
+        return;
+    }
+    let Some(turns) = recall::exchange_turns(&inner.store, target, inner.language) else {
         reject(inner, MessageKey::BandUnknown);
         return;
     };
@@ -2483,6 +3057,10 @@ fn feedback_body(
 async fn attach_band(inner: &Arc<Inner>, answer: Id, target: Id) {
     if is_running(inner) {
         reject(inner, MessageKey::Busy);
+        return;
+    }
+    if forgetting(inner) {
+        reject(inner, MessageKey::ForgetInProgress);
         return;
     }
     let Some(sid) = current_session(inner) else {
@@ -2602,6 +3180,21 @@ fn start_generation(inner: &Arc<Inner>, session: Id, user_turn: Id, extra: Vec<I
     }
 }
 
+/// システムプロンプト (05 §4.1 の順 1〜4) と、置いた事実の表。答え方の既定と事実の表が変わらなければ、
+/// ターンをまたいで同じバイト列になる (ADR-0017、AC-FR-304-5)。
+pub(crate) async fn system_message(
+    inner: &Inner,
+    session: Id,
+    defaults: &prompt::AnswerDefaults,
+) -> (ChatMessage, Option<evorag_memory::FactTable>) {
+    let mut text = prompt::system_prompt(inner.language, defaults);
+    let table = fact_table::for_turn(inner, session).await;
+    if let Some(t) = &table {
+        text = prompt::with_fact_table(text, &t.text);
+    }
+    (ChatMessage::new(Role::System, text), table)
+}
+
 /// LLM に送る会話 (05 §4.1)。
 pub(crate) struct Conversation {
     /// 発話 `user_turn` より前の発言 (失敗した応答と、この発話への前の応答は除く)。
@@ -2620,12 +3213,29 @@ fn stamped(lang: PromptLanguage, at_ms: i64, text: &str) -> String {
 }
 
 pub(crate) fn conversation(inner: &Inner, session: Id, user_turn: Id) -> Conversation {
-    let turns = inner
-        .store
-        .read()
-        .ok()
-        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
+    let rtx = inner.store.read().ok();
+    let mut turns = rtx
+        .as_ref()
+        .and_then(|r| evorag_memory::session_turns(r, session).ok())
         .unwrap_or_default();
+    // 忘れるの指示と合わないターンの本文は送らず、伏せ字の印だけにする (04 §7.2)。確かめられなければ、忘れるの
+    // 指示の掛かるターンを確かめられないので、本文を送らない側に倒す。
+    match rtx
+        .as_ref()
+        .and_then(|r| masking::Hide::load(r, inner.language))
+    {
+        Some(hide) => {
+            for t in &mut turns {
+                hide.withhold(t);
+            }
+        }
+        None => {
+            let marker = evorag_memory::redaction_marker(inner.language.as_str());
+            for t in &mut turns {
+                t.body.text = marker.to_owned();
+            }
+        }
+    }
     let mut c = Conversation {
         past: Vec::new(),
         current: None,
@@ -2722,6 +3332,10 @@ async fn generate(
     let n_ctx = server.n_ctx as usize;
     let reserve = context::reserve_for_output(n_ctx, inner.reserve);
     let conv = conversation(inner, session, user_turn);
+    // システムプロンプトは凍結の核・選べる既定・事実の表だけ。日時と引用は今の発話の側に置く (ADR-0017)。
+    let defaults = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
+    let (system, table) = system_message(inner, session, &defaults).await;
+    let budgets = context::frame_budgets(n_ctx, reserve, table.is_some());
     // 以前の会話を引く (05 §3)。このセッションでメモリを切っていれば引かない (FR-409)。
     let memory = if memory_on(inner, session) {
         Some(
@@ -2732,8 +3346,7 @@ async fn generate(
                 &*llm,
                 &inner.tokens,
                 &server.model_key,
-                n_ctx,
-                reserve,
+                budgets.recall,
                 session,
                 user_turn,
                 conv.next_source,
@@ -2746,12 +3359,6 @@ async fn generate(
     } else {
         None
     };
-    // システムプロンプトは凍結の核と選べる既定だけ。日時と引用は今の発話の側に置く (ADR-0017)。
-    let defaults = *inner.answer.lock().unwrap_or_else(|e| e.into_inner());
-    let system = ChatMessage::new(
-        Role::System,
-        prompt::system_prompt(inner.language, &defaults),
-    );
     let quote = memory.as_ref().and_then(|m| m.quote.clone());
     let (text, at) = conv
         .current
@@ -2785,6 +3392,7 @@ async fn generate(
         band: recall_obs.band,
         user_attached: recall_obs.user_attached,
         degraded: recall_obs.degraded,
+        fact_table: table.map(|t| t.version),
     };
     let req = ChatRequest {
         messages: assembled.messages,

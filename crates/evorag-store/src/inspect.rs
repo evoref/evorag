@@ -47,6 +47,13 @@ impl Inspection {
             .get(crate::store::KIND_QUARANTINE)
             .map_or(0, |c| c.ok)
     }
+
+    /// 次の起動で compact するか (`meta` の `compact.pending`、03 §3.1.1。無い・知らない値は「要らない」)。
+    pub fn compact_pending(&self) -> bool {
+        self.meta
+            .get(meta::COMPACT_PENDING)
+            .is_some_and(|v| v == crate::compact::PENDING)
+    }
 }
 
 /// データ根を、何も書かずに点検する。使っているプロセスがあれば断る (03 §9)。
@@ -56,6 +63,72 @@ pub fn inspect(
     backups: Option<&Path>,
 ) -> Result<Inspection, OpenError> {
     inspect_collect(root, kinds, backups, &[])
+}
+
+/// データ根の DB を、何も書かずに読み取りのトランザクションで開き、`f` に渡す (`doctor` が、ストアの層では
+/// 決められない数 (忘れるの指示と合わないターンなど) をメモリの層の判定で数えるため)。DB が無い・読むだけでは
+/// 開けなければ `None`。使っているプロセスがあれば断る (03 §9)。
+///
+/// # Errors
+/// データ根のロックを取れないとき。
+pub fn with_view<T>(
+    root: &Path,
+    f: impl FnOnce(&crate::export::ExportView<'_>) -> T,
+) -> Result<Option<T>, OpenError> {
+    let _lock = DataRootLock::acquire_quiet(root)?;
+    let file = root.join(DB_FILE);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let Ok(db) = ReadOnlyDatabase::open(&file) else {
+        return Ok(None);
+    };
+    let Ok(rtx) = redb::ReadableDatabase::begin_read(&db) else {
+        return Ok(None);
+    };
+    Ok(Some(f(&crate::export::ExportView::new(&rtx))))
+}
+
+/// ジャーナルの、種類 `kind` の `put` の行の単調に増える項目 `field` の値 (ID ごとに、行の数だけ)。何も書かない
+/// (`doctor` が、伏せ字の前の行の残りを数えるため、04 §7.2)。
+///
+/// # Errors
+/// ジャーナルのファイルを読めないとき。
+pub fn journal_revs(
+    root: &Path,
+    kind: &'static str,
+    field: &'static str,
+) -> std::io::Result<std::collections::BTreeMap<evorag_types::Id, Vec<u64>>> {
+    journal::put_revs(root, kind, field)
+}
+
+/// データ根の DB の `meta` を、何も書かずに読むだけで開いて読む (`evorag update rollback` のデータの案内、
+/// 12 §7.2 の rollback の 3)。
+///
+/// 呼ぶ側が、そのデータ根のロック `lock` を取って持っていること (同じプロセスの中でもロックはもう一度
+/// 取れないので、取ったロックを受け取る)。DB が無ければ [`DbState::Missing`]、読むだけでは開けなければ
+/// [`DbState::NeedsRepair`] か [`DbState::Unreadable`] と空の表を返す。
+pub fn read_meta_locked(
+    lock: &DataRootLock,
+) -> (DbState, std::collections::BTreeMap<String, String>) {
+    let Some(root) = lock.path().parent() else {
+        return (DbState::Missing, Default::default());
+    };
+    let file = root.join(DB_FILE);
+    if !file.is_file() {
+        return (DbState::Missing, Default::default());
+    }
+    match ReadOnlyDatabase::open(&file) {
+        Ok(db) => match read_meta_db_any(&db) {
+            Ok(meta) => (DbState::Opened, meta),
+            Err(e) => (DbState::Unreadable(e.to_string()), Default::default()),
+        },
+        Err(redb::DatabaseError::RepairAborted) => (
+            DbState::NeedsRepair("repair aborted".into()),
+            Default::default(),
+        ),
+        Err(e) => (DbState::Unreadable(e.to_string()), Default::default()),
+    }
 }
 
 /// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。

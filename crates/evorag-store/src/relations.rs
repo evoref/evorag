@@ -11,7 +11,7 @@ use crate::key::{self, KeyBuf, OwnedPart, Part};
 use crate::store::{BLOBS, LINKS, LOOKUP, ReadTxn, StoreError, WriteTxn, db};
 
 /// 逆向きの関係の名前の前に付ける印。関係の名前はこの文字で始めない。
-const REVERSE: char = '~';
+pub(crate) const REVERSE: char = '~';
 
 /// 関係の名前が正しくない (空、または `~` で始まる)。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

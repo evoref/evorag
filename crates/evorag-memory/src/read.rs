@@ -14,6 +14,9 @@ pub enum MemoryError {
     Body(#[from] evorag_store::BodyError),
     #[error("record {0} not found")]
     NotFound(Id),
+    /// 書き込みの入口から足せない指示 (忘れるは、伏せ字とともに `apply_forget` で足す。知らない指示は書かない)。
+    #[error("this fact directive cannot be added here: {0}")]
+    UnsupportedDirective(&'static str),
 }
 
 /// 読んだセッション。
@@ -75,6 +78,34 @@ pub struct SessionTurns {
     pub turns: Vec<Turn>,
     /// 新しい版が書いた、この版では読めないターンの数 (03 §4.2 の規則 11)。記録は消さずに残っている。
     pub unreadable: usize,
+}
+
+/// セッションの記録が無いターンの数 (開くときに当て直した削除でセッションだけが消え、古い版が書き足したターンが
+/// 残ったもの。消さずに残し、数えて知らせる、03 §6)。本体はセッションの ID だけを読む (03 §4.2 の規則 11)。
+///
+/// # Errors
+/// 記録を読めないとき。
+pub fn turns_without_session(tx: &ReadTxn<'_>) -> Result<usize, MemoryError> {
+    #[derive(serde::Deserialize)]
+    struct SessionOf {
+        session: Id,
+    }
+    let mut sessions = Vec::new();
+    tx.for_each(KIND_TURN, |r| {
+        if let Read::Ok(e) = r
+            && let Ok(t) = e.body_as::<SessionOf>()
+        {
+            sessions.push(t.session);
+        }
+        true
+    })?;
+    let mut n = 0;
+    for s in sessions {
+        if tx.get(KIND_SESSION, s)?.is_none() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// セッションのターンを、元の順 (ID の順 = 書いた順) に。

@@ -36,6 +36,7 @@ fn config(root: &Path, lang: PromptLanguage) -> CoreConfig {
         config_file: None,
         evorag_version: "0.0.3".into(),
         prompt_language: lang,
+        prompt_language_explicit: true,
         generation: Generation::default(),
         request_extra: Default::default(),
         reserve_for_output: None,
@@ -67,7 +68,7 @@ async fn start(root: &Path, llm: &ReplayClient) -> (Core, UnboundedReceiver<Even
 async fn until(rx: &mut UnboundedReceiver<Event>, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
     let mut got = Vec::new();
     loop {
-        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(30), rx.recv())
             .await
             .expect("timed out waiting for an event")
             .expect("event channel closed");
@@ -311,8 +312,13 @@ async fn sending_while_generating_is_rejected_and_shutdown_saves_the_partial_rep
         text: "一つ目".into(),
     });
     let events = until(&mut rx, |e| matches!(e, Event::Token { .. })).await;
-    let Some(Event::UserTurnSaved { turn }) = events.first() else {
-        panic!()
+    // 発話の保存は最初の Token より前に来る。その前にほかの知らせ (裏の処理の状態など) が来ることがある
+    // (遅い環境で)。
+    let Some(turn) = events.iter().find_map(|e| match e {
+        Event::UserTurnSaved { turn } => Some(turn),
+        _ => None,
+    }) else {
+        panic!("no UserTurnSaved before the first token: {events:?}")
     };
     let sid = turn.session;
     core.command(Command::Send {
@@ -489,6 +495,8 @@ async fn deleting_a_session_purges_it_from_the_backups() {
     until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
     core.command(Command::DeleteSession);
     until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    // 整理を終えるまで待つ (終了の合図があると、整理は次の退避に移る前に止まり、次の起動で続ける)。
+    core.settle().await;
     core.shutdown().await;
 
     let daily = dir.path().join("backups").join("daily");
@@ -706,4 +714,40 @@ async fn a_session_with_a_turn_from_a_newer_version_still_opens() {
     assert_eq!(*unreadable, 1);
     assert_eq!(core.turns(sid).len(), 2);
     core.shutdown().await;
+}
+
+/// 開けない退避があると、退避の整理の job は消えずに残り、次の起動で続きを行う (03 §7.3)。
+/// verifies: AC-NFR-506-1 の退避の部分 (04 §7.7 の 5: 開けない退避があれば job を残して再試行する)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_purge_that_cannot_open_a_backup_keeps_its_job() {
+    let dir = TempDir::new("core-purge-unopenable");
+    let llm = cassette(8192, OK);
+    let (core, mut rx) = start(dir.path(), &llm).await;
+    core.settle().await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::Send {
+        text: "架空の消す本文".into(),
+    });
+    until(&mut rx, finished).await;
+    // 開けない退避 (前の日の分) を置く。
+    let bad = dir.path().join("backups").join("daily").join("20251101");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("evorag.redb"), b"not a database").unwrap();
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    assert_eq!(core.pending_cleanup_jobs(), 1, "the job is kept");
+    core.shutdown().await;
+
+    // 開けない退避を片付けてから起動し直すと、job から続けて終える。
+    std::fs::remove_dir_all(&bad).unwrap();
+    let (core, _rx) = start(dir.path(), &cassette(8192, "")).await;
+    core.settle().await;
+    assert_eq!(core.pending_cleanup_jobs(), 0, "the job is done");
+    core.shutdown().await;
+    let daily = dir.path().join("backups").join("daily");
+    for e in std::fs::read_dir(&daily).unwrap() {
+        let b = e.unwrap().path().join("evorag.redb");
+        assert!(!file_contains(&b, "架空の消す本文"), "{}", b.display());
+    }
 }
