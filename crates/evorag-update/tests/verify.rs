@@ -608,10 +608,16 @@ fn release_fixtures_stay_readable() {
 }
 
 /// `tests/fixtures/release/` の見本 (フォルダの名前と `release.json` の中身)。
-const RELEASE_FIXTURES: &[(&str, &[u8])] = &[(
-    "schema-1-example",
-    include_bytes!("../../../tests/fixtures/release/schema-1-example/release.json"),
-)];
+const RELEASE_FIXTURES: &[(&str, &[u8])] = &[
+    (
+        "schema-1-example",
+        include_bytes!("../../../tests/fixtures/release/schema-1-example/release.json"),
+    ),
+    (
+        "0.3.0",
+        include_bytes!("../../../tests/fixtures/release/0.3.0/release.json"),
+    ),
+];
 
 /// `tests/fixtures/release/` のフォルダが、すべて [`RELEASE_FIXTURES`] にあること。
 /// フォルダを読めないとき (別の利用者で走らせたとき) は確かめない。
