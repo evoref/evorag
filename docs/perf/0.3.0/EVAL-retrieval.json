@@ -1,0 +1,24 @@
+{
+  "id": "EVAL-retrieval",
+  "evorag": "0.3.0",
+  "embed_url": "http://127.0.0.1:8081",
+  "rerank_url": "http://127.0.0.1:8082",
+  "results": {
+    "tests/retrieval/recall-v0.1.toml": {
+      "cases": 37.0,
+      "recall_at_3": 0.972972972972973,
+      "recall_at_10": 0.972972972972973,
+      "ndcg_at_10": 0.9330734868725901,
+      "candidates_mean_ms": 187.9793297297298,
+      "candidates_p95_ms": 227.03209999999999
+    },
+    "tests/retrieval/recall-v0.2-para.toml": {
+      "cases": 5.0,
+      "recall_at_3": 1.0,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.704743802857166,
+      "candidates_mean_ms": 162.20776,
+      "candidates_p95_ms": 179.6859
+    }
+  }
+}
