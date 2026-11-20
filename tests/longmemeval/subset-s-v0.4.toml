@@ -1,0 +1,52 @@
+# LongMemEval S の一部 (09 §5.2 の「S の一部」)。v0.4 で起点を記録し、v0.6・v0.7 の判定に使う (判定にだけ使い、調整に使わない)。
+#
+# - 元のデータ: longmemeval_s_cleaned.json (1 問あたり約 50 セッション、約 11.5 万トークン)。MIT License。
+# - 選び方: single-session-preference と開発の組 (subset-v0.3.toml) を除き、層 (question_type。`_abs` は abstention) ごとに
+#   SHA-256("<seed>:<question_id>") の 16 進の小さい順に quota 件を取る。multi-session と temporal-reasoning を厚くする
+#   (複数のセッションにまたがる問いと時期の問いを測るため)。保留の切片 (holdout-v0.4.toml) と重なる問いがあるが、
+#   以前の会話 (haystack) が違い、判定にだけ使うので、封の規律は変わらない。
+# - 試験 `longmemeval_s_subset_matches_the_data` (EVORAG_LONGMEMEVAL_DATA に S を置いたときだけ流す) が選び直して確かめる。
+
+source = "longmemeval_s_cleaned.json"
+source_url = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
+source_sha256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+license = "MIT (Copyright (c) 2024 Di Wu)"
+seed = "evorag-longmemeval-s-v0.4"
+excluded_types = ["single-session-preference"]
+excluded_subset = "tests/longmemeval/subset-v0.3.toml"
+
+[[stratum]]
+name = "abstention"
+pool = 27
+quota = 2
+ids = ["gpt4_fe651585_abs", "88432d0a_abs"]
+
+[[stratum]]
+name = "knowledge-update"
+pool = 64
+quota = 4
+ids = ["e493bb7c", "cc5ded98", "ed4ddc30", "2698e78f"]
+
+[[stratum]]
+name = "multi-session"
+pool = 108
+quota = 10
+ids = ["3a704032", "10d9b85a", "bc149d6b", "f35224e0", "cc06de0d", "80ec1f4f", "gpt4_f2262a51", "67e0d0f2", "gpt4_15e38248", "55241a1f"]
+
+[[stratum]]
+name = "single-session-assistant"
+pool = 50
+quota = 2
+ids = ["16c90bf4", "dc439ea3"]
+
+[[stratum]]
+name = "single-session-user"
+pool = 57
+quota = 2
+ids = ["51a45a95", "21436231"]
+
+[[stratum]]
+name = "temporal-reasoning"
+pool = 114
+quota = 10
+ids = ["eac54add", "gpt4_7de946e7", "gpt4_5438fa52", "gpt4_68e94288", "gpt4_e414231e", "gpt4_cd90e484", "f0853d11", "gpt4_e414231f", "gpt4_45189cb4", "b46e15ed"]
