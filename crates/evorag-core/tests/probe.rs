@@ -200,3 +200,67 @@ async fn the_core_probes_once_per_model_and_reports_issues() {
     assert!(core.probe_result("chat").is_some());
     core.shutdown().await;
 }
+
+/// verifies: AC-FR-422-1 (v0.3 までの点検で思考を切れなかった chat は、思考を切る指定を試して点検し直す。
+/// 試した後は、通らなくても繰り返さない)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_probe_from_before_v0_4_is_redone_once() {
+    let dir = TempDir::new("probe-stale");
+    // 設定に思考を切る指定が無い構成で、v0.3 の形の点検の結果 (試していない) を残す。
+    let no_kwargs = |seed| {
+        let mut c = config(dir.path(), seed);
+        c.aux_request_extra = evorag_llm::RequestExtra::new();
+        c
+    };
+    let llm = Arc::new(server(BROKEN, ""));
+    let (core, _, _) = Core::start(no_kwargs(1), llm.clone() as Arc<dyn LlmClient>)
+        .await
+        .unwrap();
+    core.settle_probe().await;
+    let p = core.probe_result("chat").expect("probe saved");
+    // BROKEN は 2 つの答えしか持たない: 試した指定でも思考が出て、試したことが残る。
+    assert_eq!(p.aux_thinking_off, Some(false));
+    core.shutdown().await;
+    // 試した記録があれば、次の起動で点検し直さない。
+    let again = Arc::new(server("", ""));
+    let (core, _, _) = Core::start(no_kwargs(2), again.clone() as Arc<dyn LlmClient>)
+        .await
+        .unwrap();
+    core.settle_probe().await;
+    assert!(again.requests().is_empty());
+    core.shutdown().await;
+
+    // 試していない記録 (v0.3 の点検) なら、点検し直して指定を足す。
+    let stale = evorag_memory::ModelProbeBody {
+        aux_thinking_off: None,
+        ..p
+    };
+    {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_001)));
+        let m = evorag_core::rebind::DataRootModels::open(
+            dir.path(),
+            "0.0.6",
+            clock.clone(),
+            Arc::new(UuidV7Gen::with_seed(clock, 9)),
+        )
+        .unwrap();
+        m.save_probe(&stale).unwrap();
+    }
+    let fixed = Arc::new(server(THINKS_UNLESS_TOLD, ""));
+    // 点検し直した結果が、残した記録より新しくなるように、時計を進めて開く。
+    let later = {
+        let mut c = no_kwargs(3);
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_002)));
+        c.clock = clock.clone();
+        c.ids = Arc::new(UuidV7Gen::with_seed(clock, 3));
+        c
+    };
+    let (core, _, _) = Core::start(later, fixed.clone() as Arc<dyn LlmClient>)
+        .await
+        .unwrap();
+    core.settle_probe().await;
+    let p = core.probe_result("chat").expect("probe saved");
+    assert_eq!(p.aux_thinking_off, Some(true));
+    assert_eq!(p.thinking_off, Some(true));
+    core.shutdown().await;
+}

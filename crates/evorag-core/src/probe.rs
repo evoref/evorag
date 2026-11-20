@@ -153,6 +153,15 @@ pub fn aux_extra_with(config: &RequestExtra, p: Option<&ModelProbeBody>) -> Requ
     e
 }
 
+/// chat の点検の結果が、思考を切る指定を試す前のもの (v0.3 までの点検) で、思考を切れない・型縛りの出力が
+/// 空だったか。設定に思考を切る指定が無ければ、点検し直す (v0.3 から更新した利用者にも OQ-52 を効かせる)。
+pub fn needs_retry(p: &ModelProbeBody, config: &RequestExtra) -> bool {
+    p.role == evorag_memory::ROLE_CHAT
+        && (p.thinking_off == Some(false) || p.structured_ok == Some(false))
+        && p.aux_thinking_off.is_none()
+        && !config.contains_key(THINKING_KEY)
+}
+
 /// 型縛りの補助の呼び出しを 1 回試す: (思考が出なかったか, 型に合う JSON だったか)。
 async fn structured(
     llm: &dyn LlmClient,
@@ -224,6 +233,8 @@ pub async fn chat(
             p.thinking_off = Some(true);
             p.structured_ok = Some(true);
             p.aux_thinking_off = Some(true);
+        } else {
+            p.aux_thinking_off = Some(false);
         }
     }
     let aux_extra = &aux_extra_with(aux_extra, Some(&p));

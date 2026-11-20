@@ -119,6 +119,21 @@ impl DataRootModels {
 
 impl DataRootModels {
     /// その役割・model_key・`build_info` の点検の結果が、もう保存してあるか (06 §3.3)。
+    /// 役割・model_key・`build_info` の点検の結果。
+    pub fn probe(
+        &self,
+        role: &str,
+        model_key: &str,
+        build_info: &str,
+    ) -> Option<evorag_memory::ModelProbeBody> {
+        self.store
+            .read()
+            .ok()
+            .and_then(|r| evorag_memory::load_probe(&r, role, model_key, build_info).ok())
+            .flatten()
+            .map(|(_, p)| p)
+    }
+
     pub fn probed(&self, role: &str, model_key: &str, build_info: &str) -> bool {
         self.store
             .read()

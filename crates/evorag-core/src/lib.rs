@@ -1263,7 +1263,7 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, &key, &build).ok())
             .flatten();
-        if old.is_some() {
+        if old.is_some_and(|(_, p)| !probe::needs_retry(&p, &inner.aux_request_extra)) {
             continue;
         }
         let body = match role {
@@ -1643,7 +1643,7 @@ pub(crate) fn needs_probe(inner: &Inner) -> bool {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, key, build).ok())
             .flatten()
-            .is_none()
+            .is_none_or(|(_, p)| probe::needs_retry(&p, &inner.aux_request_extra))
     })
 }
 
