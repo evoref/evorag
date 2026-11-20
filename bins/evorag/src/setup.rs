@@ -707,7 +707,12 @@ pub fn run(
         .find(|(r, _, _)| *r == "rerank")
         .map(|(_, o, c)| (o.model_key.clone(), Arc::clone(c)));
     for (role, o, client) in usable_roles {
-        if models.probed(role, &o.model_key, &o.build_info) {
+        // 前回と同じモデルと版なら点検しない。ただし v0.3 までの点検で思考を切れなかった chat は、思考を切る
+        // 指定を試して確かめ直す (OQ-52)。
+        if models
+            .probe(role, &o.model_key, &o.build_info)
+            .is_some_and(|p| !evorag_core::probe::needs_retry(&p, &aux_extra))
+        {
             continue;
         }
         say(MessageKey::CliSetupProbing, &[("role", role)]);

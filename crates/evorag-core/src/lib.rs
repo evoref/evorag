@@ -1263,7 +1263,7 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, &key, &build).ok())
             .flatten();
-        if old.is_some() {
+        if old.is_some_and(|(_, p)| !probe::needs_retry(&p, &inner.aux_request_extra)) {
             continue;
         }
         let body = match role {
@@ -1425,6 +1425,27 @@ impl Inner {
 
     /// 応答の経路のリランクの使い方 (05 §3.4・§3.5)。点検で測った往復 6 件の時間が締切を超えるときは
     /// 往復の数を減らし、3 件でも超えるならリランクしない (`rerank_slow`)。
+    /// 補助の呼び出しに足す JSON (設定の指定と、点検が通った思考を切る指定、06 §6、OQ-52)。
+    pub(crate) fn aux_extra(&self) -> evorag_llm::RequestExtra {
+        let server = self.conn().1;
+        let probe = self
+            .store
+            .read()
+            .ok()
+            .and_then(|r| {
+                evorag_memory::load_probe(
+                    &r,
+                    evorag_memory::ROLE_CHAT,
+                    &server.model_key,
+                    &server.build_info,
+                )
+                .ok()
+            })
+            .flatten()
+            .map(|(_, p)| p);
+        probe::aux_extra_with(&self.aux_request_extra, probe.as_ref())
+    }
+
     fn rerank_mode(&self) -> recall::RerankMode {
         let found = {
             let aux = self.aux.lock().unwrap_or_else(|e| e.into_inner());
@@ -1622,7 +1643,7 @@ pub(crate) fn needs_probe(inner: &Inner) -> bool {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, key, build).ok())
             .flatten()
-            .is_none()
+            .is_none_or(|(_, p)| probe::needs_retry(&p, &inner.aux_request_extra))
     })
 }
 

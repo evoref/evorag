@@ -241,7 +241,7 @@ enum Reply {
 
 /// 検証の要求 (06 §6: temperature 0・固定の seed・固定のスロット、`aux_request_extra`、`response_format`)。
 fn request(inner: &Inner, slot: Option<u32>, system: &str, input: &str) -> ChatRequest {
-    let mut extra = inner.aux_request_extra.clone();
+    let mut extra = inner.aux_extra();
     extra.insert(
         "response_format".into(),
         json!({
