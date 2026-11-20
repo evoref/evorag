@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 A chat and long-term memory tool written in Rust. It runs against your own llama-server (llama.cpp) and nothing else, so conversations stay on your PC. It attaches related parts of your earlier conversations to its answers, with sources. It remembers facts about you, replaces them when you correct yourself, and forgets them when you ask. Later versions will improve from your ratings and corrections. It never trains model weights.
 
-> **The latest release is v0.3.0 (2026-11-19).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64) and a tar.gz for Linux (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.en.md](dist/README.en.md); the Japanese [dist/README.md](dist/README.md) is the original).
+> **The latest release is v0.4.0 (2026-11-21).** Downloads are on [GitHub Releases](https://github.com/evoref/evorag/releases): a zip for Windows 11 (x86_64) and a tar.gz for Linux (x86_64). Installation, setup, updating and rolling back, signature verification and known limitations are described in the bundled README ([dist/README.en.md](dist/README.en.md); the Japanese [dist/README.md](dist/README.md) is the original).
 
 ## Status
 
@@ -29,10 +29,16 @@ A chat and long-term memory tool written in Rust. It runs against your own llama
   - The user interface can be switched to English (`ui.language = "en"`).
   - Added `evorag repair`, `evorag backups purge` and `evorag rebuild --facts`.
   - The storage format moved to 0.3. Records are not rewritten, so v0.2 can still read and write the data. From v0.2, update by hand as described in the bundled README.
+- **v0.4 (faster and fuller recall)** was released as v0.4.0 on 2026-11-21.
+  - It attaches several relevant exchanges from earlier conversations together, using the sentences that match your question and the sentences around them. It reaches answers near the end of a long reply and answers spread over several sessions. For questions about counts, totals and lists, it gathers more.
+  - When input pauses, it has llama-server process the quotes it would attach ahead of time (prefetch); if you send that text as it is, the reply starts right away. Text you have not sent is not saved and is never sent to a llama-server outside your PC.
+  - Fixed fact extraction stopping with a thinking model when the configuration had no setting to turn thinking off (the model check now tries it).
+  - The status line shows how many background steps are left.
+  - The storage format stays at 0.3 (only more observation fields are recorded).
 
-The plan for each version up to v0.6 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
+The plan for each version up to v0.8 is in [docs/08-roadmap.md](docs/08-roadmap.md) (in Japanese).
 
-The storage format may change until v0.5. Each version migrates data from the version just before it, so update one version at a time.
+The storage format may change until v0.7 (v0.5 imports into a new data root). Each version migrates data from the version just before it, so update one version at a time.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Japanese).
 
