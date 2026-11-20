@@ -31,7 +31,7 @@ commands:
                            EVORAG_LIVE_RERANK_URL; eval results (EVAL-*.json) to --out
   longmemeval --data FILE  LongMemEval at EVORAG_LIVE_LLM_URL (09 §5.2); results to docs/perf/<X.Y.Z>
       [--out DIR]          (default)
-      [--set S]            dev (default, the tuning subset) or holdout:<slice> (judging only)
+      [--set S]            dev (default, the tuning subset), holdout:<slice> or s (judging only)
       [--roots DIR]        save each question's ingested data root and reuse it later
       [--ingest-only]      ingest (and save) without asking; allowed for sealed slices
       [--settle SECS]      wait for the background steps up to SECS per question (default 1800)

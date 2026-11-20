@@ -40,6 +40,8 @@ const SUBSET_FILE: &str = "tests/longmemeval/subset-v0.3.toml";
 const SUBSET: &str = include_str!("../../../tests/longmemeval/subset-v0.3.toml");
 const HOLDOUT_FILE: &str = "tests/longmemeval/holdout-v0.4.toml";
 const HOLDOUT: &str = include_str!("../../../tests/longmemeval/holdout-v0.4.toml");
+const S_FILE: &str = "tests/longmemeval/subset-s-v0.4.toml";
+const S_SUBSET: &str = include_str!("../../../tests/longmemeval/subset-s-v0.4.toml");
 const ABSTENTION: &str = "abstention";
 /// 照合で解ける見込みの問いの、正解の内容語の数の上限 (開発の組では、これを超える 7 問は言い回しで外れる)。
 const SOLVABLE_WORDS: u64 = 5;
@@ -88,6 +90,49 @@ impl Subset {
             h.update(b"\n");
         }
         hex(&h.finalize())
+    }
+}
+
+/// S の一部の定義 (`subset-s-v0.4.toml`)。層の割り当ては固定の数で、選び方は開発の組と同じ順。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SSubset {
+    source: String,
+    source_url: String,
+    source_sha256: String,
+    license: String,
+    seed: String,
+    excluded_types: Vec<String>,
+    excluded_subset: String,
+    stratum: Vec<Stratum>,
+}
+
+fn s_subset() -> SSubset {
+    toml::from_str(S_SUBSET).expect("tests/longmemeval/subset-s-v0.4.toml is valid")
+}
+
+impl SSubset {
+    /// 元のデータの確かめ方は開発の組と同じ (`Subset` の形に写す)。
+    fn as_subset(&self) -> Subset {
+        Subset {
+            source: self.source.clone(),
+            source_url: self.source_url.clone(),
+            source_sha256: self.source_sha256.clone(),
+            license: self.license.clone(),
+            seed: self.seed.clone(),
+            excluded_types: self.excluded_types.clone(),
+            size: self.stratum.iter().map(|s| s.quota).sum(),
+            stratum: self
+                .stratum
+                .iter()
+                .map(|s| Stratum {
+                    name: s.name.clone(),
+                    pool: s.pool,
+                    quota: s.quota,
+                    ids: s.ids.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -234,6 +279,11 @@ impl Entry {
 
 /// データのファイルを読む (SHA-256 を確かめる)。
 fn load(subset: &Subset) -> Option<(PathBuf, Vec<Entry>)> {
+    load_as(subset, SUBSET_FILE)
+}
+
+/// データのファイルを、問いの組の定義 `subset` (ファイル `file`) の元のデータとして読む。
+fn load_as(subset: &Subset, file: &str) -> Option<(PathBuf, Vec<Entry>)> {
     let path = PathBuf::from(std::env::var_os("EVORAG_LONGMEMEVAL_DATA")?);
     let bytes =
         std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
@@ -241,7 +291,7 @@ fn load(subset: &Subset) -> Option<(PathBuf, Vec<Entry>)> {
     assert_eq!(
         sha,
         subset.source_sha256,
-        "{} is not the {} that {SUBSET_FILE} was made from ({})",
+        "{} is not the {} that {file} was made from ({})",
         path.display(),
         subset.source,
         subset.source_url
@@ -532,8 +582,21 @@ fn plan(subset: &Subset) -> Plan {
             open: true,
         };
     }
+    if set == "s" {
+        let s = s_subset().as_subset();
+        return Plan {
+            name: "s".into(),
+            file: S_FILE,
+            ids_sha256: s.ids_sha256(),
+            ids: s
+                .ids()
+                .map(|(st, i)| (st.to_owned(), i.to_owned()))
+                .collect(),
+            open: true,
+        };
+    }
     let Some(name) = set.strip_prefix("holdout:") else {
-        panic!("EVORAG_LME_SET is dev or holdout:<slice> (got {set:?})");
+        panic!("EVORAG_LME_SET is dev, s or holdout:<slice> (got {set:?})");
     };
     let h = holdout();
     let s = h
@@ -634,8 +697,14 @@ fn content_words(answer: &str) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a real llama-server and the LongMemEval data (cargo xtask longmemeval --data <path>)"]
 async fn live_longmemeval_baseline() {
-    let subset = subset();
-    let Some((path, entries)) = load(&subset) else {
+    // S の一部は、元のデータ (S) と定義が違う。ほかは開発の組の定義で確かめる (oracle)。
+    let subset = if std::env::var("EVORAG_LME_SET").as_deref() == Ok("s") {
+        s_subset().as_subset()
+    } else {
+        subset()
+    };
+    let plan = plan(&subset);
+    let Some((path, entries)) = load_as(&subset, plan.file) else {
         eprintln!("longmemeval: set EVORAG_LONGMEMEVAL_DATA to the data file (skipped)");
         return;
     };
@@ -643,7 +712,6 @@ async fn live_longmemeval_baseline() {
         eprintln!("longmemeval: set EVORAG_LIVE_LLM_URL to run (skipped)");
         return;
     };
-    let plan = plan(&subset);
     let ingest_only = std::env::var_os("EVORAG_LME_INGEST_ONLY").is_some();
     assert!(
         plan.open || ingest_only,
@@ -1008,6 +1076,58 @@ fn holdout_quotas_follow_the_largest_remainder() {
     let q = quotas(4, &counts);
     assert_eq!(q.values().sum::<usize>(), 4);
     assert_eq!((q["a"], q["b"], q["c"]), (2, 1, 1));
+}
+
+/// S の一部の定義の形 (サーバもデータも要らない)。
+#[test]
+fn the_longmemeval_s_subset_is_well_formed() {
+    let dev = subset();
+    let s = s_subset();
+    assert_eq!(s.excluded_subset, SUBSET_FILE);
+    assert_eq!(s.excluded_types, dev.excluded_types);
+    assert_ne!(s.source_sha256, dev.source_sha256);
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for st in &s.stratum {
+        assert_eq!(st.ids.len(), st.quota, "{}", st.name);
+        for id in &st.ids {
+            assert!(seen.insert(id.as_str()), "{id} listed twice");
+            assert!(!dev_ids.contains(id.as_str()), "{id} is in the dev subset");
+            assert_eq!(id.ends_with("_abs"), st.name == ABSTENTION, "{id}");
+        }
+    }
+    assert_eq!(seen.len(), 30);
+}
+
+/// S の一部の定義が、データから選び直したものと一致する (S のデータを置いたときだけ)。
+#[test]
+#[ignore = "needs the LongMemEval S data (EVORAG_LONGMEMEVAL_DATA)"]
+fn longmemeval_s_subset_matches_the_data() {
+    let s = s_subset();
+    let Some((_, entries)) = load_as(&s.as_subset(), S_FILE) else {
+        eprintln!("longmemeval: set EVORAG_LONGMEMEVAL_DATA to the S data file (skipped)");
+        return;
+    };
+    let dev = subset();
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    for st in &s.stratum {
+        let mut pool: Vec<(String, &str)> = entries
+            .iter()
+            .filter(|e| !s.excluded_types.contains(&e.question_type))
+            .filter(|e| !dev_ids.contains(e.question_id.as_str()))
+            .filter(|e| e.stratum() == st.name)
+            .map(|e| {
+                let key = hex(&Sha256::digest(
+                    format!("{}:{}", s.seed, e.question_id).as_bytes(),
+                ));
+                (key, e.question_id.as_str())
+            })
+            .collect();
+        assert_eq!(pool.len(), st.pool, "{}: pool", st.name);
+        pool.sort();
+        let chosen: Vec<&str> = pool.iter().take(st.quota).map(|(_, i)| *i).collect();
+        assert_eq!(chosen, st.ids, "{}", st.name);
+    }
 }
 
 /// 一部の定義の形 (サーバもデータも要らない)。
