@@ -747,3 +747,62 @@ async fn the_case_sessions_open_in_the_core() {
         vec![("F22 #1".to_owned(), 2), ("F22 #2".to_owned(), 4)]
     );
 }
+
+/// v0.3.0 の手動の受入で事実が現れなかった構成 (設定に思考を切る指定が無い、思考するモデル) で、話した事実が
+/// 事実の一覧 (`/memory`) に現れる (受入のやり直し 1、08 §2.5 の合格条件 (7)、OQ-52)。実際の llama-server で、
+/// 点検を前の結果なしで流す。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real llama-server (cargo xtask live-llm)"]
+async fn live_facts_appear_without_a_thinking_off_setting() {
+    let Some(servers) = Servers::from_env() else {
+        eprintln!("live facts: set EVORAG_LIVE_LLM_URL to run (skipped)");
+        return;
+    };
+    let dir = TempDir::new("live-facts-no-aux");
+    let day_ago = SystemClock.now().as_millis() - 24 * 60 * 60 * 1000;
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(day_ago)));
+    let sessions = vec![Session {
+        title: "accept".into(),
+        start: Timestamp::from_millis(day_ago),
+        turns: vec![
+            (
+                Speaker::User,
+                "最近、仙台に住んでいて冬の寒さがこたえます。暖房のコツはありますか？".into(),
+            ),
+            (
+                Speaker::Assistant,
+                "厚手のカーテンで窓からの冷気を防ぐと効率が上がります。".into(),
+            ),
+        ],
+    }];
+    eval::write_sessions(dir.path(), &clock, &sessions);
+    let system: Arc<dyn Clock> = Arc::new(SystemClock);
+    let mut cfg = eval::config(dir.path(), PromptLanguage::Ja, &servers, system);
+    // v0.3.0 の受入の設定と同じく、補助の呼び出しに思考を切る指定を書かない。
+    cfg.aux_request_extra = evorag_llm::RequestExtra::new();
+    let (core, mut rx, _) = Core::start(cfg, servers.chat_client())
+        .await
+        .expect("the core starts against the live llama-server");
+    core.settle().await;
+    assert!(
+        eval::settle(&core, SETTLE).await,
+        "background steps did not settle"
+    );
+    let probe = core
+        .probe_result("chat")
+        .expect("the chat model was probed");
+    let facts = eval::facts(&core, &mut rx).await;
+    core.shutdown().await;
+    println!("live facts without aux: probe {probe:?}, facts {facts:?}");
+    assert_ne!(
+        probe.structured_ok,
+        Some(false),
+        "structured output stays off: {probe:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.contains("residence") && f.contains("仙台")),
+        "the residence fact appears: {facts:?}"
+    );
+}
