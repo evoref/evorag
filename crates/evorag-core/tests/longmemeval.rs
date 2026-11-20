@@ -693,6 +693,37 @@ fn content_words(answer: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// `EVORAG_LME_TUNING` (`名前=値` をカンマで区切る) から想起の数値を読む。無ければ `None` (既定のまま)。
+fn tuning_from_env() -> Option<evorag_core::RecallTuning> {
+    let spec = std::env::var("EVORAG_LME_TUNING").ok()?;
+    let mut t = evorag_core::RecallTuning::default();
+    for kv in spec.split(',').filter(|s| !s.is_empty()) {
+        let (k, v) = kv
+            .split_once('=')
+            .unwrap_or_else(|| panic!("EVORAG_LME_TUNING: {kv:?} is not name=value"));
+        let n = || -> usize {
+            v.parse()
+                .unwrap_or_else(|_| panic!("{k}={v} is not a number"))
+        };
+        match k {
+            "windows" => t.windows = v == "1",
+            "floor" => t.floor = v.parse().unwrap_or_else(|_| panic!("floor={v}")),
+            "max" => t.max_exchanges = n(),
+            "budget" => t.budget = n(),
+            "window" => t.window = n(),
+            "hits" => t.hits_per_turn = n(),
+            "short" => t.short_chars = n(),
+            "turn" => t.turn_chars = n(),
+            "widen" => t.count_widen = v == "1",
+            "ctop" => t.count_top = n(),
+            "cmax" => t.count_max = n(),
+            "cbudget" => t.count_budget = n(),
+            other => panic!("EVORAG_LME_TUNING: unknown {other:?}"),
+        }
+    }
+    Some(t)
+}
+
 /// LongMemEval の問いの組を流し、結果を記録する (合否には使わない。版の間の比較は `cargo xtask lme-compare`)。
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a real llama-server and the LongMemEval data (cargo xtask longmemeval --data <path>)"]
@@ -713,6 +744,8 @@ async fn live_longmemeval_baseline() {
         return;
     };
     let ingest_only = std::env::var_os("EVORAG_LME_INGEST_ONLY").is_some();
+    // 保存したデータ根の裏の処理を済ませ直して保存し直す (取り込みだけと組み合わせて使う)。
+    let resave = std::env::var_os("EVORAG_LME_RESAVE").is_some();
     assert!(
         plan.open || ingest_only,
         "{} is sealed (opened = \"\" in {HOLDOUT_FILE}); set EVORAG_LME_INGEST_ONLY=1 to only ingest it",
@@ -729,6 +762,12 @@ async fn live_longmemeval_baseline() {
     let roots = Roots::from_env();
     // 送る前に「入力が止まった」を知らせる (既定)。`EVORAG_LME_TYPING=0` で、応答の経路だけで想起する。
     let typing = std::env::var("EVORAG_LME_TYPING").map_or(true, |v| v != "0");
+    // 想起の数値 (S-17 の 1・7)。`EVORAG_LME_TUNING="windows=1,floor=0.5,budget=800,..."`。
+    let tuning = tuning_from_env();
+    if let Some(t) = tuning {
+        evorag_core::set_tuning(t);
+    }
+    let tag = std::env::var("EVORAG_LME_TAG").ok();
     let by_id: HashMap<&str, &Entry> = entries
         .iter()
         .map(|e| (e.question_id.as_str(), e))
@@ -763,7 +802,33 @@ async fn live_longmemeval_baseline() {
         let saved = roots
             .as_ref()
             .and_then(|r| r.load(id, &fingerprint, dir.path()));
-        let marker = if let Some(m) = saved {
+        let marker = if let Some(mut m) = saved {
+            // 保存したデータ根の裏の処理を済ませ直して、保存し直す (`EVORAG_LME_RESAVE`)。済んだかの判定は
+            // 待たせている手順を除くので、取り込みのときに GPU を取り合うと、抽出などが残ったまま保存されうる
+            // (残りは開き直すたびに走り、答えの比べを揺らす)。
+            if resave {
+                let at = m["asked_at_ms"]
+                    .as_i64()
+                    .expect("the saved data root records when to ask");
+                let core_clock: Arc<dyn Clock> =
+                    Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+                let (core, mut rx, _) = Core::start(
+                    eval::config(dir.path(), PromptLanguage::En, &servers, core_clock),
+                    chat.clone(),
+                )
+                .await
+                .expect("the core starts against the live llama-server");
+                core.settle().await;
+                let settled = eval::settle(&core, settle_limit).await;
+                let facts = eval::facts(&core, &mut rx).await;
+                core.shutdown().await;
+                m["settled"] = serde_json::json!(settled);
+                m["facts"] = serde_json::json!(facts);
+                m["resaved_seconds"] = serde_json::json!(t0.elapsed().as_secs_f64());
+                if let Some(r) = &roots {
+                    r.save(id, dir.path(), &m);
+                }
+            }
             m
         } else {
             let clock = Arc::new(ManualClock::new(first));
@@ -877,14 +942,16 @@ async fn live_longmemeval_baseline() {
         }));
     }
     let n = rows.len();
-    let file = format!(
-        "EVAL-longmemeval{}.json",
-        if plan.name == "dev" {
-            String::new()
-        } else {
-            format!("-{}", plan.name)
-        }
-    );
+    let mut file = String::from("EVAL-longmemeval");
+    if plan.name != "dev" {
+        file.push('-');
+        file.push_str(&plan.name);
+    }
+    if let Some(t) = &tag {
+        file.push('-');
+        file.push_str(t);
+    }
+    file.push_str(".json");
     if ingest_only {
         println!(
             "longmemeval: ingested {n} questions in {:.0}s",
@@ -946,6 +1013,7 @@ async fn live_longmemeval_baseline() {
         "license": subset.license,
         "partial": limit.is_some_and(|l| l < plan.ids.len()),
         "typing": typing,
+        "tuning": tuning.map(|t| format!("{t:?}")),
         "setup": servers.setup(),
         "models": models,
         "ingest": "haystack turns (user and assistant, as in the data) written through the store's write path at the session dates; facts, notes and embeddings by evorag's own sleep-time steps",

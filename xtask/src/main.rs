@@ -273,6 +273,8 @@ fn live_llm(root: &Path, args: &[String]) -> bool {
         (chat, "live_llm"),
         (chat, "live_facts"),
         (recall, "live_recall"),
+        // BM-107 (TTFT、09 §5.1): 応答・埋め込み・リランカーのすべてが要る。
+        (chat && recall, "live_ttft"),
     ] {
         if !on {
             continue;

@@ -372,6 +372,32 @@ pub fn answer_record(root: &Path, turn: evorag_types::Id) -> serde_json::Value {
     })
 }
 
+/// ターンの本体 (コアを閉じた後に、データ根から読む)。
+///
+/// # Panics
+///
+/// データ根を開けない・ターンが無いとき。
+pub fn turn_body(root: &Path, turn: evorag_types::Id) -> evorag_memory::TurnBody {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let (store, _) = Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: env!("CARGO_PKG_VERSION").into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    })
+    .expect("open the data root");
+    match store
+        .read()
+        .expect("read")
+        .get(evorag_memory::KIND_TURN, turn)
+    {
+        Ok(Some(Read::Ok(e))) => e.body_as().expect("a turn body"),
+        other => panic!("cannot read the turn {turn:?}: {other:?}"),
+    }
+}
+
 /// 新しいセッションを開き、問いを送って答えを待つ (時間を測る)。待ちきれなければ `None`。
 pub async fn ask_timed(
     core: &Core,

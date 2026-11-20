@@ -245,8 +245,8 @@ fn system(req: &ChatRequest) -> &str {
     &req.messages[0].content
 }
 
-fn current(req: &ChatRequest) -> &str {
-    &req.messages.last().unwrap().content
+fn current(req: &ChatRequest) -> String {
+    user_side(&req.messages)
 }
 
 fn open(root: &Path, seed: u64) -> evorag_store::Store {
@@ -712,4 +712,17 @@ async fn private_off_of_a_successors_rule_clears_every_row_it_covers() {
     );
     core.shutdown().await;
     assert_eq!(llm.remaining(), 0);
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

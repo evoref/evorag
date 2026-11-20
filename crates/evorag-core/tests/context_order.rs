@@ -101,17 +101,28 @@ fn messages(llm: &ReplayClient, i: usize) -> Vec<ChatMessage> {
 /// 前の要求 `a` の今の発話までが、次の要求 `b` の先頭とバイト列で一致する。前の要求の今の発話に
 /// 引用が付いていたら、次の要求ではその引用を外した形になっている。
 fn assert_prefix(a: &[ChatMessage], b: &[ChatMessage]) {
+    // 想起の引用の枠は、今の発話の直前の別のメッセージ (05 §4.1、v0.4)。次の要求では外れる。
+    let quoted = a.len() >= 2
+        && a[a.len() - 2].role == evorag_llm::Role::User
+        && a[a.len() - 2].content.starts_with("<<引用-");
+    let a: Vec<&ChatMessage> = if quoted {
+        a.iter()
+            .enumerate()
+            .filter(|(i, _)| *i != a.len() - 2)
+            .map(|(_, m)| m)
+            .collect()
+    } else {
+        a.iter().collect()
+    };
     let n = a.len() - 1;
     assert!(b.len() > n, "the next request is shorter");
     for i in 0..n {
         assert_eq!(a[i].role, b[i].role, "message {i}");
         assert_eq!(a[i].content, b[i].content, "message {i} changed");
     }
-    assert!(
-        a[n].content.ends_with(&b[n].content),
-        "the last utterance changed beyond dropping the quote:\n{}\n---\n{}",
-        a[n].content,
-        b[n].content
+    assert_eq!(
+        a[n].content, b[n].content,
+        "the last utterance changed in the history"
     );
     assert!(
         !b[n].content.contains("<<引用-"),
@@ -150,10 +161,13 @@ async fn consecutive_requests_share_their_prefix_even_after_a_recall() {
     core.shutdown().await;
 
     let reqs: Vec<_> = (1..5).map(|i| messages(&llm, i)).collect();
+    // 引用の枠は、今の発話の直前の別のメッセージ (05 §4.1、v0.4)。
+    let quote = &reqs[1][reqs[1].len() - 2];
     assert!(
-        reqs[1].last().unwrap().content.contains("<<引用-"),
+        quote.content.starts_with("<<引用-"),
         "the recall must fire for this test"
     );
+    assert!(!reqs[1].last().unwrap().content.contains("<<引用-"));
     for w in reqs.windows(2) {
         assert_prefix(&w[0], &w[1]);
     }

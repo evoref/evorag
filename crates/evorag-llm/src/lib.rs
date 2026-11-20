@@ -90,6 +90,11 @@ pub trait LlmClient: Send + Sync {
     fn slots(&self) -> BoxFuture<'_, Result<Vec<SlotState>, LlmError>> {
         Box::pin(async { Err(not_supported("slots")) })
     }
+    /// 接続先がループバック (同じ機械) か。送る前の入力 (下書き) を送ってよいかの判定に使う (05 §4.5)。
+    /// HTTP の実装は接続先の URL で決める。同じプロセスの中の実装 (記録の再生など) は既定で真。
+    fn is_loopback(&self) -> bool {
+        true
+    }
     /// `/slots/{id}?action=erase` (06 §4): スロット `id` のプロンプトのキャッシュを消す。サーバを
     /// `--slot-save-path` 付きで起動したときだけ使える (既定の構成は 501 で断る)。再試行しない。
     fn erase_slot(&self, id: u32) -> BoxFuture<'_, Result<(), LlmError>> {

@@ -82,9 +82,18 @@ pub(crate) fn touch(inner: &Inner) {
 /// 事実への操作 (fact_ops.rs) も、private になった事実の鍵を同じく除き (04 §5.5)、ここを呼ぶ。忘れるの経路を足す
 /// ときも同じにする。
 pub(crate) fn invalidate(inner: &Inner) {
-    let mut st = state(inner);
-    st.invalidations += 1;
-    st.version += 1;
+    {
+        let mut st = state(inner);
+        st.invalidations += 1;
+        st.version += 1;
+    }
+    // 先読みした枠を捨てる (05 §4.5 の先読みの世代)。
+    drop(inner.pre.bump());
+}
+
+/// 忘れる・private・削除の操作の回数 (置いた表が操作の前のものか、05 §4.1)。
+pub(crate) fn invalidations(inner: &Inner) -> u64 {
+    state(inner).invalidations
 }
 
 /// 統合で事実が変わった。表に入りうる状態から外れた事実 (`withdrawn`、`Report::withdrawn`) が覚えた表に

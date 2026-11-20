@@ -359,12 +359,8 @@ async fn a_key_hit_attaches_the_original_exchange() {
         let last = llm
             .requests()
             .last()
-            .unwrap()
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .clone();
+            .map(|r| user_side(&r.messages))
+            .unwrap();
         if structured {
             assert!(last.contains(ASKED) && last.contains(ANSWERED), "{last}");
             assert!(
@@ -595,4 +591,17 @@ async fn a_note_made_before_a_revision_is_redone() {
             .src_revs
             .contains(&evorag_memory::SrcRev { turn: u1, rev: 1 })
     );
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

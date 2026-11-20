@@ -1325,3 +1325,12 @@ status = "test"
 tests = [".github/workflows/ci.yml#i18n", "xtask/src/i18n.rs::the_bundled_catalogs_match_the_code_and_each_other", "crates/evorag-tui/src/catalog.rs::the_english_catalog_has_no_japanese_text", "crates/evorag-tui/src/app.rs::every_screen_is_english_with_the_english_catalog", "crates/evorag-tui/src/app.rs::redacted_ranges_are_shown_with_the_marker_of_the_ui_language", "bins/evorag/src/main.rs::every_argument_and_subcommand_has_help_in_every_language", "bins/evorag/tests/cli.rs::the_cli_speaks_english_when_ui_language_is_en", "bins/evorag/tests/cli.rs::update_speaks_english_when_ui_language_is_en"]
 manual = ""
 note = "前半 (キーの差分がゼロ) は cargo xtask i18n (CI の i18n の job) で判定する。ja と en がそれぞれ MessageKey と属性の一覧にちょうど合い、キーごとの引数の名前が ja と同じで、en の文言に漢字・仮名・全角の文字が無いこと。後半 (全画面が英語) は、英語のカタログで会話・状態の行・ヘルプ・セッションの一覧・削除の確認・答え方・出典の詳細・メモリ・事実の一覧・履歴・忘れた事実・private とその解除・忘れるの確認・broken/ の確認を描いて日本語の文字が無いこと、ja のデータ根の伏せ字の範囲を [redacted] で出すこと、--help (下位の命令も) の文がカタログから当たること、ui.language = \"en\" で --help・doctor・backups list・設定の誤り・llama-server に繋がらないときの案内と、update の --help・通信の前に断る誤り (zip でない入れ方・読めない版・足した鍵の誤り) に日本語の文字が無いことで判定する。利用者のデータ (題名・本文・値) は ASCII にする。"
+
+[[ac]]
+id = "AC-NFR-107-1"
+requirement = "NFR-107"
+level = "Must"
+status = "review"
+tests = ["crates/evorag-core/tests/live_ttft.rs::bm_107_ttft_by_prefetch_kind"]
+manual = "リリースのゲートで docs/perf/<X.Y.Z>/BM-107.json があることを確かめる (cargo xtask live-llm --out docs/perf/<X.Y.Z>)"
+note = "実際の llama-server が要るので CI では流さない (09 §5.1)。v0.4 は記録だけ (08 §2.5 の合格条件 (4))。"
