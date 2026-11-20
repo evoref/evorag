@@ -846,12 +846,8 @@ async fn a_mismatched_turn_is_kept_out_of_recall_and_export() {
         let sent = llm
             .requests()
             .last()
-            .unwrap()
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .clone();
+            .map(|r| user_side(&r.messages))
+            .unwrap();
         assert!(sent.contains("どれくらいの頻度"), "{sent}");
         // 対照の問いの往復は消す (後の問いで、こちらを添えないように)。
         core.command(Command::DeleteSession);
@@ -1821,4 +1817,17 @@ async fn export_picks_the_redaction_marker_by_the_prompt_language() {
         Err(ExportError::PendingForget)
     ));
     assert!(matches!(export_as(None), Err(ExportError::PendingForget)));
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

@@ -28,6 +28,9 @@ use serde::Deserialize;
 
 const CASE_FILE: &str = "tests/facts/recall-v0.3.toml";
 const CASES: &str = include_str!("../../../tests/facts/recall-v0.3.toml");
+/// 日本語の想起の評価の事例 (09 §5.2、v0.4。記録だけで合否には使わない)。
+const JA_FILE: &str = "tests/memory-eval/ja-v0.4.toml";
+const JA_CASES: &str = include_str!("../../../tests/memory-eval/ja-v0.4.toml");
 
 /// 裏の処理を待つ上限 (1 件あたり。初めの事例は点検と較正を含む)。
 const SETTLE: Duration = Duration::from_secs(900);
@@ -91,6 +94,10 @@ enum Kind {
     Update,
     Multi,
     Abstain,
+    /// 答えが以前の応答の後ろのほうにある (05 §3.8、日本語の評価の事例)。
+    Window,
+    /// 答えが複数のセッションの往復にまたがる (05 §3.4、日本語の評価の事例)。
+    Aggregate,
 }
 
 /// 期待する値 1 つ (別表記の並びなら、どれか 1 つでよい)。
@@ -113,6 +120,12 @@ impl Expect {
 fn cases() -> Vec<Case> {
     toml::from_str::<CaseFile>(CASES)
         .expect("tests/facts/recall-v0.3.toml is valid")
+        .case
+}
+
+fn ja_cases() -> Vec<Case> {
+    toml::from_str::<CaseFile>(JA_CASES)
+        .expect("tests/memory-eval/ja-v0.4.toml is valid")
         .case
 }
 
@@ -245,6 +258,7 @@ async fn run_case(
     servers: &Servers,
     checks: &mut Checks,
     chat: &Arc<dyn evorag_llm::LlmClient>,
+    typing: bool,
 ) -> serde_json::Value {
     let started = Instant::now();
     let dir = TempDir::new("live-facts");
@@ -265,7 +279,13 @@ async fn run_case(
     let settled = eval::settle(&core, SETTLE).await;
     checks.capture(&core);
     let facts = eval::facts(&core, &mut rx).await;
-    let turn = eval::ask_in_new_session(&core, &mut rx, &case.question, ANSWER).await;
+    let turn = if typing {
+        eval::ask_timed(&core, &mut rx, &case.question, ANSWER, true)
+            .await
+            .map(|t| t.turn)
+    } else {
+        eval::ask_in_new_session(&core, &mut rx, &case.question, ANSWER).await
+    };
     core.shutdown().await;
     let (answer, sources) = turn.map_or_else(|| (String::new(), 0), |t| (t.text, t.sources));
     let verdict = judge_case(case, &answer);
@@ -328,7 +348,7 @@ async fn live_facts_are_recalled_in_a_new_session() {
     let mut checks = Checks::default();
     let mut results = Vec::new();
     for c in &cases {
-        results.push(run_case(c, &servers, &mut checks, &chat).await);
+        results.push(run_case(c, &servers, &mut checks, &chat, false).await);
     }
     let count = |abstain: bool, passed: bool| {
         results
@@ -390,6 +410,104 @@ async fn live_facts_are_recalled_in_a_new_session() {
         facts_ok >= need,
         "v0.3 gate (3): {facts_ok}/{facts_n} facts recalled, need {need} (failed {failed:?})"
     );
+}
+
+/// 日本語の想起の評価の事例を流し、記録する (09 §5.2、v0.4。合否には使わない)。入力が止まったことを知らせて
+/// から問う (実際の使い方に合わせる)。結果は `EVAL-ja.json`。
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a real llama-server (cargo xtask live-llm)"]
+async fn live_japanese_recall_is_recorded() {
+    let Some(servers) = Servers::from_env() else {
+        eprintln!("live ja: set EVORAG_LIVE_LLM_URL to run (skipped)");
+        return;
+    };
+    eval::init_log();
+    let chat = servers.chat_client();
+    let models = eval::models(&servers).await;
+    let mut checks = Checks::default();
+    let mut results = Vec::new();
+    for c in &ja_cases() {
+        let mut cfg_checks = std::mem::take(&mut checks);
+        results.push(run_case(c, &servers, &mut cfg_checks, &chat, true).await);
+        checks = cfg_checks;
+    }
+    let passed = results.iter().filter(|r| r["passed"] == true).count();
+    let mut per: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for r in &results {
+        let k = r["kind"].as_str().unwrap_or("?").to_owned();
+        let e = per.entry(k).or_default();
+        e.0 += 1;
+        e.1 += usize::from(r["passed"] == true);
+    }
+    println!("live ja: {passed}/{} passed {per:?}", results.len());
+    let v = serde_json::json!({
+        "id": "EVAL-ja",
+        "evorag": env!("CARGO_PKG_VERSION"),
+        "date": eval::today(),
+        "cases_file": JA_FILE,
+        "setup": servers.setup(),
+        "models": models,
+        "typing": true,
+        "judge": "answer contains every expected value after NFKC + lowercase (abstain: contains an abstention marker)",
+        "cases": results.len(),
+        "passed": passed,
+        "per_kind": per.iter().map(|(k, (n, p))| (k.clone(), serde_json::json!({"cases": n, "passed": p}))).collect::<serde_json::Map<_, _>>(),
+        "results": results.iter().map(|r| serde_json::json!({
+            "id": r["id"], "kind": r["kind"], "passed": r["passed"], "sources": r["sources"],
+        })).collect::<Vec<_>>(),
+    });
+    eval::write_json(&eval::out_dir().join("EVAL-ja.json"), &v);
+}
+
+/// 日本語の想起の評価の事例のファイルの形 (サーバなしで流す)。
+#[test]
+fn the_japanese_cases_are_well_formed() {
+    let cases = ja_cases();
+    let mut ids = std::collections::BTreeSet::new();
+    for c in &cases {
+        assert!(ids.insert(c.id.as_str()), "{}: duplicate id", c.id);
+        assert_eq!(c.lang, Lang::Ja, "{}", c.id);
+        assert!(
+            !c.sessions.is_empty() && !c.question.trim().is_empty(),
+            "{}",
+            c.id
+        );
+        for s in &c.sessions {
+            for (i, t) in s.iter().enumerate() {
+                let want = if i % 2 == 0 { "U: " } else { "A: " };
+                assert!(
+                    t.starts_with(want),
+                    "{}: turn {i} must start with {want}",
+                    c.id
+                );
+            }
+        }
+        assert_eq!(c.kind == Kind::Abstain, c.expect.is_empty(), "{}", c.id);
+        if c.kind == Kind::Window {
+            // 答えは、応答の 400 文字より後ろにある (05 §3.8 の文の窓を確かめる事例)。
+            let answer_text: String = c
+                .sessions
+                .iter()
+                .flatten()
+                .filter(|t| t.starts_with("A: "))
+                .cloned()
+                .collect();
+            let pos = c.expect[0]
+                .alternatives()
+                .iter()
+                .filter_map(|v| answer_text.find(v.as_str()))
+                .min()
+                .unwrap_or_else(|| panic!("{}: the expected value is in no answer", c.id));
+            assert!(
+                answer_text[..pos].chars().count() > 400,
+                "{}: the answer is too early",
+                c.id
+            );
+        }
+    }
+    for k in [Kind::Window, Kind::Aggregate, Kind::Abstain] {
+        assert!(cases.iter().any(|c| c.kind == k), "no {k:?} case");
+    }
 }
 
 /// 事例のファイルの形 (サーバなしで流す): 事実を答える事例が 20 件以上、abstain が 2 件以上、ID が一意、

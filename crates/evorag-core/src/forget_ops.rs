@@ -363,6 +363,11 @@ pub(crate) fn run(
                 let shown =
                     crate::current_session(&worker).map(|s| (s, reread(&worker, s, &turns)));
                 announce(&worker, shown, turns.len(), journal_pending);
+                // 飛んでいる先読みを止め、止まったことを確かめてから、スロットのキャッシュの消去を求める
+                // (05 §4.5。止める前に消すと、忘れる前の本文の先読みがキャッシュに残りうる)。
+                if let Some(h) = worker.pre.bump() {
+                    let _ = h.await;
+                }
                 erase_slots(&worker).await;
             }
             forgets::Executed::Changed { preview, hash } => {

@@ -57,6 +57,11 @@ impl Endpoint {
         })
     }
 
+    /// 接続先がループバック (同じ機械) か。
+    pub fn is_loopback(&self) -> bool {
+        is_loopback(&self.url)
+    }
+
     pub fn url(&self) -> &Url {
         &self.url
     }

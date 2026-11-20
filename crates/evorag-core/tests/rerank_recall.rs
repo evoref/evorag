@@ -205,7 +205,7 @@ async fn run(dir: &TempDir, rerank: Option<Arc<ReplayClient>>) -> Run {
     session(&core, &mut rx, "今日").await;
     let answer = say(&core, &mut rx, ASK).await;
     core.shutdown().await;
-    let current = llm.requests()[2].messages.last().unwrap().content.clone();
+    let current = user_side(&llm.requests()[2].messages);
     Run {
         plant,
         car,
@@ -235,7 +235,10 @@ async fn the_top_exchange_above_the_threshold_is_attached_and_the_next_goes_to_t
     assert_eq!(obs.threshold_version, Some(1));
     assert_eq!(obs.band, [r.car]);
     assert_eq!(obs.degraded, ["no_embed"]);
-    assert_eq!(obs.recall_position.as_deref(), Some("before_utterance"));
+    assert_eq!(
+        obs.recall_position.as_deref(),
+        Some(evorag_memory::RECALL_SEPARATE_MESSAGE)
+    );
     // 出典の番号の始まり・履歴の始まり・選んでいた既定 (M2.1 から)。
     assert_eq!(obs.source_base, Some(1));
     assert!(obs.history_from.is_some());
@@ -297,4 +300,17 @@ async fn without_a_usable_reranker_the_lexical_rule_is_used() {
     let obs = r.answer.obs.unwrap();
     assert_eq!(obs.degraded, ["no_embed", "rerank_slow"]);
     assert_eq!(rr.aux_calls().1, 0);
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

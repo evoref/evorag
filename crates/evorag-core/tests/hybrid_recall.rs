@@ -429,3 +429,344 @@ async fn the_same_data_and_question_give_the_same_choice() {
     }
     assert_eq!(seen[0], seen[1]);
 }
+
+/// 文の窓の数値を差し替える (このプロセスだけ。nextest は試験ごとにプロセスを分ける)。
+fn windows_on(floor: f64) {
+    evorag_core::set_tuning(evorag_core::RecallTuning {
+        windows: true,
+        floor,
+        ..evorag_core::RecallTuning::default()
+    });
+}
+
+/// verifies: AC-FR-417-3 (2 件目の下限以上の往復は添え、下限未満は添えずに帯に出す)
+#[tokio::test(flavor = "multi_thread")]
+async fn exchanges_above_the_second_floor_are_attached_too() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    assert!(sp > sc, "the plant exchange scores higher ({sp} vs {sc})");
+    // しきい値は PLANT のすぐ下、帯の下限は CAR の 1 つ下。
+    let thr = (sp - 0.5, sc - 1.0);
+    // 下限 = 帯の下限 (floor 1): CAR も添える。帯には出さない。
+    windows_on(1.0);
+    let dir = TempDir::new("windows-floor-low");
+    prepare(dir.path(), Some((true, thr.0, thr.1)), None);
+    let (answer, plant) = run_with(&dir, false, true).await;
+    let text = |id: &Id| turn_body(dir.path(), *id).text;
+    let attached: Vec<String> = answer.attached.iter().map(text).collect();
+    assert!(answer.attached.contains(&plant), "{attached:?}");
+    assert!(attached.iter().any(|t| t == CAR), "{attached:?}");
+    let obs = answer.obs.unwrap();
+    assert!(
+        obs.band.is_empty(),
+        "attached exchanges are not in the band"
+    );
+    assert_eq!(answer.recall.unwrap().decision, RecallDecision::Fire);
+    let packed = obs.packed.expect("packed windows are recorded");
+    assert!(!packed.windows.is_empty() && packed.tokens > 0);
+}
+
+/// verifies: AC-FR-417-3 (下限がしきい値なら、しきい値未満の往復は添えずに帯に出す)
+#[tokio::test(flavor = "multi_thread")]
+async fn exchanges_below_the_second_floor_stay_in_the_band() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_on(0.0);
+    let dir = TempDir::new("windows-floor-high");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let (answer, plant) = run_with(&dir, false, true).await;
+    let text = |id: &Id| turn_body(dir.path(), *id).text;
+    let attached: Vec<String> = answer.attached.iter().map(text).collect();
+    assert!(answer.attached.contains(&plant), "{attached:?}");
+    assert!(!attached.iter().any(|t| t == CAR), "{attached:?}");
+    let band: Vec<String> = answer.obs.unwrap().band.iter().map(text).collect();
+    assert_eq!(band, [CAR]);
+}
+
+/// verifies: AC-FR-417-3 (最上位がしきい値未満なら、何も添えない)
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_attached_below_the_threshold() {
+    let sp = score(PLANT);
+    windows_on(1.0);
+    let dir = TempDir::new("windows-none");
+    prepare(dir.path(), Some((true, sp + 1.0, sp - 0.5)), None);
+    let (answer, _) = run_with(&dir, false, true).await;
+    assert!(answer.attached.is_empty());
+    assert_eq!(answer.recall.unwrap().decision, RecallDecision::Abstain);
+}
+
+/// verifies: AC-FR-417-1 (同じ索引・問い・数値で、採る往復・窓・詰める順が毎回同じ)
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_are_the_same_for_the_same_data() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_on(1.0);
+    let mut seen = Vec::new();
+    for round in 0..2 {
+        let dir = TempDir::new(&format!("windows-determinism-{round}"));
+        prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+        let (answer, _) = run_with(&dir, false, true).await;
+        let text = |id: &Id| turn_body(dir.path(), *id).text;
+        let packed = answer.obs.unwrap().packed.unwrap();
+        seen.push((
+            answer.attached.iter().map(text).collect::<Vec<_>>(),
+            packed
+                .windows
+                .iter()
+                .map(|w| (text(&w.turn), w.start, w.end))
+                .collect::<Vec<_>>(),
+            packed.tokens,
+        ));
+    }
+    assert_eq!(seen[0], seen[1]);
+}
+
+/// verifies: AC-FR-417-4 (件数・合計・一覧の意図がある問いだけ、候補と予算を広げる)
+#[tokio::test(flavor = "multi_thread")]
+async fn count_questions_widen_the_candidates() {
+    evorag_core::set_tuning(evorag_core::RecallTuning {
+        windows: true,
+        count_widen: true,
+        ..evorag_core::RecallTuning::default()
+    });
+    let sp = score(PLANT);
+    let dir = TempDir::new("windows-widen");
+    prepare(dir.path(), Some((true, sp - 0.5, sp - 3.0)), None);
+    let llm = chat(4);
+    let (core, mut rx, _) = Core::start(config(dir.path(), Some(reranker())), Arc::new(llm))
+        .await
+        .unwrap();
+    core.settle().await;
+    session(&core, &mut rx, "観葉植物").await;
+    say(&core, &mut rx, PLANT).await;
+    core.settle_background().await;
+    session(&core, &mut rx, "今日").await;
+    let plain = say(&core, &mut rx, ASK).await;
+    let count = say(&core, &mut rx, "モンステラの水やりは、全部で何回した？").await;
+    core.shutdown().await;
+    let widened = |id: Id| {
+        turn_body(dir.path(), id)
+            .obs
+            .and_then(|o| o.query)
+            .map(|q| (q.count, q.widened))
+    };
+    assert_eq!(widened(plain.id), Some((false, false)));
+    assert_eq!(widened(count.id), Some((true, true)));
+}
+
+/// 文の窓を有効にし、予算の 2 段を見分けやすい値にする (このプロセスだけ)。
+fn windows_with_budgets(large: usize, small: usize) {
+    evorag_core::set_tuning(evorag_core::RecallTuning {
+        windows: true,
+        floor: 0.0,
+        budget: large,
+        small_budget: small,
+        ..evorag_core::RecallTuning::default()
+    });
+}
+
+/// 先読みの試験の流れ: PLANT と CAR のセッションを作り、新しいセッションで `draft` の入力が止まったことを
+/// 知らせ (`between` を挟む)、`ask` を送る。(応答のターン, 再生の chat のサーバ)。
+async fn prefetched(
+    dir: &TempDir,
+    llm: ReplayClient,
+    cfg: CoreConfig,
+    draft: &str,
+    between: impl AsyncFnOnce(&Core, &mut UnboundedReceiver<Event>),
+    ask: &str,
+) -> (TurnBody, ReplayClient) {
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    core.settle().await;
+    session(&core, &mut rx, "観葉植物").await;
+    say(&core, &mut rx, PLANT).await;
+    session(&core, &mut rx, "車").await;
+    say(&core, &mut rx, CAR).await;
+    core.settle_background().await;
+    session(&core, &mut rx, "今日").await;
+    core.command(Command::InputIdle { text: draft.into() });
+    core.settle_precompute().await;
+    between(&core, &mut rx).await;
+    let answer = say(&core, &mut rx, ask).await;
+    core.shutdown().await;
+    (turn_body(dir.path(), answer.id), llm)
+}
+
+fn frame_of(messages: &[evorag_llm::ChatMessage]) -> Option<&str> {
+    let m = messages.get(messages.len().checked_sub(2)?)?;
+    m.content.contains("<<引用-").then_some(m.content.as_str())
+}
+
+/// verifies: AC-FR-418-1, AC-FR-417-6 (先読みの要求の形と、当たったときに枠のバイト列をそのまま使う。
+/// 当たったときは大きな予算)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prefetched_frame_is_sent_byte_for_byte_when_the_draft_is_sent() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 120);
+    let dir = TempDir::new("prefetch-hit");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let llm = chat(3);
+    let cfg = config(dir.path(), Some(reranker()));
+    let (answer, llm) = prefetched(&dir, llm, cfg, ASK, async |_, _| {}, ASK).await;
+    // 先読みの要求: 履歴 + 引用の枠のメッセージ + 空の発話、生成 1 トークン、応答のスロット。
+    let warm = llm.warm_requests();
+    let pre = warm
+        .iter()
+        .find(|r| frame_of(&r.messages).is_some())
+        .expect("a prefetch request with the quote frame");
+    assert_eq!(pre.messages.last().unwrap().content, "");
+    assert_eq!(pre.generation.max_tokens, Some(1));
+    // 応答の要求の枠は、先読みの枠と同じバイト列。
+    let reqs = llm.requests();
+    let sent = reqs.last().unwrap();
+    assert_eq!(frame_of(&sent.messages), frame_of(&pre.messages));
+    assert!(!sent.messages.last().unwrap().content.contains("<<引用-"));
+    let obs = answer.obs.unwrap();
+    assert_eq!(obs.prefetch.unwrap().kind, "a");
+    assert_eq!(obs.packed.unwrap().budget, 800);
+    assert_eq!(
+        obs.recall_position.as_deref(),
+        Some(evorag_memory::RECALL_SEPARATE_MESSAGE)
+    );
+}
+
+/// verifies: AC-FR-417-6 (先読みが無いときは小さな予算)
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_prefetch_the_small_budget_is_used() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 120);
+    let dir = TempDir::new("prefetch-none");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let (answer, _) = run_with(&dir, false, true).await;
+    let obs = answer.obs.unwrap();
+    assert_eq!(obs.prefetch.unwrap().kind, evorag_memory::PREFETCH_NONE);
+    assert_eq!(obs.packed.unwrap().budget, 120);
+}
+
+/// verifies: AC-FR-418-2 (削除などで先読みの世代が変わったら、前の枠を使わない)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_discards_the_prefetched_frame() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 120);
+    let dir = TempDir::new("prefetch-delete");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let llm = chat(3);
+    let cfg = config(dir.path(), Some(reranker()));
+    let (answer, _) = prefetched(
+        &dir,
+        llm,
+        cfg,
+        ASK,
+        async |core: &Core, rx: &mut UnboundedReceiver<Event>| {
+            // 別のセッションを作って消す (削除は事実の表を作り直させ、先読みの世代を上げる)。
+            session(core, rx, "消す").await;
+            core.command(Command::DeleteSession);
+            until(rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+            core.settle().await;
+            session(core, rx, "今日 2").await;
+        },
+        ASK,
+    )
+    .await;
+    assert_eq!(
+        answer.obs.unwrap().prefetch.unwrap().kind,
+        evorag_memory::PREFETCH_NONE
+    );
+}
+
+/// verifies: AC-FR-418-3 (下書きの本文は DB・ジャーナル・ログ・観測値のどこにも書かれない)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_draft_is_never_written() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 120);
+    let dir = TempDir::new("prefetch-draft");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let marker = "下書きだけの印ズィキュル";
+    let draft = format!("モンステラの水やりの頻度 {marker}");
+    let llm = chat(3);
+    let cfg = config(dir.path(), Some(reranker()));
+    let _ = prefetched(&dir, llm, cfg, &draft, async |_, _| {}, ASK).await;
+    // データ根のどのファイルにも、下書きの本文が無い。
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir.path(), &mut files);
+    assert!(!files.is_empty());
+    let needle = marker.as_bytes();
+    for f in files {
+        let bytes = std::fs::read(&f).unwrap();
+        assert!(
+            !bytes.windows(needle.len()).any(|w| w == needle),
+            "the draft was written to {}",
+            f.display()
+        );
+    }
+}
+
+/// verifies: AC-FR-418-4 (ループバック以外の chat と、電池で `reduce` のときは、枠の先読みをしない)
+#[tokio::test(flavor = "multi_thread")]
+async fn no_frame_prefetch_for_a_remote_chat_or_on_battery() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 120);
+    // ループバック以外の chat。
+    let dir = TempDir::new("prefetch-remote");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let one = format!(r#"{{"events": [{{"delta": "{REPLY}"}}, {{"done": {{}}}}]}}"#);
+    let remote = ReplayClient::from_json(&format!(
+        r#"{{
+          "props": {{"build_info": "b1-test", "model_path": "/m/chat.gguf", "total_slots": 1,
+                     "default_generation_settings": {{"n_ctx": 8192}}}},
+          "models": {{"data": [{{"id": "test", "meta": {{"n_params": 1, "size": 2, "n_vocab": 3}}}}]}},
+          "chats": [{one}, {one}, {one}],
+          "remote": true
+        }}"#
+    ))
+    .unwrap();
+    let cfg = config(dir.path(), Some(reranker()));
+    let (answer, llm) = prefetched(&dir, remote, cfg, ASK, async |_, _| {}, ASK).await;
+    assert!(
+        llm.warm_requests()
+            .iter()
+            .all(|r| frame_of(&r.messages).is_none())
+    );
+    assert_eq!(
+        answer.obs.unwrap().prefetch.unwrap().kind,
+        evorag_memory::PREFETCH_NONE
+    );
+    // 電池で `reduce` (既定)。
+    let dir = TempDir::new("prefetch-battery");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let mut cfg = config(dir.path(), Some(reranker()));
+    cfg.probe.power = || evorag_core::power::Power::Battery;
+    cfg.sleep.on_battery = evorag_core::OnBattery::Reduce;
+    let (_, llm) = prefetched(&dir, chat(3), cfg, ASK, async |_, _| {}, ASK).await;
+    assert!(
+        llm.warm_requests()
+            .iter()
+            .all(|r| frame_of(&r.messages).is_none())
+    );
+}
+
+/// verifies: AC-FR-417-6 (予算がとても小さくても、最上位の往復は狭い窓で添える)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_top_exchange_is_kept_with_a_tight_window_when_the_budget_is_small() {
+    let (sp, sc) = (score(PLANT), score(CAR));
+    windows_with_budgets(800, 90);
+    let dir = TempDir::new("windows-tight");
+    prepare(dir.path(), Some((true, sp - 0.5, sc - 1.0)), None);
+    let (answer, plant) = run_with(&dir, false, true).await;
+    assert!(
+        answer.attached.contains(&plant),
+        "the top exchange is attached"
+    );
+    let packed = answer.obs.unwrap().packed.unwrap();
+    assert!(
+        packed.tokens as usize <= 90,
+        "within the budget: {}",
+        packed.tokens
+    );
+}

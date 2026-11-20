@@ -727,8 +727,10 @@ pub const DEGRADED_RERANK_ERROR: &str = "rerank_error";
 pub const DEGRADED_NO_THRESHOLD: &str = "no_threshold";
 pub const DEGRADED_NO_INDEX: &str = "no_index";
 
-/// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1)。
+/// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1、v0.2・v0.3)。
 pub const RECALL_BEFORE_UTTERANCE: &str = "before_utterance";
+/// 想起の引用を、今の発話の直前の別のメッセージとして添えた (05 §4.1、v0.4、OQ-50)。
+pub const RECALL_SEPARATE_MESSAGE: &str = "separate_message";
 
 /// 判定点 (05 §3.4)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

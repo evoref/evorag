@@ -276,7 +276,7 @@ async fn the_fact_table_sits_in_the_system_prompt_and_keeps_its_bytes() {
 
 /// 前の応答の要求の、今の発話の枠に想起の引用があるか。
 fn quoted(req: &ChatRequest) -> bool {
-    req.messages.last().unwrap().content.contains("<<引用-")
+    user_side(&req.messages).contains("<<引用-")
 }
 
 /// private の事実は、事実の表にも、検索の鍵にも入らない (AC-FR-308-1 のうち事実の表の部分。添えた往復の中の
@@ -620,7 +620,7 @@ async fn a_fact_key_recalls_the_source_exchange() {
     let q = ask(&core, &mut rx, "residence").await;
     core.shutdown().await;
     let check = |req: &ChatRequest| {
-        let current = &req.messages.last().unwrap().content;
+        let current = &user_side(&req.messages);
         assert!(current.contains("<<引用-"), "{current}");
         assert!(current.contains(LIVES), "the original utterance: {current}");
         assert!(current.contains(REPLY), "the original answer: {current}");
@@ -652,4 +652,61 @@ async fn a_fact_key_recalls_the_source_exchange() {
     ask(&core, &mut rx, "residence").await;
     core.shutdown().await;
     check(&answers(&again)[0]);
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
+}
+
+/// verifies: AC-FR-419-1 (履歴が長い続きのターンでは表を差し替えず、新しいセッションで差し替える)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_table_waits_for_a_new_session_when_the_history_is_long() {
+    let dir = TempDir::new("fact-table-timing");
+    prepare(dir.path());
+    // 長い応答 (履歴を 1,000 トークンより長くする)。
+    let long = "長い説明です。".repeat(300);
+    let llm = chat(&[
+        reply(&long),
+        reply(REPLY),
+        reply(LIVES_FACT),
+        reply(REPLY),
+        reply(REPLY),
+    ]);
+    let (core, mut rx) = start(dir.path(), &llm, 7).await;
+    new_session(&core, &mut rx).await;
+    say(&core, &mut rx, "はい").await;
+    // 事実を話す。裏の処理で表ができる。
+    say(&core, &mut rx, LIVES).await;
+    // 続きのターン: 履歴が長いので、まだ表を置かない (先頭を変えない)。
+    let same = ask(&core, &mut rx, "うん").await;
+    core.hold(false);
+    // 新しいセッションの始めに差し替える。
+    new_session(&core, &mut rx).await;
+    let fresh = ask(&core, &mut rx, "うん").await;
+    core.shutdown().await;
+
+    let reqs = answers(&llm);
+    assert_eq!(reqs.len(), 4);
+    let head = evorag_memory::table_head("ja");
+    assert!(
+        !system(&reqs[2]).contains(head),
+        "kept the old (empty) table"
+    );
+    assert_eq!(system(&reqs[2]), system(&reqs[0]));
+    assert!(
+        system(&reqs[3]).contains(RESIDENCE_ROW),
+        "a new session gets the table"
+    );
+    let obs = |u| answer_to(dir.path(), u).obs.expect("observations");
+    assert_eq!(obs(same).fact_table, None);
+    assert!(obs(fresh).fact_table.is_some());
 }
