@@ -5,6 +5,7 @@
 mod deps;
 mod dist;
 mod i18n;
+mod lme;
 mod metadata;
 mod trace;
 mod verify_tag;
@@ -28,9 +29,16 @@ commands:
   live-llm [--out DIR]     tests against real llama-servers (09 §3.4): chat and the fact recall eval
                            (09 §5.2) at EVORAG_LIVE_LLM_URL, recall at EVORAG_LIVE_EMBED_URL and
                            EVORAG_LIVE_RERANK_URL; eval results (EVAL-*.json) to --out
-  longmemeval --data FILE  LongMemEval subset baseline (09 §5.2) at EVORAG_LIVE_LLM_URL; results to
-      [--out DIR]          docs/perf/<X.Y.Z> (default)
+  longmemeval --data FILE  LongMemEval at EVORAG_LIVE_LLM_URL (09 §5.2); results to docs/perf/<X.Y.Z>
+      [--out DIR]          (default)
+      [--set S]            dev (default, the tuning subset) or holdout:<slice> (judging only)
+      [--roots DIR]        save each question's ingested data root and reuse it later
+      [--ingest-only]      ingest (and save) without asking; allowed for sealed slices
+      [--settle SECS]      wait for the background steps up to SECS per question (default 1800)
+      [--no-typing]        do not send 'input idle' before the question (05 §4.5)
       [--limit N]          only the first N questions (a smoke run; marked partial)
+  lme-compare --base FILE... --new FILE... [--out FILE]
+                           paired comparison of LongMemEval results (McNemar exact test, 09 §5.2)
   verify-release DIR       check SHA256SUMS, release.json and the minisign signatures (AC-FR-801-1)
       [--pubkey FILE] [--require-signatures]";
 
@@ -49,6 +57,7 @@ fn main() -> ExitCode {
         Some("bench") => bench(&root, &args[1..]),
         Some("live-llm") => live_llm(&root, &args[1..]),
         Some("longmemeval") => longmemeval(&root, &args[1..]),
+        Some("lme-compare") => done("lme-compare", lme::compare(&args[1..])),
         Some("dist") => done("dist", dist::dist(&root, &args[1..])),
         Some("verify-tag") => done("verify-tag", verify_tag::verify_tag(&root, &args[1..])),
         Some("verify-release") => done("verify-release", dist::verify_release(&root, &args[1..])),
@@ -290,13 +299,26 @@ fn live_llm(root: &Path, args: &[String]) -> bool {
     ok
 }
 
-/// LongMemEval の一部での基準値 (09 §5.2)。データ (`--data`) はリポジトリの外に置く。結果は既定で
-/// docs/perf/<X.Y.Z>/EVAL-longmemeval.json。
+/// LongMemEval での評価 (09 §5.2)。データ (`--data`) はリポジトリの外に置く。結果は既定で
+/// docs/perf/<X.Y.Z>/EVAL-longmemeval[-holdout-<切片>].json。
 fn longmemeval(root: &Path, args: &[String]) -> bool {
-    const USAGE_LME: &str = "usage: cargo xtask longmemeval --data FILE [--out DIR] [--limit N]";
-    let (mut data, mut out, mut limit) = (None, None, None);
+    const USAGE_LME: &str = "usage: cargo xtask longmemeval --data FILE [--out DIR] [--set S] [--roots DIR]          [--ingest-only] [--settle SECS] [--no-typing] [--limit N]";
+    let (mut data, mut out, mut limit, mut set, mut roots, mut settle) =
+        (None, None, None, None, None, None);
+    let (mut ingest_only, mut no_typing) = (false, false);
     let mut it = args.iter();
     while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--ingest-only" => {
+                ingest_only = true;
+                continue;
+            }
+            "--no-typing" => {
+                no_typing = true;
+                continue;
+            }
+            _ => {}
+        }
         let Some(value) = it.next() else {
             eprintln!("{USAGE_LME}");
             return false;
@@ -304,7 +326,10 @@ fn longmemeval(root: &Path, args: &[String]) -> bool {
         match flag.as_str() {
             "--data" => data = absolute(value),
             "--out" => out = absolute(value),
+            "--roots" => roots = absolute(value),
+            "--set" => set = Some(value.clone()),
             "--limit" if value.parse::<usize>().is_ok() => limit = Some(value.clone()),
+            "--settle" if value.parse::<u64>().is_ok() => settle = Some(value.clone()),
             _ => {
                 eprintln!("{USAGE_LME}");
                 return false;
@@ -343,11 +368,28 @@ fn longmemeval(root: &Path, args: &[String]) -> bool {
             "--run-ignored",
             "only",
             "--no-capture",
+            "-E",
+            "test(live_longmemeval_baseline)",
         ])
         .env("EVORAG_LONGMEMEVAL_DATA", &data)
         .env("EVORAG_BENCH_OUT", &out);
     if let Some(n) = limit {
         cmd.env("EVORAG_LONGMEMEVAL_LIMIT", n);
+    }
+    if let Some(s) = set {
+        cmd.env("EVORAG_LME_SET", s);
+    }
+    if let Some(r) = roots {
+        cmd.env("EVORAG_LME_ROOTS", r);
+    }
+    if let Some(s) = settle {
+        cmd.env("EVORAG_LME_SETTLE_SECS", s);
+    }
+    if ingest_only {
+        cmd.env("EVORAG_LME_INGEST_ONLY", "1");
+    }
+    if no_typing {
+        cmd.env("EVORAG_LME_TYPING", "0");
     }
     cmd.status().is_ok_and(|s| s.success())
 }
