@@ -744,6 +744,8 @@ async fn live_longmemeval_baseline() {
         return;
     };
     let ingest_only = std::env::var_os("EVORAG_LME_INGEST_ONLY").is_some();
+    // 保存したデータ根の裏の処理を済ませ直して保存し直す (取り込みだけと組み合わせて使う)。
+    let resave = std::env::var_os("EVORAG_LME_RESAVE").is_some();
     assert!(
         plan.open || ingest_only,
         "{} is sealed (opened = \"\" in {HOLDOUT_FILE}); set EVORAG_LME_INGEST_ONLY=1 to only ingest it",
@@ -800,7 +802,33 @@ async fn live_longmemeval_baseline() {
         let saved = roots
             .as_ref()
             .and_then(|r| r.load(id, &fingerprint, dir.path()));
-        let marker = if let Some(m) = saved {
+        let marker = if let Some(mut m) = saved {
+            // 保存したデータ根の裏の処理を済ませ直して、保存し直す (`EVORAG_LME_RESAVE`)。済んだかの判定は
+            // 待たせている手順を除くので、取り込みのときに GPU を取り合うと、抽出などが残ったまま保存されうる
+            // (残りは開き直すたびに走り、答えの比べを揺らす)。
+            if resave {
+                let at = m["asked_at_ms"]
+                    .as_i64()
+                    .expect("the saved data root records when to ask");
+                let core_clock: Arc<dyn Clock> =
+                    Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+                let (core, mut rx, _) = Core::start(
+                    eval::config(dir.path(), PromptLanguage::En, &servers, core_clock),
+                    chat.clone(),
+                )
+                .await
+                .expect("the core starts against the live llama-server");
+                core.settle().await;
+                let settled = eval::settle(&core, settle_limit).await;
+                let facts = eval::facts(&core, &mut rx).await;
+                core.shutdown().await;
+                m["settled"] = serde_json::json!(settled);
+                m["facts"] = serde_json::json!(facts);
+                m["resaved_seconds"] = serde_json::json!(t0.elapsed().as_secs_f64());
+                if let Some(r) = &roots {
+                    r.save(id, dir.path(), &m);
+                }
+            }
             m
         } else {
             let clock = Arc::new(ManualClock::new(first));
