@@ -267,6 +267,10 @@ struct Inner {
     calib_failed_at: Mutex<Option<std::time::Instant>>,
     /// 起動時の突き合わせと退避が済んだ (sleep-time の退避は、その後で日をまたいだときだけ)。
     startup_done: std::sync::atomic::AtomicBool,
+    /// 起動の突き合わせを終えた時点で残っていた裏の処理の手順 (起動の後の最初の発話の観測値、05 §3.6)。
+    pending_at_start: Mutex<Option<Vec<String>>>,
+    /// 状態の行に知らせた、残っている裏の処理の手順の数 (07 §2.1)。
+    pending_shown: std::sync::atomic::AtomicU32,
     /// 今の埋め込みのモデルのベクトルの索引 (05 §2.2)。
     vectors: Mutex<Option<embedding::Vectors>>,
     /// ベクトルの索引を DB と突き合わせ終えた埋め込みのモデル (それまでは埋め込みの手順を動かさない)。
@@ -660,6 +664,8 @@ impl Core {
             precompute: cfg.precompute,
             backoff: Mutex::new(std::collections::HashMap::new()),
             startup_done: std::sync::atomic::AtomicBool::new(false),
+            pending_at_start: Mutex::new(None),
+            pending_shown: std::sync::atomic::AtomicU32::new(0),
             aux_request_extra: cfg.aux_request_extra,
             background_checks: cfg.probe_models,
             threshold: Mutex::new(None),
@@ -728,6 +734,11 @@ impl Core {
             let _ = tokio::task::spawn_blocking(move || backup_now(&worker)).await;
             done.startup_done
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            *done
+                .pending_at_start
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(sleep::remaining_steps(&done));
+            sleep::show_pending(&done);
             done.activity.kick();
         });
         core.inner
@@ -2349,7 +2360,8 @@ async fn send(inner: &Arc<Inner>, text: String) {
         return;
     }
     // 1. 発話を先に確定する (04 §3 の 1、FR-201)。確定できなければ送らない。
-    let (uid, ops) = match writes(inner).user_turn(&session, &text) {
+    let (uid, ops) = match writes(inner).user_turn_with(&session, &text, Some(user_obs(inner, sid)))
+    {
         Ok(v) => v,
         Err(e) => {
             emit(
@@ -3306,6 +3318,70 @@ enum Outcome {
     Failed(LlmError),
 }
 
+/// 言い直して引けた問いか (05 §3.6 の `rephrase`、v0.4): 同じセッションの直前の発話の応答の候補 (v0.4 の
+/// 観測値) に、今回添えた往復がどれも無ければ、直前の発話のターン。直前の応答に候補の記録が無ければ `None`。
+fn rephrased(inner: &Inner, session: Id, user_turn: Id, attached: &[Id]) -> Option<Id> {
+    let rtx = inner.store.read().ok()?;
+    let turns = evorag_memory::session_turns(&rtx, session).ok()?;
+    let prev_user = turns
+        .iter()
+        .rev()
+        .find(|t| t.body.role == TurnRole::User && t.envelope.id < user_turn)?
+        .envelope
+        .id;
+    let prev_answer = turns
+        .iter()
+        .rev()
+        .find(|t| t.body.reply_to == Some(prev_user) && t.body.role == TurnRole::Assistant)?;
+    let cands = &prev_answer.body.obs.as_ref()?.candidates;
+    if cands.is_empty() {
+        return None;
+    }
+    // 添えた往復の代表のターン (利用者の発話。応答はその発話)。
+    let reps: Vec<Id> = attached
+        .iter()
+        .filter_map(|id| match rtx.get(evorag_memory::KIND_TURN, *id) {
+            Ok(Some(evorag_store::Read::Ok(e))) => {
+                e.body_as::<evorag_memory::TurnBody>()
+                    .ok()
+                    .map(|b| match b.role {
+                        TurnRole::User => *id,
+                        _ => b.reply_to.unwrap_or(*id),
+                    })
+            }
+            _ => None,
+        })
+        .collect();
+    (!reps.is_empty() && reps.iter().all(|r| cands.iter().all(|c| c.id != *r))).then_some(prev_user)
+}
+
+/// 発話のターンの観測値 (05 §3.6、v0.4): UTC からのずれ、同じセッションの前の発話からの時間、起動の後の最初の
+/// 発話なら起動したときに残っていた裏の処理の手順。
+fn user_obs(inner: &Inner, session: Id) -> evorag_memory::TurnObs {
+    let now = inner.clock.now().as_millis();
+    let prev = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::session_turns(&r, session).ok())
+        .and_then(|ts| {
+            ts.iter()
+                .rev()
+                .find(|t| t.body.role == TurnRole::User)
+                .map(|t| t.envelope.created_at.as_millis())
+        });
+    evorag_memory::TurnObs {
+        tz_offset: localtime::offset(now).map(|s| s / 60),
+        idle: prev.and_then(|p| u64::try_from((now - p) / 1000).ok()),
+        pending_at_start: inner
+            .pending_at_start
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(),
+        ..Default::default()
+    }
+}
+
 async fn generate(
     inner: &Arc<Inner>,
     session: Id,
@@ -3393,7 +3469,21 @@ async fn generate(
         user_attached: recall_obs.user_attached,
         degraded: recall_obs.degraded,
         fact_table: table.map(|t| t.version),
+        candidates: recall_obs.candidates,
+        query: recall_obs.query,
+        rephrase: memory
+            .as_ref()
+            .filter(|m| m.record.decision == evorag_memory::RecallDecision::Fire)
+            .and_then(|m| rephrased(inner, session, user_turn, &m.attached)),
+        versions: [
+            ("recall".to_owned(), recall::RECALL_VERSION.to_owned()),
+            ("context".to_owned(), context::CONTEXT_VERSION.to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
     };
+    let mut obs = obs;
     let req = ChatRequest {
         messages: assembled.messages,
         generation: inner.generation.clone(),
@@ -3405,6 +3495,8 @@ async fn generate(
 
     let mut text = String::new();
     let mut thinking = false;
+    let mut first_token: Option<std::time::Duration> = None;
+    let mut processed: Option<u64> = None;
     let outcome = tokio::select! {
         c = &mut cancel => Outcome::Interrupted(c.unwrap_or(Cancel::User)),
         started = llm.chat(req) => match started {
@@ -3418,6 +3510,9 @@ async fn generate(
                     }
                     ev = stream.next() => match ev {
                         Some(Ok(ChatEvent::Delta(d))) => {
+                            if first_token.is_none() {
+                                first_token = Some(started_at.elapsed());
+                            }
                             text.push_str(&d);
                             emit(inner, Event::Token { reply_to: user_turn, text: d });
                         }
@@ -3428,7 +3523,10 @@ async fn generate(
                                 emit(inner, Event::Thinking { reply_to: user_turn });
                             }
                         }
-                        Some(Ok(ChatEvent::Done { .. })) => break Outcome::Completed,
+                        Some(Ok(ChatEvent::Done { usage, .. })) => {
+                            processed = usage.and_then(|u| u.processed);
+                            break Outcome::Completed;
+                        }
                         Some(Err(e)) => break Outcome::Failed(e),
                         None => break Outcome::Failed(LlmError::Cut("the stream ended".into())),
                     }
@@ -3472,6 +3570,12 @@ async fn generate(
         }
         Outcome::Failed(e) => (TurnState::Failed, Some(llm_message(e)), Some(e.to_string())),
     };
+    // 応答の経路を始めてから最初の本文までの時間と、処理したトークン数 (05 §3.6、v0.4)。
+    obs.prefetch = Some(evorag_memory::PrefetchObs {
+        kind: evorag_memory::PREFETCH_NONE.to_owned(),
+        ttft_ms: first_token.and_then(|d| u32::try_from(d.as_millis()).ok()),
+        processed: processed.and_then(|n| u32::try_from(n).ok()),
+    });
     let g = &inner.generation;
     let turn = AssistantTurn {
         state,

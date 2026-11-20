@@ -33,6 +33,7 @@ fn app() -> App {
             limited: false,
             recall: None,
             background: None,
+            background_pending: 0,
             remote_llm: false,
             forget: None,
         },

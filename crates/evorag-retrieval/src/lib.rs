@@ -6,6 +6,7 @@ pub mod calibrate;
 pub mod chunk;
 pub mod normalize;
 pub mod recall;
+pub mod window;
 
 use evorag_index::lex::DocInput;
 use evorag_types::Id;

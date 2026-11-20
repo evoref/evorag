@@ -1231,6 +1231,7 @@ fn main() -> ExitCode {
                 .is_some_and(|p| !evorag_core::probe::issues(&p).is_empty()),
             recall: Some(report.recall),
             background: None,
+            background_pending: 0,
             remote_llm: cfg.llm.allow_remote,
             forget: Some(evorag_types::api::ForgetState {
                 mismatched: report.forget.mismatched.len(),

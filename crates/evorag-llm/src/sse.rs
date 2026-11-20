@@ -13,6 +13,8 @@ pub struct SseParser {
     buf: Vec<u8>,
     finish_reason: Option<String>,
     usage: Option<Usage>,
+    /// `timings.prompt_n` (llama-server が処理したプロンプトのトークン数)。
+    processed: Option<u64>,
     done: bool,
 }
 
@@ -50,9 +52,17 @@ impl SseParser {
             let payload = data.join("\n");
             if payload.trim() == "[DONE]" {
                 self.done = true;
+                let processed = self.processed.take();
+                let usage = match self.usage.take() {
+                    Some(u) => Some(Usage { processed, ..u }),
+                    None => processed.map(|p| Usage {
+                        processed: Some(p),
+                        ..Usage::default()
+                    }),
+                };
                 return Some(Ok(ChatEvent::Done {
                     finish_reason: self.finish_reason.take(),
-                    usage: self.usage.take(),
+                    usage,
                 }));
             }
             match self.parse(&payload) {
@@ -76,6 +86,13 @@ impl SseParser {
         }
         if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
             self.usage = serde_json::from_value(u.clone()).ok();
+        }
+        if let Some(n) = v
+            .get("timings")
+            .and_then(|t| t.get("prompt_n"))
+            .and_then(Value::as_u64)
+        {
+            self.processed = Some(n);
         }
         let choice = v.get("choices").and_then(|c| c.get(0))?;
         if let Some(r) = choice.get("finish_reason").and_then(Value::as_str) {
@@ -153,12 +170,40 @@ mod tests {
                     finish_reason: Some("stop".into()),
                     usage: Some(Usage {
                         prompt_tokens: 5,
-                        completion_tokens: 2
+                        completion_tokens: 2,
+                        processed: None,
                     })
                 },
             ]
         );
         assert!(p.is_done());
+    }
+
+    #[test]
+    fn llama_server_timings_give_the_processed_prompt_tokens() {
+        let mut p = SseParser::default();
+        p.push(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":1},",
+                "\"timings\":{\"prompt_n\":48}}\n\n",
+                "data: [DONE]\n\n",
+            )
+            .as_bytes(),
+        );
+        let events: Vec<ChatEvent> = all(&mut p).into_iter().map(Result::unwrap).collect();
+        assert_eq!(
+            events.last(),
+            Some(&ChatEvent::Done {
+                finish_reason: Some("stop".into()),
+                usage: Some(Usage {
+                    prompt_tokens: 900,
+                    completion_tokens: 1,
+                    processed: Some(48),
+                }),
+            })
+        );
     }
 
     #[test]

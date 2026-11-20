@@ -33,6 +33,9 @@ use crate::prompt::PromptLanguage;
 /// 引用する 1 ターンの本文の上限 (文字)。
 const EXCERPT_CHARS: usize = 400;
 
+/// 想起の作りの版 (観測値の `versions`、05 §3.6)。選び方・窓・予算を変えたら上げる。
+pub(crate) const RECALL_VERSION: &str = "0.4.0";
+
 /// 索引の置き場所 (05 §2.3)。v0.2 はチャンクを単位にした `chunk-lex/`。
 pub fn index_dir(data_root: &std::path::Path) -> std::path::PathBuf {
     data_root.join("index").join("memory").join("chunk-lex")
@@ -306,6 +309,53 @@ pub struct RecallObs {
     pub band: Vec<Id>,
     pub user_attached: Vec<Id>,
     pub degraded: Vec<String>,
+    /// 候補の上位 (05 §3.6、v0.4)。
+    pub candidates: Vec<evorag_memory::RecallCandidate>,
+    /// 問いの分析の結果 (05 §3.1 の 5、v0.4)。
+    pub query: Option<evorag_memory::QueryObs>,
+}
+
+/// 観測値に残す候補の数 (05 §3.6)。
+const CANDIDATES_OBS: usize = 30;
+
+/// 融合の順 `ranked` の上位を、往復の代表のターンにまとめ、語彙 (`lists[0]`) とベクトル (`lists[1]`) の
+/// それぞれの順位を添える (05 §3.6、v0.4)。
+fn candidate_obs(
+    store: &Store,
+    lists: &[Vec<Id>],
+    ranked: &[Id],
+) -> Vec<evorag_memory::RecallCandidate> {
+    let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    let rank = |list: Option<&Vec<Id>>, id: Id| -> Option<u16> {
+        list?
+            .iter()
+            .position(|x| *x == id)
+            .and_then(|p| u16::try_from(p + 1).ok())
+    };
+    let mut out: Vec<evorag_memory::RecallCandidate> = Vec::new();
+    for id in ranked {
+        if out.len() >= CANDIDATES_OBS {
+            break;
+        }
+        let rep = match rtx.get(KIND_TURN, *id) {
+            Ok(Some(Read::Ok(e))) => match e.body_as::<TurnBody>() {
+                Ok(b) if b.role != TurnRole::User => b.reply_to.unwrap_or(*id),
+                _ => *id,
+            },
+            _ => continue,
+        };
+        if out.iter().any(|c| c.id == rep) {
+            continue;
+        }
+        out.push(evorag_memory::RecallCandidate {
+            id: rep,
+            lex: rank(lists.first(), *id),
+            vec: rank(lists.get(1), *id),
+        });
+    }
+    out
 }
 
 /// 応答の経路のリランクの使い方 (05 §3.4・§3.5)。
@@ -854,6 +904,13 @@ async fn select_for(
     deadlines: Deadlines,
 ) -> Selection {
     let mut obs = RecallObs::default();
+    let intent = evorag_retrieval::window::analyze(&query);
+    obs.query = Some(evorag_memory::QueryObs {
+        count: intent.count,
+        date: intent.date,
+        explicit: intent.explicit,
+        widened: false,
+    });
     if vectors.is_none() {
         // 埋め込みが無い・記録と違う・作り直しの途中 (05 §3.5 の `no_embed`)。
         obs.degraded
@@ -886,6 +943,10 @@ async fn select_for(
     // 索引の単位はチャンク。ターンにまとめる (05 §2.4)。
     r.hits = turn_hits(store, &r.hits, session);
     r.candidates = turn_hits(store, &r.candidates, session);
+    {
+        let lex: Vec<Id> = r.candidates.iter().map(|h| h.id).collect();
+        obs.candidates = candidate_obs(store, std::slice::from_ref(&lex), &lex);
+    }
     let lexical = |obs: RecallObs| {
         // ターンに直して何も残らない当たり (鍵の事実が読み直しで外れたなど) は、添えない。
         if r.decision == Decision::Abstain || r.hits.is_empty() {
@@ -931,6 +992,7 @@ async fn select_for(
         }
     }
     let ranked = rrf(&lists);
+    obs.candidates = candidate_obs(store, &lists, &ranked);
     let ex = exchanges(store, &ranked, u.top, lang);
     if ex.is_empty() {
         return none(RecallDecision::Abstain, obs);

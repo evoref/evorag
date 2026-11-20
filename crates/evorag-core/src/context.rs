@@ -74,6 +74,9 @@ pub fn reserve_for_output(n_ctx: usize, configured: Option<usize>) -> usize {
 
 /// 想起の引用の枠の予算 (トークン、05 §4.1 の順 6)。
 pub(crate) const RECALL_BUDGET: usize = 800;
+
+/// 文脈の組み立ての版 (観測値の `versions`、05 §3.6)。並べ方・枠の置き場所を変えたら上げる。
+pub(crate) const CONTEXT_VERSION: &str = "0.4.0";
 /// 予算を半分にする `n_ctx` の目安 (05 §4.1)。
 const SMALL_CTX: usize = 8192;
 /// 小さな `n_ctx` で、履歴に残したい量 (トークン、05 §4.1)。

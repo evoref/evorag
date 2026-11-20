@@ -222,6 +222,8 @@ pub struct Status {
     pub recall: Option<RecallState>,
     /// 裏の処理の状態 (07 §2.1、04 §4)。
     pub background: Option<BackgroundState>,
+    /// 残っている裏の処理の手順の数 (07 §2.1、v0.4)。
+    pub background_pending: u32,
     /// 設定 `llm.allow_remote` (`/private` の確認に、発話の本文が外の機械に出うることを書く、07 §3)。
     pub remote_llm: bool,
     /// 忘れるの状態 (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
@@ -1114,6 +1116,9 @@ impl App {
             }
             Event::BackgroundState { state } => {
                 self.status.background = Some(state);
+            }
+            Event::BackgroundPending { steps } => {
+                self.status.background_pending = steps;
             }
             Event::RecallStatus { state } => {
                 let before = self.status.recall.replace(state);
@@ -3345,6 +3350,7 @@ mod tests {
                     failed: false,
                 }),
                 background: Some(BackgroundState::Working),
+                background_pending: 0,
                 remote_llm: true,
                 forget: Some(ForgetState {
                     mismatched: 2,
