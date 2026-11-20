@@ -730,6 +730,8 @@ pub enum Event {
     },
     /// 裏の処理の状態が変わった (04 §4)。
     BackgroundState { state: BackgroundState },
+    /// 残っている裏の処理の手順の数 (状態の行、07 §2.1、v0.4)。変わったときだけ届く。
+    BackgroundPending { steps: u32 },
     /// 想起の状態が変わった (較正が終わった、リランカーが繋がった、05 §3.7)。
     RecallStatus { state: RecallState },
     /// モデルの性質の点検が終わり、使えない機能が見つかった (06 §3.3)。

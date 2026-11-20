@@ -353,6 +353,7 @@ message_keys! {
     UiStatusIdle => "ui.status.idle",
     UiStatusLimited => "ui.status.limited",
     UiStatusWorking => "ui.status.working",
+    UiStatusPending => "ui.status.pending",
     UiStatusBattery => "ui.status.paused_battery",
     UiStatusLowSpace => "ui.status.paused_low_space",
     UiRecallStandard => "ui.status.recall_standard",

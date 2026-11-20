@@ -395,6 +395,7 @@ impl ChatStream for ReplayStream {
                         .then(|| Usage {
                             prompt_tokens: done.prompt_tokens.unwrap_or(0),
                             completion_tokens: done.completion_tokens.unwrap_or(0),
+                            processed: None,
                         });
                         return Some(Ok(ChatEvent::Done {
                             finish_reason: done.finish_reason,
