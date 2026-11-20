@@ -797,6 +797,6 @@ PO 区分で残っている判断は、外部寄稿の受付の時期 ([OQ-28](#
 
 - **状態**: 提案 (裁量。M4.4 の前に PO の異議が無ければ推奨で確定する)。v0.4 の計画の「原因の確認」の手当て。
 - **背景**: v0.3.0 の手動の受入で、話した事実が `/memory` に現れなかった。受入の設定に `llm.chat.aux_request_extra` が無く、思考するモデル (Qwen3.5-9B) では、補助の呼び出しで思考が出力の上限まで続いて本文が空になり (`finish_reason` が `length`)、モデルの点検 (06 §3.3) が「思考を切れない・型縛りの出力が空」と記録して、抽出とノートを止めていた。`chat_template_kwargs = { enable_thinking = false }` を足すと型どおりの出力になる (2026-11-20 に同じモデルとビルドで確かめた)。
-- **推奨**: chat の点検で、設定の `aux_request_extra` に `chat_template_kwargs` が無く、思考を切れないか型縛りの出力が空のときは、`chat_template_kwargs = { enable_thinking = false }` を足してもう一度点検する。通ったら、その指定を点検の結果 (派生) に記録し、補助の呼び出しに足す。`evorag setup` は、通った指定を設定ファイルの `llm.chat.aux_request_extra` に書く (書く前に利用者に示す)。`evorag doctor` と状態の行は、自動で足したことを示す。設定に `chat_template_kwargs` を書いた利用者の指定は上書きしない。
+- **推奨**: chat の点検で、設定の `aux_request_extra` に `chat_template_kwargs` が無く、思考を切れないか型縛りの出力が空のときは、`chat_template_kwargs = { enable_thinking = false }` を足してもう一度点検する。通ったら、通ったことを点検の結果 (派生) に記録し、補助の呼び出しに足す (設定ファイルは書き換えない。点検は setup と、model_key か build_info が変わったときに行うので、記録はモデルごとに残る)。`evorag setup` と `evorag doctor` は、自動で足していることと、設定に書くときの形 (`llm.chat.aux_request_extra`) を示す。設定に `chat_template_kwargs` を書いた利用者の指定は上書きしない。
 - **代替**: 手順書で設定を案内するだけにする (v0.3.0 の受入で、利用者が状態の行の理由に気付かなかった)。
 - **本文の改訂**: 06 §3.3・§6、07 §4 (v0.4 の M4.0)。
