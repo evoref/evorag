@@ -1,0 +1,144 @@
+{
+  "id": "EVAL-ja",
+  "evorag": "0.4.0",
+  "date": "2026-11-20",
+  "cases_file": "tests/memory-eval/ja-v0.4.toml",
+  "setup": "chat+embed+rerank",
+  "models": {
+    "chat": {
+      "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_fp": "04e555181c24",
+      "build_info": "b1-622aa06",
+      "n_ctx": 16384
+    },
+    "embed": {
+      "model_file": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_name": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_fp": "0c044acef127",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    },
+    "rerank": {
+      "model_file": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_name": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_fp": "cb952a6c3a57",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    }
+  },
+  "typing": true,
+  "judge": "answer contains every expected value after NFKC + lowercase (abstain: contains an abstention marker)",
+  "cases": 15,
+  "passed": 11,
+  "per_kind": {
+    "abstain": {
+      "cases": 3,
+      "passed": 3
+    },
+    "aggregate": {
+      "cases": 4,
+      "passed": 1
+    },
+    "fact": {
+      "cases": 2,
+      "passed": 1
+    },
+    "window": {
+      "cases": 6,
+      "passed": 6
+    }
+  },
+  "results": [
+    {
+      "id": "W01",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "W02",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "W03",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "W04",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "W05",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "W06",
+      "kind": "window",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "G01",
+      "kind": "aggregate",
+      "passed": false,
+      "sources": 0
+    },
+    {
+      "id": "G02",
+      "kind": "aggregate",
+      "passed": false,
+      "sources": 0
+    },
+    {
+      "id": "G03",
+      "kind": "aggregate",
+      "passed": false,
+      "sources": 0
+    },
+    {
+      "id": "G04",
+      "kind": "aggregate",
+      "passed": true,
+      "sources": 0
+    },
+    {
+      "id": "F01",
+      "kind": "fact",
+      "passed": true,
+      "sources": 1
+    },
+    {
+      "id": "F02",
+      "kind": "fact",
+      "passed": false,
+      "sources": 0
+    },
+    {
+      "id": "A01",
+      "kind": "abstain",
+      "passed": true,
+      "sources": 0
+    },
+    {
+      "id": "A02",
+      "kind": "abstain",
+      "passed": true,
+      "sources": 0
+    },
+    {
+      "id": "A03",
+      "kind": "abstain",
+      "passed": true,
+      "sources": 0
+    }
+  ]
+}
