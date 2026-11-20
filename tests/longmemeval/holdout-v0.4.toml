@@ -1,0 +1,229 @@
+# LongMemEval の保留の問い (09 §5.2 の「保留の問い」)。判定にだけ使い、調整に使わない。
+#
+# - 元のデータと選び方の前提は subset-v0.3.toml と同じ (oracle、single-session-preference を除く)。開発の組
+#   (subset-v0.3.toml の 50 問) を除いた残りの 420 問を、切片 A〜F に分ける。
+# - 分け方: 層 (question_type。`_abs` は abstention) ごとに、SHA-256("<seed>:<question_id>") の 16 進の小さい順に
+#   並べる。切片を A から順に作り、各切片の数を、その時点で残っている層の数の比で割り当てる (最大剰余法。
+#   剰余が同じなら層の名前の順)。各層の残りの先頭から quota 件を取る。
+# - 封: `opened` が空の切片は、問いに答えさせない (取り込みだけはしてよい)。判定に使う版で開け、開けた版を
+#   `opened` に書く。判定は開けた切片の累積で行い、1 版の判定の流し直しは 2 回まで (09 §5.2)。
+# - 試験 `longmemeval_holdout_matches_the_data` (EVORAG_LONGMEMEVAL_DATA を置いたときだけ流す) が、データから
+#   選び直して一致を確かめる。
+
+source = "longmemeval_oracle.json"
+source_url = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
+source_sha256 = "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c"
+license = "MIT (Copyright (c) 2024 Di Wu)"
+seed = "evorag-longmemeval-holdout-v0.4"
+excluded_types = ["single-session-preference"]
+excluded_subset = "tests/longmemeval/subset-v0.3.toml"
+
+[[slice]]
+name = "A"
+size = 100
+opened = "v0.4"
+
+[[slice.stratum]]
+name = "abstention"
+quota = 6
+ids = ["gpt4_372c3eed_abs", "982b5123_abs", "edced276_abs", "0ddfec37_abs", "f685340e_abs", "2133c1b5_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 15
+ids = ["031748ae", "2133c1b5", "22d2cb42", "07741c45", "a1eacc2a", "0f05491a", "3ba21379", "c4ea545c", "10e09553", "18bc8abd", "69fee5aa", "6a27ffc2", "852ce960", "01493427", "5831f84d"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 26
+ids = ["efc3f7c2", "3fdac837", "1a8a66a6", "6cb6f249", "3fe836c9", "6c49646a", "1f2b8d4f", "c18a7dc8", "a3332713", "099778bb", "f35224e0", "2318644b", "7024f17c", "60bf93ed", "3a704032", "09ba9854", "36b9f61e", "77eafa52", "gpt4_f2262a51", "129d1232", "720133ac", "bf659f65", "80ec1f4f", "d851d5ba", "gpt4_2ba83207", "6d550036"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 12
+ids = ["cc539528", "c8f1aeed", "e982271f", "4c36ccef", "ac031881", "e8a79c70", "18dcd5a5", "488d3006", "1568498a", "e3fc4d6e", "6ae235be", "352ab8bd"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 14
+ids = ["e47becba", "86b68151", "e01b8e2f", "c5e8278d", "21436231", "a82c026e", "d52b4f67", "ec81a493", "58ef2f1c", "29f2956b", "95bcc1c8", "7527f7e2", "caf9ead2", "51a45a95"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 27
+ids = ["gpt4_8279ba02", "f0853d11", "4dfccbf7", "bbf86515", "eac54adc", "2a1811e2", "gpt4_b5700ca0", "gpt4_e414231e", "gpt4_9a159967", "08f4fc43", "gpt4_fe651585", "gpt4_385a5000", "b46e15ed", "gpt4_e414231f", "c8090214", "gpt4_65aabe59", "5e1b23de", "gpt4_f49edff3", "gpt4_e061b84g", "gpt4_74aed68e", "gpt4_213fd887", "gpt4_68e94287", "gpt4_1d4ab0c9", "gpt4_88806d6e", "gpt4_8279ba03", "gpt4_e061b84f", "8077ef71"]
+
+[[slice]]
+name = "B"
+size = 64
+opened = ""
+
+[[slice.stratum]]
+name = "abstention"
+quota = 4
+ids = ["29f2956b_abs", "c8090214_abs", "gpt4_70e84552_abs", "bc8a6e93_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 10
+ids = ["184da446", "e66b632c", "08e075c7", "ed4ddc30", "ce6d2d27", "830ce83f", "07741c44", "c7dc5443", "5c40ec5b", "e493bb7c"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 16
+ids = ["gpt4_a56e767c", "55241a1f", "ef66a6e5", "61f8c8f8", "91b15a6e", "2e6d26dc", "8979f9ec", "88432d0a", "a346bb18", "37f165cf", "46a3abf7", "a11281a2", "0a995998", "e25c3b8d", "4f54b7c9", "2ce6a0f2"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 8
+ids = ["70b3e69b", "0e5e2d1a", "dc439ea3", "d596882b", "65240037", "e9327a54", "5809eb10", "7a8d0b71"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 9
+ids = ["545bd2b5", "19b5f2b3", "118b2229", "f4f1d8a4", "853b0a1d", "a06e4cfe", "37d43f65", "15745da0", "f8c5f88b"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 17
+ids = ["gpt4_0a05b494", "2ebe6c90", "eac54add", "6e984302", "0bc8ad93", "gpt4_b4a80587", "gpt4_1916e0ea", "2c63a862", "gpt4_cd90e484", "9a707b81", "6613b389", "4dfccbf8", "a3838d2b", "gpt4_f420262c", "0bb5a684", "gpt4_93f6379c", "gpt4_7de946e7"]
+
+[[slice]]
+name = "C"
+size = 64
+opened = ""
+
+[[slice.stratum]]
+name = "abstention"
+quota = 4
+ids = ["a96c20ee_abs", "gpt4_c27434e8_abs", "6456829e_abs", "60bf93ed_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 10
+ids = ["ba61f0b9", "41698283", "945e3d21", "c6853660", "5a4f22c0", "dad224aa", "71315a70", "e61a7584", "cc5ded98", "db467c8c"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 17
+ids = ["d3ab962e", "1c549ce4", "a1cc6108", "9aaed6a3", "00ca467f", "gpt4_731e37d7", "81507db6", "a4996e51", "aae3761f", "0ea62687", "gpt4_31ff4165", "d905b33f", "bb7c3b45", "92a0aa75", "85fa3a3f", "0100672e", "a9f6b44c"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 8
+ids = ["ceb54acb", "c4f10528", "1b9b7252", "7e00a6cb", "e48988bc", "71a3fd6b", "2bf43736", "1903aded"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 8
+ids = ["3b6f954b", "6b168ec8", "c14c00dd", "b86304ba", "c19f7a0b", "bc8a6e93", "8550ddae", "af8d2e46"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 17
+ids = ["gpt4_61e13b3c", "gpt4_76048e76", "gpt4_7a0daae1", "gpt4_b5700ca9", "gpt4_7ddcf75f", "gpt4_d6585ce9", "dcfa8644", "gpt4_2f584639", "gpt4_b0863698", "gpt4_d6585ce8", "gpt4_d9af6064", "gpt4_4cd9eba1", "71017277", "gpt4_78cf46a3", "gpt4_2312f94c", "gpt4_f420262d", "gpt4_e072b769"]
+
+[[slice]]
+name = "D"
+size = 64
+opened = ""
+
+[[slice.stratum]]
+name = "abstention"
+quota = 4
+ids = ["15745da0_abs", "f4f1d8a4_abs", "80ec1f4f_abs", "gpt4_fe651585_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 10
+ids = ["06db6396", "50635ada", "0977f2af", "4b24c848", "9bbe84a2", "b6019101", "9ea5eabc", "7401057b", "7e974930", "45dc21b6"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 16
+ids = ["a08a253f", "7405e8b1", "10d9b85a", "d682f1a2", "60159905", "e6041065", "gpt4_d12ceb0e", "bc149d6b", "gpt4_59c863d7", "gpt4_d84a3211", "cc06de0d", "d6062bb9", "60472f9c", "f0e564bc", "d23cf73b", "67e0d0f2"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 7
+ids = ["b759caee", "eaca4986", "8752c811", "8aef76bc", "c7cf7dfd", "6222b6eb", "3249768e"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 9
+ids = ["dccbc061", "8e9d538c", "60d45044", "1faac195", "c960da58", "311778f1", "0862e8bf", "8ebdbe50", "86f00804"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 18
+ids = ["a3045048", "cc6d1ec1", "gpt4_98f46fc6", "gpt4_2655b836", "gpt4_5438fa52", "b46e15ee", "gpt4_21adecb5", "af082822", "gpt4_a1b77f9c", "gpt4_4fc4f797", "gpt4_4edbafa2", "gpt4_5dcc0aab", "d01c6aa8", "gpt4_18c2b244", "gpt4_4ef30696", "gpt4_59149c77", "b9cfe692", "gpt4_0b2f1d21"]
+
+[[slice]]
+name = "E"
+size = 64
+opened = ""
+
+[[slice.stratum]]
+name = "abstention"
+quota = 5
+ids = ["0862e8bf_abs", "031748ae_abs", "e5ba910e_abs", "09ba9854_abs", "2698e78f_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 10
+ids = ["b01defab", "2698e78f", "89941a93", "6071bd76", "603deb26", "72e3ee87", "a2f3aa27", "26bdc477", "cf22b7bf", "f9e8c073"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 17
+ids = ["c2ac3c61", "157a136e", "9ee3ecd6", "2788b940", "gpt4_e05b82a6", "87f22b4a", "gpt4_5501fe77", "73d42213", "60036106", "ef9cf60a", "21d02d0d", "3c1045c8", "gpt4_194be4b3", "28dc39ac", "51c32626", "c4a1ceb8", "e3038f8c"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 7
+ids = ["3e321797", "8cf51dda", "41275add", "a40e080f", "fea54f57", "778164c6", "51b23612"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 8
+ids = ["6f9b354f", "76d63226", "faba32e5", "3d86fd0a", "6ade9755", "94f70d80", "5d3d2817", "b320f3f8"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 17
+ids = ["gpt4_70e84552", "8c18457d", "bcbe585f", "0db4c65d", "gpt4_45189cb4", "e4e14d04", "gpt4_1d80365e", "gpt4_59149c78", "gpt4_d31cdae3", "gpt4_2c50253f", "71017276", "gpt4_468eb063", "gpt4_1a1dc16d", "gpt4_fa19884d", "982b5123", "gpt4_a2d1d1f6", "gpt4_2f56ae70"]
+
+[[slice]]
+name = "F"
+size = 64
+opened = ""
+
+[[slice.stratum]]
+name = "abstention"
+quota = 4
+ids = ["88432d0a_abs", "gpt4_93159ced_abs", "6aeb4375_abs", "ba358f49_abs"]
+
+[[slice.stratum]]
+name = "knowledge-update"
+quota = 9
+ids = ["eace081b", "0e4e4c46", "6aeb4375", "618f13b2", "1cea1afa", "affe2881", "6a1eabeb", "89941a94", "d7c942c3"]
+
+[[slice.stratum]]
+name = "multi-session"
+quota = 16
+ids = ["8cf4d046", "b3c15d39", "gpt4_15e38248", "078150f1", "9d25d4e0", "gpt4_2f91af09", "ba358f49", "27016adc", "dd2973ad", "8e91e7d9", "1192316e", "4adc0475", "gpt4_372c3eed", "2b8f3739", "681a1674", "6456829e"]
+
+[[slice.stratum]]
+name = "single-session-assistant"
+quota = 8
+ids = ["8464fc84", "16c90bf4", "89527b6b", "4388e9dd", "58470ed2", "1de5cff2", "4baee567", "8b9d4367"]
+
+[[slice.stratum]]
+name = "single-session-user"
+quota = 9
+ids = ["58bf7951", "3f1e9474", "66f24dbb", "ccb36322", "36580ce8", "ad7109d1", "577d4d32", "c8c3f81d", "1e043500"]
+
+[[slice.stratum]]
+name = "temporal-reasoning"
+quota = 18
+ids = ["9a707b82", "gpt4_7ca326fa", "6e984301", "gpt4_4929293a", "gpt4_4929293b", "2ebe6c92", "gpt4_68e94288", "gpt4_483dd43c", "gpt4_2d58bcd6", "370a8ff4", "gpt4_7abb270c", "b29f3365", "gpt4_2487a7cb", "gpt4_6dc9b45b", "gpt4_1e4a8aec", "gpt4_1e4a8aeb", "993da5e2", "gpt4_7bc6cf22"]
