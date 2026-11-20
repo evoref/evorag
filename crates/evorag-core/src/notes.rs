@@ -184,7 +184,7 @@ async fn make_keys(
     slot: Option<u32>,
     seg: &Segment,
 ) -> Result<Vec<String>, KeysError> {
-    let mut extra = inner.aux_request_extra.clone();
+    let mut extra = inner.aux_extra();
     extra.insert(
         "response_format".into(),
         json!({

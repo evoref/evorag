@@ -135,21 +135,30 @@ fn request(prompt: &str, extra: RequestExtra, max_tokens: u32, slot: Option<u32>
     }
 }
 
-/// chat の役割を点検する。`aux_extra` は補助の呼び出しに足す JSON (`llm.chat.aux_request_extra`)。
-pub async fn chat(
+/// 思考を切る指定 (`chat_template_kwargs`) の項目の名前 (06 §6)。
+pub const THINKING_KEY: &str = "chat_template_kwargs";
+
+/// 点検が自動で足す、思考を切る指定 (OQ-52)。
+pub fn thinking_off_value() -> serde_json::Value {
+    json!({"enable_thinking": false})
+}
+
+/// 補助の呼び出しに足す JSON: 設定の指定に、点検が通った思考を切る指定 (`p.aux_thinking_off`) を足したもの
+/// (設定に `chat_template_kwargs` があれば、そちらを使う、06 §6、OQ-52)。
+pub fn aux_extra_with(config: &RequestExtra, p: Option<&ModelProbeBody>) -> RequestExtra {
+    let mut e = config.clone();
+    if !e.contains_key(THINKING_KEY) && p.is_some_and(|p| p.aux_thinking_off == Some(true)) {
+        e.insert(THINKING_KEY.into(), thinking_off_value());
+    }
+    e
+}
+
+/// 型縛りの補助の呼び出しを 1 回試す: (思考が出なかったか, 型に合う JSON だったか)。
+async fn structured(
     llm: &dyn LlmClient,
-    model_key: &str,
-    build_info: &str,
     aux_extra: &RequestExtra,
     slot: Option<u32>,
-) -> ModelProbeBody {
-    let mut p = ModelProbeBody {
-        role: evorag_memory::ROLE_CHAT.into(),
-        model_key: model_key.into(),
-        build_info: build_info.into(),
-        ..ModelProbeBody::default()
-    };
-    // 型縛りの補助の呼び出し (06 §6): 型に合う JSON が返るか、思考が出ないか。
+) -> Result<(bool, bool), ChatError> {
     let mut extra = aux_extra.clone();
     extra.insert(
         "response_format".into(),
@@ -167,7 +176,7 @@ pub async fn chat(
             }
         }),
     );
-    match run_chat(
+    let c = run_chat(
         llm,
         request(
             "1 から 9 までの数を 1 つ選び、JSON で答えてください。",
@@ -176,19 +185,48 @@ pub async fn chat(
             slot,
         ),
     )
-    .await
-    {
-        Ok(c) => {
-            p.thinking_off = Some(!c.reasoning);
-            p.structured_ok = Some(
-                serde_json::from_str::<serde_json::Value>(c.text.trim())
-                    .ok()
-                    .and_then(|v| v.get("n").and_then(serde_json::Value::as_i64))
-                    .is_some(),
-            );
+    .await?;
+    let ok = serde_json::from_str::<serde_json::Value>(c.text.trim())
+        .ok()
+        .and_then(|v| v.get("n").and_then(serde_json::Value::as_i64))
+        .is_some();
+    Ok((!c.reasoning, ok))
+}
+
+/// chat の役割を点検する。`aux_extra` は補助の呼び出しに足す JSON (`llm.chat.aux_request_extra`)。
+pub async fn chat(
+    llm: &dyn LlmClient,
+    model_key: &str,
+    build_info: &str,
+    aux_extra: &RequestExtra,
+    slot: Option<u32>,
+) -> ModelProbeBody {
+    let mut p = ModelProbeBody {
+        role: evorag_memory::ROLE_CHAT.into(),
+        model_key: model_key.into(),
+        build_info: build_info.into(),
+        ..ModelProbeBody::default()
+    };
+    // 型縛りの補助の呼び出し (06 §6): 型に合う JSON が返るか、思考が出ないか。
+    match structured(llm, aux_extra, slot).await {
+        Ok((thinking_off, ok)) => {
+            p.thinking_off = Some(thinking_off);
+            p.structured_ok = Some(ok);
         }
         Err(e) => p.error = Some(format!("structured: {e}")),
     }
+    // 思考を切れない・型縛りの出力が空で、設定に思考を切る指定が無ければ、指定を足して確かめ直す (OQ-52)。
+    let failed = p.thinking_off == Some(false) || p.structured_ok == Some(false);
+    if failed && !aux_extra.contains_key(THINKING_KEY) {
+        let mut with = aux_extra.clone();
+        with.insert(THINKING_KEY.into(), thinking_off_value());
+        if let Ok((true, true)) = structured(llm, &with, slot).await {
+            p.thinking_off = Some(true);
+            p.structured_ok = Some(true);
+            p.aux_thinking_off = Some(true);
+        }
+    }
+    let aux_extra = &aux_extra_with(aux_extra, Some(&p));
     // 生成の速さ (補助の呼び出しと同じ設定で、思考の時間を数えないようにする)。
     // 前の点検のキャッシュでプロンプトの処理が省かれないようにする。
     let mut extra = aux_extra.clone();

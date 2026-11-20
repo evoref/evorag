@@ -285,7 +285,7 @@ enum Stop {
 
 /// 抽出の要求 (06 §6: temperature 0・固定の seed・固定のスロット、`aux_request_extra`、`response_format`)。
 fn request(inner: &Inner, slot: Option<u32>, system: &str, texts: &[&str]) -> ChatRequest {
-    extraction_request(&inner.aux_request_extra, slot, system, texts)
+    extraction_request(&inner.aux_extra(), slot, system, texts)
 }
 
 /// 抽出の要求の形 (sleep-time の抽出と `rebuild --facts` で共通、06 §6): 型縛り (`response_format`)・

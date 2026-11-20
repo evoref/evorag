@@ -823,6 +823,7 @@ message_keys! {
     /// 引数: `prompt`, `gen`, `issues`。
     DoctorProbeChat => "doctor.probe_chat",
     DoctorProbeNoIssue => "doctor.probe_no_issue",
+    DoctorProbeAuxThinkingOff => "doctor.probe_aux_thinking_off",
     /// 引数: `dims`, `ms`。
     DoctorProbeEmbed => "doctor.probe_embed",
     /// 引数: `ms`。

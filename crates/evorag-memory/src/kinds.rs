@@ -315,6 +315,10 @@ pub struct ModelProbeBody {
     pub thinking_off: Option<bool>,
     /// chat: 型縛りの出力が、型に合う JSON だった (空にならなかった)。
     pub structured_ok: Option<bool>,
+    /// chat: 設定に思考を切る指定が無く、点検が `chat_template_kwargs = { enable_thinking = false }` を足して
+    /// 確かめ直して通った。補助の呼び出しにその指定を足す (06 §3.3、OQ-52、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux_thinking_off: Option<bool>,
     /// embed: 次元の数。
     pub dims: Option<u32>,
     /// embed: 問い 1 件の埋め込みの時間 (ms)。

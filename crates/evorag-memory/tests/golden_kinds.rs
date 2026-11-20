@@ -181,6 +181,8 @@ fn model_probe_v1() {
             gen_tps: Some(41.2),
             thinking_off: Some(true),
             structured_ok: Some(false),
+            // v0.4 の任意の項目。見本 (v0.2 の形) には無い。
+            aux_thinking_off: None,
             dims: None,
             embed_ms: None,
             rerank6_ms: None,

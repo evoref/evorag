@@ -98,6 +98,57 @@ async fn the_chat_probe_checks_structured_output_thinking_and_speed() {
     );
 }
 
+/// 設定の指定では思考が出て型縛りの出力が空になり、思考を切る指定を足すと型どおりに答える chat のサーバ。
+const THINKS_UNLESS_TOLD: &str = r#"
+  {"events": [{"reasoning": "考え中"}, {"done": {"finish_reason": "length"}}]},
+  {"events": [{"delta": "{\"n\": 3}"}, {"done": {}}]},
+  {"events": [{"delta": "1"}, {"wait_ms": 20}, {"delta": " 2 3"},
+              {"done": {"prompt_tokens": 300, "completion_tokens": 11}}]}"#;
+
+/// verifies: AC-FR-422-1 (点検が思考を切る指定を足して確かめ直し、通れば記録して補助の呼び出しに足す)
+#[tokio::test]
+async fn the_chat_probe_adds_the_thinking_off_setting_when_it_helps() {
+    let kwargs = "chat_template_kwargs";
+    // 設定に思考を切る指定が無い: 足して確かめ直し、通ったことを記録する。
+    let llm = server(THINKS_UNLESS_TOLD, "");
+    let p = probe::chat(&llm, "k", "b", &evorag_llm::RequestExtra::new(), None).await;
+    assert_eq!(p.thinking_off, Some(true));
+    assert_eq!(p.structured_ok, Some(true));
+    assert_eq!(p.aux_thinking_off, Some(true));
+    assert!(probe::issues(&p).is_empty());
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 3);
+    assert!(!reqs[0].extra.contains_key(kwargs));
+    assert_eq!(
+        reqs[1].extra.get(kwargs),
+        Some(&serde_json::json!({"enable_thinking": false}))
+    );
+    // 速さの課題も、補助の呼び出しと同じ設定で流す。
+    assert!(reqs[2].extra.contains_key(kwargs));
+    // 補助の呼び出しの指定: 点検の結果から足す。設定に書いた指定は上書きしない。
+    let none = evorag_llm::RequestExtra::new();
+    assert_eq!(
+        probe::aux_extra_with(&none, Some(&p)).get(kwargs),
+        Some(&serde_json::json!({"enable_thinking": false}))
+    );
+    let mut own = evorag_llm::RequestExtra::new();
+    own.insert(kwargs.into(), serde_json::json!({"enable_thinking": true}));
+    assert_eq!(
+        probe::aux_extra_with(&own, Some(&p)).get(kwargs),
+        Some(&serde_json::json!({"enable_thinking": true}))
+    );
+    assert!(!probe::aux_extra_with(&none, None).contains_key(kwargs));
+
+    // 設定に思考を切る指定があれば、確かめ直さない (利用者の指定を変えない)。
+    let llm = server(BROKEN, "");
+    let mut aux = evorag_llm::RequestExtra::new();
+    aux.insert(kwargs.into(), serde_json::json!({"enable_thinking": false}));
+    let p = probe::chat(&llm, "k", "b", &aux, None).await;
+    assert_eq!(p.aux_thinking_off, None);
+    assert_eq!(p.thinking_off, Some(false));
+    assert_eq!(llm.requests().len(), 2);
+}
+
 /// verifies: AC-FR-514-1 (embed と rerank の点検)
 #[tokio::test]
 async fn the_embed_and_rerank_probes_measure_dims_and_time() {
