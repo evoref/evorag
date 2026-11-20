@@ -124,13 +124,19 @@ async fn utterances_and_answers_keep_the_v0_4_observations() {
 
     // 発話: UTC からのずれ、前の発話からの時間、起動したときに残っていた手順 (最初の発話だけ)。
     let offset = evorag_core::localtime::offset(START).map(|s| s / 60);
-    let first = users[0].obs.as_ref().expect("the first utterance has observations");
+    let first = users[0]
+        .obs
+        .as_ref()
+        .expect("the first utterance has observations");
     assert_eq!(first.tz_offset, offset);
     assert_eq!(first.idle, None, "no earlier utterance in the session");
     assert!(first.pending_at_start.is_some());
     let second = users[1].obs.as_ref().expect("observations");
     assert_eq!(second.idle, Some(90));
-    assert_eq!(second.pending_at_start, None, "only the first utterance after the start");
+    assert_eq!(
+        second.pending_at_start, None,
+        "only the first utterance after the start"
+    );
 
     // 応答: 問いの分析、先読み (v0.4 の M4.1 では無し) と応答が始まるまでの時間、作りの版。
     for a in &answers {
