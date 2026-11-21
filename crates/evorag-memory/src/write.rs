@@ -257,6 +257,20 @@ impl Writes<'_> {
         session: &Envelope,
         text: &str,
     ) -> Result<(Id, Vec<WriteOp>), BodyError> {
+        self.user_turn_with(session, text, None)
+    }
+
+    /// 利用者の発話を、観測値 (05 §3.6 の発話のターンの項目、v0.4) をつけて書く。
+    ///
+    /// # Errors
+    ///
+    /// 本体を符号化できないとき。
+    pub fn user_turn_with(
+        &self,
+        session: &Envelope,
+        text: &str,
+        obs: Option<TurnObs>,
+    ) -> Result<(Id, Vec<WriteOp>), BodyError> {
         let id = self.ids.next_id();
         let now = self.clock.now();
         let e = envelope(
@@ -274,7 +288,7 @@ impl Writes<'_> {
                 reply_to: None,
                 error: None,
                 recall: None,
-                obs: None,
+                obs,
             },
         )?;
         let mut ops = vec![

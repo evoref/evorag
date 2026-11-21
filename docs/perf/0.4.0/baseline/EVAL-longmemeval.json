@@ -1,0 +1,3445 @@
+{
+  "id": "EVAL-longmemeval",
+  "set": "dev",
+  "evorag": "0.3.0",
+  "date": "2026-11-20",
+  "subset_file": "tests/longmemeval/subset-v0.3.toml",
+  "subset_ids_sha256": "c2e454667816bfe9d589133c5969ad33d91aeec4bcabee9d1cd9acaf09aa85e5",
+  "source": "longmemeval_oracle.json",
+  "source_sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+  "license": "MIT (Copyright (c) 2024 Di Wu)",
+  "partial": false,
+  "typing": true,
+  "setup": "chat+embed+rerank",
+  "models": {
+    "chat": {
+      "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_fp": "04e555181c24",
+      "build_info": "b1-622aa06",
+      "n_ctx": 16384
+    },
+    "embed": {
+      "model_file": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_name": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_fp": "0c044acef127",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    },
+    "rerank": {
+      "model_file": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_name": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_fp": "cb952a6c3a57",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    }
+  },
+  "ingest": "haystack turns (user and assistant, as in the data) written through the store's write path at the session dates; facts, notes and embeddings by evorag's own sleep-time steps",
+  "judge": "deterministic: NFKC + lowercase word tokens (number words to digits); correct if the gold answer's word sequence appears in the response or all its content words do; _abs: an abstention marker. Not comparable with the official GPT-4o judge",
+  "questions": 50,
+  "correct": 20,
+  "accuracy": 0.4,
+  "mean_token_recall": 0.5690323886639675,
+  "solvable_words": 5,
+  "solvable_questions": 43,
+  "solvable_correct": 19,
+  "solvable_accuracy": 0.4418604651162791,
+  "per_type": {
+    "abstention": {
+      "questions": 3,
+      "correct": 1,
+      "accuracy": 0.3333333333333333,
+      "mean_token_recall": 0.3333333333333333
+    },
+    "knowledge-update": {
+      "questions": 8,
+      "correct": 4,
+      "accuracy": 0.5,
+      "mean_token_recall": 0.6458333333333333
+    },
+    "multi-session": {
+      "questions": 13,
+      "correct": 2,
+      "accuracy": 0.15384615384615385,
+      "mean_token_recall": 0.37191944357936263
+    },
+    "single-session-assistant": {
+      "questions": 6,
+      "correct": 2,
+      "accuracy": 0.3333333333333333,
+      "mean_token_recall": 0.5833333333333334
+    },
+    "single-session-user": {
+      "questions": 7,
+      "correct": 5,
+      "accuracy": 0.7142857142857143,
+      "mean_token_recall": 0.8380952380952381
+    },
+    "temporal-reasoning": {
+      "questions": 13,
+      "correct": 6,
+      "accuracy": 0.46153846153846156,
+      "mean_token_recall": 0.6217948717948717
+    }
+  },
+  "seconds": 706.3874461,
+  "results": [
+    {
+      "id": "8a137a7f",
+      "stratum": "single-session-user",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 2.0399941,
+      "answer_seconds": 4.6954884,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "018856bd-3320-70a4-aa68-c32c0da28de0",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885162-a7c0-7000-ab03-54df4a45b34e",
+              "score": 0.6987540125846863
+            },
+            {
+              "id": "0188515e-fe40-7000-b3d3-3b666a1e21da",
+              "score": 0.49625295400619507
+            },
+            {
+              "id": "01885161-bd60-7000-9a82-e79b05b5faeb",
+              "score": -6.663895606994629
+            },
+            {
+              "id": "01885160-d300-7000-a25e-c07a99506761",
+              "score": -7.5229644775390625
+            },
+            {
+              "id": "0188515f-e8a0-7000-b7cb-c4a133c2d0f6",
+              "score": -8.293111801147461
+            },
+            {
+              "id": "0188515e-13e0-7000-a698-4080bab12a02",
+              "score": -8.446434020996094
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01885161-bd60-7000-9a82-e79b05b5faeb"
+          ],
+          "fact_table": "d35eb6e3a5e0253627bcd08065ef0e23efec5f9459112a4bbe4bb1c9c7612132"
+        }
+      },
+      "seconds": 7.0929166
+    },
+    {
+      "id": "726462e0",
+      "stratum": "single-session-user",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 5,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4097695,
+      "answer_seconds": 3.3312407,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f751-1afb-709b-81e6-4d77133d8e5e",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018853ac-97c0-7000-b3d3-3b666a1e21da",
+              "score": 4.533502101898193
+            },
+            {
+              "id": "018853ad-8220-7000-b7cb-c4a133c2d0f6",
+              "score": -10.872559547424316
+            },
+            {
+              "id": "018853ae-6c80-7000-a25e-c07a99506761",
+              "score": -10.886823654174805
+            },
+            {
+              "id": "018853b0-4140-7000-ab03-54df4a45b34e",
+              "score": -10.944799423217773
+            },
+            {
+              "id": "018853ab-ad60-7000-a698-4080bab12a02",
+              "score": -10.983224868774414
+            },
+            {
+              "id": "018853af-56e0-7000-9a82-e79b05b5faeb",
+              "score": -11.013688087463379
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "8d6073f0aec5210ac6c1dc7dc7c4c6b58f37b25cae19142facc50d14c88fec89"
+        }
+      },
+      "seconds": 4.6253764
+    },
+    {
+      "id": "75499fd8",
+      "stratum": "single-session-user",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0252664,
+      "answer_seconds": 10.0884163,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f752-297f-7097-abf2-439e92f37d77",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188412a-bd20-7000-9a82-e79b05b5faeb",
+              "score": -3.000025749206543
+            },
+            {
+              "id": "0188412b-a780-7000-ab03-54df4a45b34e",
+              "score": -3.194497585296631
+            },
+            {
+              "id": "01884129-d2c0-7000-a25e-c07a99506761",
+              "score": -4.689342498779297
+            },
+            {
+              "id": "01884128-e860-7000-b7cb-c4a133c2d0f6",
+              "score": -4.873544692993164
+            },
+            {
+              "id": "01884127-13a0-7000-a698-4080bab12a02",
+              "score": -6.4948296546936035
+            },
+            {
+              "id": "01884127-fe00-7000-b3d3-3b666a1e21da",
+              "score": -7.387603282928467
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01884127-fe00-7000-b3d3-3b666a1e21da"
+          ]
+        }
+      },
+      "seconds": 11.8403097
+    },
+    {
+      "id": "4fd1909e",
+      "stratum": "single-session-user",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4400568,
+      "answer_seconds": 2.6767288000000002,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f752-f39a-706b-9011-bd238e8a1711",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884f96-2520-7000-b3d3-3b666a1e21da",
+              "score": 4.235750198364258
+            },
+            {
+              "id": "01884f97-f9e0-7000-a25e-c07a99506761",
+              "score": -6.39021635055542
+            },
+            {
+              "id": "01884f97-0f80-7000-b7cb-c4a133c2d0f6",
+              "score": -7.203536033630371
+            },
+            {
+              "id": "01884f99-cea0-7000-ab03-54df4a45b34e",
+              "score": -8.687528610229492
+            },
+            {
+              "id": "01884f95-3ac0-7000-a698-4080bab12a02",
+              "score": -8.71208667755127
+            },
+            {
+              "id": "01884f98-e440-7000-9a82-e79b05b5faeb",
+              "score": -9.753883361816406
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01884f97-0f80-7000-b7cb-c4a133c2d0f6"
+          ],
+          "fact_table": "ea95260f6ac318a8796d12cf6312f67a2930c8bca5d2f33a24749afa80128793"
+        }
+      },
+      "seconds": 4.0302811
+    },
+    {
+      "id": "001be529",
+      "stratum": "single-session-user",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4307396,
+      "answer_seconds": 3.9560652,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f754-0da1-7099-a069-049544f425a5",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883df0-eee0-7000-b7cb-c4a133c2d0f6",
+              "score": 0.9124795198440552
+            },
+            {
+              "id": "01883df1-d940-7000-a25e-c07a99506761",
+              "score": -10.517879486083984
+            },
+            {
+              "id": "01883def-1a20-7000-a698-4080bab12a02",
+              "score": -10.9154691696167
+            },
+            {
+              "id": "01883df3-ae00-7000-ab03-54df4a45b34e",
+              "score": -10.982227325439453
+            },
+            {
+              "id": "01883df2-c3a0-7000-9a82-e79b05b5faeb",
+              "score": -10.987699508666992
+            },
+            {
+              "id": "01883df0-0480-7000-b3d3-3b666a1e21da",
+              "score": -11.023489952087402
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "9ef266aaf2513c3087d6cc43e4077e7f2762c5195fcd147d95afec57ce6cd15f"
+        }
+      },
+      "seconds": 5.415194
+    },
+    {
+      "id": "4100d0a0",
+      "stratum": "single-session-user",
+      "correct": false,
+      "token_recall": 0.6666666666666666,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 0.9661615,
+      "answer_seconds": 6.7309721,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f755-b526-708f-975f-85b08f5a5194",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883c94-1e00-7000-b3d3-3b666a1e21da",
+              "score": 1.1680073738098145
+            },
+            {
+              "id": "01883c95-f2c0-7000-a25e-c07a99506761",
+              "score": -0.9009965658187866
+            },
+            {
+              "id": "01883c95-0860-7000-b7cb-c4a133c2d0f6",
+              "score": -2.219766139984131
+            },
+            {
+              "id": "01883c97-c780-7000-ab03-54df4a45b34e",
+              "score": -3.852834463119507
+            },
+            {
+              "id": "01883c93-33a0-7000-a698-4080bab12a02",
+              "score": -4.3179097175598145
+            },
+            {
+              "id": "01883c96-dd20-7000-9a82-e79b05b5faeb",
+              "score": -4.710355758666992
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 8.9327335
+    },
+    {
+      "id": "25e5aa4f",
+      "stratum": "single-session-user",
+      "correct": false,
+      "token_recall": 0.2,
+      "gold_content_words": 5,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2640385,
+      "answer_seconds": 9.4654025,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f756-4d92-70c7-95c0-a339c4b4d5e1",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018835c4-f400-7000-ab03-54df4a45b34e",
+              "score": -1.3008239269256592
+            },
+            {
+              "id": "018835c2-34e0-7000-b7cb-c4a133c2d0f6",
+              "score": -1.9180550575256348
+            },
+            {
+              "id": "018835c3-1f40-7000-a25e-c07a99506761",
+              "score": -4.227397918701172
+            },
+            {
+              "id": "018835c0-6020-7000-a698-4080bab12a02",
+              "score": -5.136898994445801
+            },
+            {
+              "id": "018835c4-09a0-7000-9a82-e79b05b5faeb",
+              "score": -6.826435565948486
+            },
+            {
+              "id": "018835c1-4a80-7000-b3d3-3b666a1e21da",
+              "score": -7.065425395965576
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "018835c4-09a0-7000-9a82-e79b05b5faeb",
+            "018835c1-4a80-7000-b3d3-3b666a1e21da"
+          ],
+          "fact_table": "c90d80ff8c9f7d840591af67e7489a9f19a0d7bfd34c3e946b54159dc00da804"
+        }
+      },
+      "seconds": 10.8171269
+    },
+    {
+      "id": "561fabcd",
+      "stratum": "single-session-assistant",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 8,
+      "assistant_turns": 8,
+      "dropped_turns": 1,
+      "merged_turns": 0,
+      "ttft_seconds": 1.1250331,
+      "answer_seconds": 7.5660212,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f757-8b67-7076-8201-c74239499809",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885f0d-cd00-7000-b3d3-3b666a1e21da",
+              "score": -0.9107279181480408
+            },
+            {
+              "id": "01885f0c-e2a0-7000-a698-4080bab12a02",
+              "score": -1.420981526374817
+            },
+            {
+              "id": "01885f0f-a1c0-7000-a25e-c07a99506761",
+              "score": -4.880928993225098
+            },
+            {
+              "id": "01885f10-8c20-7000-9a82-e79b05b5faeb",
+              "score": -5.613133430480957
+            },
+            {
+              "id": "01885f0e-b760-7000-b7cb-c4a133c2d0f6",
+              "score": -7.101783752441406
+            },
+            {
+              "id": "01885f12-60e0-7000-9d2f-9b2d0b5f15e6",
+              "score": -7.311173439025879
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01885f0e-b760-7000-b7cb-c4a133c2d0f6",
+            "01885f12-60e0-7000-9d2f-9b2d0b5f15e6"
+          ]
+        }
+      },
+      "seconds": 9.099215
+    },
+    {
+      "id": "1d4da289",
+      "stratum": "single-session-assistant",
+      "correct": false,
+      "token_recall": 0.75,
+      "gold_content_words": 12,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 3,
+      "assistant_turns": 3,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 0.876349,
+      "answer_seconds": 15.5258974,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f758-6813-7033-b464-c7a220d08e82",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883dba-eac0-7000-a698-4080bab12a02",
+              "score": 1.5948643684387207
+            },
+            {
+              "id": "01883dbc-bf80-7000-b7cb-c4a133c2d0f6",
+              "score": 0.6750994920730591
+            },
+            {
+              "id": "01883dbb-d520-7000-b3d3-3b666a1e21da",
+              "score": -4.758910179138184
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 17.1495736
+    },
+    {
+      "id": "f523d9fe",
+      "stratum": "single-session-assistant",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0475495,
+      "answer_seconds": 4.9162989,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f759-0a7a-7053-a7f5-e08b2228d81a",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018844c5-9720-7000-a12e-5d006cd3d6af",
+              "score": 8.038749694824219
+            },
+            {
+              "id": "018844c8-5640-7000-982d-6717a91d279d",
+              "score": -0.09267205744981766
+            },
+            {
+              "id": "018844c1-0340-7000-b7cb-c4a133c2d0f6",
+              "score": -2.9193930625915527
+            },
+            {
+              "id": "018844c1-eda0-7000-a25e-c07a99506761",
+              "score": -4.3734612464904785
+            },
+            {
+              "id": "018844c0-18e0-7000-b3d3-3b666a1e21da",
+              "score": -5.103499889373779
+            },
+            {
+              "id": "018844c6-8180-7000-9e7e-b00e4c9c9e35",
+              "score": -5.752737045288086
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 6.1719788
+    },
+    {
+      "id": "28bcfaac",
+      "stratum": "single-session-assistant",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 3,
+      "assistant_turns": 3,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 0.9223964,
+      "answer_seconds": 3.4475557,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f759-868b-7034-8fb8-91793eb95609",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188540d-a380-7000-b3d3-3b666a1e21da",
+              "score": 8.789423942565918
+            },
+            {
+              "id": "0188540e-8de0-7000-b7cb-c4a133c2d0f6",
+              "score": 4.2296342849731445
+            },
+            {
+              "id": "0188540c-b920-7000-a698-4080bab12a02",
+              "score": 0.7356991171836853
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 4.2644285
+    },
+    {
+      "id": "7161e7e2",
+      "stratum": "single-session-assistant",
+      "correct": false,
+      "token_recall": 0.75,
+      "gold_content_words": 8,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 7,
+      "assistant_turns": 7,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0588173,
+      "answer_seconds": 15.0427421,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f759-d9c8-7065-aaa0-4b44afe1864a",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884ca8-5400-7000-9d2f-9b2d0b5f15e6",
+              "score": 3.791870355606079
+            },
+            {
+              "id": "01884ca7-69a0-7000-ab03-54df4a45b34e",
+              "score": 3.66800856590271
+            },
+            {
+              "id": "01884ca3-c020-7000-b3d3-3b666a1e21da",
+              "score": 2.064345359802246
+            },
+            {
+              "id": "01884ca4-aa80-7000-b7cb-c4a133c2d0f6",
+              "score": 1.467244029045105
+            },
+            {
+              "id": "01884ca6-7f40-7000-9a82-e79b05b5faeb",
+              "score": 1.3599590063095093
+            },
+            {
+              "id": "01884ca2-d5c0-7000-a698-4080bab12a02",
+              "score": 1.0581600666046143
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 16.421595
+    },
+    {
+      "id": "fca762bc",
+      "stratum": "single-session-assistant",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 6,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 3,
+      "assistant_turns": 3,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4171459,
+      "answer_seconds": 9.481012400000001,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f75a-8d25-7036-9326-207e5ea49086",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884020-5200-7000-b7cb-c4a133c2d0f6",
+              "score": 5.836716651916504
+            },
+            {
+              "id": "0188401e-7d40-7000-a698-4080bab12a02",
+              "score": -5.501543045043945
+            },
+            {
+              "id": "0188401f-67a0-7000-b3d3-3b666a1e21da",
+              "score": -5.637009620666504
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "c1338087b941178f9ab173630f69d76d4a604c810728d0918bde2639f2f3696f"
+        }
+      },
+      "seconds": 11.3977013
+    },
+    {
+      "id": "gpt4_7fce9456",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.2631578947368421,
+      "gold_content_words": 38,
+      "sources": 1,
+      "facts": 12,
+      "settled": true,
+      "ready": true,
+      "sessions": 5,
+      "user_turns": 30,
+      "assistant_turns": 30,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.5249333,
+      "answer_seconds": 8.5577413,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f75b-505f-733d-a72e-9b522ef7791f",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0186bf3b-25d0-7000-93f1-83c986aec07e",
+              "score": 0.8059693574905396
+            },
+            {
+              "id": "0186bdef-ba10-7000-b5e1-803bf4585807",
+              "score": 0.6434639096260071
+            },
+            {
+              "id": "0186bdeb-2630-7000-a6df-52ffdf834b47",
+              "score": 0.5983624458312988
+            },
+            {
+              "id": "0186bd19-7e50-7000-938c-6a0cda7326c7",
+              "score": -2.079218864440918
+            },
+            {
+              "id": "0186bf3a-3b70-7000-91ce-3318362240f6",
+              "score": -8.809732437133789
+            },
+            {
+              "id": "0186bd18-93f0-7000-8c5c-906b1aeb85f8",
+              "score": -9.154555320739746
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "31bafe1e6fd56c71c757c4b0b2c5a8ed88fec9d9e0dda4d1293d30328b5ece4d"
+        }
+      },
+      "seconds": 11.4654269
+    },
+    {
+      "id": "e831120c",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.3333333333333333,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.1436338,
+      "answer_seconds": 9.755781,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f760-e720-70e5-abef-17d5d245b8ed",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883ca3-3930-7000-81df-da7a5eb236f8",
+              "score": 5.56586217880249
+            },
+            {
+              "id": "01883c69-1660-7000-a698-4080bab12a02",
+              "score": 3.5008645057678223
+            },
+            {
+              "id": "01883ca1-6470-7000-8c5c-906b1aeb85f8",
+              "score": 1.945281982421875
+            },
+            {
+              "id": "01883ca2-4ed0-7000-938c-6a0cda7326c7",
+              "score": -1.51708984375
+            },
+            {
+              "id": "01883ca5-0df0-7000-ac7c-5b1c60b890ff",
+              "score": -2.5197696685791016
+            },
+            {
+              "id": "01883ca4-2390-7000-9b50-51c62d0332cd",
+              "score": -4.048624515533447
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 11.3837979
+    },
+    {
+      "id": "gpt4_2f8be40d",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.2,
+      "gold_content_words": 10,
+      "sources": 1,
+      "facts": 12,
+      "settled": true,
+      "ready": true,
+      "sessions": 3,
+      "user_turns": 18,
+      "assistant_turns": 18,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 2.2460011,
+      "answer_seconds": 6.9035713,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f762-1551-720d-9011-fce1096dec34",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018b3328-bdf0-7000-9363-f25caeb7c570",
+              "score": -4.376167297363281
+            },
+            {
+              "id": "018b2f3b-0900-7000-a698-4080bab12a02",
+              "score": -5.218936920166016
+            },
+            {
+              "id": "018b3325-fed0-7000-b89c-5aca8c448a78",
+              "score": -5.241127014160156
+            },
+            {
+              "id": "018b3147-2cb0-7000-938c-6a0cda7326c7",
+              "score": -6.155179977416992
+            },
+            {
+              "id": "018b3325-1470-7000-a6df-52ffdf834b47",
+              "score": -7.503158092498779
+            },
+            {
+              "id": "018b3146-4250-7000-8c5c-906b1aeb85f8",
+              "score": -7.709486961364746
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "018b3325-1470-7000-a6df-52ffdf834b47",
+            "018b3146-4250-7000-8c5c-906b1aeb85f8"
+          ],
+          "fact_table": "3c2269657ff5dd9fc533ef9f37e657ea9b7f06145aae7f08e56ffea85040113f"
+        }
+      },
+      "seconds": 10.1071422
+    },
+    {
+      "id": "edced276",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 11,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 9,
+      "assistant_turns": 9,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4720081999999999,
+      "answer_seconds": 9.8049934,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f768-6c7f-7104-bb98-bd3820627a8f",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883869-8720-7000-a698-4080bab12a02",
+              "score": -1.2906036376953125
+            },
+            {
+              "id": "01883b14-0db0-7000-8c5c-906b1aeb85f8",
+              "score": -5.512791633605957
+            },
+            {
+              "id": "01883b13-2350-7000-9f0f-9924a3016430",
+              "score": -5.601849555969238
+            },
+            {
+              "id": "0188386b-5be0-7000-b7cb-c4a133c2d0f6",
+              "score": -8.741337776184082
+            },
+            {
+              "id": "0188386d-30a0-7000-9a82-e79b05b5faeb",
+              "score": -8.898185729980469
+            },
+            {
+              "id": "0188386c-4640-7000-a25e-c07a99506761",
+              "score": -9.970745086669922
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "b444452a7016fee90127c215895dc7a70ef82e8b2c5db891d3899bf6e9e33bdd"
+        }
+      },
+      "seconds": 11.1332602
+    },
+    {
+      "id": "2311e44b",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 3,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 9,
+      "assistant_turns": 9,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.572912,
+      "answer_seconds": 7.0402695,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f76c-9632-70dc-a0f3-7f0c63fc6156",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188466e-da50-7000-9f0f-9924a3016430",
+              "score": 5.105965614318848
+            },
+            {
+              "id": "01884270-aaa0-7000-9a82-e79b05b5faeb",
+              "score": 1.9492578506469727
+            },
+            {
+              "id": "0188466f-c4b0-7000-8c5c-906b1aeb85f8",
+              "score": -4.282882213592529
+            },
+            {
+              "id": "0188426d-eb80-7000-b3d3-3b666a1e21da",
+              "score": -5.594302177429199
+            },
+            {
+              "id": "01884671-9970-7000-81df-da7a5eb236f8",
+              "score": -5.807961940765381
+            },
+            {
+              "id": "0188426d-0120-7000-a698-4080bab12a02",
+              "score": -6.603185653686523
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "0188426d-0120-7000-a698-4080bab12a02"
+          ],
+          "fact_table": "b1b9dbc0b099745890ac1add7cfa8cb10f5578ecc916892e26b3d9fb3a910ca8"
+        }
+      },
+      "seconds": 8.4523063
+    },
+    {
+      "id": "eeda8a6d",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 2,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2431052,
+      "answer_seconds": 18.5983801,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f76e-9040-7119-ae8a-a41aa800b5c3",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885a13-d830-7000-9b50-51c62d0332cd",
+              "score": -3.7257163524627686
+            },
+            {
+              "id": "01885a12-edd0-7000-81df-da7a5eb236f8",
+              "score": -4.388755798339844
+            },
+            {
+              "id": "01885a15-acf0-7000-b5d8-1f333a1fb9e9",
+              "score": -4.427860260009766
+            },
+            {
+              "id": "01885a11-1910-7000-8c5c-906b1aeb85f8",
+              "score": -5.411281585693359
+            },
+            {
+              "id": "01884127-fe00-7000-b3d3-3b666a1e21da",
+              "score": -6.247068881988525
+            },
+            {
+              "id": "01885a14-c290-7000-ac7c-5b1c60b890ff",
+              "score": -7.907003402709961
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "670870101fc0eb9e05eef19d10e47c0b7ebf84420d199f285ebeac4e6e00631d"
+        }
+      },
+      "seconds": 20.2044587
+    },
+    {
+      "id": "e56a43b9",
+      "stratum": "multi-session",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 9,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.7998549000000001,
+      "answer_seconds": 9.1087368,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f770-112b-70f4-8cbb-8819a64b42d9",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188662a-53b0-7000-81df-da7a5eb236f8",
+              "score": 4.814844608306885
+            },
+            {
+              "id": "01886629-6950-7000-938c-6a0cda7326c7",
+              "score": 3.7465436458587646
+            },
+            {
+              "id": "01885483-bde0-7000-a698-4080bab12a02",
+              "score": 1.5831341743469238
+            },
+            {
+              "id": "01885485-92a0-7000-b7cb-c4a133c2d0f6",
+              "score": -7.586307525634766
+            },
+            {
+              "id": "01885488-51c0-7000-ab03-54df4a45b34e",
+              "score": -9.963737487792969
+            },
+            {
+              "id": "01885484-a840-7000-b3d3-3b666a1e21da",
+              "score": -10.727362632751465
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01885485-92a0-7000-b7cb-c4a133c2d0f6"
+          ],
+          "fact_table": "f2eba56662c3ad94291c5f5346a77f2e3fa900b55316b3258c78c6098ba3bfff"
+        }
+      },
+      "seconds": 14.0537734
+    },
+    {
+      "id": "4bc144e2",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 1,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0831379,
+      "answer_seconds": 8.2221162,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f772-93f5-70b6-9333-d2d20ff982ab",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884878-b410-7000-8c5c-906b1aeb85f8",
+              "score": 0.42932987213134766
+            },
+            {
+              "id": "0188487a-88d0-7000-81df-da7a5eb236f8",
+              "score": -0.9337524771690369
+            },
+            {
+              "id": "01884459-8ee0-7000-b3d3-3b666a1e21da",
+              "score": -1.314246654510498
+            },
+            {
+              "id": "0188445a-7940-7000-b7cb-c4a133c2d0f6",
+              "score": -5.5443878173828125
+            },
+            {
+              "id": "01884458-a480-7000-a698-4080bab12a02",
+              "score": -6.692741394042969
+            },
+            {
+              "id": "0188487b-7330-7000-9b50-51c62d0332cd",
+              "score": -7.710028648376465
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01884458-a480-7000-a698-4080bab12a02",
+            "0188487b-7330-7000-9b50-51c62d0332cd"
+          ]
+        }
+      },
+      "seconds": 11.3610353
+    },
+    {
+      "id": "5025383b",
+      "stratum": "multi-session",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 9,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.6626376,
+      "answer_seconds": 9.134869,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f774-0359-713c-abdd-e4d402914196",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884d6a-6b80-7000-a25e-c07a99506761",
+              "score": 0.7272862195968628
+            },
+            {
+              "id": "01884d68-96c0-7000-b3d3-3b666a1e21da",
+              "score": 0.31347543001174927
+            },
+            {
+              "id": "018856e0-7290-7000-81df-da7a5eb236f8",
+              "score": -5.162555694580078
+            },
+            {
+              "id": "018856e2-4750-7000-ac7c-5b1c60b890ff",
+              "score": -5.317647933959961
+            },
+            {
+              "id": "018856e1-5cf0-7000-9b50-51c62d0332cd",
+              "score": -8.058431625366211
+            },
+            {
+              "id": "01884d67-ac60-7000-a698-4080bab12a02",
+              "score": -10.919441223144531
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "8ac1ca01e0b392d4d390387b9094354e8e4750a374c5a2a3bf5a1688932346a8"
+        }
+      },
+      "seconds": 11.5444219
+    },
+    {
+      "id": "a96c20ee",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 1,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 0.9110085,
+      "answer_seconds": 12.6314876,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f776-13c3-713d-b761-259e64c9ac1f",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018843bb-2c00-7000-a698-4080bab12a02",
+              "score": 0.682081937789917
+            },
+            {
+              "id": "0188459c-4810-7000-8c5c-906b1aeb85f8",
+              "score": -5.022709846496582
+            },
+            {
+              "id": "018843bf-bfe0-7000-ab03-54df4a45b34e",
+              "score": -5.637229919433594
+            },
+            {
+              "id": "0188459d-3270-7000-938c-6a0cda7326c7",
+              "score": -8.414115905761719
+            },
+            {
+              "id": "018843bd-eb20-7000-a25e-c07a99506761",
+              "score": -8.943889617919922
+            },
+            {
+              "id": "0188459f-0730-7000-9b50-51c62d0332cd",
+              "score": -10.206186294555664
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 15.65637
+    },
+    {
+      "id": "gpt4_ab202e7f",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.5384615384615384,
+      "gold_content_words": 13,
+      "sources": 1,
+      "facts": 13,
+      "settled": true,
+      "ready": true,
+      "sessions": 5,
+      "user_turns": 30,
+      "assistant_turns": 30,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 2.4140301,
+      "answer_seconds": 5.9825444,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f777-8b58-72c6-a6f1-7bef27e2c80b",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188638c-2930-7000-b6a3-dec45265c099",
+              "score": -5.633048057556152
+            },
+            {
+              "id": "0188616b-6c10-7000-ab7a-07aacd555fc9",
+              "score": -6.889922142028809
+            },
+            {
+              "id": "0188616f-1590-7000-a4d2-1225283af2e8",
+              "score": -6.893125534057617
+            },
+            {
+              "id": "01884011-36d0-7000-8c5c-906b1aeb85f8",
+              "score": -8.663482666015625
+            },
+            {
+              "id": "01883f65-8d80-7000-a25e-c07a99506761",
+              "score": -10.31208610534668
+            },
+            {
+              "id": "01884015-cab0-7000-b5d8-1f333a1fb9e9",
+              "score": -10.951809883117676
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "0188616b-6c10-7000-ab7a-07aacd555fc9",
+            "0188616f-1590-7000-a4d2-1225283af2e8"
+          ],
+          "fact_table": "657f45e7569b2d9f50bcdcc42f070843ccee2a680f200ffe0a8ddf78a7772f82"
+        }
+      },
+      "seconds": 8.5825579
+    },
+    {
+      "id": "5a7937c8",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 3,
+      "settled": true,
+      "ready": true,
+      "sessions": 3,
+      "user_turns": 16,
+      "assistant_turns": 16,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4441987,
+      "answer_seconds": 6.4876097,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f77c-9b44-71cc-8c06-8294fa6e90e0",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018cf28e-20d0-7000-81df-da7a5eb236f8",
+              "score": -3.9535956382751465
+            },
+            {
+              "id": "018cf28c-4c10-7000-8c5c-906b1aeb85f8",
+              "score": -5.509952068328857
+            },
+            {
+              "id": "018cf32e-5870-7000-a6df-52ffdf834b47",
+              "score": -9.460793495178223
+            },
+            {
+              "id": "018cf32d-6e10-7000-93a1-6201310d9aba",
+              "score": -9.657445907592773
+            },
+            {
+              "id": "018cf28d-3670-7000-938c-6a0cda7326c7",
+              "score": -10.0587158203125
+            },
+            {
+              "id": "018ceeeb-7ea0-7000-a698-4080bab12a02",
+              "score": -10.202714920043945
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "f6aee5ed1c51cd8b5b6d62e32692dacb2daf57075899c9dc56d52e4c9e74cbbb"
+        }
+      },
+      "seconds": 9.9075189
+    },
+    {
+      "id": "b5ef892d",
+      "stratum": "multi-session",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 9,
+      "settled": true,
+      "ready": true,
+      "sessions": 3,
+      "user_turns": 18,
+      "assistant_turns": 18,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.5930507999999999,
+      "answer_seconds": 7.1457021,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f77e-ff53-71eb-b3fe-56b3c6f2a1a6",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0187c962-10e0-7000-a698-4080bab12a02",
+              "score": -5.350029945373535
+            },
+            {
+              "id": "0187cc75-e090-7000-a6df-52ffdf834b47",
+              "score": -5.400006294250488
+            },
+            {
+              "id": "0187cbe7-f870-7000-8c5c-906b1aeb85f8",
+              "score": -7.129508972167969
+            },
+            {
+              "id": "0187cbea-b790-7000-9b50-51c62d0332cd",
+              "score": -10.002010345458984
+            },
+            {
+              "id": "0187cbeb-a1f0-7000-ac7c-5b1c60b890ff",
+              "score": -10.87330436706543
+            },
+            {
+              "id": "0187cc76-caf0-7000-b89c-5aca8c448a78",
+              "score": -10.90537166595459
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "0187cbe7-f870-7000-8c5c-906b1aeb85f8"
+          ],
+          "fact_table": "334cd816070c557e7bf8300c582275276d5eb777ffd23a9e7acee1ad1dc61486"
+        }
+      },
+      "seconds": 10.0455134
+    },
+    {
+      "id": "4d6b87c8",
+      "stratum": "knowledge-update",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.192337,
+      "answer_seconds": 3.1748323,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f783-01e8-710f-a9e9-c155b246272a",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885e5f-6490-7000-938c-6a0cda7326c7",
+              "score": 4.5546464920043945
+            },
+            {
+              "id": "01885e63-0e10-7000-b5d8-1f333a1fb9e9",
+              "score": 2.6457018852233887
+            },
+            {
+              "id": "01883fc3-da20-7000-b3d3-3b666a1e21da",
+              "score": 1.903923749923706
+            },
+            {
+              "id": "01885e62-23b0-7000-ac7c-5b1c60b890ff",
+              "score": -0.1614925116300583
+            },
+            {
+              "id": "01883fc4-c480-7000-b7cb-c4a133c2d0f6",
+              "score": -4.685378551483154
+            },
+            {
+              "id": "01883fc2-efc0-7000-a698-4080bab12a02",
+              "score": -6.144611835479736
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 5.6338416
+    },
+    {
+      "id": "59524333",
+      "stratum": "knowledge-update",
+      "correct": false,
+      "token_recall": 0.6666666666666666,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 1,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4487411,
+      "answer_seconds": 3.8071075,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f784-1f19-70fb-8922-a1ad0d2e18ed",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01863f30-1080-7000-b7cb-c4a133c2d0f6",
+              "score": 2.0403730869293213
+            },
+            {
+              "id": "01886c86-2270-7000-8c5c-906b1aeb85f8",
+              "score": 0.7400372624397278
+            },
+            {
+              "id": "01886c87-0cd0-7000-938c-6a0cda7326c7",
+              "score": -1.107539415359497
+            },
+            {
+              "id": "01886c85-3810-7000-9f0f-9924a3016430",
+              "score": -9.820125579833984
+            },
+            {
+              "id": "01863f30-fae0-7000-a25e-c07a99506761",
+              "score": -10.739900588989258
+            },
+            {
+              "id": "01886c87-f730-7000-81df-da7a5eb236f8",
+              "score": -10.924444198608398
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "a07e94fcaab0aa9ea4b2b22af696e88017b57df3dcb841c1165f8396528fd71d"
+        }
+      },
+      "seconds": 9.3173948
+    },
+    {
+      "id": "8fb83627",
+      "stratum": "knowledge-update",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0990004,
+      "answer_seconds": 4.3086559,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f785-2609-7108-902b-ef4397e4b7c7",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01879a5a-e1a0-7000-b3d3-3b666a1e21da",
+              "score": 2.6808152198791504
+            },
+            {
+              "id": "01895a07-3890-7000-938c-6a0cda7326c7",
+              "score": 2.6396446228027344
+            },
+            {
+              "id": "01879a5e-8b20-7000-ab03-54df4a45b34e",
+              "score": 2.4501543045043945
+            },
+            {
+              "id": "01895a09-0d50-7000-9b50-51c62d0332cd",
+              "score": -0.3094603419303894
+            },
+            {
+              "id": "01879a5d-a0c0-7000-9a82-e79b05b5faeb",
+              "score": -1.6968938112258911
+            },
+            {
+              "id": "01879a59-f740-7000-a698-4080bab12a02",
+              "score": -7.799447536468506
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01879a59-f740-7000-a698-4080bab12a02"
+          ]
+        }
+      },
+      "seconds": 8.0042339
+    },
+    {
+      "id": "0ddfec37",
+      "stratum": "knowledge-update",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0952668,
+      "answer_seconds": 7.5236268,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f787-5360-7116-85f7-3751d461cab2",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01894458-d620-7000-a698-4080bab12a02",
+              "score": 3.149405002593994
+            },
+            {
+              "id": "018cb75e-2690-7000-8c5c-906b1aeb85f8",
+              "score": 3.1070706844329834
+            },
+            {
+              "id": "018cb761-d010-7000-ac7c-5b1c60b890ff",
+              "score": -2.573888063430786
+            },
+            {
+              "id": "018cb75f-10f0-7000-938c-6a0cda7326c7",
+              "score": -9.272645950317383
+            },
+            {
+              "id": "0189445c-7fa0-7000-9a82-e79b05b5faeb",
+              "score": -9.618645668029785
+            },
+            {
+              "id": "01894459-c080-7000-b3d3-3b666a1e21da",
+              "score": -10.408123016357422
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 11.5623818
+    },
+    {
+      "id": "dfde3500",
+      "stratum": "knowledge-update",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 2,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2835353,
+      "answer_seconds": 3.8185332,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f788-5a2e-70ee-a0f8-a3ddd21a4328",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018853d4-e040-7000-9a82-e79b05b5faeb",
+              "score": 3.6463963985443115
+            },
+            {
+              "id": "018853d3-0b80-7000-b7cb-c4a133c2d0f6",
+              "score": 1.7290704250335693
+            },
+            {
+              "id": "018853d3-f5e0-7000-a25e-c07a99506761",
+              "score": 1.1291056871414185
+            },
+            {
+              "id": "018853d1-36c0-7000-a698-4080bab12a02",
+              "score": -3.2040317058563232
+            },
+            {
+              "id": "018853d2-2120-7000-b3d3-3b666a1e21da",
+              "score": -3.6201493740081787
+            },
+            {
+              "id": "018853d6-3fd0-7000-9f0f-9924a3016430",
+              "score": -4.741264343261719
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "2e3a0dcbdbd43ce8e4c93a2adbe2cd2263ea95a4f7736df205090fe3e6e8d4ad"
+        }
+      },
+      "seconds": 8.1381822
+    },
+    {
+      "id": "42ec0761",
+      "stratum": "knowledge-update",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4677595,
+      "answer_seconds": 15.2702316,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f789-dd7b-7111-a683-0fd5698783f0",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0189f773-d1b0-7000-81df-da7a5eb236f8",
+              "score": 6.896368980407715
+            },
+            {
+              "id": "0189e41a-5bc0-7000-b7cb-c4a133c2d0f6",
+              "score": 1.6854242086410522
+            },
+            {
+              "id": "0189f774-bc10-7000-9b50-51c62d0332cd",
+              "score": 0.024825546890497208
+            },
+            {
+              "id": "0189e41b-4620-7000-a25e-c07a99506761",
+              "score": -1.9357986450195312
+            },
+            {
+              "id": "0189e41d-1ae0-7000-ab03-54df4a45b34e",
+              "score": -4.488417625427246
+            },
+            {
+              "id": "0189e419-7160-7000-b3d3-3b666a1e21da",
+              "score": -9.44851303100586
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "63dd66ba4053b390186b48174da285e8209c873a724c8f9b5c7f9ddce012ef76"
+        }
+      },
+      "seconds": 19.2901972
+    },
+    {
+      "id": "f685340e",
+      "stratum": "knowledge-update",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 16,
+      "sources": 1,
+      "facts": 5,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.6374094000000001,
+      "answer_seconds": 13.0893815,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f78b-71b7-70f5-a577-24bc6364e8ec",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0189a272-a650-7000-8c5c-906b1aeb85f8",
+              "score": -0.34025466442108154
+            },
+            {
+              "id": "0186cd8e-4ae0-7000-a25e-c07a99506761",
+              "score": -0.61985182762146
+            },
+            {
+              "id": "0186cd8b-8bc0-7000-a698-4080bab12a02",
+              "score": -2.241121768951416
+            },
+            {
+              "id": "0186cd8f-3540-7000-9a82-e79b05b5faeb",
+              "score": -4.157740116119385
+            },
+            {
+              "id": "0186cd90-1fa0-7000-ab03-54df4a45b34e",
+              "score": -5.750151634216309
+            },
+            {
+              "id": "0186cd8d-6080-7000-b7cb-c4a133c2d0f6",
+              "score": -8.436386108398438
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "3a99cd20feea912fcb66d648faa4a3773c5161c5c8686547dad272be7395d456"
+        }
+      },
+      "seconds": 31.2833793
+    },
+    {
+      "id": "7a87bd0c",
+      "stratum": "knowledge-update",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 2,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2703548,
+      "answer_seconds": 10.2431425,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f78d-0c0c-710d-af4d-2074e0287605",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0188a73a-f940-7000-a698-4080bab12a02",
+              "score": 5.101983070373535
+            },
+            {
+              "id": "018ae61d-8950-7000-8c5c-906b1aeb85f8",
+              "score": 4.460631370544434
+            },
+            {
+              "id": "0188a73e-a2c0-7000-9a82-e79b05b5faeb",
+              "score": 4.403362274169922
+            },
+            {
+              "id": "018ae61e-73b0-7000-938c-6a0cda7326c7",
+              "score": -6.132707595825195
+            },
+            {
+              "id": "0188a73f-8d20-7000-ab03-54df4a45b34e",
+              "score": -8.156522750854492
+            },
+            {
+              "id": "0188a73b-e3a0-7000-b3d3-3b666a1e21da",
+              "score": -9.669293403625488
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "4a2463272f2275b4004725994b660cc1506c81cf8bc595ad7f1ff79abef63c10"
+        }
+      },
+      "seconds": 15.9798141
+    },
+    {
+      "id": "gpt4_7f6b06db",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.3333333333333333,
+      "gold_content_words": 24,
+      "sources": 1,
+      "facts": 16,
+      "settled": true,
+      "ready": true,
+      "sessions": 3,
+      "user_turns": 18,
+      "assistant_turns": 18,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.7714965999999999,
+      "answer_seconds": 16.4912381,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f78e-3d9e-71ab-acf8-cd8cc6cf35b5",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01879ee6-f970-7000-ac7c-5b1c60b890ff",
+              "score": -5.894281387329102
+            },
+            {
+              "id": "01879ee3-4ff0-7000-8c5c-906b1aeb85f8",
+              "score": -7.076385974884033
+            },
+            {
+              "id": "01879ee5-24b0-7000-81df-da7a5eb236f8",
+              "score": -7.552231788635254
+            },
+            {
+              "id": "0186c8b8-7fe0-7000-9a82-e79b05b5faeb",
+              "score": -7.676418304443359
+            },
+            {
+              "id": "01881c29-51d0-7000-a6df-52ffdf834b47",
+              "score": -8.2846097946167
+            },
+            {
+              "id": "0186c8b5-c0c0-7000-b3d3-3b666a1e21da",
+              "score": -9.9490327835083
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01879ee3-4ff0-7000-8c5c-906b1aeb85f8",
+            "01879ee5-24b0-7000-81df-da7a5eb236f8",
+            "0186c8b8-7fe0-7000-9a82-e79b05b5faeb"
+          ],
+          "fact_table": "9d471fea6b1df3dd25610277e0cd5eb06daa929f2629f12ff994d3b8a3afd430"
+        }
+      },
+      "seconds": 24.4325838
+    },
+    {
+      "id": "gpt4_af6db32f",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.0714082,
+      "answer_seconds": 14.0197654,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f792-defb-707f-adae-3eae4a9f3c52",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0186421b-2280-7000-9a82-e79b05b5faeb",
+              "score": -4.327588081359863
+            },
+            {
+              "id": "01864217-7900-7000-a698-4080bab12a02",
+              "score": -4.666312217712402
+            },
+            {
+              "id": "0186421c-0ce0-7000-ab03-54df4a45b34e",
+              "score": -7.460322856903076
+            },
+            {
+              "id": "01864218-6360-7000-b3d3-3b666a1e21da",
+              "score": -8.0597562789917
+            },
+            {
+              "id": "01864219-4dc0-7000-b7cb-c4a133c2d0f6",
+              "score": -9.168230056762695
+            },
+            {
+              "id": "0186421a-3820-7000-a25e-c07a99506761",
+              "score": -10.405624389648438
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "0186421c-0ce0-7000-ab03-54df4a45b34e"
+          ]
+        }
+      },
+      "seconds": 20.2047225
+    },
+    {
+      "id": "gpt4_93159ced",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.75,
+      "gold_content_words": 4,
+      "sources": 1,
+      "facts": 6,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.356559,
+      "answer_seconds": 11.255691,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f793-9afd-7149-b7e5-baf9423cd7d7",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01883faa-acd0-7000-b5d8-1f333a1fb9e9",
+              "score": 2.9509356021881104
+            },
+            {
+              "id": "01883fa7-edb0-7000-81df-da7a5eb236f8",
+              "score": 1.2709406614303589
+            },
+            {
+              "id": "01883fa8-d810-7000-9b50-51c62d0332cd",
+              "score": -2.692704677581787
+            },
+            {
+              "id": "01883fa6-18f0-7000-8c5c-906b1aeb85f8",
+              "score": -5.199565410614014
+            },
+            {
+              "id": "01883efa-6fa0-7000-b3d3-3b666a1e21da",
+              "score": -5.516182899475098
+            },
+            {
+              "id": "01883ef9-8540-7000-a698-4080bab12a02",
+              "score": -8.554940223693848
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "b2a3d7a7503b529b30cfc04b1f911054185b31dbf7580bb0f702985bd0a7250a"
+        }
+      },
+      "seconds": 30.8355126
+    },
+    {
+      "id": "gpt4_8c8961ae",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 6,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.6134179,
+      "answer_seconds": 9.9065352,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f798-76e0-7142-9acb-0d0b5f7a6823",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884730-f1d0-7000-938c-6a0cda7326c7",
+              "score": -0.9328451156616211
+            },
+            {
+              "id": "01884730-0770-7000-8c5c-906b1aeb85f8",
+              "score": -1.4345462322235107
+            },
+            {
+              "id": "018845ee-38a0-7000-a698-4080bab12a02",
+              "score": -3.9110374450683594
+            },
+            {
+              "id": "01884732-c690-7000-9b50-51c62d0332cd",
+              "score": -4.283205032348633
+            },
+            {
+              "id": "01884733-b0f0-7000-ac7c-5b1c60b890ff",
+              "score": -5.364263534545898
+            },
+            {
+              "id": "018845ef-2300-7000-b3d3-3b666a1e21da",
+              "score": -6.033660888671875
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "5afef2c4e3ed0be62550f1e8b245b794ca05e78f55df9ef70fe08bf987d46d9e"
+        }
+      },
+      "seconds": 33.1472593
+    },
+    {
+      "id": "gpt4_6ed717ea",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 2,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 2.9785088,
+      "answer_seconds": 10.8471648,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f79a-f1ff-712d-9ca6-fba823d7a57c",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018835e2-4000-7000-a698-4080bab12a02",
+              "score": 0.5275142192840576
+            },
+            {
+              "id": "01883996-4750-7000-ac7c-5b1c60b890ff",
+              "score": -1.4521198272705078
+            },
+            {
+              "id": "01883992-9dd0-7000-8c5c-906b1aeb85f8",
+              "score": -1.8107024431228638
+            },
+            {
+              "id": "018835e3-2a60-7000-b3d3-3b666a1e21da",
+              "score": -3.416381597518921
+            },
+            {
+              "id": "01883995-5cf0-7000-9b50-51c62d0332cd",
+              "score": -5.135251045227051
+            },
+            {
+              "id": "018835e4-ff20-7000-a25e-c07a99506761",
+              "score": -7.987479209899902
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "e60d9717c9710f1630f5270ee6eba46916f47346e6708db2ed2507a17510e463"
+        }
+      },
+      "seconds": 13.9417676
+    },
+    {
+      "id": "c9f37c46",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2727887,
+      "answer_seconds": 9.7520796,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f79c-5b62-7123-b6ea-05254d735d34",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885b8c-2050-7000-8c5c-906b1aeb85f8",
+              "score": -0.02844301611185074
+            },
+            {
+              "id": "018858a7-01c0-7000-a698-4080bab12a02",
+              "score": -0.4388861656188965
+            },
+            {
+              "id": "01885b8f-c9d0-7000-ac7c-5b1c60b890ff",
+              "score": -1.8198107481002808
+            },
+            {
+              "id": "018858a9-c0e0-7000-a25e-c07a99506761",
+              "score": -3.54947566986084
+            },
+            {
+              "id": "018858a8-d680-7000-b7cb-c4a133c2d0f6",
+              "score": -3.6609315872192383
+            },
+            {
+              "id": "018858a7-ec20-7000-b3d3-3b666a1e21da",
+              "score": -4.3822126388549805
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "c1d115ca87daf0e46616b9bc4957b15b07d0229b022d003d502e022015e7fcc5"
+        }
+      },
+      "seconds": 21.6212452
+    },
+    {
+      "id": "gpt4_fa19884c",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.6726178,
+      "answer_seconds": 10.6118713,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f79e-e92f-7121-91e8-28eff66cfc8d",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0187153c-3500-7000-9a82-e79b05b5faeb",
+              "score": -0.07854372262954712
+            },
+            {
+              "id": "018737b7-4390-7000-8c5c-906b1aeb85f8",
+              "score": -2.6339895725250244
+            },
+            {
+              "id": "0187153d-1f60-7000-ab03-54df4a45b34e",
+              "score": -5.909217834472656
+            },
+            {
+              "id": "018737b9-1850-7000-81df-da7a5eb236f8",
+              "score": -9.221916198730469
+            },
+            {
+              "id": "018737ba-02b0-7000-9b50-51c62d0332cd",
+              "score": -10.074891090393066
+            },
+            {
+              "id": "0187153b-4aa0-7000-a25e-c07a99506761",
+              "score": -10.377167701721191
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "1d50aa85c9db025baa1f52f76e707edaad828017ffdd5de2896f735e70ee19f2"
+        }
+      },
+      "seconds": 21.2041937
+    },
+    {
+      "id": "gpt4_85da3956",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 3,
+      "sources": 1,
+      "facts": 1,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2065903,
+      "answer_seconds": 12.5223485,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7a1-8f39-7071-9529-fa5304428130",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018955ea-d280-7000-a698-4080bab12a02",
+              "score": 2.2407679557800293
+            },
+            {
+              "id": "018955ed-91a0-7000-a25e-c07a99506761",
+              "score": -2.0451135635375977
+            },
+            {
+              "id": "018955eb-bce0-7000-b3d3-3b666a1e21da",
+              "score": -5.4297590255737305
+            },
+            {
+              "id": "018955ef-6660-7000-ab03-54df4a45b34e",
+              "score": -8.953557968139648
+            },
+            {
+              "id": "018955ec-a740-7000-b7cb-c4a133c2d0f6",
+              "score": -10.246574401855469
+            },
+            {
+              "id": "018955ee-7c00-7000-9a82-e79b05b5faeb",
+              "score": -10.921091079711914
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "4f144919b2cc5aaa454d86b23bd22cc08df7858d7271c6ce2b6d3bfd8276f0d0"
+        }
+      },
+      "seconds": 16.9150733
+    },
+    {
+      "id": "gpt4_8e165409",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.5,
+      "gold_content_words": 2,
+      "sources": 1,
+      "facts": 2,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.3268477,
+      "answer_seconds": 14.164098,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7a3-165c-7120-aa34-668784e43936",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0186f2c7-8f10-7000-9b50-51c62d0332cd",
+              "score": 0.6330030560493469
+            },
+            {
+              "id": "0186a8fb-31c0-7000-a698-4080bab12a02",
+              "score": -1.4462890625
+            },
+            {
+              "id": "0186f2c8-7970-7000-ac7c-5b1c60b890ff",
+              "score": -6.453752517700195
+            },
+            {
+              "id": "0186f2c5-ba50-7000-938c-6a0cda7326c7",
+              "score": -8.502171516418457
+            },
+            {
+              "id": "0186a8fd-0680-7000-b7cb-c4a133c2d0f6",
+              "score": -8.700849533081055
+            },
+            {
+              "id": "0186a8fc-1c20-7000-b3d3-3b666a1e21da",
+              "score": -9.679712295532227
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "375ad4c8492eeaced25bb0882d153201ed8b0edad23837331d6abaeccf0855db"
+        }
+      },
+      "seconds": 18.4615506
+    },
+    {
+      "id": "gpt4_ec93e27f",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 5,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.3527249000000001,
+      "answer_seconds": 9.4052946,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7a4-ae95-7103-9e5c-16035cccd854",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0186a5fb-8650-7000-938c-6a0cda7326c7",
+              "score": 0.12652498483657837
+            },
+            {
+              "id": "01869125-3460-7000-b7cb-c4a133c2d0f6",
+              "score": -1.6792536973953247
+            },
+            {
+              "id": "0186a5fe-4570-7000-ac7c-5b1c60b890ff",
+              "score": -1.9640073776245117
+            },
+            {
+              "id": "01869127-0920-7000-9a82-e79b05b5faeb",
+              "score": -6.518263816833496
+            },
+            {
+              "id": "01869124-4a00-7000-b3d3-3b666a1e21da",
+              "score": -6.7677998542785645
+            },
+            {
+              "id": "0186a5fc-70b0-7000-81df-da7a5eb236f8",
+              "score": -8.475109100341797
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01869124-4a00-7000-b3d3-3b666a1e21da"
+          ],
+          "fact_table": "d3e94f7e59bf89738a98cdcdbf126e37a4fe44a51fcca6377febecddb4edfcb3"
+        }
+      },
+      "seconds": 15.4101736
+    },
+    {
+      "id": "gpt4_468eb064",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.2669179,
+      "answer_seconds": 5.0507448,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7a8-7662-70cf-bc04-65c98adb7fb8",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01876e38-5bc0-7000-a698-4080bab12a02",
+              "score": -1.3467079401016235
+            },
+            {
+              "id": "01876e3c-0540-7000-9a82-e79b05b5faeb",
+              "score": -10.88266372680664
+            },
+            {
+              "id": "01876e39-4620-7000-b3d3-3b666a1e21da",
+              "score": -10.899152755737305
+            },
+            {
+              "id": "01876e3b-1ae0-7000-a25e-c07a99506761",
+              "score": -10.903329849243164
+            },
+            {
+              "id": "01876e3a-3080-7000-b7cb-c4a133c2d0f6",
+              "score": -10.907502174377441
+            },
+            {
+              "id": "01876e3c-efa0-7000-ab03-54df4a45b34e",
+              "score": -10.942047119140625
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "4bd082b44108cd6b4436619c771e2a07e78a95782b404b6f7b7544e13099d51e"
+        }
+      },
+      "seconds": 7.8886158
+    },
+    {
+      "id": "0bc8ad92",
+      "stratum": "temporal-reasoning",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 1,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 3,
+      "user_turns": 16,
+      "assistant_turns": 16,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.3331982,
+      "answer_seconds": 12.8347973,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7a9-796b-719e-a1f3-f1f0c0caabf6",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "0183fcf6-db60-7000-a25e-c07a99506761",
+              "score": -2.97473406791687
+            },
+            {
+              "id": "0183fcf5-f100-7000-b7cb-c4a133c2d0f6",
+              "score": -4.717159271240234
+            },
+            {
+              "id": "01866414-2fd0-7000-a70c-d6df5d49ce30",
+              "score": -6.959634304046631
+            },
+            {
+              "id": "0183fcf4-1c40-7000-a698-4080bab12a02",
+              "score": -7.098196983337402
+            },
+            {
+              "id": "0183fcf7-c5c0-7000-9a82-e79b05b5faeb",
+              "score": -7.895089149475098
+            },
+            {
+              "id": "01866418-c3b0-7000-8eb6-7bb2bf528e01",
+              "score": -8.23691177368164
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01866414-2fd0-7000-a70c-d6df5d49ce30",
+            "0183fcf4-1c40-7000-a698-4080bab12a02"
+          ]
+        }
+      },
+      "seconds": 24.2250728
+    },
+    {
+      "id": "gpt4_c27434e8",
+      "stratum": "temporal-reasoning",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 5,
+      "sources": 1,
+      "facts": 3,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 11,
+      "assistant_turns": 11,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.5004693,
+      "answer_seconds": 5.4881827,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7ab-6ffc-7137-80aa-4246cae98204",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884dc0-0590-7000-8c5c-906b1aeb85f8",
+              "score": 1.8591512441635132
+            },
+            {
+              "id": "01884dc3-af10-7000-ac7c-5b1c60b890ff",
+              "score": 1.4868221282958984
+            },
+            {
+              "id": "01884dc2-c4b0-7000-9b50-51c62d0332cd",
+              "score": 0.18054574728012085
+            },
+            {
+              "id": "01884dc1-da50-7000-81df-da7a5eb236f8",
+              "score": -3.200345754623413
+            },
+            {
+              "id": "01884a42-0260-7000-9a82-e79b05b5faeb",
+              "score": -8.561752319335938
+            },
+            {
+              "id": "01884dc0-eff0-7000-938c-6a0cda7326c7",
+              "score": -9.444086074829102
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "fact_table": "04e19fac54c56634ae358ae609a7536166a3c3eb299c9ad1499d4e4baa1ac41b"
+        }
+      },
+      "seconds": 12.4007883
+    },
+    {
+      "id": "2311e44b_abs",
+      "stratum": "abstention",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 12,
+      "sources": 1,
+      "facts": 5,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 9,
+      "assistant_turns": 9,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.4714225,
+      "answer_seconds": 15.4362072,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7ad-a241-70de-99dc-c5d6e4bd6f17",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "018845f5-8ba0-7000-b3d3-3b666a1e21da",
+              "score": 2.3309926986694336
+            },
+            {
+              "id": "01886985-1770-7000-9f0f-9924a3016430",
+              "score": 1.0339406728744507
+            },
+            {
+              "id": "018845f6-7600-7000-b7cb-c4a133c2d0f6",
+              "score": 0.537488579750061
+            },
+            {
+              "id": "018845f4-a140-7000-a698-4080bab12a02",
+              "score": -2.794708251953125
+            },
+            {
+              "id": "01886987-d690-7000-81df-da7a5eb236f8",
+              "score": -5.216749668121338
+            },
+            {
+              "id": "01886984-2d10-7000-b5ba-4eb728dd632c",
+              "score": -7.233152389526367
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01886984-2d10-7000-b5ba-4eb728dd632c"
+          ],
+          "fact_table": "42173fa8d6235c7065c8fc193d85e0f18e13ee3ad68f79a597ed48aa4fb14169"
+        }
+      },
+      "seconds": 22.3623395
+    },
+    {
+      "id": "19b5f2b3_abs",
+      "stratum": "abstention",
+      "correct": true,
+      "token_recall": 1.0,
+      "gold_content_words": 9,
+      "sources": 0,
+      "facts": 4,
+      "settled": true,
+      "ready": true,
+      "sessions": 1,
+      "user_turns": 6,
+      "assistant_turns": 6,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 0.7604781,
+      "answer_seconds": 5.0706308,
+      "answer": {
+        "attached": 0,
+        "recall": {
+          "decision": "abstain",
+          "sources": []
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7b0-25b7-70ad-820d-a90bfd667bc7",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01884548-82c0-7000-9a82-e79b05b5faeb",
+              "score": -7.472012996673584
+            },
+            {
+              "id": "01884549-6d20-7000-ab03-54df4a45b34e",
+              "score": -8.58070182800293
+            },
+            {
+              "id": "01884545-c3a0-7000-b3d3-3b666a1e21da",
+              "score": -9.044196128845215
+            },
+            {
+              "id": "01884546-ae00-7000-b7cb-c4a133c2d0f6",
+              "score": -10.056293487548828
+            },
+            {
+              "id": "01884544-d940-7000-a698-4080bab12a02",
+              "score": -10.555283546447754
+            },
+            {
+              "id": "01884547-9860-7000-a25e-c07a99506761",
+              "score": -10.606962203979492
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1,
+          "band": [
+            "01884548-82c0-7000-9a82-e79b05b5faeb"
+          ],
+          "fact_table": "81a6be4330a25edce270cee9afcca52f3b9af4af6681e57445acfefc10da6931"
+        }
+      },
+      "seconds": 8.8748565
+    },
+    {
+      "id": "eeda8a6d_abs",
+      "stratum": "abstention",
+      "correct": false,
+      "token_recall": 0.0,
+      "gold_content_words": 9,
+      "sources": 1,
+      "facts": 0,
+      "settled": true,
+      "ready": true,
+      "sessions": 2,
+      "user_turns": 12,
+      "assistant_turns": 12,
+      "dropped_turns": 0,
+      "merged_turns": 0,
+      "ttft_seconds": 1.112137,
+      "answer_seconds": 25.4019181,
+      "answer": {
+        "attached": 2,
+        "recall": {
+          "decision": "fire",
+          "sources": [
+            2
+          ]
+        },
+        "obs": {
+          "source_base": 1,
+          "history_from": "01a1f7b1-c480-7117-b7f6-19ccdd2841d2",
+          "recall_position": "before_utterance",
+          "answer": {
+            "format": "auto",
+            "language": "auto",
+            "length": "auto"
+          },
+          "reranked": [
+            {
+              "id": "01885ac7-bee0-7000-ab03-54df4a45b34e",
+              "score": -1.626062035560608
+            },
+            {
+              "id": "01885ac5-ea20-7000-a25e-c07a99506761",
+              "score": -3.199009656906128
+            },
+            {
+              "id": "01885ac4-ffc0-7000-b7cb-c4a133c2d0f6",
+              "score": -3.6640172004699707
+            },
+            {
+              "id": "01885e57-2730-7000-8c5c-906b1aeb85f8",
+              "score": -4.750030040740967
+            },
+            {
+              "id": "01885ac3-2b00-7000-a698-4080bab12a02",
+              "score": -5.549282073974609
+            },
+            {
+              "id": "01885e58-1190-7000-938c-6a0cda7326c7",
+              "score": -5.872213363647461
+            }
+          ],
+          "reranker": "cb952a6c3a57bc45533178d0a7adb99f",
+          "threshold_version": 1
+        }
+      },
+      "seconds": 31.4637862
+    }
+  ]
+}

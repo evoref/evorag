@@ -1,0 +1,111 @@
+{
+  "id": "EVAL-longmemeval-compare",
+  "test": "McNemar exact (binomial) on per-question correctness",
+  "base": [
+    "EVAL-longmemeval-holdout-A.json"
+  ],
+  "new": [
+    "EVAL-longmemeval-holdout-A.json"
+  ],
+  "all": {
+    "questions": 100,
+    "base_correct": 45,
+    "new_correct": 66,
+    "only_base": 3,
+    "only_new": 24,
+    "p_two_sided": 0.000049233436584472656,
+    "p_improved": 0.000024616718292236328,
+    "base_mean_token_recall": 0.6117614607614609,
+    "new_mean_token_recall": 0.7554943667443668
+  },
+  "solvable": {
+    "questions": 91,
+    "base_correct": 45,
+    "new_correct": 65,
+    "only_base": 3,
+    "only_new": 23,
+    "p_two_sided": 0.00008797645568847656,
+    "p_improved": 0.00004398822784423828,
+    "base_mean_token_recall": 0.6102564102564103,
+    "new_mean_token_recall": 0.764102564102564
+  },
+  "per_type": {
+    "abstention": {
+      "questions": 6,
+      "base_correct": 5,
+      "new_correct": 4,
+      "only_base": 1,
+      "only_new": 0,
+      "p_two_sided": 1.0,
+      "p_improved": 1.0,
+      "base_mean_token_recall": 0.8333333333333334,
+      "new_mean_token_recall": 0.6666666666666666
+    },
+    "knowledge-update": {
+      "questions": 15,
+      "base_correct": 7,
+      "new_correct": 11,
+      "only_base": 0,
+      "only_new": 4,
+      "p_two_sided": 0.125,
+      "p_improved": 0.0625,
+      "base_mean_token_recall": 0.5577777777777778,
+      "new_mean_token_recall": 0.7866666666666667
+    },
+    "multi-session": {
+      "questions": 26,
+      "base_correct": 3,
+      "new_correct": 11,
+      "only_base": 0,
+      "only_new": 8,
+      "p_two_sided": 0.0078125,
+      "p_improved": 0.00390625,
+      "base_mean_token_recall": 0.2835664335664335,
+      "new_mean_token_recall": 0.5335664335664336
+    },
+    "single-session-assistant": {
+      "questions": 12,
+      "base_correct": 6,
+      "new_correct": 9,
+      "only_base": 1,
+      "only_new": 4,
+      "p_two_sided": 0.375,
+      "p_improved": 0.1875,
+      "base_mean_token_recall": 0.7637108262108262,
+      "new_mean_token_recall": 0.9489850427350427
+    },
+    "single-session-user": {
+      "questions": 14,
+      "base_correct": 13,
+      "new_correct": 12,
+      "only_base": 1,
+      "only_new": 0,
+      "p_two_sided": 1.0,
+      "p_improved": 1.0,
+      "base_mean_token_recall": 0.9642857142857143,
+      "new_mean_token_recall": 0.8928571428571429
+    },
+    "temporal-reasoning": {
+      "questions": 27,
+      "base_correct": 11,
+      "new_correct": 19,
+      "only_base": 0,
+      "only_new": 8,
+      "p_two_sided": 0.0078125,
+      "p_improved": 0.00390625,
+      "base_mean_token_recall": 0.6582304526748971,
+      "new_mean_token_recall": 0.8144032921810699
+    }
+  },
+  "abstention_fired": {
+    "questions": 6,
+    "base": 5,
+    "new": 5
+  },
+  "ttft_seconds": {
+    "base_p50": 1.3721343,
+    "new_p50": 0.3220517,
+    "base_p95": 1.7948464,
+    "new_p95": 0.4941272
+  }
+}

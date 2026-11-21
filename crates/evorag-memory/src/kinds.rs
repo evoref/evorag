@@ -315,6 +315,10 @@ pub struct ModelProbeBody {
     pub thinking_off: Option<bool>,
     /// chat: 型縛りの出力が、型に合う JSON だった (空にならなかった)。
     pub structured_ok: Option<bool>,
+    /// chat: 設定に思考を切る指定が無く、点検が `chat_template_kwargs = { enable_thinking = false }` を足して
+    /// 確かめ直して通った。補助の呼び出しにその指定を足す (06 §3.3、OQ-52、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux_thinking_off: Option<bool>,
     /// embed: 次元の数。
     pub dims: Option<u32>,
     /// embed: 問い 1 件の埋め込みの時間 (ms)。
@@ -615,7 +619,96 @@ pub struct TurnObs {
     /// 置いた事実の表の版 (表の本文の SHA-256 の 16 進、04 §5.4、v0.3)。表を置かなかったら無い。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fact_table: Option<String>,
+    /// 候補の上位 (融合の順。往復の代表のターンと、語彙とベクトルのそれぞれの順位、05 §3.6、v0.4)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<RecallCandidate>,
+    /// 引用に詰めた窓 (05 §3.8、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packed: Option<Packed>,
+    /// 問いの分析の結果 (05 §3.1 の 5、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<QueryObs>,
+    /// 先読みの当たりと、応答が始まるまでの時間 (05 §4.5、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetch: Option<PrefetchObs>,
+    /// 言い直して引けた問い: 直前の問いの候補に無かった往復をこの問いで添えたときの、直前の問いのターン
+    /// (別名の鍵の材料、v0.4 は記録だけ)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rephrase: Option<Id>,
+    /// 想起・文脈の作りの版 (名前 → 版)。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub versions: std::collections::BTreeMap<String, String>,
+    /// 発話のときの UTC からのずれ (分。発話のターン、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz_offset: Option<i32>,
+    /// 同じセッションの前の発話からの時間 (秒。発話のターン、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<u64>,
+    /// 起動の突き合わせを終えた時点で残っていた裏の処理の手順 (起動の後の最初の発話のターン、v0.4)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_at_start: Option<Vec<String>>,
 }
+
+/// 候補の 1 つ (05 §3.6、v0.4)。順位は 1 から。その順位の列に無ければ無い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallCandidate {
+    pub id: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lex: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vec: Option<u16>,
+}
+
+/// 引用に詰めた窓 (05 §3.8、v0.4)。本文は持たない。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Packed {
+    /// 窓の並び (ターン、その改訂の番号、本文のバイト位置の範囲)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowRef>,
+    /// 引用の枠のトークン数。
+    pub tokens: u32,
+    /// 使った予算 (トークン)。
+    pub budget: u32,
+}
+
+/// 窓 1 つ。`start..end` はターンの本文 (改訂の番号 `rev` のとき) のバイト位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowRef {
+    pub turn: Id,
+    #[serde(default)]
+    pub rev: u32,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// 問いの分析の結果 (05 §3.1 の 5、v0.4)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryObs {
+    #[serde(default)]
+    pub count: bool,
+    #[serde(default)]
+    pub date: bool,
+    #[serde(default)]
+    pub explicit: bool,
+    /// 件数の意図で候補と予算を広げた。
+    #[serde(default)]
+    pub widened: bool,
+}
+
+/// 先読みの当たり (05 §4.5、v0.4)。`kind` は `a`・`b`・`c`・`none` (値は足すだけ。知らない値はそのまま読む)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefetchObs {
+    pub kind: String,
+    /// 応答の経路を始めてから最初の本文の断片まで (ミリ秒)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u32>,
+    /// llama-server が処理したプロンプトのトークン数 (`timings.prompt_n`)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed: Option<u32>,
+}
+
+/// 先読みが無かった (05 §4.5)。
+pub const PREFETCH_NONE: &str = "none";
 
 /// リランクした 1 つの往復。`id` は往復を代表するターン (利用者の発話。発話の無い往復は、そのターン)。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -634,8 +727,10 @@ pub const DEGRADED_RERANK_ERROR: &str = "rerank_error";
 pub const DEGRADED_NO_THRESHOLD: &str = "no_threshold";
 pub const DEGRADED_NO_INDEX: &str = "no_index";
 
-/// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1)。
+/// 想起の引用を、今の発話の直前 (同じメッセージの中) に添えた (05 §4.1、v0.2・v0.3)。
 pub const RECALL_BEFORE_UTTERANCE: &str = "before_utterance";
+/// 想起の引用を、今の発話の直前の別のメッセージとして添えた (05 §4.1、v0.4、OQ-50)。
+pub const RECALL_SEPARATE_MESSAGE: &str = "separate_message";
 
 /// 判定点 (05 §3.4)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

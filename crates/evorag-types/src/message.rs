@@ -353,6 +353,7 @@ message_keys! {
     UiStatusIdle => "ui.status.idle",
     UiStatusLimited => "ui.status.limited",
     UiStatusWorking => "ui.status.working",
+    UiStatusPending => "ui.status.pending",
     UiStatusBattery => "ui.status.paused_battery",
     UiStatusLowSpace => "ui.status.paused_low_space",
     UiRecallStandard => "ui.status.recall_standard",
@@ -822,6 +823,7 @@ message_keys! {
     /// 引数: `prompt`, `gen`, `issues`。
     DoctorProbeChat => "doctor.probe_chat",
     DoctorProbeNoIssue => "doctor.probe_no_issue",
+    DoctorProbeAuxThinkingOff => "doctor.probe_aux_thinking_off",
     /// 引数: `dims`, `ms`。
     DoctorProbeEmbed => "doctor.probe_embed",
     /// 引数: `ms`。

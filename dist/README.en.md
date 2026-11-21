@@ -135,7 +135,7 @@ To send text that starts with `/` as it is, start it with `//`.
 
 ### 4.3 Recalling earlier conversations
 
-- evorag looks for earlier conversations (in other sessions) related to what you sent, and attaches only the single most relevant exchange (a message and its reply) to the reply. What it attaches is shown in the reply with a number such as `[1]`.
+- evorag looks for earlier conversations (in other sessions) related to what you sent, and attaches the relevant exchanges (a message and its reply) to the reply. It attaches the sentences in the exchange that match your question, with the sentences around them (so it reaches answers near the end of a long reply). When several exchanges are relevant, it attaches them together within a fixed amount. What it attaches is shown in the reply with a number such as `[1]`.
 - How it searches: it gathers candidates both by shared characters (lexical) and by closeness of meaning (embeddings), measures relevance with the reranker, and attaches only what is at or above the threshold. Nothing is attached to unrelated questions.
 - Exchanges just below the threshold are shown faintly under the reply as "Possibly related records (not used for this reply)". Choose one with Tab and open the details with Enter; there, `a` attaches it and regenerates, and `x` marks it "irrelevant" (the arrow keys and Enter work too).
 - For each topic of a conversation, search keys (notes) are made in the background. The keys are used only for searching; what is attached is the original conversation.
@@ -146,8 +146,9 @@ To send text that starts with `/` as it is, start it with `//`.
 ### 4.4 Background work and work done ahead
 
 - While you are not using it (60 seconds by default, `memory.idle_seconds`), it embeds earlier conversations and makes search keys for notes, and when it has been running past midnight, it takes the automatic backup. A key press stops it within a second; it continues where it left off at the next chance. The status line shows "Organizing".
-- Right after writing a reply, it has llama-server process the context for your next message ahead of time (so the next reply starts sooner).
-- When the text in the input box has not changed for about 0.5 seconds, it searches earlier conversations with that text ahead of time. **Text you have not sent also goes to the configured llama-server** (it does not leave your PC). To turn this off, write `retrieval.precompute = false` in the configuration. With `llm.allow_remote = true`, it is off unless you write it.
+- Right after writing a reply, and right after you open a session, it has llama-server process the context for your next message ahead of time (so the next reply starts sooner).
+- When the text in the input box has not changed for about 0.5 seconds, it searches earlier conversations with that text ahead of time and has llama-server process the quotes it would attach (prefetch). If you send that text as it is, the reply starts right away. If you change it before sending, it searches again. **Text you have not sent also goes to the configured llama-server** (it does not leave your PC, and it is not saved). To turn this off, write `retrieval.precompute = false` in the configuration. With `llm.allow_remote = true`, it is off unless you write it. Text you have not sent is never sent to a llama-server outside your PC (judged per role).
+- "Organizing (3 left)" in the status line is the number of background steps still to do. If you close evorag right after talking, steps such as extracting facts may not finish.
 - On battery, it follows `memory.on_battery` (`reduce`: stops the work when input pauses, and waits five times longer for background work / `normal` / `stop`: stops both). `memory.sleep_time = false` stops background work. Even then, conversations are saved and recall works.
 
 ### 4.5 Other subcommands
@@ -313,7 +314,14 @@ evorag restore "<data root>\backups\pre-op\<date and time>"
 - **The index is rebuilt**: the lexical index of v0.1 is not used; it is rebuilt at the first start (the conversation data does not change).
 - v0.1 and v0.2 do not have `evorag update`. Update to v0.3 by hand (6.6).
 
-### 6.8 Restoring from a backup
+### 6.8 If you are updating from v0.3
+
+- **The data format does not change**: a v0.3 data root opens as it is (only more observation fields are recorded).
+- **Recall attaches more**: it attaches several relevant exchanges together, with the sentences around the ones that match your question (4.3). Because it attaches more, the reply can take a little longer to start when the prefetch misses.
+- **Prefetch**: when input pauses, it has llama-server process the quotes it would attach ahead of time (4.4).
+- **Fact extraction with a thinking model**: in v0.3, fact extraction stopped when the configuration had no setting to turn thinking off. v0.4 tries it in the model check. A model whose v0.3 check could not turn thinking off is checked again at the first start of v0.4 (in the background, about a minute).
+
+### 6.9 Restoring from a backup
 
 To put the database back to an earlier state (after a mistaken action, for example), quit evorag and then:
 
@@ -333,7 +341,8 @@ The database from before the restore is copied to `backups/pre-op/`, as before a
 - **"The data root (…) is in use by another evorag (pid …)"**: another evorag is using the same data root. Quit the evorag that was started first, then run it again.
 - **`evorag update` cannot connect**: if you use a proxy, set `HTTPS_PROXY` ([6.5](#65-network-access-and-proxies)). If it still cannot connect, update by hand ([6.6](#66-updating-by-hand)).
 - **An update stopped partway and `evorag.exe` is missing**: put it back as described in [6.4](#64-if-it-stops-partway).
-- **Replies take long to start**: a thinking model shows "Thinking" while it thinks. To turn thinking off, write the following in `config.toml` (for auxiliary calls, write the same under `[llm.chat.aux_request_extra]`).
+- **Facts do not appear in `/memory`**: if the status line shows "left", background work has not finished. Leave evorag idle for a while (longer on battery). If the model check in `evorag doctor` says thinking cannot be turned off, helper calls (fact extraction) are stopped. From v0.4, the check tries the setting that turns thinking off by itself (for a thinking model, `evorag doctor` says it adds the setting).
+- **Replies take long to start**: a thinking model shows "Thinking" while it thinks. To turn thinking off, write the following in `config.toml` (from v0.4, the model check turns thinking off for helper calls by itself; to write it in the configuration, put the same under `[llm.chat.aux_request_extra]`).
 
   ```toml
   [llm.chat.request_extra]

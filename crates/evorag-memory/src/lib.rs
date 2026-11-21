@@ -68,13 +68,14 @@ pub use kinds::{
     JOB_PURGE_BACKUPS, JOB_PURGE_INDEXES, JobBody, KIND_CHUNK, KIND_EMBEDDING, KIND_JOB,
     KIND_MODEL_BINDING, KIND_MODEL_PROBE, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION,
     KIND_SETTING, KIND_SIGNAL, KIND_THRESHOLD, KIND_TURN, METHOD_BUNDLED, ModelBindingBody,
-    ModelOrigin, ModelProbeBody, NoteBody, RECALL_BEFORE_UTTERANCE, REL_CHUNK_OF, REL_EMBEDDING_OF,
+    ModelOrigin, ModelProbeBody, NoteBody, PREFETCH_NONE, Packed, PrefetchObs, QueryObs,
+    RECALL_BEFORE_UTTERANCE, RECALL_SEPARATE_MESSAGE, REL_CHUNK_OF, REL_EMBEDDING_OF,
     REL_FEEDBACK_ANSWER, REL_FEEDBACK_TARGET, REL_IN_SESSION, REL_NOTE_OF, REL_REPLY_TO,
-    REL_TARGET, ROLE_CHAT, ROLE_EMBED, ROLE_RERANK, RecallDecision, RecallFeedbackBody,
-    RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH,
-    SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody, SignalBody, SignalKind, SrcRev,
-    TARGET_CONVERSATION, TURN_REV_FIELD, ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState,
-    UNIT_CHUNK, UNIT_KEY, carried_on_restore, kinds,
+    REL_TARGET, ROLE_CHAT, ROLE_EMBED, ROLE_RERANK, RecallCandidate, RecallDecision,
+    RecallFeedbackBody, RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE,
+    SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody,
+    SignalBody, SignalKind, SrcRev, TARGET_CONVERSATION, TURN_REV_FIELD, ThresholdBody, TurnBody,
+    TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, WindowRef, carried_on_restore, kinds,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use mask::{

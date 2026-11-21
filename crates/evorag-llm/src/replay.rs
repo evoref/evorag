@@ -53,6 +53,9 @@ pub struct Cassette {
     /// `/v1/rerank` に答える (rerank の役割)。無ければ 501。
     #[serde(default)]
     pub rerank: bool,
+    /// ループバック以外の接続先として振る舞う (送る前の入力を送らない判定の試験、05 §4.5)。
+    #[serde(default)]
+    pub remote: bool,
     /// 生成を 1 トークンに限った要求 (次のターンを先に処理させる要求、05 §4.5) への答え。`chats` を使わず、
     /// 要求は `warm_requests` に分けて記録する。無ければすぐに終える。
     #[serde(default)]
@@ -221,6 +224,10 @@ impl ReplayClient {
 }
 
 impl LlmClient for ReplayClient {
+    fn is_loopback(&self) -> bool {
+        !self.cassette.remote
+    }
+
     fn health(&self) -> BoxFuture<'_, Result<(), LlmError>> {
         Box::pin(async move {
             if self.cassette.health {
@@ -395,6 +402,7 @@ impl ChatStream for ReplayStream {
                         .then(|| Usage {
                             prompt_tokens: done.prompt_tokens.unwrap_or(0),
                             completion_tokens: done.completion_tokens.unwrap_or(0),
+                            processed: None,
                         });
                         return Some(Ok(ChatEvent::Done {
                             finish_reason: done.finish_reason,

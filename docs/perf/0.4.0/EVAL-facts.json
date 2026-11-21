@@ -1,0 +1,958 @@
+{
+  "id": "EVAL-facts",
+  "evorag": "0.4.0",
+  "date": "2026-11-20",
+  "cases_file": "tests/facts/recall-v0.3.toml",
+  "setup": "chat+embed+rerank",
+  "models": {
+    "chat": {
+      "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_fp": "04e555181c24",
+      "build_info": "b1-622aa06",
+      "n_ctx": 16384
+    },
+    "embed": {
+      "model_file": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_name": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_fp": "0c044acef127",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    },
+    "rerank": {
+      "model_file": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_name": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_fp": "cb952a6c3a57",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    }
+  },
+  "judge": "answer contains every expected value after NFKC + lowercase (abstain: contains an abstention marker)",
+  "fact_cases": 30,
+  "fact_passed": 28,
+  "fact_needed": 27,
+  "abstain_cases": 4,
+  "abstain_passed": 4,
+  "facts_judge": "facts_expect lines are in the fact list and no facts_forbid pair is Live (after the same normalization); not part of the gate",
+  "facts_checked_cases": 22,
+  "facts_correct": 18,
+  "partial": false,
+  "passed": true,
+  "cases": [
+    {
+      "id": "F01",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "residence"
+      ],
+      "question": "私が住んでいる街、どこだったか覚えてる？",
+      "expect": [
+        [
+          "仙台"
+        ]
+      ],
+      "answer": "はい、覚えております。\n\n利用者の居住地は「仙台」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/residence=仙台 (Live, Current)",
+        "self/likes=冬の寒さ (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 38.0675128
+    },
+    {
+      "id": "F02",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "name"
+      ],
+      "question": "私のこと、何て呼ぶことになってたっけ？",
+      "expect": [
+        [
+          "ミナト"
+        ]
+      ],
+      "answer": "ミナトさんと呼んでください。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/name=ミナト (Live, Current)",
+        "self/hobby=読書の記録の付け方 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 16.9513743
+    },
+    {
+      "id": "F03",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "pet"
+      ],
+      "question": "うちで飼っている犬の名前、覚えてる？",
+      "expect": [
+        [
+          "コタロウ"
+        ]
+      ],
+      "answer": "はい、覚えております。利用者の飼い犬の名前は「コタロウ」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/pet=コタロウという柴犬 (Live, Current)",
+        "self/pet=柴犬 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 24.0273683
+    },
+    {
+      "id": "F04",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "dietary"
+      ],
+      "question": "私が食べられない食材って何だっけ？",
+      "expect": [
+        [
+          "えび"
+        ]
+      ],
+      "answer": "えび（エビ）です。\n\n先ほどの会話で、えびのアレルギーがあるため食べられないと記載されていました。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/dietary=えび (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 19.1543276
+    },
+    {
+      "id": "F05",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "occupation"
+      ],
+      "question": "私の仕事、何か覚えてる？",
+      "expect": [
+        [
+          "教員"
+        ]
+      ],
+      "answer": "はい、覚えております。\n\n提供された情報によると、あなたの職業は**小学校の教員**です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/occupation=小学校の教員 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 25.5325592
+    },
+    {
+      "id": "F06",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "age"
+      ],
+      "question": "私の年齢、覚えてる？",
+      "expect": [
+        [
+          "34"
+        ]
+      ],
+      "answer": "はい、覚えております。利用者の年齢は 34 歳です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/age=34歳 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 27.6843492
+    },
+    {
+      "id": "F07",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "household"
+      ],
+      "question": "私が一緒に暮らしている家族は誰？",
+      "expect": [
+        [
+          "妻"
+        ],
+        [
+          "息子"
+        ]
+      ],
+      "answer": "あなたが一緒に暮らしている家族は、妻と 6 歳の息子です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/household=妻と6歳の息子 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 18.805661
+    },
+    {
+      "id": "F08",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "spoken_language"
+      ],
+      "question": "私が勉強している外国語は何だっけ？",
+      "expect": [
+        [
+          "スペイン語"
+        ]
+      ],
+      "answer": "あなたが勉強している外国語はスペイン語です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/spoken_language=スペイン語 (Live, Current)",
+        "self/skill=スペイン語 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 21.0511277
+    },
+    {
+      "id": "F09",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "hometown"
+      ],
+      "question": "私の出身地はどこだっけ？",
+      "expect": [
+        [
+          "高知"
+        ]
+      ],
+      "answer": "あなたの出身地は**高知**です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/hometown=高知 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 17.7040104
+    },
+    {
+      "id": "F10",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "birthday"
+      ],
+      "question": "私の誕生日、いつか覚えてる？",
+      "expect": [
+        [
+          "7月22日"
+        ]
+      ],
+      "answer": "はい、覚えております。利用者の誕生日は**7 月 22 日**です。\n\n先ほどの会話で「毎年その日に何か新しいことを始めること」を目標にされていることも承知しています。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/birthday=7月22日 (Live, Current)",
+        "self/goal=毎年その日に何か新しいことを始めること (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 29.304526
+    },
+    {
+      "id": "F11",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "education"
+      ],
+      "question": "私が大学で学んでいた分野って何だった？",
+      "expect": [
+        [
+          "農学",
+          "土壌"
+        ]
+      ],
+      "answer": "大学では農学部で土壌の研究をしていました。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/education=(vacant)",
+        "self/hobby=家庭菜園 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 20.1612853
+    },
+    {
+      "id": "F12",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "skill"
+      ],
+      "question": "私が持っている資格は何？",
+      "expect": [
+        [
+          "簿記2級"
+        ]
+      ],
+      "answer": "あなたが持っている資格は「簿記 2 級」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/skill=簿記2級 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 55.2816597
+    },
+    {
+      "id": "F13",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "device"
+      ],
+      "question": "私が家で使っているパソコン、何だったっけ？",
+      "expect": [
+        [
+          "ThinkPad"
+        ]
+      ],
+      "answer": "あなたが家で使っているパソコンは、ThinkPad X1 Carbon です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/device=ThinkPad X1 Carbon (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 23.1819987
+    },
+    {
+      "id": "F14",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "software"
+      ],
+      "question": "私がメモに使っているアプリは何だっけ？",
+      "expect": [
+        [
+          "Obsidian"
+        ]
+      ],
+      "answer": "メモに使っているアプリは **Obsidian** です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/software=Obsidian (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 24.5307437
+    },
+    {
+      "id": "F15",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "hobby"
+      ],
+      "question": "私が週末によくしていることって何だっけ？",
+      "expect": [
+        [
+          "ボルダリング"
+        ]
+      ],
+      "answer": "週末によくしていることは、**ボルダリング**です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/hobby=ボルダリング (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 18.114252
+    },
+    {
+      "id": "F16",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "likes"
+      ],
+      "question": "私の好きな食べ物、覚えてる？",
+      "expect": [
+        [
+          "担々麺"
+        ]
+      ],
+      "answer": "はい、覚えております。\nあなたの好きな食べ物は「担々麺」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/likes=担々麺 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 17.242302
+    },
+    {
+      "id": "F17",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "dislikes"
+      ],
+      "question": "私が苦手なものって何だった？",
+      "expect": [
+        [
+          "人混み"
+        ]
+      ],
+      "answer": "苦手なものは「人混み」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/dislikes=人混み (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 14.8986698
+    },
+    {
+      "id": "F18",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "goal"
+      ],
+      "question": "私が今目指している資格の試験は何だっけ？",
+      "expect": [
+        [
+          "気象予報士"
+        ]
+      ],
+      "answer": "あなたが今目指している資格の試験は「気象予報士の試験」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/skill=気象予報士の試験 (Live, Current)",
+        "self/goal=気象予報士の試験に向けて勉強 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 27.9789988
+    },
+    {
+      "id": "F19",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "event"
+      ],
+      "question": "来月の旅行、どこへ行くって話したっけ？",
+      "expect": [
+        [
+          "金沢"
+        ]
+      ],
+      "answer": "先ほど、**金沢**へ一人旅をする予定について話しました。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/household=一人 (Live, Planned)",
+        "self/event=来月、金沢へ一人旅をする (Live, Planned)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 28.2328953
+    },
+    {
+      "id": "F20",
+      "lang": "ja",
+      "kind": "fact",
+      "attributes": [
+        "relation"
+      ],
+      "question": "真壁さんって、私とどういう関係だったっけ？",
+      "expect": [
+        [
+          "友人"
+        ]
+      ],
+      "answer": "真壁さんは、あなたの**大学時代の友人**です。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "真壁さん/relation=大学時代の友人 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 39.0213333
+    },
+    {
+      "id": "F21",
+      "lang": "ja",
+      "kind": "correction",
+      "attributes": [
+        "residence"
+      ],
+      "question": "私が住んでいるところ、どこか覚えてる？",
+      "expect": [
+        [
+          "神戸"
+        ]
+      ],
+      "answer": "はい、覚えております。\n利用者の居住地は「神戸」です。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/residence=神戸 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 34.4669006
+    },
+    {
+      "id": "F22",
+      "lang": "ja",
+      "kind": "correction",
+      "attributes": [
+        "birthday"
+      ],
+      "question": "私の誕生日っていつだったっけ？",
+      "expect": [
+        [
+          "5月13日"
+        ]
+      ],
+      "answer": "あなたの誕生日は**5 月 13 日**です。\n\n先ほど、5 月 3 日ではなく 5 月 13 日だと訂正されていましたね。",
+      "passed": true,
+      "missing": [],
+      "sources": 2,
+      "facts": [
+        "self/birthday=5月13日 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 57.2532085
+    },
+    {
+      "id": "F23",
+      "lang": "ja",
+      "kind": "update",
+      "attributes": [
+        "residence"
+      ],
+      "question": "私が今住んでいるのはどこ？",
+      "expect": [
+        [
+          "福岡"
+        ]
+      ],
+      "answer": "先月の会話の記録（引用-b9ce76c3e53c5d73）によると、利用者は**福岡**に引っ越しており、現在は福岡に住んでいると記載されています。",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": true,
+      "facts_correct": false,
+      "facts_missing": [
+        "self/residence=福岡 (Live, Current)"
+      ],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 7.154234
+    },
+    {
+      "id": "F24",
+      "lang": "ja",
+      "kind": "multi",
+      "attributes": [
+        "hobby"
+      ],
+      "question": "私の趣味を全部挙げてみて。",
+      "expect": [
+        [
+          "将棋"
+        ],
+        [
+          "囲碁"
+        ]
+      ],
+      "answer": "申し訳ありませんが、私の記憶には「趣味を全部挙げて」というご依頼に対する私の回答や、それ以前の会話の記録が含まれていません。\n\n提供された引用（引用-13819b89e6aa44f1）には、将棋を趣味としてお持ちで、最近詰将棋を毎日一問解いているという情報しか確認できません。\n\nもし他にも趣味がある場合は、改めて教えていただけますでしょうか？",
+      "passed": false,
+      "missing": [
+        "囲碁"
+      ],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": true,
+      "facts_correct": false,
+      "facts_missing": [
+        "self/hobby=将棋 (Live, Current)",
+        "self/hobby=囲碁 (Live, Current)"
+      ],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 12.4681105
+    },
+    {
+      "id": "F25",
+      "lang": "en",
+      "kind": "fact",
+      "attributes": [
+        "residence"
+      ],
+      "question": "Do you remember which city I live in?",
+      "expect": [
+        [
+          "Portland"
+        ]
+      ],
+      "answer": "Yes, based on our previous conversation, you mentioned that you live in **Portland**.",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": true,
+      "facts_correct": false,
+      "facts_missing": [
+        "self/residence=Portland (Live, Current)"
+      ],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 43.4376418
+    },
+    {
+      "id": "F26",
+      "lang": "en",
+      "kind": "fact",
+      "attributes": [
+        "pet"
+      ],
+      "question": "What's the name of my cat?",
+      "expect": [
+        [
+          "Biscuit"
+        ]
+      ],
+      "answer": "Your cat's name is Biscuit.",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 5.8038792
+    },
+    {
+      "id": "F27",
+      "lang": "en",
+      "kind": "fact",
+      "attributes": [
+        "occupation"
+      ],
+      "question": "What do I do for a living?",
+      "expect": [
+        [
+          "dental hygienist"
+        ]
+      ],
+      "answer": "I don't know what you do for a living. As an AI, I don't have access to your personal information, employment records, or daily life unless you choose to share it with me in our conversation.\n\nIf you'd like to tell me about your job or career, I'd be happy to listen or help you brainstorm ideas related to it!",
+      "passed": false,
+      "missing": [
+        "dental hygienist"
+      ],
+      "sources": 0,
+      "facts": [],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 10.7145563
+    },
+    {
+      "id": "F28",
+      "lang": "en",
+      "kind": "fact",
+      "attributes": [
+        "dietary"
+      ],
+      "question": "Which food can't I eat?",
+      "expect": [
+        [
+          "peanut"
+        ]
+      ],
+      "answer": "Based on your previous message, you are allergic to **peanuts**. Therefore, you cannot eat peanuts or any foods that contain them.\n\nAlways check food labels carefully for:\n*   The word \"peanuts\" or \"peanut.\"\n*   The phrase \"contains peanuts.\"\n*   The word \"may contain peanuts\" (which indicates a risk of cross-contact).\n*   Ingredients like peanut butter, peanut oil, or peanut flour.\n\nEven if a snack is naturally peanut-free (like sunflower seeds or dried fruit), it might be processed in a facility that also handles peanuts, so checking the label is essential for your safety.",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 17.0415357
+    },
+    {
+      "id": "F29",
+      "lang": "en",
+      "kind": "correction",
+      "attributes": [
+        "residence"
+      ],
+      "question": "Which city do I live in?",
+      "expect": [
+        [
+          "Boulder"
+        ]
+      ],
+      "answer": "Based on our previous conversation, you live in **Boulder**.\n\nIn that chat, you initially mentioned Denver but then corrected me, stating, \"Sorry, it's Boulder, not Denver.\"",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [],
+      "facts_checked": true,
+      "facts_correct": false,
+      "facts_missing": [
+        "self/residence=Boulder (Live, Current)"
+      ],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 21.1431358
+    },
+    {
+      "id": "F30",
+      "lang": "en",
+      "kind": "fact",
+      "attributes": [
+        "spoken_language"
+      ],
+      "question": "Which language am I learning?",
+      "expect": [
+        [
+          "Korean"
+        ]
+      ],
+      "answer": "You are learning Korean.",
+      "passed": true,
+      "missing": [],
+      "sources": 1,
+      "facts": [
+        "self/occupation=work (Live, Current)",
+        "self/spoken_language=Korean (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 29.2646171
+    },
+    {
+      "id": "A01",
+      "lang": "ja",
+      "kind": "abstain",
+      "attributes": [
+        "residence"
+      ],
+      "question": "私自身はどこに住んでいるか、覚えてる？",
+      "expect": [],
+      "answer": "申し訳ありませんが、私の知識ベースにはあなたの居住地に関する情報が含まれていません。\n\n提供された事実の表には「妹」の居住地（札幌）が記載されていますが、あなた自身の居住地については記載されていません。そのため、あなたの居住地を特定することはできません。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "妹/relation=妹 (Live, Current)",
+        "妹/residence=札幌 (Live, Current)"
+      ],
+      "facts_checked": true,
+      "facts_correct": true,
+      "facts_missing": [],
+      "facts_live_forbidden": [],
+      "settled": true,
+      "seconds": 36.7581164
+    },
+    {
+      "id": "A02",
+      "lang": "ja",
+      "kind": "abstain",
+      "attributes": [
+        "birthday"
+      ],
+      "question": "私の誕生日はいつだったっけ？",
+      "expect": [],
+      "answer": "申し訳ありませんが、私の記憶にはあなたの誕生日に関する情報は保存されていません。\n\nもしあなたが私に誕生日を教えたことがあれば、その時の会話履歴（引用）を確認する必要がありますが、現在の会話履歴にはそのような情報はありません。\n\n正確に回答するためには、あなたが直接「私の誕生日は〇月〇日です」と教えていただくか、あなたが普段利用しているカレンダーやメモアプリを確認することをお勧めします。",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 16.337803
+    },
+    {
+      "id": "A03",
+      "lang": "ja",
+      "kind": "abstain",
+      "attributes": [
+        "pet"
+      ],
+      "question": "私が飼っているペットの名前、何だったっけ？",
+      "expect": [],
+      "answer": "申し訳ありませんが、私が飼っているペットの名前については、利用者の提供した情報（趣味は写真を撮ること、写真は好きであること）や、過去の会話記録には記載されていません。\n\nそのため、その名前をお答えすることはできません。もしよろしければ、改めて教えていただけますでしょうか？",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [
+        "self/hobby=写真を撮る (Live, Current)",
+        "self/likes=写真 (Live, Current)"
+      ],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 19.7638759
+    },
+    {
+      "id": "A04",
+      "lang": "en",
+      "kind": "abstain",
+      "attributes": [
+        "likes"
+      ],
+      "question": "What's my favorite food?",
+      "expect": [],
+      "answer": "I don't have access to your personal preferences or past conversations outside of the current session, so I don't know what your favorite food is.\n\nIf you'd like to tell me, I'd be happy to chat about it!",
+      "passed": true,
+      "missing": [],
+      "sources": 0,
+      "facts": [],
+      "facts_checked": false,
+      "facts_correct": null,
+      "facts_missing": null,
+      "facts_live_forbidden": null,
+      "settled": true,
+      "seconds": 21.8226415
+    }
+  ]
+}

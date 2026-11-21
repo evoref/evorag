@@ -193,6 +193,8 @@ pub(super) struct Checked {
     key: Option<ForgetKey>,
     /// 当て直しで本文が記録と合わないターン (裏の LLM の呼び出しから除く、04 §7.2)。
     excluded: BTreeSet<Id>,
+    /// 補助の呼び出しに足す JSON (設定と、点検が通った思考を切る指定、OQ-52)。
+    aux_extra: evorag_llm::RequestExtra,
 }
 
 /// 実行の前に確かめる (読むだけ)。
@@ -213,6 +215,7 @@ pub(super) async fn check(
         None => src.prompt_language,
     }
     .as_str();
+    let aux_extra;
     {
         let tx = store.read().map_err(|e| read(&e))?;
         // 応答のモデルを記録と照合する (06 §3.1)。違うモデルで作り直さない。
@@ -236,7 +239,9 @@ pub(super) async fn check(
             Some((_, p)) if p.structured_ok != Some(true) || p.thinking_off == Some(false) => {
                 return Err(FactsUnavailable::ProbeFailed.into());
             }
-            Some(_) => {}
+            Some((_, p)) => {
+                aux_extra = crate::probe::aux_extra_with(&src.aux_request_extra, Some(&p));
+            }
         }
     }
     if !extraction_fits(server.n_ctx as usize) {
@@ -273,6 +278,7 @@ pub(super) async fn check(
         language,
         key,
         excluded,
+        aux_extra,
     })
 }
 
@@ -509,7 +515,7 @@ pub(super) async fn extract(
     let server = &checked.server;
     let mut ex = Extractor {
         llm,
-        aux_request_extra: &src.aux_request_extra,
+        aux_request_extra: &checked.aux_extra,
         // 裏の処理は最後のスロット (06 §4)。
         slot: (server.total_slots > 1).then(|| server.total_slots - 1),
         system,

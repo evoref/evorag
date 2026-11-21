@@ -54,6 +54,11 @@ fn chat_key() -> String {
 
 /// 起動の前に、応答のモデルの点検の結果を書いておく (型縛りを使えるか)。
 fn prepare(root: &Path, structured_ok: bool) {
+    prepare_with(root, structured_ok, None);
+}
+
+/// `aux_thinking_off`: 点検が思考を切る指定を足して通った (OQ-52)。
+fn prepare_with(root: &Path, structured_ok: bool, aux_thinking_off: Option<bool>) {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_640_000_000)));
     let m = DataRootModels::open(
         root,
@@ -68,6 +73,7 @@ fn prepare(root: &Path, structured_ok: bool) {
         build_info: "b1-test".into(),
         structured_ok: Some(structured_ok),
         thinking_off: Some(true),
+        aux_thinking_off,
         ..ModelProbeBody::default()
     })
     .unwrap();
@@ -153,10 +159,12 @@ const KEYS: &str = r#"{"keys": ["観葉植物の水やり", "https://example.com
 
 /// 区切りがつくまで作らず、ついたら 1 回の型縛りの呼び出しで作る。鍵は検査を通ったものだけ。
 /// verifies: AC-FR-303-1 (鍵の数と長さの上限を超える出力は切り捨てられ、命令形の文と URL を含む鍵は捨てられる)
+/// verifies: AC-FR-422-1 (点検が足した思考を切る指定が、抽出とノートの補助の呼び出しに入る)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_note_is_made_once_the_segment_closes() {
     let dir = TempDir::new("notes");
-    prepare(dir.path(), true);
+    // 点検が思考を切る指定を自動で足した (設定の aux_request_extra は空、OQ-52)。
+    prepare_with(dir.path(), true, Some(true));
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     let llm = chat(
         &[reply(REPLY), reply(REPLY), reply(NO_FACTS), reply(KEYS)],
@@ -205,6 +213,16 @@ async fn a_note_is_made_once_the_segment_closes() {
     );
     assert_eq!(n[0].model_key, chat_key());
     assert_eq!(n[0].rules, evorag_memory::NOTE_RULES);
+    // 補助の呼び出し (抽出とノート、裏のスロット) には思考を切る指定が入り、応答には入らない。
+    let thinking_off = serde_json::json!({"enable_thinking": false});
+    for r in llm.requests() {
+        let got = r.extra.get("chat_template_kwargs");
+        if r.id_slot == Some(1) {
+            assert_eq!(got, Some(&thinking_off), "a helper call");
+        } else {
+            assert_eq!(got, None, "an answer");
+        }
+    }
 }
 
 /// 続きが足されたら作り直し (前のノートは消える)、型に合わない答えが 2 回続いた区切りは飛ばす。
@@ -341,12 +359,8 @@ async fn a_key_hit_attaches_the_original_exchange() {
         let last = llm
             .requests()
             .last()
-            .unwrap()
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .clone();
+            .map(|r| user_side(&r.messages))
+            .unwrap();
         if structured {
             assert!(last.contains(ASKED) && last.contains(ANSWERED), "{last}");
             assert!(
@@ -577,4 +591,17 @@ async fn a_note_made_before_a_revision_is_redone() {
             .src_revs
             .contains(&evorag_memory::SrcRev { turn: u1, rev: 1 })
     );
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

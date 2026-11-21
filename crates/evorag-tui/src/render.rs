@@ -365,12 +365,24 @@ pub fn draw(app: &App, f: &mut Frame) {
     } else if app.generating() {
         app.catalog.key(MessageKey::UiStatusGenerating)
     } else {
-        app.catalog.key(match app.status.background {
+        let mut s = app.catalog.key(match app.status.background {
             Some(BackgroundState::Working) => MessageKey::UiStatusWorking,
             Some(BackgroundState::PausedBattery) => MessageKey::UiStatusBattery,
             Some(BackgroundState::PausedLowSpace) => MessageKey::UiStatusLowSpace,
             _ => MessageKey::UiStatusIdle,
-        })
+        });
+        // 残っている裏の処理の手順の数 (07 §2.1、v0.4)。切っているときは出さない。
+        let pending = app.status.background_pending;
+        if pending > 0 && app.status.background != Some(BackgroundState::Off) {
+            s = format!(
+                "{s} ({})",
+                app.catalog.with(
+                    MessageKey::UiStatusPending,
+                    &[("count", &pending.to_string())]
+                )
+            );
+        }
+        s
     };
     let st = &app.status;
     // 点検で止めた機能があれば示す (06 §3.3。理由は知らせと `evorag doctor`)。
@@ -690,6 +702,7 @@ mod tests {
                 limited: false,
                 recall: None,
                 background: None,
+                background_pending: 0,
                 remote_llm: false,
                 forget: None,
             },
@@ -748,6 +761,32 @@ mod tests {
         let cursor = term.get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (1 + 4, 12 - 1 - 3 + 1));
     }
+    /// verifies: AC-FR-421-1 (状態の行に、残っている裏の処理の手順の数を出す)
+    #[test]
+    fn the_status_line_shows_the_remaining_background_steps() {
+        let draw_with = |pending: u32| {
+            let app = App::new(
+                Catalog::load("ja"),
+                Status {
+                    endpoint: "127.0.0.1:8080".into(),
+                    background: Some(BackgroundState::Working),
+                    background_pending: pending,
+                    ..Status::default()
+                },
+            );
+            let mut term = Terminal::new(TestBackend::new(80, 8)).unwrap();
+            term.draw(|f| draw(&app, f)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+                .collect::<String>()
+                .replace(' ', "")
+        };
+        assert!(draw_with(3).contains("整理中(残り3)"), "{}", draw_with(3));
+        assert!(!draw_with(0).contains("残り"));
+    }
+
     /// verifies: AC-FR-412-1 (画面の層: 応答の下に帯を薄く出し、印を付けたものに印を出す)
     #[test]
     fn the_band_is_drawn_under_the_answer() {

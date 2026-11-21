@@ -70,6 +70,9 @@ pub struct Usage {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    /// llama-server が実際に処理したプロンプトのトークン数 (`timings.prompt_n`。キャッシュから使った分を除く)。
+    #[serde(skip)]
+    pub processed: Option<u64>,
 }
 
 /// 逐次表示の 1 つの出来事。

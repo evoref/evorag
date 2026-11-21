@@ -242,6 +242,34 @@ pub(crate) fn pending_steps(inner: &Inner) -> Vec<String> {
     out
 }
 
+/// 残っている裏の処理の手順 (待たせているものも含む。起動の後の点検と退避は数えない。状態の行と観測値、
+/// 07 §2.1・05 §3.6)。
+pub(crate) fn remaining_steps(inner: &Inner) -> Vec<String> {
+    if !inner.sleep.enabled {
+        return Vec::new();
+    }
+    [
+        (Step::Forget, crate::forgets::needed(inner)),
+        (Step::Embed, crate::embedding::needed(inner)),
+        (Step::Notes, crate::notes::needed(inner)),
+        (Step::Extract, crate::extraction::needed(inner)),
+        (Step::Verify, crate::correction::needed(inner)),
+        (Step::FactTable, crate::fact_table::needed(inner)),
+    ]
+    .into_iter()
+    .filter(|(_, needed)| *needed)
+    .map(|(s, _)| format!("{s:?}"))
+    .collect()
+}
+
+/// 残っている手順の数が変わっていれば、状態の行に知らせる (07 §2.1)。
+pub(crate) fn show_pending(inner: &Inner) {
+    let n = u32::try_from(remaining_steps(inner).len()).unwrap_or(u32::MAX);
+    if inner.pending_shown.swap(n, Ordering::SeqCst) != n {
+        emit(inner, Event::BackgroundPending { steps: n });
+    }
+}
+
 /// 要る手順があるか (待たせている手順を除く)。
 pub(crate) fn pending(inner: &Inner) -> bool {
     !pending_steps(inner).is_empty()
@@ -290,6 +318,7 @@ pub(crate) async fn run(inner: Arc<Inner>) {
                 let result = run_step(&inner, step, generation).await;
                 tracing::info!(?step, ?result, "background step");
                 set_state(&inner, resting(&inner));
+                show_pending(&inner);
                 if let Some(progressed) = result {
                     // 終えたのに、進まずにまだ要る (保存できなかったなど) なら、しばらく待たせる。
                     // 少しでも進んだ手順は待たせない (残りは次の回で続ける)。

@@ -1,0 +1,215 @@
+{
+  "id": "BM-107",
+  "evorag": "0.4.0",
+  "date": "2026-11-20",
+  "setup": "chat+embed+rerank",
+  "models": {
+    "chat": {
+      "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_name": "Qwen3.5-9B-Q4_K_M.gguf",
+      "model_fp": "04e555181c24",
+      "build_info": "b1-622aa06",
+      "n_ctx": 16384
+    },
+    "embed": {
+      "model_file": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_name": "qwen3-embedding-8b-q4_k_m.gguf",
+      "model_fp": "0c044acef127",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    },
+    "rerank": {
+      "model_file": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_name": "bge-reranker-v2-m3-q8_0.gguf",
+      "model_fp": "cb952a6c3a57",
+      "build_info": "b1-622aa06",
+      "n_ctx": 8192
+    }
+  },
+  "method": "synthetic English history of about 2k tokens; each kind asked ROUNDS times in the same session; TTFT from the start of the response path to the first content token (obs.prefetch.ttft_ms)",
+  "by_kind": {
+    "none": {
+      "rounds": 5,
+      "observed_kinds": {
+        "none": 5
+      },
+      "ttft_p50_s": 1.653,
+      "ttft_p95_s": 3.33,
+      "processed_p50": 313.0,
+      "quote_tokens_mean": 219.6
+    },
+    "a": {
+      "rounds": 5,
+      "observed_kinds": {
+        "a": 5
+      },
+      "ttft_p50_s": 0.332,
+      "ttft_p95_s": 0.506,
+      "processed_p50": 52.0,
+      "quote_tokens_mean": 172.4
+    },
+    "b": {
+      "rounds": 5,
+      "observed_kinds": {
+        "b": 4,
+        "c": 1
+      },
+      "ttft_p50_s": 0.676,
+      "ttft_p95_s": 1.416,
+      "processed_p50": 52.0,
+      "quote_tokens_mean": 195.0
+    },
+    "c": {
+      "rounds": 5,
+      "observed_kinds": {
+        "c": 5
+      },
+      "ttft_p50_s": 1.132,
+      "ttft_p95_s": 1.554,
+      "processed_p50": 311.0,
+      "quote_tokens_mean": 173.8
+    }
+  },
+  "rows": [
+    {
+      "asked_as": "none",
+      "kind": "none",
+      "ttft_ms": 3330,
+      "processed": 319,
+      "quote_tokens": 202
+    },
+    {
+      "asked_as": "none",
+      "kind": "none",
+      "ttft_ms": 1632,
+      "processed": 313,
+      "quote_tokens": 195
+    },
+    {
+      "asked_as": "none",
+      "kind": "none",
+      "ttft_ms": 1653,
+      "processed": 307,
+      "quote_tokens": 189
+    },
+    {
+      "asked_as": "none",
+      "kind": "none",
+      "ttft_ms": 1548,
+      "processed": 252,
+      "quote_tokens": 139
+    },
+    {
+      "asked_as": "none",
+      "kind": "none",
+      "ttft_ms": 2048,
+      "processed": 489,
+      "quote_tokens": 373
+    },
+    {
+      "asked_as": "a",
+      "kind": "a",
+      "ttft_ms": 306,
+      "processed": 55,
+      "quote_tokens": 190
+    },
+    {
+      "asked_as": "a",
+      "kind": "a",
+      "ttft_ms": 304,
+      "processed": 52,
+      "quote_tokens": 147
+    },
+    {
+      "asked_as": "a",
+      "kind": "a",
+      "ttft_ms": 332,
+      "processed": 53,
+      "quote_tokens": 196
+    },
+    {
+      "asked_as": "a",
+      "kind": "a",
+      "ttft_ms": 339,
+      "processed": 51,
+      "quote_tokens": 190
+    },
+    {
+      "asked_as": "a",
+      "kind": "a",
+      "ttft_ms": 506,
+      "processed": 50,
+      "quote_tokens": 139
+    },
+    {
+      "asked_as": "b",
+      "kind": "b",
+      "ttft_ms": 736,
+      "processed": 51,
+      "quote_tokens": 196
+    },
+    {
+      "asked_as": "b",
+      "kind": "b",
+      "ttft_ms": 343,
+      "processed": 55,
+      "quote_tokens": 190
+    },
+    {
+      "asked_as": "b",
+      "kind": "b",
+      "ttft_ms": 676,
+      "processed": 52,
+      "quote_tokens": 203
+    },
+    {
+      "asked_as": "b",
+      "kind": "c",
+      "ttft_ms": 1416,
+      "processed": 314,
+      "quote_tokens": 196
+    },
+    {
+      "asked_as": "b",
+      "kind": "b",
+      "ttft_ms": 350,
+      "processed": 51,
+      "quote_tokens": 190
+    },
+    {
+      "asked_as": "c",
+      "kind": "c",
+      "ttft_ms": 1554,
+      "processed": 249,
+      "quote_tokens": 138
+    },
+    {
+      "asked_as": "c",
+      "kind": "c",
+      "ttft_ms": 1132,
+      "processed": 314,
+      "quote_tokens": 196
+    },
+    {
+      "asked_as": "c",
+      "kind": "c",
+      "ttft_ms": 1081,
+      "processed": 311,
+      "quote_tokens": 191
+    },
+    {
+      "asked_as": "c",
+      "kind": "c",
+      "ttft_ms": 1006,
+      "processed": 265,
+      "quote_tokens": 148
+    },
+    {
+      "asked_as": "c",
+      "kind": "c",
+      "ttft_ms": 1195,
+      "processed": 316,
+      "quote_tokens": 196
+    }
+  ]
+}

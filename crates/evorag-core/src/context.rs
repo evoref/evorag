@@ -74,6 +74,9 @@ pub fn reserve_for_output(n_ctx: usize, configured: Option<usize>) -> usize {
 
 /// 想起の引用の枠の予算 (トークン、05 §4.1 の順 6)。
 pub(crate) const RECALL_BUDGET: usize = 800;
+
+/// 文脈の組み立ての版 (観測値の `versions`、05 §3.6)。並べ方・枠の置き場所を変えたら上げる。
+pub(crate) const CONTEXT_VERSION: &str = "0.4.0";
 /// 予算を半分にする `n_ctx` の目安 (05 §4.1)。
 const SMALL_CTX: usize = 8192;
 /// 小さな `n_ctx` で、履歴に残したい量 (トークン、05 §4.1)。
@@ -113,6 +116,7 @@ pub(crate) fn frame_budgets(n_ctx: usize, reserve: usize, with_facts: bool) -> F
 }
 
 /// 履歴の 1 つの発言。
+#[derive(Clone)]
 pub struct Past {
     /// このターンの ID。
     pub turn: Id,
@@ -140,6 +144,7 @@ pub async fn assemble(
     reserve: usize,
     system: ChatMessage,
     past: Vec<Past>,
+    frame: Option<ChatMessage>,
     current: (Id, ChatMessage),
     from: Option<Id>,
 ) -> Assembled {
@@ -152,7 +157,10 @@ pub async fn assemble(
         }
     };
     let system_cost = count(&system.content).await + PER_MESSAGE_OVERHEAD;
-    let current_cost = count(&current.1.content).await + PER_MESSAGE_OVERHEAD;
+    let mut current_cost = count(&current.1.content).await + PER_MESSAGE_OVERHEAD;
+    if let Some(f) = &frame {
+        current_cost += count(&f.content).await + PER_MESSAGE_OVERHEAD;
+    }
     // 前のターンが省いた位置より前は数えもしない。
     let start = from.map_or(0, |f| {
         past.iter().position(|p| p.turn >= f).unwrap_or(past.len())
@@ -185,6 +193,10 @@ pub async fn assemble(
     let mut messages = Vec::with_capacity(past.len() - keep + 2);
     messages.push(system);
     messages.extend(past.into_iter().skip(keep).map(|p| p.message));
+    // 想起の引用の枠は、今の発話と別のメッセージとして直前に置く (05 §4.1、OQ-50)。
+    if let Some(f) = frame {
+        messages.push(f);
+    }
     messages.push(current.1);
     Assembled {
         messages,

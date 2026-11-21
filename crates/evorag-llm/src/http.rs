@@ -342,6 +342,10 @@ pub(crate) fn parse_rerank(v: &Value, n: usize) -> Result<Vec<f32>, LlmError> {
 }
 
 impl LlmClient for HttpClient {
+    fn is_loopback(&self) -> bool {
+        self.endpoint.is_loopback()
+    }
+
     fn health(&self) -> BoxFuture<'_, Result<(), LlmError>> {
         Box::pin(async move {
             // /health は API キーなしで呼べる。

@@ -33,6 +33,77 @@ use crate::prompt::PromptLanguage;
 /// 引用する 1 ターンの本文の上限 (文字)。
 const EXCERPT_CHARS: usize = 400;
 
+/// 想起の数値 (05 §3.8、OQ-51。S-17 の 1・7 で決めた)。`windows = false` は v0.3 の形 (最上位の 1 往復を
+/// 400 文字で添える。評価で起点と比べるために残す)。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecallTuning {
+    /// 往復で選び、文の窓で詰める (v0.4、05 §3.4)。`false` なら v0.3 の形。
+    pub windows: bool,
+    /// 2 件目以降の下限の位置: しきい値から帯の下限へ向けた割合 (0 ならしきい値、1 なら帯の下限)。
+    pub floor: f64,
+    /// 添える往復の上限。
+    pub max_exchanges: usize,
+    /// 想起の予算 (トークン。n_ctx が小さいときは今と同じ比で減らす)。
+    pub budget: usize,
+    /// 先読みが当たらなかったとき・先読みが無いときの予算 (トークン。05 §3.8 の 5)。
+    pub small_budget: usize,
+    /// 窓に足す前後の文の数。
+    pub window: usize,
+    /// 1 ターンの中で中心にする当たった文の数。
+    pub hits_per_turn: usize,
+    /// これ以下の長さ (文字) のターンは、窓にせず全文を添える。
+    pub short_chars: usize,
+    /// 1 ターンの引用の上限 (文字)。
+    pub turn_chars: usize,
+    /// 件数・合計・一覧の意図がある問いで、候補と予算を広げる (S-17 の 7)。
+    pub count_widen: bool,
+    /// 広げるときのリランクの往復の数。
+    pub count_top: usize,
+    /// 広げるときの添える往復の上限。
+    pub count_max: usize,
+    /// 広げるときの予算。
+    pub count_budget: usize,
+}
+
+impl Default for RecallTuning {
+    fn default() -> Self {
+        Self {
+            windows: true,
+            floor: 0.5,
+            max_exchanges: 4,
+            budget: 800,
+            window: 1,
+            hits_per_turn: 2,
+            short_chars: 300,
+            small_budget: 800,
+            turn_chars: 700,
+            count_widen: true,
+            count_top: 10,
+            count_max: 8,
+            count_budget: 1200,
+        }
+    }
+}
+
+static TUNING: std::sync::RwLock<Option<RecallTuning>> = std::sync::RwLock::new(None);
+
+/// 評価のため: 想起の数値を差し替える (プロセス全体)。
+#[doc(hidden)]
+pub fn set_tuning(t: RecallTuning) {
+    *TUNING.write().unwrap_or_else(|e| e.into_inner()) = Some(t);
+}
+
+fn tuning() -> RecallTuning {
+    TUNING
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_default()
+}
+
+/// 想起の作りの版 (観測値の `versions`、05 §3.6)。選び方・窓・予算を変えたら上げる。
+pub(crate) const RECALL_VERSION: &str = "0.4.0";
+
 /// 索引の置き場所 (05 §2.3)。v0.2 はチャンクを単位にした `chunk-lex/`。
 pub fn index_dir(data_root: &std::path::Path) -> std::path::PathBuf {
     data_root.join("index").join("memory").join("chunk-lex")
@@ -288,9 +359,12 @@ fn turn_hits(
     out
 }
 /// 文脈に添えるもの。
+#[derive(Clone)]
 pub struct Attached {
     /// 今の発話の直前に置く引用の枠 (添えるものが無ければ `None`)。
     pub quote: Option<String>,
+    /// 引用の枠の中身 (乱数の区切りを除く)。先読みの枠と同じかを比べる (05 §4.5)。
+    pub body: String,
     pub attached: Vec<Id>,
     pub record: RecallRecord,
     /// 観測値 (05 §3.6): リランクの値、帯、縮退の理由。
@@ -306,6 +380,55 @@ pub struct RecallObs {
     pub band: Vec<Id>,
     pub user_attached: Vec<Id>,
     pub degraded: Vec<String>,
+    /// 候補の上位 (05 §3.6、v0.4)。
+    pub candidates: Vec<evorag_memory::RecallCandidate>,
+    /// 問いの分析の結果 (05 §3.1 の 5、v0.4)。
+    pub query: Option<evorag_memory::QueryObs>,
+    /// 引用に詰めた窓 (05 §3.8、v0.4)。
+    pub packed: Option<evorag_memory::Packed>,
+}
+
+/// 観測値に残す候補の数 (05 §3.6)。
+const CANDIDATES_OBS: usize = 30;
+
+/// 融合の順 `ranked` の上位を、往復の代表のターンにまとめ、語彙 (`lists[0]`) とベクトル (`lists[1]`) の
+/// それぞれの順位を添える (05 §3.6、v0.4)。
+fn candidate_obs(
+    store: &Store,
+    lists: &[Vec<Id>],
+    ranked: &[Id],
+) -> Vec<evorag_memory::RecallCandidate> {
+    let Ok(rtx) = store.read() else {
+        return Vec::new();
+    };
+    let rank = |list: Option<&Vec<Id>>, id: Id| -> Option<u16> {
+        list?
+            .iter()
+            .position(|x| *x == id)
+            .and_then(|p| u16::try_from(p + 1).ok())
+    };
+    let mut out: Vec<evorag_memory::RecallCandidate> = Vec::new();
+    for id in ranked {
+        if out.len() >= CANDIDATES_OBS {
+            break;
+        }
+        let rep = match rtx.get(KIND_TURN, *id) {
+            Ok(Some(Read::Ok(e))) => match e.body_as::<TurnBody>() {
+                Ok(b) if b.role != TurnRole::User => b.reply_to.unwrap_or(*id),
+                _ => *id,
+            },
+            _ => continue,
+        };
+        if out.iter().any(|c| c.id == rep) {
+            continue;
+        }
+        out.push(evorag_memory::RecallCandidate {
+            id: rep,
+            lex: rank(lists.first(), *id),
+            vec: rank(lists.get(1), *id),
+        });
+    }
+    out
 }
 
 /// 応答の経路のリランクの使い方 (05 §3.4・§3.5)。
@@ -764,6 +887,9 @@ struct Selection {
     hits: Vec<Id>,
     decision: RecallDecision,
     obs: RecallObs,
+    /// 引いた問い (追い質問なら直前の発話を足したもの)。窓の文の点数に使う。
+    query: String,
+    intent: evorag_retrieval::window::QueryIntent,
 }
 
 /// セッションの `upto` までの発話の本文 (新しい順)。
@@ -811,36 +937,6 @@ async fn select(
     .await
 }
 
-/// 入力が止まったときに、送る前の発話 `draft` で問いの準備・候補の収集・リランクを先に済ませる
-/// (05 §4.5)。結果は問いの埋め込みとリランクのキャッシュに残るだけで、保存しない。
-#[allow(clippy::too_many_arguments)]
-pub async fn precompute(
-    store: &Store,
-    index: Option<&LexIndex>,
-    lang: PromptLanguage,
-    session: Id,
-    draft: String,
-    mode: &RerankMode,
-    vectors: Option<&VectorQuery>,
-) {
-    // 送ると、今の最後の発話が「直前の発話」になる。
-    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]), lang)
-        .into_iter()
-        .next();
-    select_for(
-        store,
-        index,
-        lang,
-        session,
-        draft,
-        previous,
-        mode,
-        vectors,
-        PRECOMPUTE_DEADLINES,
-    )
-    .await;
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn select_for(
     store: &Store,
@@ -854,15 +950,27 @@ async fn select_for(
     deadlines: Deadlines,
 ) -> Selection {
     let mut obs = RecallObs::default();
+    let t = tuning();
+    let intent = evorag_retrieval::window::analyze(&query);
+    let widen = t.windows && t.count_widen && intent.count;
+    obs.query = Some(evorag_memory::QueryObs {
+        count: intent.count,
+        date: intent.date,
+        explicit: intent.explicit,
+        widened: widen,
+    });
     if vectors.is_none() {
         // 埋め込みが無い・記録と違う・作り直しの途中 (05 §3.5 の `no_embed`)。
         obs.degraded
             .push(evorag_memory::DEGRADED_NO_EMBED.to_owned());
     }
+    let q_for_window = query.clone();
     let none = |decision, obs: RecallObs| Selection {
         hits: Vec::new(),
         decision,
         obs,
+        query: q_for_window.clone(),
+        intent,
     };
     let Some(index) = index else {
         obs.degraded = vec![evorag_memory::DEGRADED_NO_INDEX.to_owned()];
@@ -886,6 +994,10 @@ async fn select_for(
     // 索引の単位はチャンク。ターンにまとめる (05 §2.4)。
     r.hits = turn_hits(store, &r.hits, session);
     r.candidates = turn_hits(store, &r.candidates, session);
+    {
+        let lex: Vec<Id> = r.candidates.iter().map(|h| h.id).collect();
+        obs.candidates = candidate_obs(store, std::slice::from_ref(&lex), &lex);
+    }
     let lexical = |obs: RecallObs| {
         // ターンに直して何も残らない当たり (鍵の事実が読み直しで外れたなど) は、添えない。
         if r.decision == Decision::Abstain || r.hits.is_empty() {
@@ -895,6 +1007,8 @@ async fn select_for(
                 hits: r.hits.iter().map(|h| h.id).collect(),
                 decision: RecallDecision::Fire,
                 obs,
+                query: q_for_window.clone(),
+                intent,
             }
         }
     };
@@ -931,7 +1045,9 @@ async fn select_for(
         }
     }
     let ranked = rrf(&lists);
-    let ex = exchanges(store, &ranked, u.top, lang);
+    obs.candidates = candidate_obs(store, &lists, &ranked);
+    let top_n = if widen { t.count_top.max(u.top) } else { u.top };
+    let ex = exchanges(store, &ranked, top_n, lang);
     if ex.is_empty() {
         return none(RecallDecision::Abstain, obs);
     }
@@ -979,14 +1095,33 @@ async fn select_for(
     obs.threshold_version = Some(version);
     let (top, top_score) = order[0];
     let fire = f64::from(top_score) >= thr;
+    // 2 件目以降は、下限 (しきい値と帯の下限の間) 以上の往復も採る (v0.4、05 §3.4)。
+    let mut chosen = vec![top];
+    if fire && t.windows {
+        let floor = thr - t.floor * (thr - band_low);
+        let max = if widen { t.count_max } else { t.max_exchanges };
+        for &(i, s) in order.iter().skip(1) {
+            if chosen.len() >= max {
+                break;
+            }
+            if f64::from(s) >= floor {
+                chosen.push(i);
+            }
+        }
+    }
     obs.band = band(&order, &ex, |i, s| {
-        (!fire || i != top) && f64::from(s) >= band_low && f64::from(s) < thr
+        (!fire || !chosen.contains(&i)) && f64::from(s) >= band_low && f64::from(s) < thr
     });
     if !fire {
         return none(RecallDecision::Abstain, obs);
     }
     Selection {
-        hits: ex[top].turns.iter().map(|t| t.envelope.id).collect(),
+        hits: chosen
+            .iter()
+            .flat_map(|&i| ex[i].turns.iter().map(|t| t.envelope.id))
+            .collect(),
+        query: q_for_window.clone(),
+        intent,
         decision: RecallDecision::Fire,
         obs,
     }
@@ -1003,6 +1138,7 @@ pub async fn attach(
     tokens: &TokenCache,
     model_key: &str,
     budget: usize,
+    large: bool,
     session: Id,
     user_turn: Id,
     base: u32,
@@ -1020,6 +1156,7 @@ pub async fn attach(
     if sel.hits.is_empty() {
         return Attached {
             quote: None,
+            body: String::new(),
             attached: Vec::new(),
             record: RecallRecord {
                 decision: sel.decision,
@@ -1028,10 +1165,375 @@ pub async fn attach(
             obs: sel.obs,
         };
     }
+    pack(
+        store, lang, llm, tokens, model_key, budget, large, session, base, sel,
+    )
+    .await
+}
+
+/// 選んだ往復を引用にする (v0.4 は文の窓、05 §3.8)。`budget` は文脈の枠の予算 (n_ctx が小さいときは減って
+/// いる)。`large` は先読みが当たったときの大きな予算を使うか (05 §3.8 の 5)。
+#[allow(clippy::too_many_arguments)]
+async fn pack(
+    store: &Store,
+    lang: PromptLanguage,
+    llm: &dyn LlmClient,
+    tokens: &TokenCache,
+    model_key: &str,
+    budget: usize,
+    large: bool,
+    session: Id,
+    base: u32,
+    sel: Selection,
+) -> Attached {
+    let t = tuning();
+    if t.windows {
+        let b = if t.count_widen && sel.intent.count {
+            t.count_budget
+        } else if large {
+            t.budget
+        } else {
+            t.small_budget
+        };
+        // n_ctx が小さいとき (frame_budgets が減らしたとき) は、同じ比で減らす。
+        let budget = b * budget / crate::context::RECALL_BUDGET;
+        return finish_windows(
+            store, lang, llm, tokens, model_key, budget, session, base, sel, &t,
+        )
+        .await;
+    }
     finish(
         store, lang, llm, tokens, model_key, budget, session, base, sel.hits, sel.obs,
     )
     .await
+}
+
+/// 入力が止まったときに、送る前の発話 `draft` で想起し、大きな予算で引用の枠を作る (投機的な先読み、
+/// 05 §4.5)。問いの埋め込みとリランクの結果はキャッシュに残る。保存しない。
+#[allow(clippy::too_many_arguments)]
+pub async fn draft_attach(
+    store: &Store,
+    index: Option<&LexIndex>,
+    lang: PromptLanguage,
+    llm: &dyn LlmClient,
+    tokens: &TokenCache,
+    model_key: &str,
+    budget: usize,
+    session: Id,
+    draft: String,
+    base: u32,
+    mode: &RerankMode,
+    vectors: Option<&VectorQuery>,
+) -> Attached {
+    // 送ると、今の最後の発話が「直前の発話」になる。
+    let previous = user_texts(store, session, Id::from_bytes([0xff; 16]), lang)
+        .into_iter()
+        .next();
+    let sel = select_for(
+        store,
+        index,
+        lang,
+        session,
+        draft,
+        previous,
+        mode,
+        vectors,
+        PRECOMPUTE_DEADLINES,
+    )
+    .await;
+    if sel.hits.is_empty() {
+        return Attached {
+            quote: None,
+            body: String::new(),
+            attached: Vec::new(),
+            record: RecallRecord {
+                decision: sel.decision,
+                sources: Vec::new(),
+            },
+            obs: sel.obs,
+        };
+    }
+    pack(
+        store, lang, llm, tokens, model_key, budget, true, session, base, sel,
+    )
+    .await
+}
+
+/// 先読みで作った引用のターンを、今も添えてよいか (添える直前のふるい分け、05 §3.4)。DB に無い・忘れるの
+/// 指示と合わないターンがあれば偽。
+pub fn still_attachable(store: &Store, ids: &[Id], lang: PromptLanguage) -> bool {
+    let Ok(rtx) = store.read() else {
+        return false;
+    };
+    let Some(hide) = crate::masking::Hide::load(&rtx, lang) else {
+        return false;
+    };
+    ids.iter().all(|id| match rtx.get(KIND_TURN, *id) {
+        Ok(Some(Read::Ok(e))) => !hide.excluded(&e),
+        _ => false,
+    })
+}
+
+/// 1 ターンを窓にした引用の本文 (v0.4、05 §3.4)。`scores` はそのターンの文ごとの点数。
+fn window_text(
+    text: &str,
+    sents: &[evorag_retrieval::window::Sentence],
+    scores: &[f64],
+    role: TurnRole,
+    t: &RecallTuning,
+) -> (String, Vec<(usize, usize)>) {
+    if text.chars().count() <= t.short_chars || sents.is_empty() {
+        return head_span(text, t.turn_chars);
+    }
+    let mut ranked: Vec<usize> = (0..sents.len()).filter(|&i| scores[i] > 0.0).collect();
+    ranked.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    ranked.truncate(t.hits_per_turn);
+    // 2 つ目以降の当たった文は、最も高い文の半分以上の点数のものだけ (機能語だけが重なる文を除く)。
+    if let Some(&best) = ranked.first() {
+        let top = scores[best];
+        ranked.retain(|&i| scores[i] * 2.0 >= top);
+    }
+    if ranked.is_empty() {
+        // 当たった文が無い (言い換え): 発話は短い頭、応答は頭から。
+        let n = if role == TurnRole::User {
+            t.short_chars / 2
+        } else {
+            t.turn_chars / 2
+        };
+        return head_span(text, n);
+    }
+    let body = |i: usize| &text[sents[i].start..sents[i].end];
+    let is_table = |i: usize| body(i).trim_start().starts_with('|');
+    let is_list = |i: usize| {
+        let b = body(i).trim_start();
+        b.starts_with("- ")
+            || b.starts_with("* ")
+            || b.starts_with('・')
+            || b.split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &h in &ranked {
+        let lo = h.saturating_sub(t.window);
+        let hi = (h + t.window).min(sents.len() - 1);
+        ranges.push((lo, hi));
+        // 表や箇条書きの中なら、見出しの行 (表の 1 行目、箇条の前の文) を足す。
+        if is_table(h) {
+            let mut s0 = h;
+            while s0 > 0 && is_table(s0 - 1) {
+                s0 -= 1;
+            }
+            ranges.push((s0, s0));
+        } else if is_list(h) {
+            let mut s0 = h;
+            while s0 > 0 && is_list(s0 - 1) {
+                s0 -= 1;
+            }
+            if s0 > 0 {
+                ranges.push((s0 - 1, s0 - 1));
+            }
+        }
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (lo, hi) in ranges {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    let mut out = String::new();
+    if merged[0].0 > 0 {
+        out.push_str("… ");
+    }
+    for (k, (lo, hi)) in merged.iter().enumerate() {
+        if k > 0 {
+            out.push_str(" … ");
+        }
+        out.push_str(&text[sents[*lo].start..sents[*hi].end]);
+    }
+    if merged.last().is_some_and(|l| l.1 + 1 < sents.len()) {
+        out.push_str(" …");
+    }
+    let spans = merged
+        .iter()
+        .map(|(lo, hi)| (sents[*lo].start, sents[*hi].end))
+        .collect();
+    (head_ellipsis(&out, t.turn_chars), spans)
+}
+
+/// 頭から `n` 文字 (と、その範囲)。
+fn head_span(text: &str, n: usize) -> (String, Vec<(usize, usize)>) {
+    let end = text.char_indices().nth(n).map_or(text.len(), |(i, _)| i);
+    (head_ellipsis(text, n), vec![(0, end)])
+}
+
+fn head_ellipsis(text: &str, n: usize) -> String {
+    let mut out: String = text.chars().take(n).collect();
+    if text.chars().count() > n {
+        out.push('…');
+    }
+    out
+}
+
+/// 選んだ往復を出典にまとめ、文の窓で詰める (v0.4、05 §3.4)。値の高い往復の出典から、予算に入るだけ。
+#[allow(clippy::too_many_arguments)]
+async fn finish_windows(
+    store: &Store,
+    lang: PromptLanguage,
+    llm: &dyn LlmClient,
+    tokens: &TokenCache,
+    model_key: &str,
+    budget: usize,
+    session: Id,
+    base: u32,
+    sel: Selection,
+    t: &RecallTuning,
+) -> Attached {
+    let nonce = nonce();
+    let srcs: Vec<Source> = sources(store, &sel.hits, lang)
+        .into_iter()
+        .filter(|s| s.session != session && !s.turns.is_empty())
+        .collect();
+    // 文の点数の重みは、添える候補のすべての文で求める。
+    let texts: Vec<Vec<String>> = srcs
+        .iter()
+        .map(|s| {
+            s.turns
+                .iter()
+                .map(|t| t.body.text.replace(&nonce, ""))
+                .collect()
+        })
+        .collect();
+    let sents: Vec<Vec<Vec<evorag_retrieval::window::Sentence>>> = texts
+        .iter()
+        .map(|ts| {
+            ts.iter()
+                .map(|x| evorag_retrieval::window::sentences(x))
+                .collect()
+        })
+        .collect();
+    let mut flat: Vec<&str> = Vec::new();
+    for (si, ts) in texts.iter().enumerate() {
+        for (ti, x) in ts.iter().enumerate() {
+            for s in &sents[si][ti] {
+                flat.push(&x[s.start..s.end]);
+            }
+        }
+    }
+    let all_scores = evorag_retrieval::window::sentence_scores(&sel.query, &flat);
+    // 各ターンの文の点数の始まり (all_scores の中の位置)。
+    let mut offs: Vec<Vec<usize>> = Vec::with_capacity(sents.len());
+    let mut at = 0;
+    for ss in &sents {
+        offs.push(
+            ss.iter()
+                .map(|x| {
+                    let o = at;
+                    at += x.len();
+                    o
+                })
+                .collect(),
+        );
+    }
+    // 出典 `si` の引用の本文と窓 (番号 `n`、数値 `tt`)。
+    let render = |si: usize, n: usize, tt: &RecallTuning| {
+        let s = &srcs[si];
+        let when = s
+            .turns
+            .first()
+            .map(|t| crate::localtime::datetime(t.envelope.created_at.as_millis()))
+            .unwrap_or_default();
+        let title = s.title.replace(&nonce, "");
+        let mut text = match lang {
+            PromptLanguage::Ja => format!("[{n}] {when} セッション「{title}」\n"),
+            PromptLanguage::En => format!("[{n}] {when} session \"{title}\"\n"),
+        };
+        let mut these = Vec::new();
+        for (ti, turn) in s.turns.iter().enumerate() {
+            let o = offs[si][ti];
+            let scores = &all_scores[o..o + sents[si][ti].len()];
+            let (w, spans) =
+                window_text(&texts[si][ti], &sents[si][ti], scores, turn.body.role, tt);
+            text.push_str(role_label(lang, turn.body.role));
+            text.push_str(": ");
+            text.push_str(&w);
+            text.push('\n');
+            // 窓の範囲は、添えたときの本文 ([非表示] の置き換えの後) のバイト位置。
+            let rev = evorag_memory::turn_rev(&turn.envelope);
+            these.extend(spans.into_iter().map(|(a, b)| evorag_memory::WindowRef {
+                turn: turn.envelope.id,
+                rev,
+                start: u32::try_from(a).unwrap_or(u32::MAX),
+                end: u32::try_from(b).unwrap_or(u32::MAX),
+            }));
+        }
+        (text, these)
+    };
+    // 最上位の出典が予算に入らないときに使う、狭い窓 (当たった文だけ、05 §3.8 の 4)。
+    let tight = RecallTuning {
+        window: 0,
+        hits_per_turn: 1,
+        short_chars: t.short_chars.min(120),
+        turn_chars: t.turn_chars.min(240),
+        ..*t
+    };
+    let mut body = String::new();
+    let mut used = 0;
+    let mut attached = Vec::new();
+    let mut counts = Vec::new();
+    let mut windows: Vec<evorag_memory::WindowRef> = Vec::new();
+    for (si, s) in srcs.iter().enumerate() {
+        let n = base as usize + counts.len();
+        let mut tries = vec![*t];
+        if counts.is_empty() {
+            tries.push(tight);
+        }
+        for tt in &tries {
+            let (text, these) = render(si, n, tt);
+            let cost = match tokens.count(llm, model_key, &text).await {
+                Some(n) => n,
+                None => estimate(&text) * 5 / 4,
+            };
+            if used + cost > budget {
+                continue;
+            }
+            used += cost;
+            body.push_str(&text);
+            counts.push(s.turns.len() as u32);
+            attached.extend(s.turns.iter().map(|t| t.envelope.id));
+            windows.extend(these);
+            break;
+        }
+    }
+    let mut obs = sel.obs;
+    obs.packed = Some(evorag_memory::Packed {
+        windows,
+        tokens: u32::try_from(used).unwrap_or(u32::MAX),
+        budget: u32::try_from(budget).unwrap_or(u32::MAX),
+    });
+    if counts.is_empty() {
+        return Attached {
+            quote: None,
+            body: String::new(),
+            attached: Vec::new(),
+            record: RecallRecord {
+                decision: RecallDecision::Abstain,
+                sources: Vec::new(),
+            },
+            obs,
+        };
+    }
+    Attached {
+        quote: Some(crate::prompt::quote_block(lang, &nonce, &body)),
+        body,
+        attached,
+        record: RecallRecord {
+            decision: RecallDecision::Fire,
+            sources: counts,
+        },
+        obs,
+    }
 }
 
 /// 選んだターンを出典にまとめ、予算の中で引用の枠を作る。
@@ -1073,6 +1575,7 @@ async fn finish(
     if counts.is_empty() {
         return Attached {
             quote: None,
+            body: String::new(),
             attached: Vec::new(),
             record: RecallRecord {
                 decision: RecallDecision::Abstain,
@@ -1083,6 +1586,7 @@ async fn finish(
     }
     Attached {
         quote: Some(crate::prompt::quote_block(lang, &nonce, &body)),
+        body,
         attached,
         record: RecallRecord {
             decision: RecallDecision::Fire,
@@ -1171,6 +1675,95 @@ mod tests {
         // (ID の大きい) 方が先。
         let fused = rrf(&[vec![id(1), id(2), id(3)], vec![id(3), id(4)]]);
         assert_eq!(fused, [id(3), id(1), id(4), id(2)]);
+    }
+
+    fn windows_of(text: &str, query: &str, t: &RecallTuning) -> String {
+        let sents = evorag_retrieval::window::sentences(text);
+        let flat: Vec<&str> = sents.iter().map(|s| &text[s.start..s.end]).collect();
+        let scores = evorag_retrieval::window::sentence_scores(query, &flat);
+        window_text(text, &sents, &scores, TurnRole::Assistant, t).0
+    }
+
+    fn filler(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("Step {i} is about something unrelated and fairly generic."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// verifies: AC-FR-417-2 (応答の 400 文字より後ろにある、問いに当たった文が窓に入る)
+    #[test]
+    fn a_late_sentence_that_answers_the_question_is_quoted() {
+        let t = RecallTuning {
+            windows: true,
+            ..RecallTuning::default()
+        };
+        let text = format!(
+            "{} Your golden retriever is named Biscuit. {}",
+            filler(12),
+            filler(3).replace("Step", "Note")
+        );
+        assert!(text.find("Biscuit").unwrap() > 400);
+        let w = windows_of(&text, "What is the name of my golden retriever?", &t);
+        assert!(w.contains("Your golden retriever is named Biscuit."), "{w}");
+        // 前後の文 (既定 1 文) も入り、省いたところは `…` で示す。
+        assert!(w.starts_with("… "), "{w}");
+        assert!(w.ends_with(" …"), "{w}");
+        assert!(!w.contains("Step 0 "), "{w}");
+        // 同じ入力では同じ窓。
+        assert_eq!(
+            w,
+            windows_of(&text, "What is the name of my golden retriever?", &t)
+        );
+    }
+
+    /// verifies: AC-FR-417-5 (表の中の文には表の 1 行目を、箇条書きの中の文には箇条の前の文を足す)
+    #[test]
+    fn tables_and_lists_bring_their_header() {
+        let t = RecallTuning {
+            windows: true,
+            window: 0,
+            short_chars: 10,
+            ..RecallTuning::default()
+        };
+        let table = format!(
+            "{} Here is the plan.
+| day | sport |
+| Mon | swim |
+| Tue | run |
+| Wed | bike |
+{}",
+            filler(4),
+            filler(2)
+        );
+        let w = windows_of(&table, "which day is bike", &t);
+        assert!(
+            w.contains("| day | sport |") && w.contains("| Wed | bike |"),
+            "{w}"
+        );
+        let list = format!(
+            "{} You should pack these items:
+- a tent
+- a stove
+- a kayak paddle
+{}",
+            filler(4),
+            filler(2)
+        );
+        let w = windows_of(&list, "kayak paddle", &t);
+        assert!(
+            w.contains("You should pack these items:") && w.contains("- a kayak paddle"),
+            "{w}"
+        );
+        // 短いターンは窓にせず全文。
+        let short = RecallTuning {
+            windows: true,
+            ..RecallTuning::default()
+        };
+        assert_eq!(
+            windows_of("Short answer.", "answer", &short),
+            "Short answer."
+        );
     }
 
     #[test]

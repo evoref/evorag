@@ -108,7 +108,7 @@ fn system_prompt(llm: &ReplayClient, i: usize) -> String {
 
 /// i 番目の要求の今の発話 (想起の引用はここに入る、05 §4.1)。
 fn current(llm: &ReplayClient, i: usize) -> String {
-    llm.requests()[i].messages.last().unwrap().content.clone()
+    user_side(&llm.requests()[i].messages)
 }
 
 fn nonce_of(system: &str) -> Option<String> {
@@ -216,8 +216,8 @@ async fn earlier_turns_are_attached_with_sources_and_recorded() {
     // 出典の番号はセッションの通し番号 (05 §5.1)。前のターンの引用は、次の要求の履歴に残らない。
     assert_eq!(again.source_base, 2);
     let req = &llm.requests()[2];
-    // 先頭はシステムプロンプト (枠の扱い方の説明がある)。その後から今の発話の前までが履歴。
-    let history = &req.messages[1..req.messages.len() - 1];
+    // 先頭はシステムプロンプト (枠の扱い方の説明がある)。その後から、今の引用の枠と発話の前までが履歴。
+    let history = &req.messages[1..req.messages.len() - 2];
     assert!(!history.is_empty());
     assert!(history.iter().all(|m| !m.content.contains("<<引用-")));
     core.command(Command::ShowSource {
@@ -480,4 +480,17 @@ async fn logs_never_contain_the_conversation() {
         !evorag_store::fsutil::acl_applicable(&log).unwrap()
             || evorag_store::fsutil::is_private(&log).unwrap()
     );
+}
+
+/// 今の発話の側 (v0.4 から、引用の枠は発話の直前の別のメッセージ、05 §4.1)。枠があれば、枠と発話をつなぐ。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    let n = messages.len();
+    if n >= 2
+        && messages[n - 2].role == evorag_llm::Role::User
+        && messages[n - 2].content.starts_with("<<引用-")
+    {
+        format!("{}{}", messages[n - 2].content, messages[n - 1].content)
+    } else {
+        messages[n - 1].content.clone()
+    }
 }

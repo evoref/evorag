@@ -303,6 +303,10 @@ pub fn probe_lines(c: &Catalog, role: &str, p: &ModelProbeBody) -> Vec<String> {
                     ("issues", &issues),
                 ],
             ));
+            // 点検が思考を切る指定を自動で足した (06 §3.3、OQ-52)。
+            if p.aux_thinking_off == Some(true) {
+                out.push(c.key(MessageKey::DoctorProbeAuxThinkingOff));
+            }
         }
         evorag_memory::ROLE_EMBED if p.error.is_none() => out.push(c.with(
             MessageKey::DoctorProbeEmbed,

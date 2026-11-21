@@ -1,23 +1,30 @@
-//! LongMemEval の一部での基準値 (09 §5.2 の「LongMemEval の一部」、08 §2.4 の v0.3 の合格条件 (6))。
-//! 合否には使わず、版の間の比較に使う。`cargo xtask longmemeval --data <path>` で流す。
+//! LongMemEval での評価 (09 §5.2 の「LongMemEval」)。合否の判定は、版の間の対の比較で行う
+//! (`cargo xtask lme-compare`)。`cargo xtask longmemeval --data <path>` で流す。
 //!
 //! - データはリポジトリに置かない。`EVORAG_LONGMEMEVAL_DATA` に元のファイル (oracle) のパスを置く。SHA-256 が
-//!   一部の定義 (`tests/longmemeval/subset-v0.3.toml`) と違えば流さない。データは信用しない入力として、
-//!   ここの型で読むだけにする。
+//!   問いの組の定義と違えば流さない。データは信用しない入力として、ここの型で読むだけにする。
+//! - 問いの組 (`EVORAG_LME_SET`): `dev` (既定。開発の組 `tests/longmemeval/subset-v0.3.toml`、調整に使う) か、
+//!   `holdout:<切片>` (保留の問い `tests/longmemeval/holdout-v0.4.toml`、判定にだけ使う)。封をした切片
+//!   (`opened` が空) は、取り込みだけ (`EVORAG_LME_INGEST_ONLY`) を許す。
 //! - 問いごとに新しいデータ根を作り、以前のセッションのターン (利用者と応答の両方、データのまま) を、各
 //!   セッションの日時で書き込みの入口から書く。コアは問いの日時の時計で開き、sleep-time の手順 (点検・抽出・
-//!   訂正の検証・事実の表。埋め込みとリランカーを置けば埋め込みと較正も) が済むまで待ってから、新しいセッション
-//!   で問う。
+//!   訂正の検証・事実の表。埋め込みとリランカーを置けば埋め込みと較正も) が済むまで待ち (上限は
+//!   `EVORAG_LME_SETTLE_SECS`)、いったん閉じる。開き直して、新しいセッションで、入力が止まったことを知らせて
+//!   (05 §4.5。`EVORAG_LME_TYPING=0` で省く) から問う。
+//! - `EVORAG_LME_ROOTS` を置くと、閉じた時点のデータ根を問いごとに保存し、次からは取り込みを省いて使い回す
+//!   (取り込みの手順の版 `WRITE_PATH` とモデルが同じときだけ)。想起と文脈だけを変える比べ方で使う。
 //! - 判定は決定論 (LLM で判定しない。元の評価は GPT-4o の判定なので、値は元の論文の値と比べられない)。
 //!   答えと正解を NFKC・小文字にして語に分け (数詞は数字に)、正解の語の並びがそのまま含まれるか、正解の内容語が
-//!   すべて含まれれば正しい。`_abs` の問いは、断った印があれば正しい。内容語の再現率の平均も記録する。
-//! - 結果: `EVAL-longmemeval.json` (`EVORAG_BENCH_OUT`、無ければ target の試験用のフォルダ)。問いと答えの本文は
-//!   リポジトリに戻さないように、target の試験用のフォルダの `EVAL-longmemeval.details.json` にだけ書く。
+//!   すべて含まれれば正しい。`_abs` の問いは、断った印があれば正しい。内容語の再現率の平均と、照合で解ける
+//!   見込みの問い (正解の内容語が `SOLVABLE_WORDS` 以下) の正解率も記録する。
+//! - 結果: `EVAL-longmemeval[-holdout-<切片>].json` (`EVORAG_BENCH_OUT`、無ければ target の試験用のフォルダ)。
+//!   問いごとに、TTFT・想起の記録と観測値 (ID と数値だけ) を残す。問いと答えの本文はリポジトリに戻さないように、
+//!   target の試験用のフォルダの `*.details.json` にだけ書く。
 
 mod eval;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,7 +38,13 @@ use sha2::{Digest, Sha256};
 
 const SUBSET_FILE: &str = "tests/longmemeval/subset-v0.3.toml";
 const SUBSET: &str = include_str!("../../../tests/longmemeval/subset-v0.3.toml");
+const HOLDOUT_FILE: &str = "tests/longmemeval/holdout-v0.4.toml";
+const HOLDOUT: &str = include_str!("../../../tests/longmemeval/holdout-v0.4.toml");
+const S_FILE: &str = "tests/longmemeval/subset-s-v0.4.toml";
+const S_SUBSET: &str = include_str!("../../../tests/longmemeval/subset-s-v0.4.toml");
 const ABSTENTION: &str = "abstention";
+/// 照合で解ける見込みの問いの、正解の内容語の数の上限 (開発の組では、これを超える 7 問は言い回しで外れる)。
+const SOLVABLE_WORDS: u64 = 5;
 
 /// 裏の処理を待つ上限 (1 問あたり)。
 const SETTLE: Duration = Duration::from_secs(1800);
@@ -80,8 +93,143 @@ impl Subset {
     }
 }
 
+/// S の一部の定義 (`subset-s-v0.4.toml`)。層の割り当ては固定の数で、選び方は開発の組と同じ順。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SSubset {
+    source: String,
+    source_url: String,
+    source_sha256: String,
+    license: String,
+    seed: String,
+    excluded_types: Vec<String>,
+    excluded_subset: String,
+    stratum: Vec<Stratum>,
+}
+
+fn s_subset() -> SSubset {
+    toml::from_str(S_SUBSET).expect("tests/longmemeval/subset-s-v0.4.toml is valid")
+}
+
+impl SSubset {
+    /// 元のデータの確かめ方は開発の組と同じ (`Subset` の形に写す)。
+    fn as_subset(&self) -> Subset {
+        Subset {
+            source: self.source.clone(),
+            source_url: self.source_url.clone(),
+            source_sha256: self.source_sha256.clone(),
+            license: self.license.clone(),
+            seed: self.seed.clone(),
+            excluded_types: self.excluded_types.clone(),
+            size: self.stratum.iter().map(|s| s.quota).sum(),
+            stratum: self
+                .stratum
+                .iter()
+                .map(|s| Stratum {
+                    name: s.name.clone(),
+                    pool: s.pool,
+                    quota: s.quota,
+                    ids: s.ids.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 fn subset() -> Subset {
     toml::from_str(SUBSET).expect("tests/longmemeval/subset-v0.3.toml is valid")
+}
+
+/// 保留の問いの定義 (`holdout-v0.4.toml`)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Holdout {
+    source: String,
+    source_url: String,
+    source_sha256: String,
+    license: String,
+    seed: String,
+    excluded_types: Vec<String>,
+    excluded_subset: String,
+    slice: Vec<Slice>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Slice {
+    name: String,
+    size: usize,
+    /// 判定のために開けた版。空なら封をしている。
+    opened: String,
+    stratum: Vec<SliceStratum>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SliceStratum {
+    name: String,
+    quota: usize,
+    ids: Vec<String>,
+}
+
+fn holdout() -> Holdout {
+    toml::from_str(HOLDOUT).expect("tests/longmemeval/holdout-v0.4.toml is valid")
+}
+
+/// 最大剰余法で `size` を層の数 `counts` の比で割り当てる (剰余が同じなら名前の順)。
+fn quotas(size: usize, counts: &BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+    let total: usize = counts.values().sum();
+    let mut q: BTreeMap<String, usize> = counts
+        .iter()
+        .map(|(k, v)| (k.clone(), size * v / total))
+        .collect();
+    let mut by_rest: Vec<(usize, &str)> = counts
+        .iter()
+        .map(|(k, v)| (size * v % total, k.as_str()))
+        .collect();
+    by_rest.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    let left = size - q.values().sum::<usize>();
+    for (_, k) in by_rest.into_iter().take(left) {
+        *q.get_mut(k).expect("a stratum") += 1;
+    }
+    q
+}
+
+/// 保留の問いの分け方 (定義の説明のとおり) で、データから切片を選び直す。(切片の名前, 層 → ID)。
+fn split_holdout(
+    h: &Holdout,
+    dev: &Subset,
+    entries: &[Entry],
+) -> Vec<(String, BTreeMap<String, Vec<String>>)> {
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    let mut ranked: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for e in entries.iter().filter(|e| {
+        !h.excluded_types.contains(&e.question_type) && !dev_ids.contains(e.question_id.as_str())
+    }) {
+        let key = hex(&Sha256::digest(
+            format!("{}:{}", h.seed, e.question_id).as_bytes(),
+        ));
+        ranked
+            .entry(e.stratum().to_owned())
+            .or_default()
+            .push((key, e.question_id.clone()));
+    }
+    for v in ranked.values_mut() {
+        v.sort();
+    }
+    let mut out = Vec::new();
+    for s in &h.slice {
+        let counts: BTreeMap<String, usize> =
+            ranked.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+        let q = quotas(s.size, &counts);
+        let mut chosen = BTreeMap::new();
+        for (k, v) in &mut ranked {
+            let n = q[k];
+            chosen.insert(k.clone(), v.drain(..n).map(|(_, id)| id).collect());
+        }
+        out.push((s.name.clone(), chosen));
+    }
+    out
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -131,6 +279,11 @@ impl Entry {
 
 /// データのファイルを読む (SHA-256 を確かめる)。
 fn load(subset: &Subset) -> Option<(PathBuf, Vec<Entry>)> {
+    load_as(subset, SUBSET_FILE)
+}
+
+/// データのファイルを、問いの組の定義 `subset` (ファイル `file`) の元のデータとして読む。
+fn load_as(subset: &Subset, file: &str) -> Option<(PathBuf, Vec<Entry>)> {
     let path = PathBuf::from(std::env::var_os("EVORAG_LONGMEMEVAL_DATA")?);
     let bytes =
         std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
@@ -138,7 +291,7 @@ fn load(subset: &Subset) -> Option<(PathBuf, Vec<Entry>)> {
     assert_eq!(
         sha,
         subset.source_sha256,
-        "{} is not the {} that {SUBSET_FILE} was made from ({})",
+        "{} is not the {} that {file} was made from ({})",
         path.display(),
         subset.source,
         subset.source_url
@@ -359,6 +512,14 @@ mod score {
         vec![a.to_owned()]
     }
 
+    /// 内容語の数。
+    pub fn content(key: &str) -> usize {
+        tokens(key)
+            .iter()
+            .filter(|w| !STOP.contains(&w.as_str()))
+            .count()
+    }
+
     /// (語の並びがそのまま含まれるか、内容語の再現率)。
     pub fn compare(key: &str, response: &[String]) -> (bool, f64) {
         let k = tokens(key);
@@ -394,12 +555,187 @@ mod score {
     }
 }
 
-/// LongMemEval の一部を流し、基準値を記録する (合否には使わない)。
+/// 流す問いの組 (`EVORAG_LME_SET`): `dev` (既定、開発の組) か `holdout:<切片>` (保留の問い)。
+#[derive(Debug)]
+struct Plan {
+    /// 結果のファイルの名前に使う (`dev`・`holdout-A`)。
+    name: String,
+    file: &'static str,
+    ids_sha256: String,
+    /// (層, ID)。
+    ids: Vec<(String, String)>,
+    /// 問いに答えさせてよいか (封をした切片は取り込みだけ)。
+    open: bool,
+}
+
+fn plan(subset: &Subset) -> Plan {
+    let set = std::env::var("EVORAG_LME_SET").unwrap_or_else(|_| "dev".into());
+    if set == "dev" {
+        return Plan {
+            name: "dev".into(),
+            file: SUBSET_FILE,
+            ids_sha256: subset.ids_sha256(),
+            ids: subset
+                .ids()
+                .map(|(s, i)| (s.to_owned(), i.to_owned()))
+                .collect(),
+            open: true,
+        };
+    }
+    if set == "s" {
+        let s = s_subset().as_subset();
+        return Plan {
+            name: "s".into(),
+            file: S_FILE,
+            ids_sha256: s.ids_sha256(),
+            ids: s
+                .ids()
+                .map(|(st, i)| (st.to_owned(), i.to_owned()))
+                .collect(),
+            open: true,
+        };
+    }
+    let Some(name) = set.strip_prefix("holdout:") else {
+        panic!("EVORAG_LME_SET is dev, s or holdout:<slice> (got {set:?})");
+    };
+    let h = holdout();
+    let s = h
+        .slice
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no slice {name:?} in {HOLDOUT_FILE}"));
+    let ids: Vec<(String, String)> = s
+        .stratum
+        .iter()
+        .flat_map(|st| st.ids.iter().map(|i| (st.name.clone(), i.clone())))
+        .collect();
+    let mut sha = Sha256::new();
+    for (_, id) in &ids {
+        sha.update(id.as_bytes());
+        sha.update(b"\n");
+    }
+    Plan {
+        name: format!("holdout-{name}"),
+        file: HOLDOUT_FILE,
+        ids_sha256: hex(&sha.finalize()),
+        ids,
+        open: !s.opened.is_empty(),
+    }
+}
+
+/// 取り込みの手順の版。抽出・ノート・埋め込みなど、保存したデータ根の中身を変える変更で上げる (上げると、
+/// 保存したデータ根を使わずに取り込み直す)。
+const WRITE_PATH: u32 = 1;
+
+/// 保存したデータ根 (`EVORAG_LME_ROOTS`)。問いごとに `<dir>/<id>/data` と `<dir>/<id>/ingest.json`。
+/// 取り込み (書き込みと裏の処理) を済ませ、問いを送る前の状態を保存し、想起と文脈だけを変える比べ方で使い回す
+/// (09 §5.2)。
+struct Roots(PathBuf);
+
+impl Roots {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("EVORAG_LME_ROOTS").map(|d| Self(PathBuf::from(d)))
+    }
+
+    /// 同じ手順の版と同じモデルで取り込んだデータ根があれば、`to` に写して、その記録を返す。
+    fn load(
+        &self,
+        id: &str,
+        fingerprint: &serde_json::Value,
+        to: &Path,
+    ) -> Option<serde_json::Value> {
+        let dir = self.0.join(id);
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("ingest.json")).ok()?).ok()?;
+        if &marker["fingerprint"] != fingerprint {
+            println!("{id}: the saved data root was ingested differently; ingesting again");
+            return None;
+        }
+        copy_dir(&dir.join("data"), to);
+        Some(marker)
+    }
+
+    fn save(&self, id: &str, from: &Path, marker: &serde_json::Value) {
+        let dir = self.0.join(id);
+        let data = dir.join("data");
+        if data.exists() {
+            std::fs::remove_dir_all(&data).expect("remove the old saved data root");
+        }
+        copy_dir(from, &data);
+        eval::write_json(&dir.join("ingest.json"), marker);
+    }
+}
+
+/// フォルダを写す (錠のプロセスの記録と、空きの予約のファイルは写さない。開くときに作り直す)。
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("create the folder");
+    for e in std::fs::read_dir(from).expect("read the folder") {
+        let e = e.expect("a folder entry");
+        let name = e.file_name();
+        if name == "lock.pid" || name == "reserve.space" {
+            continue;
+        }
+        let ty = e.file_type().expect("a file type");
+        if ty.is_dir() {
+            copy_dir(&e.path(), &to.join(&name));
+        } else {
+            std::fs::copy(e.path(), to.join(&name)).expect("copy a file");
+        }
+    }
+}
+
+/// 正解の内容語の数 (判定の照合の上限を見積もる。多いほど言い回しで外れやすい、09 §5.2)。
+fn content_words(answer: &str) -> usize {
+    score::keys(answer)
+        .iter()
+        .map(|k| score::content(k))
+        .min()
+        .unwrap_or(0)
+}
+
+/// `EVORAG_LME_TUNING` (`名前=値` をカンマで区切る) から想起の数値を読む。無ければ `None` (既定のまま)。
+fn tuning_from_env() -> Option<evorag_core::RecallTuning> {
+    let spec = std::env::var("EVORAG_LME_TUNING").ok()?;
+    let mut t = evorag_core::RecallTuning::default();
+    for kv in spec.split(',').filter(|s| !s.is_empty()) {
+        let (k, v) = kv
+            .split_once('=')
+            .unwrap_or_else(|| panic!("EVORAG_LME_TUNING: {kv:?} is not name=value"));
+        let n = || -> usize {
+            v.parse()
+                .unwrap_or_else(|_| panic!("{k}={v} is not a number"))
+        };
+        match k {
+            "windows" => t.windows = v == "1",
+            "floor" => t.floor = v.parse().unwrap_or_else(|_| panic!("floor={v}")),
+            "max" => t.max_exchanges = n(),
+            "budget" => t.budget = n(),
+            "window" => t.window = n(),
+            "hits" => t.hits_per_turn = n(),
+            "short" => t.short_chars = n(),
+            "turn" => t.turn_chars = n(),
+            "widen" => t.count_widen = v == "1",
+            "ctop" => t.count_top = n(),
+            "cmax" => t.count_max = n(),
+            "cbudget" => t.count_budget = n(),
+            other => panic!("EVORAG_LME_TUNING: unknown {other:?}"),
+        }
+    }
+    Some(t)
+}
+
+/// LongMemEval の問いの組を流し、結果を記録する (合否には使わない。版の間の比較は `cargo xtask lme-compare`)。
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a real llama-server and the LongMemEval data (cargo xtask longmemeval --data <path>)"]
 async fn live_longmemeval_baseline() {
-    let subset = subset();
-    let Some((path, entries)) = load(&subset) else {
+    // S の一部は、元のデータ (S) と定義が違う。ほかは開発の組の定義で確かめる (oracle)。
+    let subset = if std::env::var("EVORAG_LME_SET").as_deref() == Ok("s") {
+        s_subset().as_subset()
+    } else {
+        subset()
+    };
+    let plan = plan(&subset);
+    let Some((path, entries)) = load_as(&subset, plan.file) else {
         eprintln!("longmemeval: set EVORAG_LONGMEMEVAL_DATA to the data file (skipped)");
         return;
     };
@@ -407,9 +743,31 @@ async fn live_longmemeval_baseline() {
         eprintln!("longmemeval: set EVORAG_LIVE_LLM_URL to run (skipped)");
         return;
     };
+    let ingest_only = std::env::var_os("EVORAG_LME_INGEST_ONLY").is_some();
+    // 保存したデータ根の裏の処理を済ませ直して保存し直す (取り込みだけと組み合わせて使う)。
+    let resave = std::env::var_os("EVORAG_LME_RESAVE").is_some();
+    assert!(
+        plan.open || ingest_only,
+        "{} is sealed (opened = \"\" in {HOLDOUT_FILE}); set EVORAG_LME_INGEST_ONLY=1 to only ingest it",
+        plan.name
+    );
     let limit: Option<usize> = std::env::var("EVORAG_LONGMEMEVAL_LIMIT")
         .ok()
         .map(|v| v.parse().expect("EVORAG_LONGMEMEVAL_LIMIT is a number"));
+    let settle_limit = std::env::var("EVORAG_LME_SETTLE_SECS")
+        .ok()
+        .map_or(SETTLE, |v| {
+            Duration::from_secs(v.parse().expect("EVORAG_LME_SETTLE_SECS is a number"))
+        });
+    let roots = Roots::from_env();
+    // 送る前に「入力が止まった」を知らせる (既定)。`EVORAG_LME_TYPING=0` で、応答の経路だけで想起する。
+    let typing = std::env::var("EVORAG_LME_TYPING").map_or(true, |v| v != "0");
+    // 想起の数値 (S-17 の 1・7)。`EVORAG_LME_TUNING="windows=1,floor=0.5,budget=800,..."`。
+    let tuning = tuning_from_env();
+    if let Some(t) = tuning {
+        evorag_core::set_tuning(t);
+    }
+    let tag = std::env::var("EVORAG_LME_TAG").ok();
     let by_id: HashMap<&str, &Entry> = entries
         .iter()
         .map(|e| (e.question_id.as_str(), e))
@@ -417,11 +775,19 @@ async fn live_longmemeval_baseline() {
     eval::init_log();
     let chat = servers.chat_client();
     let models = eval::models(&servers).await;
+    // 取り込みの結果を左右するもの (手順の版と、応答・埋め込み・リランカーのモデル)。
+    let fingerprint = serde_json::json!({
+        "write_path": WRITE_PATH,
+        "chat": models["chat"]["model_fp"],
+        "embed": models.get("embed").map(|m| m["model_fp"].clone()),
+        "rerank": models.get("rerank").map(|m| m["model_fp"].clone()),
+    });
     let mut checks = Checks::default();
     let mut rows = Vec::new();
     let mut details = Vec::new();
     let started = Instant::now();
-    for (stratum, id) in subset.ids().take(limit.unwrap_or(usize::MAX)) {
+    for (stratum, id) in plan.ids.iter().take(limit.unwrap_or(usize::MAX)) {
+        let (stratum, id) = (stratum.as_str(), id.as_str());
         let e = by_id
             .get(id)
             .unwrap_or_else(|| panic!("{id} is not in {}", path.display()));
@@ -431,27 +797,114 @@ async fn live_longmemeval_baseline() {
         let first = sessions
             .first()
             .map_or(Timestamp::from_millis(0), |s| s.start);
-        let clock = Arc::new(ManualClock::new(first));
-        let last = eval::write_sessions(dir.path(), &clock, &sessions);
         let asked = parse_date(&e.question_date)
             .unwrap_or_else(|| panic!("{id}: unreadable question date"));
-        // 問いは、以前の会話の後に問う (データで同じ日の後の時刻に会話があっても、順を保つ)。
-        let asked = Timestamp::from_millis(asked.as_millis().max(last.as_millis() + 60_000));
-        checks.seed(dir.path());
-        let core_clock: Arc<dyn Clock> = Arc::new(ManualClock::new(asked));
-        let (core, mut rx, _) = Core::start(
-            eval::config(dir.path(), PromptLanguage::En, &servers, core_clock),
-            chat.clone(),
-        )
-        .await
-        .expect("the core starts against the live llama-server");
+        let saved = roots
+            .as_ref()
+            .and_then(|r| r.load(id, &fingerprint, dir.path()));
+        let marker = if let Some(mut m) = saved {
+            // 保存したデータ根の裏の処理を済ませ直して、保存し直す (`EVORAG_LME_RESAVE`)。済んだかの判定は
+            // 待たせている手順を除くので、取り込みのときに GPU を取り合うと、抽出などが残ったまま保存されうる
+            // (残りは開き直すたびに走り、答えの比べを揺らす)。
+            if resave {
+                let at = m["asked_at_ms"]
+                    .as_i64()
+                    .expect("the saved data root records when to ask");
+                let core_clock: Arc<dyn Clock> =
+                    Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+                let (core, mut rx, _) = Core::start(
+                    eval::config(dir.path(), PromptLanguage::En, &servers, core_clock),
+                    chat.clone(),
+                )
+                .await
+                .expect("the core starts against the live llama-server");
+                core.settle().await;
+                let settled = eval::settle(&core, settle_limit).await;
+                let facts = eval::facts(&core, &mut rx).await;
+                core.shutdown().await;
+                m["settled"] = serde_json::json!(settled);
+                m["facts"] = serde_json::json!(facts);
+                m["resaved_seconds"] = serde_json::json!(t0.elapsed().as_secs_f64());
+                if let Some(r) = &roots {
+                    r.save(id, dir.path(), &m);
+                }
+            }
+            m
+        } else {
+            let clock = Arc::new(ManualClock::new(first));
+            let last = eval::write_sessions(dir.path(), &clock, &sessions);
+            // 問いは、以前の会話の後に問う (データで同じ日の後の時刻に会話があっても、順を保つ)。
+            let at = asked.as_millis().max(last.as_millis() + 60_000);
+            checks.seed(dir.path());
+            let core_clock: Arc<dyn Clock> = Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+            let (core, mut rx, _) = Core::start(
+                eval::config(dir.path(), PromptLanguage::En, &servers, core_clock),
+                chat.clone(),
+            )
+            .await
+            .expect("the core starts against the live llama-server");
+            core.settle().await;
+            let settled = eval::settle(&core, settle_limit).await;
+            checks.capture(&core);
+            let facts = eval::facts(&core, &mut rx).await;
+            core.shutdown().await;
+            let m = serde_json::json!({
+                "fingerprint": fingerprint,
+                "evorag": env!("CARGO_PKG_VERSION"),
+                "asked_at_ms": at,
+                "settled": settled,
+                "facts": facts,
+                "sessions": ingest.sessions,
+                "user_turns": ingest.user_turns,
+                "assistant_turns": ingest.assistant_turns,
+                "dropped_turns": ingest.dropped,
+                "merged_turns": ingest.merged,
+                "ingest_seconds": t0.elapsed().as_secs_f64(),
+            });
+            if let Some(r) = &roots {
+                r.save(id, dir.path(), &m);
+            }
+            m
+        };
+        if ingest_only {
+            println!(
+                "{id} ({stratum}): ingested, settled {} in {:.0}s",
+                marker["settled"],
+                t0.elapsed().as_secs_f64()
+            );
+            rows.push(serde_json::json!({
+                "id": id,
+                "stratum": stratum,
+                "settled": marker["settled"],
+                "facts": marker["facts"].as_array().map_or(0, Vec::len),
+                "ingest_seconds": marker["ingest_seconds"],
+            }));
+            continue;
+        }
+        let at = marker["asked_at_ms"]
+            .as_i64()
+            .expect("the saved data root records when to ask");
+        let core_clock: Arc<dyn Clock> = Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+        let mut cfg = eval::config(dir.path(), PromptLanguage::En, &servers, core_clock);
+        // 実際の使い方に合わせ、入力が止まったときの処理 (05 §4.5) を済ませてから送る。
+        cfg.precompute = typing;
+        let (core, mut rx, _) = Core::start(cfg, chat.clone())
+            .await
+            .expect("the core starts against the live llama-server");
         core.settle().await;
-        let settled = eval::settle(&core, SETTLE).await;
-        checks.capture(&core);
-        let facts = eval::facts(&core, &mut rx).await;
-        let turn = eval::ask_in_new_session(&core, &mut rx, &e.question, ANSWER).await;
+        let ready = eval::settle(&core, settle_limit).await;
+        let timed = eval::ask_timed(&core, &mut rx, &e.question, ANSWER, typing).await;
         core.shutdown().await;
-        let (response, sources) = turn.map_or_else(|| (String::new(), 0), |t| (t.text, t.sources));
+        let (response, sources, record, ttft, total) = match timed {
+            Some(t) => (
+                t.turn.text,
+                t.turn.sources,
+                eval::answer_record(dir.path(), t.turn.id),
+                t.ttft.map(|d| d.as_secs_f64()),
+                Some(t.total.as_secs_f64()),
+            ),
+            None => (String::new(), 0, serde_json::Value::Null, None, None),
+        };
         let answer = e.answer_text();
         let (correct, recall) = score::judge(&answer, &response, stratum == ABSTENTION);
         let seconds = t0.elapsed().as_secs_f64();
@@ -465,14 +918,19 @@ async fn live_longmemeval_baseline() {
             "stratum": stratum,
             "correct": correct,
             "token_recall": recall,
+            "gold_content_words": content_words(&answer),
             "sources": sources,
-            "facts": facts.len(),
-            "settled": settled,
-            "sessions": ingest.sessions,
-            "user_turns": ingest.user_turns,
-            "assistant_turns": ingest.assistant_turns,
-            "dropped_turns": ingest.dropped,
-            "merged_turns": ingest.merged,
+            "facts": marker["facts"].as_array().map_or(0, Vec::len),
+            "settled": marker["settled"],
+            "ready": ready,
+            "sessions": marker["sessions"],
+            "user_turns": marker["user_turns"],
+            "assistant_turns": marker["assistant_turns"],
+            "dropped_turns": marker["dropped_turns"],
+            "merged_turns": marker["merged_turns"],
+            "ttft_seconds": ttft,
+            "answer_seconds": total,
+            "answer": record,
             "seconds": seconds,
         }));
         details.push(serde_json::json!({
@@ -480,8 +938,26 @@ async fn live_longmemeval_baseline() {
             "question": e.question,
             "answer": answer,
             "response": response,
-            "facts": facts,
+            "facts": marker["facts"],
         }));
+    }
+    let n = rows.len();
+    let mut file = String::from("EVAL-longmemeval");
+    if plan.name != "dev" {
+        file.push('-');
+        file.push_str(&plan.name);
+    }
+    if let Some(t) = &tag {
+        file.push('-');
+        file.push_str(t);
+    }
+    file.push_str(".json");
+    if ingest_only {
+        println!(
+            "longmemeval: ingested {n} questions in {:.0}s",
+            started.elapsed().as_secs_f64()
+        );
+        return;
     }
     let mut per: BTreeMap<&str, (usize, usize, f64)> = BTreeMap::new();
     for r in &rows {
@@ -491,7 +967,6 @@ async fn live_longmemeval_baseline() {
         p.1 += usize::from(r["correct"] == true);
         p.2 += r["token_recall"].as_f64().unwrap_or(0.0);
     }
-    let n = rows.len();
     let correct: usize = per.values().map(|p| p.1).sum();
     let recall: f64 = per.values().map(|p| p.2).sum();
     let ratio = |a: f64, b: usize| if b == 0 { 0.0 } else { a / b as f64 };
@@ -509,21 +984,36 @@ async fn live_longmemeval_baseline() {
             )
         })
         .collect();
+    // 判定の照合で解ける見込みの問い (abstention か、正解の内容語が SOLVABLE_WORDS 以下)。
+    let solvable: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| {
+            r["stratum"] == ABSTENTION
+                || r["gold_content_words"]
+                    .as_u64()
+                    .is_some_and(|w| w <= SOLVABLE_WORDS)
+        })
+        .collect();
+    let solvable_correct = solvable.iter().filter(|r| r["correct"] == true).count();
     println!(
-        "longmemeval: {correct}/{n} correct ({:.3}) in {:.0}s",
+        "longmemeval ({}): {correct}/{n} correct ({:.3}) in {:.0}s",
+        plan.name,
         ratio(correct as f64, n),
         started.elapsed().as_secs_f64()
     );
     let v = serde_json::json!({
         "id": "EVAL-longmemeval",
+        "set": plan.name,
         "evorag": env!("CARGO_PKG_VERSION"),
         "date": eval::today(),
-        "subset_file": SUBSET_FILE,
-        "subset_ids_sha256": subset.ids_sha256(),
+        "subset_file": plan.file,
+        "subset_ids_sha256": plan.ids_sha256,
         "source": subset.source,
         "source_sha256": subset.source_sha256,
         "license": subset.license,
-        "partial": limit.is_some_and(|l| l < subset.size),
+        "partial": limit.is_some_and(|l| l < plan.ids.len()),
+        "typing": typing,
+        "tuning": tuning.map(|t| format!("{t:?}")),
         "setup": servers.setup(),
         "models": models,
         "ingest": "haystack turns (user and assistant, as in the data) written through the store's write path at the session dates; facts, notes and embeddings by evorag's own sleep-time steps",
@@ -532,14 +1022,18 @@ async fn live_longmemeval_baseline() {
         "correct": correct,
         "accuracy": ratio(correct as f64, n),
         "mean_token_recall": ratio(recall, n),
+        "solvable_words": SOLVABLE_WORDS,
+        "solvable_questions": solvable.len(),
+        "solvable_correct": solvable_correct,
+        "solvable_accuracy": ratio(solvable_correct as f64, solvable.len()),
         "per_type": per_type,
         "seconds": started.elapsed().as_secs_f64(),
         "results": rows,
     });
-    eval::write_json(&eval::out_dir().join("EVAL-longmemeval.json"), &v);
+    eval::write_json(&eval::out_dir().join(&file), &v);
     eval::write_json(
-        &PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("EVAL-longmemeval.details.json"),
-        &serde_json::json!({ "id": "EVAL-longmemeval", "details": details }),
+        &PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(file.replace(".json", ".details.json")),
+        &serde_json::json!({ "id": "EVAL-longmemeval", "set": plan.name, "details": details }),
     );
 }
 
@@ -572,6 +1066,135 @@ fn longmemeval_subset_matches_the_data() {
             parse_date(&e.question_date).is_some(),
             "{id}: question date"
         );
+    }
+}
+
+/// 保留の問いの定義が、データから選び直したものと一致する (データを置いたときだけ。サーバは要らない)。
+#[test]
+#[ignore = "needs the LongMemEval data (EVORAG_LONGMEMEVAL_DATA)"]
+fn longmemeval_holdout_matches_the_data() {
+    let dev = subset();
+    let Some((_, entries)) = load(&dev) else {
+        eprintln!("longmemeval: set EVORAG_LONGMEMEVAL_DATA to the data file (skipped)");
+        return;
+    };
+    let h = holdout();
+    let split = split_holdout(&h, &dev, &entries);
+    assert_eq!(split.len(), h.slice.len());
+    for ((name, chosen), s) in split.iter().zip(&h.slice) {
+        assert_eq!(name, &s.name);
+        let listed: BTreeMap<String, Vec<String>> = s
+            .stratum
+            .iter()
+            .map(|st| (st.name.clone(), st.ids.clone()))
+            .collect();
+        let chosen: BTreeMap<String, Vec<String>> = chosen
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(&chosen, &listed, "slice {name}");
+    }
+}
+
+/// 保留の問いの定義の形 (サーバもデータも要らない)。
+#[test]
+fn the_longmemeval_holdout_is_well_formed() {
+    let dev = subset();
+    let h = holdout();
+    assert_eq!(h.source_sha256, dev.source_sha256);
+    assert_eq!(h.source, dev.source);
+    assert_eq!(h.excluded_subset, SUBSET_FILE);
+    assert_eq!(h.excluded_types, dev.excluded_types);
+    assert!(!h.seed.is_empty() && h.seed != dev.seed);
+    assert!(!h.source_url.is_empty() && !h.license.is_empty());
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for s in &h.slice {
+        let n: usize = s.stratum.iter().map(|st| st.ids.len()).sum();
+        assert_eq!(n, s.size, "slice {}: size", s.name);
+        for st in &s.stratum {
+            assert_eq!(st.ids.len(), st.quota, "{}/{}: quota", s.name, st.name);
+            for id in &st.ids {
+                assert!(seen.insert(id.as_str()), "{id}: listed twice");
+                assert!(!dev_ids.contains(id.as_str()), "{id}: in the dev subset");
+                assert_eq!(
+                    id.ends_with("_abs"),
+                    st.name == ABSTENTION,
+                    "{id} in {}",
+                    st.name
+                );
+            }
+        }
+    }
+    // 切片は前から順に開ける (開けた切片の累積で判定するため)。
+    let opened: Vec<bool> = h.slice.iter().map(|s| !s.opened.is_empty()).collect();
+    assert!(
+        opened.windows(2).all(|w| w[0] || !w[1]),
+        "slices open in order: {opened:?}"
+    );
+}
+
+#[test]
+fn holdout_quotas_follow_the_largest_remainder() {
+    let counts: BTreeMap<String, usize> = [("a", 5), ("b", 3), ("c", 2)]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+    let q = quotas(4, &counts);
+    assert_eq!(q.values().sum::<usize>(), 4);
+    assert_eq!((q["a"], q["b"], q["c"]), (2, 1, 1));
+}
+
+/// S の一部の定義の形 (サーバもデータも要らない)。
+#[test]
+fn the_longmemeval_s_subset_is_well_formed() {
+    let dev = subset();
+    let s = s_subset();
+    assert_eq!(s.excluded_subset, SUBSET_FILE);
+    assert_eq!(s.excluded_types, dev.excluded_types);
+    assert_ne!(s.source_sha256, dev.source_sha256);
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for st in &s.stratum {
+        assert_eq!(st.ids.len(), st.quota, "{}", st.name);
+        for id in &st.ids {
+            assert!(seen.insert(id.as_str()), "{id} listed twice");
+            assert!(!dev_ids.contains(id.as_str()), "{id} is in the dev subset");
+            assert_eq!(id.ends_with("_abs"), st.name == ABSTENTION, "{id}");
+        }
+    }
+    assert_eq!(seen.len(), 30);
+}
+
+/// S の一部の定義が、データから選び直したものと一致する (S のデータを置いたときだけ)。
+#[test]
+#[ignore = "needs the LongMemEval S data (EVORAG_LONGMEMEVAL_DATA)"]
+fn longmemeval_s_subset_matches_the_data() {
+    let s = s_subset();
+    let Some((_, entries)) = load_as(&s.as_subset(), S_FILE) else {
+        eprintln!("longmemeval: set EVORAG_LONGMEMEVAL_DATA to the S data file (skipped)");
+        return;
+    };
+    let dev = subset();
+    let dev_ids: std::collections::HashSet<&str> = dev.ids().map(|(_, i)| i).collect();
+    for st in &s.stratum {
+        let mut pool: Vec<(String, &str)> = entries
+            .iter()
+            .filter(|e| !s.excluded_types.contains(&e.question_type))
+            .filter(|e| !dev_ids.contains(e.question_id.as_str()))
+            .filter(|e| e.stratum() == st.name)
+            .map(|e| {
+                let key = hex(&Sha256::digest(
+                    format!("{}:{}", s.seed, e.question_id).as_bytes(),
+                ));
+                (key, e.question_id.as_str())
+            })
+            .collect();
+        assert_eq!(pool.len(), st.pool, "{}: pool", st.name);
+        pool.sort();
+        let chosen: Vec<&str> = pool.iter().take(st.quota).map(|(_, i)| *i).collect();
+        assert_eq!(chosen, st.ids, "{}", st.name);
     }
 }
 

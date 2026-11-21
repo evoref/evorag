@@ -113,6 +113,8 @@ fn turn_v1() {
                 degraded: vec![DEGRADED_NO_EMBED.into()],
                 // 見本 (tests/fixtures/) は v0.2 の形のまま。事実の表の版は任意の項目なので、無くても読める。
                 fact_table: None,
+                // v0.4 の観測値 (候補・窓・先読みなど) も任意の項目で、無くても読める。
+                ..TurnObs::default()
             }),
         },
     );
@@ -179,6 +181,8 @@ fn model_probe_v1() {
             gen_tps: Some(41.2),
             thinking_off: Some(true),
             structured_ok: Some(false),
+            // v0.4 の任意の項目。見本 (v0.2 の形) には無い。
+            aux_thinking_off: None,
             dims: None,
             embed_ms: None,
             rerank6_ms: None,
@@ -388,4 +392,130 @@ fn correction_v1() {
             old_end: Some(12),
         },
     );
+}
+
+/// v0.3.0 の `turn` の本体の形 (v0.3.0 の kinds.rs の写し。観測値の項目は v0.3 まで)。v0.4 の観測値を足した
+/// 本体を、v0.3.0 の読み手が読めることを確かめる (知らない項目は読み飛ばす、03 §4.2 の規則 7)。
+mod v03 {
+    use evorag_memory::{GenerationRecord, RecallRecord, Reranked, TurnRole, TurnState};
+    use evorag_types::Id;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    pub struct TurnBody {
+        pub session: Id,
+        pub role: TurnRole,
+        pub state: TurnState,
+        pub text: String,
+        #[serde(default)]
+        pub model_key: Option<String>,
+        #[serde(default)]
+        pub generation: Option<GenerationRecord>,
+        #[serde(default)]
+        pub attached: Vec<Id>,
+        #[serde(default)]
+        pub reply_to: Option<Id>,
+        #[serde(default)]
+        pub error: Option<String>,
+        #[serde(default)]
+        pub recall: Option<RecallRecord>,
+        #[serde(default)]
+        pub obs: Option<TurnObs>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct TurnObs {
+        #[serde(default)]
+        pub source_base: Option<u32>,
+        #[serde(default)]
+        pub reranked: Vec<Reranked>,
+        #[serde(default)]
+        pub degraded: Vec<String>,
+        #[serde(default)]
+        pub fact_table: Option<String>,
+    }
+}
+
+/// verifies: AC-FR-420-2
+#[test]
+fn v0_4_observations_are_read_by_the_v0_3_shape() {
+    let rid = id("019a6a2b-0000-7000-8000-000000000020");
+    let body = TurnBody {
+        session: id("019a6a2b-0000-7000-8000-000000000001"),
+        role: TurnRole::Assistant,
+        state: TurnState::Completed,
+        text: "応答".into(),
+        model_key: None,
+        generation: None,
+        attached: vec![id("019a6a2b-0000-7000-8000-000000000009")],
+        reply_to: Some(id("019a6a2b-0000-7000-8000-000000000003")),
+        error: None,
+        recall: Some(RecallRecord {
+            decision: RecallDecision::Fire,
+            sources: vec![1],
+        }),
+        obs: Some(TurnObs {
+            source_base: Some(2),
+            reranked: vec![Reranked {
+                id: id("019a6a2b-0000-7000-8000-00000000000a"),
+                score: 1.5,
+            }],
+            degraded: vec![DEGRADED_NO_EMBED.into()],
+            candidates: vec![RecallCandidate {
+                id: id("019a6a2b-0000-7000-8000-00000000000a"),
+                lex: Some(1),
+                vec: None,
+            }],
+            packed: Some(Packed {
+                windows: vec![WindowRef {
+                    turn: id("019a6a2b-0000-7000-8000-00000000000a"),
+                    rev: 0,
+                    start: 0,
+                    end: 12,
+                }],
+                tokens: 40,
+                budget: 300,
+            }),
+            query: Some(QueryObs {
+                count: true,
+                ..QueryObs::default()
+            }),
+            prefetch: Some(PrefetchObs {
+                kind: "a".into(),
+                ttft_ms: Some(320),
+                processed: Some(48),
+            }),
+            rephrase: Some(id("019a6a2b-0000-7000-8000-000000000005")),
+            versions: [("recall".to_owned(), "0.4.0".to_owned())].into(),
+            tz_offset: Some(540),
+            idle: Some(30),
+            pending_at_start: Some(vec!["Notes".into()]),
+            ..TurnObs::default()
+        }),
+    };
+    let mut e = Envelope::new(rid, KIND_TURN, 1, Timestamp::from_millis(1), "0.4.0");
+    e.set_body(&body).unwrap();
+    let mut k = KeyBuf::new();
+    k.str(KIND_TURN).id(rid);
+    let key = k.into_bytes();
+    let back = Envelope::decode(&key, &e.encode(&key)).unwrap();
+    // 今の版は全部を読み戻す。
+    assert_eq!(back.body_as::<TurnBody>().unwrap(), body);
+    // v0.3.0 の形でも読め、知っている項目は同じ。
+    let old = back.body_as::<v03::TurnBody>().unwrap();
+    assert_eq!(old.text, "応答");
+    assert_eq!(
+        (old.role, old.state),
+        (TurnRole::Assistant, TurnState::Completed)
+    );
+    let obs = old.obs.unwrap();
+    assert_eq!(obs.source_base, Some(2));
+    assert_eq!(obs.reranked.len(), 1);
+    assert_eq!(obs.degraded, [DEGRADED_NO_EMBED]);
+    assert_eq!(obs.fact_table, None);
+    assert_eq!(old.attached.len(), 1);
+    assert!(old.recall.is_some() && old.generation.is_none() && old.model_key.is_none());
+    assert_eq!(old.reply_to, body.reply_to);
+    assert_eq!(old.error, None);
+    assert_eq!(old.session, body.session);
 }

@@ -329,6 +329,115 @@ pub async fn ask_in_new_session(
     Some(turn)
 }
 
+/// 問いの答えと時間。
+#[derive(Debug)]
+pub struct Timed {
+    pub turn: TurnView,
+    /// 送ってから最初の本文の断片まで (思考の間を含む)。断片が無ければ無い。
+    pub ttft: Option<Duration>,
+    /// 送ってから応答が終わるまで。
+    pub total: Duration,
+}
+
+/// 応答のターンの想起の記録と観測値 (コアを閉じた後に、データ根から読む)。本文は返さない。
+///
+/// # Panics
+///
+/// データ根を開けないとき。
+pub fn answer_record(root: &Path, turn: evorag_types::Id) -> serde_json::Value {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let (store, _) = Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: env!("CARGO_PKG_VERSION").into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    })
+    .expect("open the data root");
+    let body = match store
+        .read()
+        .expect("read")
+        .get(evorag_memory::KIND_TURN, turn)
+    {
+        Ok(Some(Read::Ok(e))) => e.body_as::<evorag_memory::TurnBody>().ok(),
+        _ => None,
+    };
+    body.map_or(serde_json::Value::Null, |b| {
+        serde_json::json!({
+            "attached": b.attached.len(),
+            "recall": b.recall,
+            "obs": b.obs,
+        })
+    })
+}
+
+/// ターンの本体 (コアを閉じた後に、データ根から読む)。
+///
+/// # Panics
+///
+/// データ根を開けない・ターンが無いとき。
+pub fn turn_body(root: &Path, turn: evorag_types::Id) -> evorag_memory::TurnBody {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let (store, _) = Store::open(OpenOptions {
+        data_root: root.to_path_buf(),
+        evorag_version: env!("CARGO_PKG_VERSION").into(),
+        kinds: evorag_memory::kinds(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    })
+    .expect("open the data root");
+    match store
+        .read()
+        .expect("read")
+        .get(evorag_memory::KIND_TURN, turn)
+    {
+        Ok(Some(Read::Ok(e))) => e.body_as().expect("a turn body"),
+        other => panic!("cannot read the turn {turn:?}: {other:?}"),
+    }
+}
+
+/// 新しいセッションを開き、問いを送って答えを待つ (時間を測る)。待ちきれなければ `None`。
+pub async fn ask_timed(
+    core: &Core,
+    rx: &mut UnboundedReceiver<Event>,
+    question: &str,
+    limit: Duration,
+    typing: bool,
+) -> Option<Timed> {
+    core.command(Command::NewSession {
+        title: "eval".into(),
+    });
+    until(rx, limit, |e| matches!(e, Event::SessionOpened { .. })).await?;
+    if typing {
+        // 入力が止まった (05 §4.5): 先に済ませる処理を待つ (待ちきれなくても送る)。
+        core.command(Command::InputIdle {
+            text: question.into(),
+        });
+        let c = core.clone();
+        let _ = tokio::spawn(async move { c.settle_precompute().await }).await;
+    }
+    let sent = std::time::Instant::now();
+    core.command(Command::Send {
+        text: question.into(),
+    });
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut ttft = None;
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv()).await.ok()??;
+        match ev {
+            Event::Token { .. } if ttft.is_none() => ttft = Some(sent.elapsed()),
+            Event::ResponseFinished { turn, .. } => {
+                let total = sent.elapsed();
+                core.settle().await;
+                return Some(Timed { turn, ttft, total });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 今の事実の一覧 (`/memory`) を `主語/属性=値 (状態, 時制)` の並び (今の値の消えた属性は `(vacant)`) で返す (結果の記録と、外したときの調べのため)。
 pub async fn facts(core: &Core, rx: &mut UnboundedReceiver<Event>) -> Vec<String> {
     core.command(Command::ShowFacts);
@@ -363,7 +472,7 @@ pub async fn facts(core: &Core, rx: &mut UnboundedReceiver<Event>) -> Vec<String
     out
 }
 
-/// 結果に書くモデルの情報 (`/props` と `/v1/models` から)。ローカルのパスを書かないように、モデルのファイルと
+/// 結果に書くモデルの情報 (`/props` と `/v1/models` から)。model_key は先頭の 12 桁 (`model_fp`) だけ。ローカルのパスを書かないように、モデルのファイルと
 /// 名前 (llama-server はパスを返すことがある) は、最後の部分だけにする (09 §8.2 の「固有の情報は記録に書かない」)。
 pub async fn models(servers: &Servers) -> serde_json::Value {
     async fn one(c: Arc<dyn LlmClient>) -> serde_json::Value {
@@ -371,7 +480,9 @@ pub async fn models(servers: &Servers) -> serde_json::Value {
             Ok(s) => serde_json::json!({
                 "model_file": file_name(&s.model_path),
                 "model_name": file_name(&s.model_name),
-                "model_key": s.model_key,
+                // model_key の全体は書かない (16 進 32 桁が gitleaks の generic-api-key に誤検知される、08 §6)。
+                // 版の間で同じモデルかを見分けるには、先頭の 12 桁で足りる。
+                "model_fp": s.model_key.get(..12).unwrap_or(&s.model_key),
                 "build_info": s.build_info,
                 "n_ctx": s.n_ctx,
             }),
