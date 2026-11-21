@@ -617,6 +617,10 @@ const RELEASE_FIXTURES: &[(&str, &[u8])] = &[
         "0.3.0",
         include_bytes!("../../../tests/fixtures/release/0.3.0/release.json"),
     ),
+    (
+        "0.4.0",
+        include_bytes!("../../../tests/fixtures/release/0.4.0/release.json"),
+    ),
 ];
 
 /// `tests/fixtures/release/` のフォルダが、すべて [`RELEASE_FIXTURES`] にあること。
