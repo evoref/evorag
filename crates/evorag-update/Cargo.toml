@@ -39,7 +39,7 @@ url = { workspace = true }
 [dev-dependencies]
 # 試験の鍵で minisign の署名を作る (Ed25519 と、prehash の BLAKE2b-512)。試験だけの依存。
 ed25519-compact = { version = "2.1.1", default-features = false }
-blake2 = "0.10.6"
+blake2 = "0.11.0"
 # 試験のデータ根を作る (rollback のデータの案内)。
 evorag-types = { workspace = true }
 
