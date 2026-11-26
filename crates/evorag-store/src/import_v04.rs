@@ -96,8 +96,15 @@ pub enum Refusal {
     #[error("a forget has not been applied to the data root yet")]
     ForgetPending,
     /// (3) ジャーナルに、まだ DB に取り込んでいない行・書きかけの末尾・書き直しの途中の跡がある。
-    #[error("the journal has {lines} line(s) not yet in the database")]
-    JournalPending { lines: usize },
+    #[error("the journal is not settled ({})", journal_why(*lines, *partial_tail, *rewrite_leftover))]
+    JournalPending {
+        /// まだ DB に取り込んでいない行の数。
+        lines: usize,
+        /// 書きかけの末尾 (改行で終わらない最後の行・そろわない末尾の組) がある。
+        partial_tail: bool,
+        /// 書き直しの一時のファイル (`*.jsonl.tmp`) が残っている。
+        rewrite_leftover: bool,
+    },
     /// (4) `memory.forget_key` が使えない (03 §3.1.1 のフェイルクローズ)。
     #[error("the forget key of the data root cannot be used")]
     ForgetKeyUnusable,
@@ -108,6 +115,20 @@ pub enum Refusal {
     /// DB・`meta`・記録を読めない。
     #[error("the data root cannot be read ({what})")]
     Unreadable { what: String },
+}
+
+fn journal_why(lines: usize, partial_tail: bool, rewrite_leftover: bool) -> String {
+    let mut why = Vec::new();
+    if lines > 0 {
+        why.push(format!("{lines} line(s) not yet in the database"));
+    }
+    if partial_tail {
+        why.push("an unfinished last line".to_owned());
+    }
+    if rewrite_leftover {
+        why.push("a rewrite left a temporary file".to_owned());
+    }
+    why.join(", ")
 }
 
 /// 断った後に利用者がすること (画面の文言は CLI と TUI が持つ)。
@@ -190,14 +211,16 @@ impl OldRoot {
     /// # Errors
     /// 取り込める根でないとき ([`OldRootError::Refused`])、ロックが取れないとき、ファイルを読めないとき。
     pub fn open(root: &Path) -> Result<Self, OldRootError> {
-        if !root.join(DB_FILE).is_file() {
+        // 移行の途中で止まった根は、本体の DB が無いこともあるので、データ根かを見る前に調べる。
+        let left = crate::migrate::leftover(root);
+        if left.is_none() && !root.join(DB_FILE).is_file() {
             return Err(Refusal::NotDataRoot {
                 path: root.to_path_buf(),
             }
             .into());
         }
         let lock = DataRootLock::acquire(root)?;
-        if let Some(left) = crate::migrate::leftover(root) {
+        if let Some(left) = left.or_else(|| crate::migrate::leftover(root)) {
             return Err(Refusal::Unfinished {
                 what: format!("{left} remains"),
             }
@@ -227,13 +250,13 @@ impl OldRoot {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let summary = journal::summarize(root, last_seq, journal::Tail::of(Some(&meta)))?;
-        if summary.pending > 0
-            || summary.partial > 0
-            || summary.torn_groups > 0
-            || journal::has_rewrite_leftover(root)?
-        {
+        let partial_tail = summary.partial > 0 || summary.torn_groups > 0;
+        let rewrite_leftover = journal::has_rewrite_leftover(root)?;
+        if summary.pending > 0 || partial_tail || rewrite_leftover {
             return Err(Refusal::JournalPending {
                 lines: summary.pending,
+                partial_tail,
+                rewrite_leftover,
             }
             .into());
         }
@@ -622,7 +645,9 @@ pub fn rebuild_check(
                 }
             }
         }
-        let (rebuilt, _) = Store::open_with(scratch, plan)?;
+        // ジャーナルの `import.source` で作りかけの取り込みの根になるので、取り込みの照合の入口で開く。
+        let lock = DataRootLock::acquire(&dir).map_err(OpenError::from)?;
+        let (rebuilt, _) = Store::open_for_import(scratch, plan, lock)?;
         Ok(diff(store, &rebuilt)?)
     })();
     let removed = remove_dir_retry(&dir);
@@ -631,8 +656,12 @@ pub fn rebuild_check(
     Ok(diff)
 }
 
-/// 開いていたストアを落とした直後は、Windows でファイルの取っ手が残って消せないことがあるので、短く試し直す。
-fn remove_dir_retry(dir: &Path) -> io::Result<()> {
+/// フォルダ `dir` を中身ごと消す (無ければ何もしない)。開いていたストアを落とした直後は、Windows でファイルの取っ手が
+/// 残って消せないことがあるので、短く試し直す (`import-v04` が作りかけの新しい根を消すときにも使う)。
+///
+/// # Errors
+/// 試し直しても消せないとき。
+pub fn remove_dir_retry(dir: &Path) -> io::Result<()> {
     if !dir.exists() {
         return Ok(());
     }

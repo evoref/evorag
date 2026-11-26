@@ -2,7 +2,8 @@
 //!
 //! [`run`] は、(1) 古い根が取り込める根かを確かめて読むだけで開き、(2) 同じ親のフォルダに `<名前>.v05-import` の
 //! 新しい根 (形式の版 `0.5`) を作り、(3) 写す記録を通常の書き込みの入口で DB とジャーナルに書き、(4) 新しい根を開き
-//! 直して照合し、照合の結果 (`import.report`) を書く。照合が合わなければ新しい根を消す (古い根はそのまま)。
+//! 直して照合し、照合の結果 (`import.report`) を書く。照合が合わなければ新しい根を消す (古い根はそのまま)。新しい根の
+//! ロックは、作ってから照合の後まで持ち続け、古い根のロックとともに呼び手に渡す (入れ替えの直前まで持つ、03 §9)。
 //!
 //! 何を写すか・どう変えるかはメモリの層 (`evorag_memory` の `import_v04`)、古い根を読むことと照合の道具は保存の層
 //! (`evorag_store::import_v04`) が持つ (02 §4.4)。入れ替えと、途中で止まった取り込みの片付けは、この後の段で足す。
@@ -12,19 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use evorag_memory::{
-    COPY_KINDS, Disposition, Exclusion, FactDirectiveBody, ForgetKey, KIND_DIRECTIVE,
-    REDACTION_MARKERS, Selector, copy_ops, imported_directive, read_fact_directives, read_facts,
-    redaction_marker, v04_ended,
+    COPY_KINDS, Disposition, Exclusion, FactBody, FactDirectiveBody, ForgetKey, KIND_DIRECTIVE,
+    KIND_FACT_DIRECTIVE, Selector, copy_ops, imported_directive, read_fact_directives, read_facts,
+    v04_ended,
 };
+use evorag_store::forget::matching_markers;
 use evorag_store::import_v04::{
-    DigestSummary, KindDigest, OldRoot, OldRootError, Refusal, import_dir, rebuild_check,
-    renamed_old_root,
+    DigestSummary, KindDigest, OldRoot, OldRootError, RebuildError, Refusal, import_dir,
+    rebuild_check, remove_dir_retry, renamed_old_root,
 };
 use evorag_store::location::Verdict;
 use evorag_store::lock::{DataRootLock, LockError};
 use evorag_store::{
-    Durability, Envelope, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer, WriterHandle,
-    meta,
+    Durability, Envelope, OpenError, OpenOptions, Read, Store, StoreError, WriteError, WriteOp,
+    WriteRequest, Writer, WriterHandle, fsutil, meta,
 };
 use evorag_types::{Clock, Id, IdGen, UuidV7Gen};
 
@@ -32,13 +34,16 @@ use evorag_types::{Clock, Id, IdGen, UuidV7Gen};
 /// 大きくすると 1 つのトランザクションが重くなり、小さくするとコミット (約 1〜2 ms、03 §3.4) の数が増える。
 const BATCH_RECORDS: usize = 256;
 
-/// 照合の (3) で、ジャーナルから DB を作り直すフォルダ (新しい根の中。照合の後に消す)。
+/// 照合の (3) で、ジャーナルから DB を作り直すフォルダ (新しい根の中。照合の結果を書く前に消す)。
 const REBUILD_DIR: &str = "import-check";
 
 /// 照合の結果 (`import.report`) の形の版。
 const REPORT_V: u32 = 1;
 /// `import.source` の形の版。
 const SOURCE_V: u32 = 1;
+
+/// 照合の前に呼ぶ関数 (古い根・新しい根のパス)。試験が照合の失敗を作るためだけに使う。
+pub type BeforeVerify = fn(&Path, &Path);
 
 /// 取り込みの指定。
 pub struct ImportOptions {
@@ -53,12 +58,15 @@ pub struct ImportOptions {
     pub location: fn(&Path) -> Verdict,
     /// 危ない置き場所を警告だけにする (設定 `storage.allow_unsafe_location`)。
     pub allow_unsafe_location: bool,
+    /// 試験だけ: 写し終えてから照合の前に呼ぶ。
+    #[doc(hidden)]
+    pub before_verify: Option<BeforeVerify>,
 }
 
 /// 取り込みが失敗した・断った理由。
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    /// 取り込める根でない (何も残していない。終了コード 1)。
+    /// 取り込める根でない (ロックのファイルのほかは何も残していない。終了コード 1)。
     #[error(transparent)]
     Refused(#[from] Refusal),
     /// 古い根か新しい根のロックが取れない (終了コード 2)。
@@ -73,9 +81,28 @@ pub enum ImportError {
     /// 照合が合わなかった。新しい根は消した (古い根はそのまま。終了コード 1)。
     #[error("the imported data root did not verify: {}", .0.join("; "))]
     Mismatch(Vec<String>),
-    /// 書けない・読めない (新しい根は消した)。
-    #[error("storage error: {0}")]
-    Storage(String),
+    /// 新しい根を開けない (ロックのほか)。
+    #[error(transparent)]
+    Open(OpenError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Write(#[from] WriteError),
+    /// 照合の (3) を行えない。
+    #[error(transparent)]
+    Rebuild(#[from] RebuildError),
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// `cause` で失敗し、作りかけの新しい根 `left` を消せなかった (次の取り込みが片付ける)。
+    #[error("{cause}; and {} could not be removed: {error}", left.display())]
+    NotRemoved {
+        cause: Box<ImportError>,
+        left: PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
 }
 
 impl From<OldRootError> for ImportError {
@@ -83,13 +110,18 @@ impl From<OldRootError> for ImportError {
         match e {
             OldRootError::Refused(r) => ImportError::Refused(r),
             OldRootError::Lock(l) => ImportError::Locked(l),
-            OldRootError::Io(io) => ImportError::Storage(io.to_string()),
+            OldRootError::Io(io) => ImportError::Io(io),
         }
     }
 }
 
-fn storage(e: impl std::fmt::Display) -> ImportError {
-    ImportError::Storage(e.to_string())
+impl From<OpenError> for ImportError {
+    fn from(e: OpenError) -> Self {
+        match e {
+            OpenError::Lock(l) => ImportError::Locked(l),
+            other => ImportError::Open(other),
+        }
+    }
 }
 
 /// 除いた記録 1 件 (03 §12.4 の「除くもの」)。
@@ -105,8 +137,8 @@ pub struct Excluded {
 pub struct ImportReport {
     /// 封筒をそのまま写した種類ごとの件数とハッシュ (照合の (1))。
     pub kinds: BTreeMap<String, DigestSummary>,
-    /// 写した指示の数 (元の `fact_directive` の数。照合の (2))。
-    pub directives: usize,
+    /// 写した指示の件数と (ID ‖ 本体の CBOR) のハッシュ (照合の (2))。
+    pub directives: DigestSummary,
     /// 根拠の位置 (`at`) を決められなかった `private`・`accept`・`revert` の数 (元の事実が無い)。
     pub directives_without_at: usize,
     /// `import.v04_ended` の表の値の数。
@@ -150,8 +182,8 @@ impl ImportReport {
             "v": REPORT_V,
             "kinds": kinds,
             "directive": {
-                "count": self.directives,
-                "ended_added": 0,
+                "count": self.directives.count,
+                "sha256": self.directives.sha256,
                 "without_at": self.directives_without_at,
             },
             "v04_ended": self.v04_ended,
@@ -176,15 +208,18 @@ pub struct Imported {
     pub location_warnings: Vec<String>,
     /// 古い根のロック (入れ替えの直前まで持つ、03 §9)。
     pub old_root_lock: DataRootLock,
+    /// 新しい根のロック (作ってから持ち続けている。入れ替えの直前まで持つ、03 §9)。
+    pub new_root_lock: DataRootLock,
 }
 
 /// v0.4 の根を新しい根へ取り込み、照合する (03 §12.4)。入れ替えはしない。
 ///
 /// # Errors
-/// [`ImportError`] の通り。取り込める根でないとき・危ない置き場所・ロックが取れないときは何も書かない。書き始めた
-/// 後に失敗したとき (照合が合わないときを含む) は、新しい根のフォルダを消してから返す (古い根は変えない)。
-pub fn run(opts: ImportOptions) -> Result<Imported, ImportError> {
-    let old_path = std::path::absolute(&opts.old_root).map_err(storage)?;
+/// [`ImportError`] の通り。取り込める根でないとき・危ない置き場所・ロックが取れないときは、ロックのファイルのほかは
+/// 何も書かない。書き始めた後に失敗したとき (照合が合わないときを含む) は、新しい根のフォルダを消してから返す
+/// (消せなければ [`ImportError::NotRemoved`])。古い根は変えない。
+pub fn run(opts: &ImportOptions) -> Result<Imported, ImportError> {
+    let old_path = std::path::absolute(&opts.old_root)?;
     let not_root = || Refusal::NotDataRoot {
         path: old_path.clone(),
     };
@@ -192,7 +227,7 @@ pub fn run(opts: ImportOptions) -> Result<Imported, ImportError> {
     let started = opts.clock.now().as_millis();
     let renamed = renamed_old_root(&old_path, started).ok_or_else(not_root)?;
 
-    // 危ない置き場所の検査は、古い根と新しい根の両方に当てる (03 §12.4 の (5))。
+    // 危ない置き場所の検査は、古い根と新しい根の両方に、古い根に触れる前に当てる (03 §12.4 の (5))。
     let mut location_warnings = Vec::new();
     for place in [&old_path, &new_root] {
         match (opts.location)(place) {
@@ -209,54 +244,67 @@ pub fn run(opts: ImportOptions) -> Result<Imported, ImportError> {
     }
     let source = Source::read(&old)?;
 
-    let mut created = Created::new(&new_root, &opts)?;
-    let copied = match created.copy(&old, &source, &opts, &renamed, started) {
-        Ok(c) => c,
-        Err(e) => {
-            created.discard();
-            return Err(e);
+    let mut created = NewRoot::create(&new_root, opts)?;
+    let outcome = (|| -> Result<ImportReport, ImportError> {
+        let copied = created.copy(&old, &source, opts, &renamed, started)?;
+        created.close_writer()?;
+        if let Some(hook) = opts.before_verify {
+            hook(&old_path, &new_root);
         }
-    };
-    created.close();
-
-    match verify(&new_root, &mut old, &source, &copied, &opts) {
+        let store = created.reopen(opts)?;
+        let (report, store) = verify(store, &mut old, &copied, opts)?;
+        created.keep_lock(store.into_lock());
+        Ok(report)
+    })();
+    match outcome {
         Ok(report) => Ok(Imported {
             new_root,
             renamed_old_root: renamed,
             report,
             location_warnings,
             old_root_lock: old.into_lock(),
+            new_root_lock: created.commit(),
         }),
-        Err(e) => {
-            remove_new_root(&new_root);
-            Err(e)
-        }
+        Err(e) => Err(created.discard(e)),
     }
 }
 
 /// 古い根から、書き始める前に読むもの (指示・事実・鍵・言語)。読めないもの・断る理由は、ここで見つける。
 struct Source {
     directives: Vec<(Envelope, FactDirectiveBody)>,
-    facts: BTreeMap<Id, evorag_memory::FactBody>,
+    facts: BTreeMap<Id, FactBody>,
     forget_key: Option<String>,
     prompt_language: Option<String>,
     selector: Selector,
+    /// 写す前に除いたもの (ジャーナルに削除の行のある `fact_directive`)。
+    excluded: Vec<Excluded>,
 }
 
 impl Source {
     fn read(old: &OldRoot) -> Result<Self, ImportError> {
-        let (directives, facts) =
+        let (all, facts) =
             old.read(|view| Ok::<_, Refusal>((read_fact_directives(view)?, read_facts(view)?)))??;
+        // ジャーナルに削除の行のある ID の指示は、v0.4 が開くときに消すものなので写さない (03 §6・§12.4)。
+        let (deleted, directives): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|(e, _)| old.deleted().contains_key(&e.id));
+        let excluded = deleted
+            .into_iter()
+            .map(|(e, _)| Excluded {
+                kind: KIND_FACT_DIRECTIVE.to_owned(),
+                id: e.id,
+                reason: Exclusion::Deleted,
+            })
+            .collect();
         let forget_key = old.meta(meta::FORGET_KEY).map(str::to_owned);
-        // 指示があるのに鍵が無い根は、写した指示の値の鍵を確かめられない (03 §3.1.1 のフェイルクローズ)。
-        if forget_key.is_none() && !directives.is_empty() {
+        // 指示か値の鍵を持つ事実があるのに鍵が無い根は、写した値の鍵を確かめられない (03 §3.1.1 のフェイルクローズ)。
+        if forget_key.is_none()
+            && (!directives.is_empty() || facts.values().any(|f| f.vk.is_some()))
+        {
             return Err(Refusal::ForgetKeyUnusable.into());
         }
         let prompt_language = old.meta(meta::PROMPT_LANGUAGE).map(str::to_owned);
-        let markers: Vec<&'static str> = match prompt_language.as_deref() {
-            Some(l @ ("ja" | "en")) => vec![redaction_marker(l)],
-            _ => REDACTION_MARKERS.to_vec(),
-        };
+        let markers = matching_markers(prompt_language.as_deref());
         let selector = Selector::new(&directives, old.deleted().keys().copied(), &markers);
         // 伏せ字の掛かるターンを先に確かめる (当て直しの前の本文が残っていれば、書く前に断る)。
         old.read(|view| selector.check_redacted_turns(view))??;
@@ -266,6 +314,7 @@ impl Source {
             forget_key,
             prompt_language,
             selector,
+            excluded,
         })
     }
 }
@@ -273,18 +322,11 @@ impl Source {
 /// 写した結果 (照合の (1)・(2) で新しい根と比べる、古い根の側の値)。
 struct Copied {
     kinds: BTreeMap<String, DigestSummary>,
+    directives: DigestSummary,
     directive_ids: BTreeSet<Id>,
     directives_without_at: usize,
     v04_ended: usize,
     excluded: Vec<Excluded>,
-}
-
-/// 作った新しい根と、その書き手。
-struct Created {
-    root: PathBuf,
-    store: Option<Arc<Store>>,
-    writer: Option<WriterHandle>,
-    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 fn v05_options(root: &Path, opts: &ImportOptions, ids: Arc<dyn IdGen>) -> OpenOptions {
@@ -298,45 +340,56 @@ fn v05_options(root: &Path, opts: &ImportOptions, ids: Arc<dyn IdGen>) -> OpenOp
     }
 }
 
-impl Created {
-    /// 新しい根を作り (形式の版 `0.5`、権限は 03 §2.1)、書き手を動かす。
-    fn new(root: &Path, opts: &ImportOptions) -> Result<Self, ImportError> {
-        let (_, plan) = evorag_memory::v05_root();
-        let store = match Store::open_with(v05_options(root, opts, opts.ids.clone()), plan) {
-            Ok((store, _)) => Arc::new(store),
-            Err(e) => {
-                remove_new_root(root);
-                return Err(match e {
-                    evorag_store::OpenError::Lock(l) => ImportError::Locked(l),
-                    other => storage(other),
-                });
-            }
-        };
+/// 作っている新しい根。[`NewRoot::commit`] するまでは、落とす (失敗・panic) と書き手を止めて、フォルダを消す。
+struct NewRoot {
+    root: PathBuf,
+    /// 書き手を止めた後の新しい根のロック (開き直しの間も持ち続ける)。
+    lock: Option<DataRootLock>,
+    store: Option<Arc<Store>>,
+    writer: Option<WriterHandle>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    armed: bool,
+}
+
+impl NewRoot {
+    /// 新しい根を作り (形式の版 `0.5`、権限は 03 §2.1)、ロックを取って開き、書き手を動かす。ロックが取れなければ、
+    /// ほかが使っているフォルダなので消さない。
+    fn create(root: &Path, opts: &ImportOptions) -> Result<Self, ImportError> {
+        fsutil::create_private_dir(root)?;
         let mut out = Self {
             root: root.to_path_buf(),
-            store: Some(store.clone()),
+            lock: None,
+            store: None,
             writer: None,
             thread: None,
+            armed: true,
         };
-        let started = Writer::new(store)
-            .map_err(storage)
-            .and_then(|(writer, handle)| {
-                std::thread::Builder::new()
+        let lock = match DataRootLock::acquire(root) {
+            Ok(l) => l,
+            Err(e) => {
+                out.armed = false;
+                return Err(e.into());
+            }
+        };
+        let (_, plan) = evorag_memory::v05_root();
+        let started = Store::open_for_import(v05_options(root, opts, opts.ids.clone()), plan, lock)
+            .map_err(ImportError::from)
+            .and_then(|(store, _)| {
+                let store = Arc::new(store);
+                let (writer, handle) = Writer::new(store.clone())?;
+                let thread = std::thread::Builder::new()
                     .name("evorag-import-writer".into())
-                    .spawn(move || writer.run())
-                    .map(|t| (handle, t))
-                    .map_err(storage)
+                    .spawn(move || writer.run())?;
+                Ok((store, handle, thread))
             });
         match started {
-            Ok((handle, thread)) => {
+            Ok((store, handle, thread)) => {
+                out.store = Some(store);
                 out.writer = Some(handle);
                 out.thread = Some(thread);
                 Ok(out)
             }
-            Err(e) => {
-                out.discard();
-                Err(e)
-            }
+            Err(e) => Err(out.discard(e)),
         }
     }
 
@@ -344,31 +397,65 @@ impl Created {
         if ops.is_empty() {
             return Ok(());
         }
-        let writer = self
-            .writer
-            .as_ref()
-            .ok_or_else(|| storage("the writer is stopped"))?;
-        writer
-            .submit_wait(WriteRequest::conversation(ops))
-            .map(|_| ())
-            .map_err(storage)
+        let writer = self.writer.as_ref().ok_or(WriteError::ShuttingDown)?;
+        writer.submit_wait(WriteRequest::conversation(ops))?;
+        Ok(())
     }
 
-    /// 書き手を止めて、DB を閉じる (ロックも外す)。
-    fn close(&mut self) {
+    /// 書き手を止めて DB を閉じ、新しい根のロックを手元に残す。
+    fn close_writer(&mut self) -> Result<(), ImportError> {
         if let Some(w) = self.writer.take() {
             w.shutdown();
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        self.store = None;
+        if let Some(store) = self.store.take() {
+            let store = Arc::try_unwrap(store)
+                .map_err(|_| StoreError::Io("the new data root is still in use".into()))?;
+            self.lock = Some(store.into_lock());
+        }
+        Ok(())
     }
 
-    /// 閉じてから、新しい根のフォルダを消す。
-    fn discard(&mut self) {
-        self.close();
-        remove_new_root(&self.root);
+    /// 持っているロックのまま、新しい根を開き直す (03 §12.4 の「照合」)。
+    fn reopen(&mut self, opts: &ImportOptions) -> Result<Store, ImportError> {
+        let lock = self
+            .lock
+            .take()
+            .ok_or_else(|| StoreError::Io("the new data root lock is not held".into()))?;
+        let (_, plan) = evorag_memory::v05_root();
+        let (store, _) =
+            Store::open_for_import(v05_options(&self.root, opts, opts.ids.clone()), plan, lock)?;
+        Ok(store)
+    }
+
+    fn keep_lock(&mut self, lock: DataRootLock) {
+        self.lock = Some(lock);
+    }
+
+    /// 取り込みを終えた: フォルダを残し、新しい根のロックを返す。
+    fn commit(mut self) -> DataRootLock {
+        self.armed = false;
+        self.lock
+            .take()
+            .expect("the new data root lock is kept after verification")
+    }
+
+    /// 書き手を止めて閉じ、フォルダを消す。`cause` に、消せなかったときはそのことを添えて返す。
+    fn discard(mut self, cause: ImportError) -> ImportError {
+        let _ = self.close_writer();
+        self.store = None;
+        self.lock = None;
+        self.armed = false;
+        match remove_dir_retry(&self.root) {
+            Ok(()) => cause,
+            Err(error) => ImportError::NotRemoved {
+                cause: Box::new(cause),
+                left: self.root.clone(),
+                error,
+            },
+        }
     }
 
     /// 写す記録を書く (03 §12.4 の「書き方」)。ジャーナルの行の順は、`meta` の行 → セッション → ターン → 信号・
@@ -382,7 +469,6 @@ impl Created {
         renamed: &Path,
         started: i64,
     ) -> Result<Copied, ImportError> {
-        // 鍵は、DB とジャーナルの両方に、ほかの記録より先に書く (03 §3.1.1)。
         let ended = v04_ended(
             &src.facts,
             src.forget_key
@@ -390,97 +476,19 @@ impl Created {
                 .and_then(ForgetKey::from_hex)
                 .as_ref(),
         );
-        let source = serde_json::json!({
-            "v": SOURCE_V,
-            "data_root_id": old.meta(meta::DATA_ROOT_ID),
-            "path": renamed.to_string_lossy(),
-            "imported_at": started,
-            "evorag": opts.evorag_version,
-            "journal_last_seq": old.journal_last_seq(),
-            "files": old.files_before().len(),
-            "files_sha256": old.files_before().digest(),
-        });
-        let mut metas = Vec::new();
-        if let Some(l) = &src.prompt_language {
-            metas.push(WriteOp::SetMetaOnce {
-                key: meta::PROMPT_LANGUAGE.into(),
-                value: l.clone(),
-            });
-        }
-        if let Some(k) = &src.forget_key {
-            metas.push(WriteOp::SetMetaOnce {
-                key: meta::FORGET_KEY.into(),
-                value: k.clone(),
-            });
-        }
-        metas.push(WriteOp::SetMetaOnce {
-            key: meta::IMPORT_SOURCE.into(),
-            value: source.to_string(),
-        });
-        metas.push(WriteOp::SetMeta {
-            key: meta::IMPORT_OLD_ROOT.into(),
-            value: meta::IMPORT_OLD_ROOT_KEPT.into(),
-        });
-        metas.push(WriteOp::SetMeta {
-            key: meta::IMPORT_V04_ENDED.into(),
-            value: serde_json::to_string(&ended).map_err(storage)?,
-        });
-        self.submit(metas)?;
+        self.submit(meta_ops(old, src, opts, renamed, started, &ended)?)?;
 
-        let mut selector = src.selector.clone();
+        let mut state = CopyState {
+            selector: src.selector.clone(),
+            excluded: src.excluded.clone(),
+            max_id: None,
+        };
         let mut kinds = BTreeMap::new();
-        let mut excluded = Vec::new();
-        let mut max_id: Option<Id> = None;
         for kind in COPY_KINDS {
-            let mut digest = KindDigest::new();
-            let mut batch = Batch::default();
-            let mut failed: Option<ImportError> = None;
-            old.read(|view| {
-                view.for_each(kind, |r| {
-                    let step = (|| -> Result<(), ImportError> {
-                        let env = match r {
-                            Read::Ok(e) => e,
-                            Read::Newer { kind, id, .. } | Read::Corrupt { kind, id, .. } => {
-                                return Err(Refusal::Unreadable {
-                                    what: format!("record {kind}/{id}"),
-                                }
-                                .into());
-                            }
-                        };
-                        match selector.judge(&env)? {
-                            Disposition::Copy => {
-                                digest.add(&env);
-                                max_id = max_id.max(Some(env.id));
-                                batch.push(copy_ops(env));
-                                if batch.records >= BATCH_RECORDS {
-                                    self.submit(batch.take())?;
-                                }
-                            }
-                            Disposition::Exclude(reason) => excluded.push(Excluded {
-                                kind: env.kind.clone(),
-                                id: env.id,
-                                reason,
-                            }),
-                        }
-                        Ok(())
-                    })();
-                    match step {
-                        Ok(()) => true,
-                        Err(e) => {
-                            failed = Some(e);
-                            false
-                        }
-                    }
-                })
-                .map_err(storage)
-            })??;
-            if let Some(e) = failed {
-                return Err(e);
-            }
-            self.submit(batch.take())?;
-            kinds.insert(kind.to_owned(), digest.finish());
+            kinds.insert(kind.to_owned(), self.copy_kind(old, kind, &mut state)?);
         }
 
+        let mut digest = KindDigest::new();
         let mut directive_ids = BTreeSet::new();
         let mut directives_without_at = 0;
         let mut batch = Batch::default();
@@ -492,8 +500,9 @@ impl Created {
             {
                 directives_without_at += 1;
             }
+            digest.add(&d);
             directive_ids.insert(d.id);
-            max_id = max_id.max(Some(d.id));
+            state.max_id = state.max_id.max(Some(d.id));
             batch.push(copy_ops(d));
             if batch.records >= BATCH_RECORDS {
                 self.submit(batch.take())?;
@@ -502,19 +511,142 @@ impl Created {
         self.submit(batch.take())?;
 
         // ID の下限: 写した ID と、古い根のジャーナルの削除の行の ID の最大 (03 §3.3)。
-        let floor = max_id.max(old.deleted().keys().next_back().copied());
+        let floor = state.max_id.max(old.deleted().keys().next_back().copied());
         if let Some(f) = floor {
             opts.ids.raise_floor(f);
         }
+        let mut excluded = state.excluded;
         excluded.sort();
         Ok(Copied {
             kinds,
+            directives: digest.finish(),
             directive_ids,
             directives_without_at,
             v04_ended: ended.values.len(),
             excluded,
         })
     }
+
+    /// 封筒をそのまま写す 1 つの種類を、ID の順に写す。写した記録の (ID ‖ 本体の CBOR) のハッシュを返す。
+    fn copy_kind(
+        &self,
+        old: &OldRoot,
+        kind: &str,
+        state: &mut CopyState,
+    ) -> Result<DigestSummary, ImportError> {
+        let mut digest = KindDigest::new();
+        let mut batch = Batch::default();
+        let mut failed: Option<ImportError> = None;
+        let mut step = |r: Read| -> Result<(), ImportError> {
+            let env = match r {
+                Read::Ok(e) => e,
+                Read::Newer { kind, id, .. } | Read::Corrupt { kind, id, .. } => {
+                    return Err(Refusal::Unreadable {
+                        what: format!("record {kind}/{id}"),
+                    }
+                    .into());
+                }
+            };
+            match state.selector.judge(&env)? {
+                Disposition::Copy => {
+                    digest.add(&env);
+                    state.max_id = state.max_id.max(Some(env.id));
+                    batch.push(copy_ops(env));
+                    if batch.records >= BATCH_RECORDS {
+                        self.submit(batch.take())?;
+                    }
+                }
+                Disposition::Exclude(reason) => state.excluded.push(Excluded {
+                    kind: env.kind.clone(),
+                    id: env.id,
+                    reason,
+                }),
+            }
+            Ok(())
+        };
+        old.read(|view| {
+            view.for_each(kind, |r| match step(r) {
+                Ok(()) => true,
+                Err(e) => {
+                    failed = Some(e);
+                    false
+                }
+            })
+        })?
+        .map_err(|e| Refusal::Unreadable {
+            what: e.to_string(),
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        self.submit(batch.take())?;
+        Ok(digest.finish())
+    }
+}
+
+impl Drop for NewRoot {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // 失敗の経路は [`NewRoot::discard`] で消す。ここに来るのは panic などで落としたときだけ。
+        let _ = self.close_writer();
+        self.store = None;
+        self.lock = None;
+        if remove_dir_retry(&self.root).is_err() {
+            // パスは利用者の名前を含みうるので、ログには出さない (NFR-502)。次の取り込みが片付ける。
+            tracing::warn!("an unfinished import-v04 data root could not be removed");
+        }
+    }
+}
+
+/// 種類をまたいで持ち越す、写しの状態。
+struct CopyState {
+    selector: Selector,
+    excluded: Vec<Excluded>,
+    max_id: Option<Id>,
+}
+
+/// 最初に書く `meta` の行: 鍵は、DB とジャーナルの両方に、ほかの記録より先に書く (03 §3.1.1)。
+fn meta_ops(
+    old: &OldRoot,
+    src: &Source,
+    opts: &ImportOptions,
+    renamed: &Path,
+    started: i64,
+    ended: &evorag_memory::V04Ended,
+) -> Result<Vec<WriteOp>, ImportError> {
+    let source = serde_json::json!({
+        "v": SOURCE_V,
+        "data_root_id": old.meta(meta::DATA_ROOT_ID),
+        "path": renamed.to_string_lossy(),
+        "imported_at": started,
+        "evorag": opts.evorag_version,
+        "journal_last_seq": old.journal_last_seq(),
+        "files": old.files_before().len(),
+        "files_sha256": old.files_before().digest(),
+    });
+    let once = |key: &str, value: String| WriteOp::SetMetaOnce {
+        key: key.into(),
+        value,
+    };
+    let mut ops = Vec::new();
+    if let Some(l) = &src.prompt_language {
+        ops.push(once(meta::PROMPT_LANGUAGE, l.clone()));
+    }
+    if let Some(k) = &src.forget_key {
+        ops.push(once(meta::FORGET_KEY, k.clone()));
+    }
+    ops.push(once(meta::IMPORT_SOURCE, source.to_string()));
+    ops.push(WriteOp::SetMetaLatest {
+        key: meta::IMPORT_OLD_ROOT.into(),
+        value: meta::IMPORT_OLD_ROOT_KEPT.into(),
+    });
+    ops.push(WriteOp::SetMetaLatest {
+        key: meta::IMPORT_V04_ENDED.into(),
+        value: serde_json::to_string(ended)?,
+    });
+    Ok(ops)
 }
 
 /// 1 つの依頼にまとめる操作。
@@ -536,25 +668,27 @@ impl Batch {
     }
 }
 
-/// 新しい根のフォルダを消す (作りかけ・照合の合わないもの)。消せなくても続ける (次の取り込みが作りかけとして扱う)。
-fn remove_new_root(root: &Path) {
-    let _ = evorag_store::fsutil::retry_transient(|| match std::fs::remove_dir_all(root) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        r => r,
-    });
+/// 種類 `kind` の記録の (ID ‖ 本体の CBOR) のハッシュ。読めない記録は数えて返す。
+fn digest_of(store: &Store, kind: &str) -> Result<(DigestSummary, usize), ImportError> {
+    let mut digest = KindDigest::new();
+    let mut unreadable = 0usize;
+    store.read()?.for_each(kind, |x| {
+        match x {
+            Read::Ok(e) => digest.add(&e),
+            _ => unreadable += 1,
+        }
+        true
+    })?;
+    Ok((digest.finish(), unreadable))
 }
 
-/// 新しい根を開き直して照合し (03 §12.4 の「照合」の (1)〜(4))、合えば `import.report` を書く。
+/// 開き直した新しい根を照合し (03 §12.4 の「照合」の (1)〜(4))、合えば `import.report` を書く。
 fn verify(
-    new_root: &Path,
+    store: Store,
     old: &mut OldRoot,
-    src: &Source,
     copied: &Copied,
     opts: &ImportOptions,
-) -> Result<ImportReport, ImportError> {
-    let (_, plan) = evorag_memory::v05_root();
-    let (store, _) = Store::open_with(v05_options(new_root, opts, opts.ids.clone()), plan.clone())
-        .map_err(storage)?;
+) -> Result<(ImportReport, Store), ImportError> {
     let mut problems = Vec::new();
     if store.format_version() != evorag_store::FORMAT_V05 {
         problems.push(format!("format {}", store.format_version()));
@@ -562,57 +696,46 @@ fn verify(
 
     // (1) 封筒をそのまま写した種類ごとの件数とハッシュ。
     let mut kinds = BTreeMap::new();
-    {
-        let r = store.read().map_err(storage)?;
-        for kind in COPY_KINDS {
-            let mut digest = KindDigest::new();
-            let mut unreadable = 0usize;
-            r.for_each(kind, |x| {
-                match x {
-                    Read::Ok(e) => digest.add(&e),
-                    _ => unreadable += 1,
-                }
-                true
-            })
-            .map_err(storage)?;
-            let got = digest.finish();
-            if unreadable > 0 || copied.kinds.get(kind) != Some(&got) {
-                problems.push(format!("kind {kind} differs"));
-            }
-            kinds.insert(kind.to_owned(), got);
+    for kind in COPY_KINDS {
+        let (got, unreadable) = digest_of(&store, kind)?;
+        if unreadable > 0 || copied.kinds.get(kind) != Some(&got) {
+            problems.push(format!("kind {kind} differs"));
         }
-        // (2) 指示の件数と元の ID の集合。
-        let mut ids = BTreeSet::new();
-        r.for_each(KIND_DIRECTIVE, |x| {
-            if let Read::Ok(e) = x {
-                ids.insert(e.id);
-            }
-            true
-        })
-        .map_err(storage)?;
-        let want: BTreeSet<Id> = src.directives.iter().map(|(e, _)| e.id).collect();
-        if ids != want || ids != copied.directive_ids {
-            problems.push("directive ids differ".to_owned());
+        kinds.insert(kind.to_owned(), got);
+    }
+    // (2) 指示の件数と元の ID の集合、古い根から写し方で作った本体のハッシュ。
+    let (directives, unreadable) = digest_of(&store, KIND_DIRECTIVE)?;
+    let mut ids = BTreeSet::new();
+    store.read()?.for_each(KIND_DIRECTIVE, |x| {
+        if let Read::Ok(e) = x {
+            ids.insert(e.id);
         }
+        true
+    })?;
+    if ids != copied.directive_ids {
+        problems.push("directive ids differ".to_owned());
+    }
+    if unreadable > 0 || directives != copied.directives {
+        problems.push("directive bodies differ".to_owned());
     }
 
     // (3) 新しい根のジャーナルだけから DB を作り直して比べる。
     let scratch_ids: Arc<dyn IdGen> = Arc::new(UuidV7Gen::new(opts.clock.clone()));
-    match rebuild_check(
+    let (_, plan) = evorag_memory::v05_root();
+    let diff = rebuild_check(
         &store,
-        v05_options(&new_root.join(REBUILD_DIR), opts, scratch_ids),
+        v05_options(&store.data_root().join(REBUILD_DIR), opts, scratch_ids),
         plan,
-    ) {
-        Ok(diff) if diff.is_empty() => {}
-        Ok(diff) => problems.push(format!(
+    )?;
+    if !diff.is_empty() {
+        problems.push(format!(
             "rebuild from the journal differs (records {}, links {}, lookups {}, meta {:?})",
             diff.records, diff.links, diff.lookups, diff.meta
-        )),
-        Err(e) => problems.push(format!("rebuild from the journal failed: {e}")),
+        ));
     }
 
-    // (4) 古い根のすべてのファイルが、取り込みの前と同じ。
-    let after = old.close_and_snapshot().map_err(storage)?;
+    // (4) 古い根のすべてのファイル (ロックのファイルを除く) が、取り込みの前と同じ。
+    let after = old.close_and_snapshot()?;
     let changed = old.files_before().changed(&after);
     if !changed.is_empty() {
         problems.push(format!(
@@ -626,19 +749,14 @@ fn verify(
     }
     let report = ImportReport {
         kinds,
-        directives: copied.directive_ids.len(),
+        directives,
         directives_without_at: copied.directives_without_at,
         v04_ended: copied.v04_ended,
         excluded: copied.excluded.clone(),
     };
-    let token = store
-        .take_write_token()
-        .ok_or_else(|| storage("the write token is taken"))?;
-    let mut tx = store
-        .write(&token, Durability::Immediate)
-        .map_err(storage)?;
-    tx.set_meta_once(meta::IMPORT_REPORT, &report.to_json())
-        .map_err(storage)?;
-    tx.commit().map_err(storage)?;
-    Ok(report)
+    let token = store.take_write_token().ok_or(StoreError::TokenTaken)?;
+    let mut tx = store.write(&token, Durability::Immediate)?;
+    tx.set_meta_once(meta::IMPORT_REPORT, &report.to_json())?;
+    tx.commit()?;
+    Ok((report, store))
 }

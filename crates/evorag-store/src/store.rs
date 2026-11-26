@@ -235,6 +235,16 @@ pub(crate) fn parse_ids(v: &str) -> PendingDeletes {
     out
 }
 
+/// `import.v04_ended` の 2 つの値の表 (`values`) が同じか。どちらかが JSON として読めなければ違うとみなす。
+fn same_ended_values(a: &str, b: &str) -> bool {
+    let values = |s: &str| {
+        serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|v| v.get("values").cloned())
+    };
+    matches!((values(a), values(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// `memory.forget_key` の形 (ちょうど 64 桁の小文字の 16 進、03 §3.1.1)。
 fn is_forget_key(v: &str) -> bool {
     v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -256,6 +266,10 @@ pub enum OpenError {
     /// `import-v04` で新しい根へ取り込む (03 §12.4)。何も書いていない。
     #[error("the database is in format {format}; import it into a new data root (import-v04)")]
     NeedsImport { format: String },
+    /// `import-v04` が照合を終えていない作りかけの新しい根 (`import.source` があって `import.report` が無い)。
+    /// 開かない (次の `import-v04` が片付けてやり直す、03 §12.4)。何も書いていない。
+    #[error("the data root is an unfinished import (import-v04 will remove and redo it)")]
+    UnfinishedImport,
     /// `meta` が読めない・形式の版が無い。
     #[error("the database metadata is unreadable: {0}")]
     BadMeta(String),
@@ -585,6 +599,18 @@ fn needs_compact_after_old_writer(existing: &BTreeMap<String, String>, ours: &Ve
             .is_some_and(|w| w < since)
 }
 
+/// 照合を終えていない作りかけの取り込みの根を開くか (03 §12.4 の「書き方」の「作りかけの根を開かない」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unfinished {
+    Refuse,
+    Allow,
+}
+
+/// `import.source` があって `import.report` が無い (照合を終えていない作りかけの取り込みの根、03 §12.4)。
+fn is_unfinished_import(m: &BTreeMap<String, String>) -> bool {
+    m.contains_key(meta::IMPORT_SOURCE) && !m.contains_key(meta::IMPORT_REPORT)
+}
+
 /// v0.5 の形式の版 ([`FORMAT_V05`])。
 fn v05() -> Version {
     FORMAT_V05.parse().expect("FORMAT_V05 is a version")
@@ -615,18 +641,42 @@ impl Store {
         opts: OpenOptions,
         lock: DataRootLock,
     ) -> Result<(Self, OpenReport), OpenError> {
-        Self::open_inner(opts, FormatPlan::current(), Some(lock))
+        Self::open_inner(opts, FormatPlan::current(), Some(lock), Unfinished::Refuse)
     }
 
     /// 書く形式と移行を指定して開く (移行の試験のため)。
     pub fn open_with(opts: OpenOptions, plan: FormatPlan) -> Result<(Self, OpenReport), OpenError> {
-        Self::open_inner(opts, plan, None)
+        Self::open_inner(opts, plan, None, Unfinished::Refuse)
+    }
+
+    /// `import-v04` 自身が、作っている新しい根を開く入口 (03 §12.4 の「書き方」・「照合」)。呼ぶ側が取ったロック
+    /// `lock` を持ったまま開き、照合を終えていない作りかけの根 (`import.source` があって `import.report` が無い) も
+    /// 開く。ほかの経路は [`Store::open_with`] を使う (作りかけの根を [`OpenError::UnfinishedImport`] で断る)。
+    ///
+    /// # Panics
+    /// [`Store::open_locked`] と同じ (`lock` が `opts.data_root` のロックでないとき、debug のビルド)。
+    pub fn open_for_import(
+        opts: OpenOptions,
+        plan: FormatPlan,
+        lock: DataRootLock,
+    ) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(opts, plan, Some(lock), Unfinished::Allow)
+    }
+
+    /// 閉じて (DB を閉じてから)、データ根のロックを返す (`import-v04` が、新しい根のロックを開き直しの間も持ち
+    /// 続けるため)。
+    #[must_use]
+    pub fn into_lock(self) -> DataRootLock {
+        let Self { db, _lock, .. } = self;
+        drop(db);
+        _lock
     }
 
     fn open_inner(
         opts: OpenOptions,
         plan: FormatPlan,
         held: Option<DataRootLock>,
+        unfinished: Unfinished,
     ) -> Result<(Self, OpenReport), OpenError> {
         fsutil::create_private_dir(&opts.data_root)?;
         let wanted = opts.data_root.join(crate::lock::LOCK_FILE);
@@ -650,6 +700,14 @@ impl Store {
                 DataRootLock::acquire(&opts.data_root)?
             }
         };
+        // 作りかけの取り込みの根は、書き込みで開く前に、読むだけで開いて見分ける (何も書かずに断る、03 §12.4)。
+        // 読むだけで開けない (修復が要る) ときは、開いた後の `meta` で見分ける。
+        if unfinished == Unfinished::Refuse
+            && let Ok(ro) = redb::ReadOnlyDatabase::open(opts.data_root.join(DB_FILE))
+            && read_meta_db_any(&ro).is_ok_and(|m| is_unfinished_import(&m))
+        {
+            return Err(OpenError::UnfinishedImport);
+        }
         migrate::recover(&opts.data_root)?;
         crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;
         let mut database = match open_db(&opts.data_root) {
@@ -679,6 +737,9 @@ impl Store {
         let mut read_only = None;
         let mut existing =
             read_meta_db(&database).map_err(|e| OpenError::BadMeta(e.to_string()))?;
+        if unfinished == Unfinished::Refuse && existing.as_ref().is_some_and(is_unfinished_import) {
+            return Err(OpenError::UnfinishedImport);
+        }
         if let Some(m) = &existing {
             let format = meta_version(m, meta::FORMAT_VERSION)?;
             let min_read = meta_version(m, meta::FORMAT_MIN_READ)?;
@@ -743,6 +804,14 @@ impl Store {
                 .map_err(|e| OpenError::Unreadable(e.to_string()))?;
             report.created = true;
             store.open_journal(&mut report)?;
+            // ジャーナルから作り直した根も、作りかけの取り込みなら使わせない (03 §12.4)。
+            if unfinished == Unfinished::Refuse {
+                let m =
+                    read_meta_db_any(&store.db).map_err(|e| OpenError::BadMeta(e.to_string()))?;
+                if is_unfinished_import(&m) {
+                    return Err(OpenError::UnfinishedImport);
+                }
+            }
             return Ok((store, report));
         };
 
@@ -1799,10 +1868,11 @@ impl WriteTxn<'_> {
     }
 
     /// 上書きしてよい、ジャーナルにも書く `meta` の値 (`import.old_root`・`import.v04_ended`、03 §3.1.1) を書く。
-    /// 古い根を処分した印 (`import.old_root` の `disposed:…`) は `kept` に戻さない (`MetaConflict`)。
+    /// 古い根を処分した印 (`import.old_root` の `disposed:…`) は `kept` に戻さず、`import.v04_ended` は表 (`values`)
+    /// を変えない (書き換えてよいのは照らし終えた印だけ)。どちらも `MetaConflict`。
     ///
     /// # Errors
-    /// ほかのキーのとき (`MetaNotWritable`)、処分した印を戻そうとしたとき (`MetaConflict`)、DB を書けないとき。
+    /// ほかのキーのとき (`MetaNotWritable`)、上の規則に反するとき (`MetaConflict`)、DB を書けないとき。
     pub fn set_meta_latest(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
         if key != meta::IMPORT_OLD_ROOT && key != meta::IMPORT_V04_ENDED {
             return Err(StoreError::MetaNotWritable(key.to_owned()));
@@ -1812,15 +1882,18 @@ impl WriteTxn<'_> {
             .get(key.as_bytes())
             .map_err(db)?
             .map(|v| String::from_utf8_lossy(v.value()).into_owned());
-        if key == meta::IMPORT_OLD_ROOT
-            && let Some(e) = existing
-            && e.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED)
-            && !value.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED)
-        {
-            return Err(StoreError::MetaConflict {
-                key: key.to_owned(),
-                existing: e,
-            });
+        if let Some(e) = existing {
+            let disposed_back = key == meta::IMPORT_OLD_ROOT
+                && e.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED)
+                && !value.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED);
+            // `import.v04_ended` で書き換えてよいのは照らし終えた印 (`done`) だけ (表は変えない、03 §3.1.1)。
+            let table_changed = key == meta::IMPORT_V04_ENDED && !same_ended_values(&e, value);
+            if disposed_back || table_changed {
+                return Err(StoreError::MetaConflict {
+                    key: key.to_owned(),
+                    existing: e,
+                });
+            }
         }
         m.insert(key.as_bytes(), value.as_bytes()).map_err(db)?;
         Ok(())

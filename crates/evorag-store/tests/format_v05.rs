@@ -1072,7 +1072,7 @@ fn import_meta_keys_are_journaled_and_replayed_latest_first() {
     let dir = TempDir::new("v05-import-meta");
     let root = dir.path().join("root");
     let (store, _) = open_v05(&root);
-    let set = |key: &str, value: &str| WriteOp::SetMeta {
+    let set = |key: &str, value: &str| WriteOp::SetMetaLatest {
         key: key.into(),
         value: value.into(),
     };
@@ -1087,9 +1087,12 @@ fn import_meta_keys_are_journaled_and_replayed_latest_first() {
         WriteRequest::conversation(vec![
             once(meta::IMPORT_SOURCE, "{\"v\":1}"),
             set(meta::IMPORT_OLD_ROOT, meta::IMPORT_OLD_ROOT_KEPT),
-            set(meta::IMPORT_V04_ENDED, "{\"done\":false}"),
+            set(meta::IMPORT_V04_ENDED, "{\"done\":false,\"values\":[]}"),
         ]),
-        WriteRequest::conversation(vec![set(meta::IMPORT_V04_ENDED, "{\"done\":true}")]),
+        WriteRequest::conversation(vec![set(
+            meta::IMPORT_V04_ENDED,
+            "{\"done\":true,\"values\":[]}",
+        )]),
         WriteRequest::conversation(vec![set(meta::IMPORT_OLD_ROOT, "disposed:1")]),
         WriteRequest::conversation(vec![once(meta::IMPORT_REPORT, "{}")]),
     ] {
@@ -1099,6 +1102,11 @@ fn import_meta_keys_are_journaled_and_replayed_latest_first() {
     for (op, conflict) in [
         (set(meta::IMPORT_OLD_ROOT, meta::IMPORT_OLD_ROOT_KEPT), true),
         (set(meta::PROMPT_LANGUAGE, "en"), false),
+        // 表 (`values`) は変えられない (書き換えてよいのは `done` だけ)。
+        (
+            set(meta::IMPORT_V04_ENDED, "{\"done\":true,\"values\":[1]}"),
+            true,
+        ),
         (once(meta::IMPORT_SOURCE, "{\"v\":2}"), true),
     ] {
         match handle.submit_wait(WriteRequest::conversation(vec![op])) {
@@ -1127,7 +1135,20 @@ fn import_meta_keys_are_journaled_and_replayed_latest_first() {
         rebuilt.join(JOURNAL_DIR).join(file.file_name().unwrap()),
     )
     .unwrap();
-    let (store, _) = open_v05(&rebuilt);
+    // `import.source` があって `import.report` が無い根は、作りかけの取り込みとして通常の開き方では開かない
+    // (03 §12.4)。取り込みの照合の入口では開ける。
+    let refused = Store::open_with(
+        options(&rebuilt, vec![SAMPLE, UNIT, LEDGER, TURN], 5),
+        FormatPlan::v05(),
+    );
+    assert!(matches!(refused, Err(OpenError::UnfinishedImport)));
+    let lock = evorag_store::lock::DataRootLock::acquire(&rebuilt).unwrap();
+    let (store, _) = Store::open_for_import(
+        options(&rebuilt, vec![SAMPLE, UNIT, LEDGER, TURN], 5),
+        FormatPlan::v05(),
+        lock,
+    )
+    .unwrap();
     assert_eq!(
         meta_of(&store, meta::IMPORT_SOURCE).as_deref(),
         Some("{\"v\":1}")
@@ -1138,7 +1159,7 @@ fn import_meta_keys_are_journaled_and_replayed_latest_first() {
     );
     assert_eq!(
         meta_of(&store, meta::IMPORT_V04_ENDED).as_deref(),
-        Some("{\"done\":true}")
+        Some("{\"done\":true,\"values\":[]}")
     );
     assert_eq!(meta_of(&store, meta::IMPORT_REPORT), None);
 }

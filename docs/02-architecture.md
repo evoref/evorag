@@ -60,7 +60,7 @@ flowchart TB
 |---|---|---|---|
 | `evorag-types` | ID、時刻、エラー、文言キー、コアの API の命令・イベント・照会の型 | serde | v0.1 |
 | `evorag-llm` | llama-server のクライアント (chat・embed・rerank・tokenize・props・slots) | reqwest (TLS なし)、serde_json | v0.1 |
-| `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック、伏せ字の純粋な核 (04 §7.2)、ファイルの操作の道具 (`fsutil`。上書きしない改名・ロックの再試行。`evorag-update` も使う)。v0.5 から、データ根を消す手順 (`reset` と古い根の処分の共通の実装、03 §10.2)、`import-v04` の土台 (古い根を読むだけで開く・新しい根を作る・照合・入れ替え、03 §12.4。種類を写して変える中身は `evorag-memory` が渡す) | redb、ciborium、xxhash-rust、sha2・unicode-segmentation (伏せ字の核、v0.3) | v0.1 |
+| `evorag-store` | redb の表、封筒、スキーマの版と移行、書き手スレッド、`WriteToken`、ジャーナル、退避、ロック、伏せ字の純粋な核 (04 §7.2)、ファイルの操作の道具 (`fsutil`。上書きしない改名・ロックの再試行。`evorag-update` も使う)。v0.5 から、データ根を消す手順 (`reset` と古い根の処分の共通の実装、03 §10.2)、`import-v04` の土台 (古い根を読むだけで開いて取り込める根か確かめる・照合の道具 (ファイルの一覧・種類ごとのハッシュ・ジャーナルからの作り直しの比べ)・改名の道具、03 §12.4。種類を写して変える中身は `evorag-memory`、新しい根を作って写し照合を組み立てるのは `evorag-core`) | redb、ciborium、xxhash-rust、sha2・unicode-segmentation (伏せ字の核、v0.3) | v0.1 |
 | `evorag-index` | 語彙の索引とベクトルの索引、セグメントの形式と入れ替え | memmap2、rayon、arc-swap | v0.1 (語彙) / v0.2 (ベクトル) |
 | `evorag-memory` | メモリの書き込み・統合・読み出し、事実の入口、訂正の検証。v0.5 からは、メモリの新エンジンの **LLM と I/O を持たない純粋な部分** (§4.4): 区切りの決め方と文の分け方 v1、B2 のプロンプトと型と出力の検証、台帳の型 (書くときの型と読むときの型を分ける) と有効性と選び方、関門 (B3)、全件の導出と指紋 (B4)、指示の型と当て方の述語、台帳の掃除、プロファイルの描画、`import-v04` の指示の写し方 | toml、unicode-normalization、unicase (値の鍵の case folding、04 §5.6)、sha2 (値の鍵の HMAC。HMAC は sha2 の上に組む) | v0.1 (ターンとセッション) / v0.2〜v0.3 / v0.5 (新しいエンジン) |
 | `evorag-retrieval` | 問いの準備、候補の収集と順位付け、文脈の組み立て | unicode-normalization | v0.1 |
@@ -115,7 +115,7 @@ ADR-0021 の新しいエンジン (提案書 §4〜§8) のブロックを、今
 | 単位の鍵 (v0.5)・単位の索引 (v0.6) | 単位の鍵: 辞書の属性の `world` の Live・Superseded の単位から作る短い語句 (v0.4 の事実の鍵の後継)。単位の索引: 単位の値・自由記述の属性・entity の語彙とベクトルの索引 (単位を想起の候補の由来にするもの)。言葉の区別は 04 §5.5 | 単位の鍵は `evorag-memory` (語句の作り方) / `evorag-index` (今の検索の鍵の索引に足す)。単位の索引は v0.6 で `evorag-index` に作る (v0.5 は読み出しを変えず、忘れるの置き場所を増やさないため。確定、2026-11-26、OQ-54 の 7) | index → store |
 | 文の分け方 v1 | 区切りの文番号の分け方 (版を持たせて凍結する、04 §2) | `evorag-memory` (今の `evorag-retrieval::window::sentences` を移す。`evorag-retrieval` が `evorag-memory` に依存するので、B2 から呼べる側に置く)。文の窓 (05 §3.8) は、`evorag-memory` の v1 を呼ぶか、別に持つ (M5.2 で決める) | retrieval → memory |
 | B10 (段取り) | 即時・微小待機・応答の後・短い待機・長い待機 (v0.7)・夜間 (v0.8) の階層、1 秒以内の停止と再開 | `evorag-core` (`sleep.rs` の sleep-time を広げる)。`evorag sleep` は同じ段取りを、待機の判定を省いて前景で流す | — |
-| `import-v04` | 古い根を読むだけで開く・新しい根を作る・照合・入れ替え / 種類を写して変える (`fact_directive` → `directive`、`end` を足す) | `evorag-store` (土台) / `evorag-memory` (写して変える中身) / `evorag-core` と bin (手順と画面) | core → memory → store |
+| `import-v04` | 古い根を読むだけで開く・照合の道具・改名の道具 / 種類を写して変える (`fact_directive` → `directive`、`import.v04_ended` の表。`end` は導出のときに足す) / 新しい根を作り、通常の書き手で写し、照合と入れ替えを組み立てる | `evorag-store` (古い根の読みと照合の道具) / `evorag-memory` (写して変える中身) / `evorag-core` (新しい根を作り照合を組み立てる) と bin (画面) | core → memory → store |
 | `reset`・`doctor --deep` | 消す手順 / 導出のし直しの照合と残りの走査 | `evorag-store` (消す手順・退避とジャーナルの走査の土台) / `evorag-memory` (照合と走査の判定) / `evorag-core` と bin (組み立て) | core → memory → store |
 | B11 (学習)・B12 (評価の台) | 学習の輪 (v0.7) / 評価の台 | `evorag-learn` (v0.7) / `xtask` (`live-llm`・`longmemeval`) | — |
 
