@@ -108,6 +108,10 @@ pub enum WriteOp {
     /// 依頼は断らない (コミットは済んでいる)。`Delete` で消すジャーナルに書く種類の ID には、
     /// [`JournalCut::All`] を自動で足す。
     RewriteJournal(BTreeMap<Id, JournalCut>),
+    /// この依頼のジャーナルの行を、1 つの操作を成す組の行にする (03 §6 の「組の行」、v0.5)。忘れる (`forget` の行
+    /// → `end` の行 → 伏せ字にしたターンの行) と削除 (`delete` の行 → `end`・`private` の行) の依頼に入れる。取り込みは、
+    /// 組の行がすべてそろったときだけ組を当てる。DB には何も書かない。
+    GroupJournalLines,
 }
 
 /// 書き込みの依頼。`ops` は 1 つのトランザクションで、すべて書くか、何も書かない。
@@ -136,6 +140,16 @@ impl WriteRequest {
         Self {
             ops,
             durability: Durability::None,
+            priority: Priority::Background,
+        }
+    }
+
+    /// 裏の処理の結果のうち、作り直せないもの (`Immediate`)。会話の追記より後に回すが、`None` のコミットにまとめず、
+    /// 1 つの依頼を書き切る。v0.5 の台帳と閉じた区切り (03 §3.4 の「台帳」)。
+    pub fn background_durable(ops: Vec<WriteOp>) -> Self {
+        Self {
+            ops,
+            durability: Durability::Immediate,
             priority: Priority::Background,
         }
     }
@@ -350,13 +364,24 @@ impl Writer {
             let mut guard = self.store.journal.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(journal) = guard.as_mut() {
                 let now = self.store.clock().now();
-                let seq = match journal.append(now, &lines) {
+                let grouped = req
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, WriteOp::GroupJournalLines));
+                let append = |journal: &mut crate::journal::Journal| {
+                    if grouped {
+                        journal.append_group(now, &lines)
+                    } else {
+                        journal.append(now, &lines)
+                    }
+                };
+                let seq = match append(journal) {
                     // 空きが尽きたら、予備のファイルを消してもう一度書く (03 §8)。
                     Err(e)
                         if e.kind() == std::io::ErrorKind::StorageFull
                             && self.store.release_reserve() =>
                     {
-                        journal.append(now, &lines)
+                        append(journal)
                     }
                     r => r,
                 }
@@ -618,8 +643,8 @@ pub(crate) fn apply_op(
         WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
         WriteOp::SetCompactPending => tx.set_compact_pending()?,
         WriteOp::ClearForgetRecheck => tx.clear_forget_recheck()?,
-        // コミットの後に書き手が行う (DB には書かない)。
-        WriteOp::RewriteJournal(_) => {}
+        // コミットの後に書き手が行う・ジャーナルの行の書き方だけを決める (DB には書かない)。
+        WriteOp::RewriteJournal(_) | WriteOp::GroupJournalLines => {}
     }
     Ok(None)
 }

@@ -38,6 +38,11 @@ pub const FORMAT_VERSION: &str = "0.3";
 /// にし、v0.1.2・v0.2.x に戻しても読み書きできるようにする (03 §12.1)。
 pub const FORMAT_MIN: &str = "0.1";
 
+/// v0.5 の新しいデータ根の形式の版 (03 §3.1.1・§12.4)。`format.min_read`・`format.min_write` も同じ値にし、
+/// v0.4 以前の版には読むだけでも開かせない (台帳と指示を知らずに会話だけを見せ、忘れる・private を当てずに
+/// 使うのを防ぐため)。v0.4 の根 (形式の版 `0.3`) は在り場所で移行せず、`import-v04` で新しい根へ取り込む。
+pub const FORMAT_V05: &str = "0.5";
+
 pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub(crate) const META: Raw = TableDefinition::new("meta");
 pub(crate) const RECORDS: Raw = TableDefinition::new("records");
@@ -97,6 +102,19 @@ pub struct KindSpec {
     /// (と repair) は、DB の記録のこの値を小さくする `put` の行を当てない (03 §6 の「突き合わせ」)。ジャーナルを
     /// 開くときに、この値を ID ごとに集める (04 §7.2 の「ジャーナルの層の見つけ方」)。
     pub monotonic: Option<&'static str>,
+    /// 記録の ID の作り方 (03 §3.3)。中身から作る種類 (v0.5 の `segment`・`unit`) の ID は時刻の順に並ばないので、
+    /// `IdGen` の下限 ([`Store::max_record_id`]) に入れない。
+    pub ids: RecordIds,
+}
+
+/// 記録の ID の作り方 ([`KindSpec::ids`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordIds {
+    /// `IdGen` が出す、時刻の順に並ぶ UUID v7 (02 §6)。
+    #[default]
+    Generated,
+    /// 中身から決定論で作るハッシュ (04 §2 の区切りの ID、§5.1 の単位の ID)。時刻の順に並ばない。
+    Content,
 }
 
 impl KindSpec {
@@ -110,6 +128,7 @@ impl KindSpec {
             derived_rels: &[],
             derived_lookups: &[],
             monotonic: None,
+            ids: RecordIds::Generated,
         }
     }
 
@@ -173,6 +192,11 @@ pub struct OpenReport {
     pub journal_truncated: usize,
     /// ジャーナルの新しい版の行 (チェックサムは合うが読めない) の数。
     pub journal_newer_lines: usize,
+    /// ジャーナルの末尾で組の行がそろわず (書きかけの追記の途中で止まった)、当てずに捨てた組の数 (03 §6 の
+    /// 「組の行」、v0.5)。DB にはコミットしていないので、操作は無かったことになる。
+    pub journal_torn_groups: usize,
+    /// ジャーナルの末尾でない場所で行の欠けた組の数。当てずに残す (`doctor` が報告する)。
+    pub journal_incomplete_groups: usize,
     /// DB に無かった `memory.forget_key` を、ジャーナルの行から入れた (03 §3.1.1)。
     pub forget_key_recovered: bool,
     /// ジャーナルの `memory.forget_key` が 2 つ以上あるか、DB の値と違う。書き換えていない。
@@ -227,6 +251,10 @@ pub enum OpenError {
         "the database needs a newer evorag to read (format {format}, needs at least {min_read})"
     )]
     TooNew { format: String, min_read: String },
+    /// v0.5 の形式 ([`FORMAT_V05`]) で開こうとした DB が、それより古い形式の版で書かれている。在り場所で移行せず、
+    /// `import-v04` で新しい根へ取り込む (03 §12.4)。何も書いていない。
+    #[error("the database is in format {format}; import it into a new data root (import-v04)")]
+    NeedsImport { format: String },
     /// `meta` が読めない・形式の版が無い。
     #[error("the database metadata is unreadable: {0}")]
     BadMeta(String),
@@ -557,6 +585,11 @@ fn needs_compact_after_old_writer(existing: &BTreeMap<String, String>, ours: &Ve
 }
 
 /// ストアが自分で持つ種類と、渡された種類。
+/// v0.5 の形式の版 ([`FORMAT_V05`])。
+fn v05() -> Version {
+    FORMAT_V05.parse().expect("FORMAT_V05 is a version")
+}
+
 pub(crate) fn kind_map(kinds: Vec<KindSpec>) -> BTreeMap<&'static str, KindSpec> {
     let mut m: BTreeMap<&'static str, KindSpec> =
         BUILTIN_KINDS.iter().map(|k| (k.name, k.clone())).collect();
@@ -652,6 +685,12 @@ impl Store {
                 return Err(OpenError::TooNew {
                     format: format.to_string(),
                     min_read: min_read.to_string(),
+                });
+            }
+            // v0.5 の根は、v0.4 以前の形式の根を在り場所で移行しない (03 §4.1・§12.1・§12.4)。
+            if format < ours && ours >= v05() && format < v05() {
+                return Err(OpenError::NeedsImport {
+                    format: format.to_string(),
                 });
             }
             if format < ours {
@@ -797,6 +836,8 @@ impl Store {
             .extend(scan.deleted.keys().copied());
         report.journal_bad_lines = scan.bad;
         report.journal_newer_lines = scan.newer;
+        report.journal_torn_groups = scan.torn_groups;
+        report.journal_incomplete_groups = scan.incomplete_groups;
         report.journal_truncated = scan.truncated;
         report.journal_rewrite_failed = scan.rewrite_failed.clone();
         let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
@@ -886,7 +927,13 @@ impl Store {
         let tx = self.db.begin_read().map_err(db)?;
         let table = tx.open_table(RECORDS).map_err(db)?;
         let mut max = None;
-        for kind in self.kinds.keys().copied().chain([KIND_QUARANTINE]) {
+        // 中身から ID を作る種類は時刻の順に並ばないので、下限に入れない (03 §3.3)。
+        let generated = self
+            .kinds
+            .values()
+            .filter(|k| k.ids == RecordIds::Generated)
+            .map(|k| k.name);
+        for kind in generated.chain([KIND_QUARANTINE]) {
             let start = kind_prefix(kind);
             let end = key::prefix_end(&start);
             let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
@@ -1219,6 +1266,20 @@ impl Store {
 
     pub fn evorag_version(&self) -> &str {
         &self.version
+    }
+
+    /// この版が書く DB の形式の版 (開くときに渡した [`FormatPlan`] の版)。v0.5 の根なら [`FORMAT_V05`]。
+    pub fn format_version(&self) -> &str {
+        &self.plan.version
+    }
+
+    /// v0.5 の新しいデータ根 (形式の版 [`FORMAT_V05`] 以上) として開いているか (03 §3.3 の「v0.5 の根で作らない
+    /// 種類」・§6 の組の行・§7.1・§11 の範囲を決める)。
+    pub fn is_v05_root(&self) -> bool {
+        self.plan
+            .version
+            .parse::<Version>()
+            .is_ok_and(|v| v >= v05())
     }
 
     pub fn clock(&self) -> &Arc<dyn Clock> {

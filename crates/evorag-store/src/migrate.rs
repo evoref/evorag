@@ -19,7 +19,8 @@ use crate::envelope::{DecodeError, Envelope};
 use crate::fsutil;
 use crate::meta;
 use crate::store::{
-    BLOBS, DB_FILE, FORMAT_MIN, FORMAT_VERSION, LINKS, LOOKUP, META, RECORDS, Raw, TABLES,
+    BLOBS, DB_FILE, FORMAT_MIN, FORMAT_V05, FORMAT_VERSION, LINKS, LOOKUP, META, RECORDS, Raw,
+    TABLES,
 };
 use crate::version::Version;
 
@@ -86,6 +87,18 @@ impl FormatPlan {
             min_read: FORMAT_MIN.to_owned(),
             min_write: FORMAT_MIN.to_owned(),
             migrations: MIGRATIONS.to_vec(),
+        }
+    }
+
+    /// v0.5 の新しいデータ根の形式 (03 §3.1.1・§12.4): `format.version`・`format.min_read`・`format.min_write` を
+    /// すべて [`FORMAT_V05`] にする。移行は持たない (v0.4 の根は在り場所で移行せず、`import-v04` で取り込む。
+    /// その根を開こうとすると [`crate::OpenError::NeedsImport`])。
+    pub fn v05() -> Self {
+        Self {
+            version: FORMAT_V05.to_owned(),
+            min_read: FORMAT_V05.to_owned(),
+            min_write: FORMAT_V05.to_owned(),
+            migrations: Vec::new(),
         }
     }
 }

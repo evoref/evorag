@@ -11,6 +11,10 @@
 //!   04 §7.2 の「ジャーナルの層の見つけ方」)。
 //! - 削除の行がある ID の `put` の行が残っていれば (除く前に止まった)、起動時に除く。入れ替えの前に止まった
 //!   一時のファイル (`*.jsonl.tmp`) は、起動時に消す。
+//! - 組の行 (v0.5、03 §6): 1 つの操作を成す複数の行 (忘れる・削除の 1 回の追記) は、同じ `grp` (`{"id": <組の
+//!   最初の行の連番>, "n": <行数>}`) を持つ。取り込み (起動時・`restore`・`repair`) は、組の行がすべてそろった組
+//!   だけを当てる。末尾で組がそろわない (書きかけの追記の途中で止まった) ときは、その組の行を当てずに捨てる
+//!   (ファイルから切り詰める)。末尾でない場所の欠けた組は、当てずに数える (`doctor` が報告する)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -41,11 +45,22 @@ pub enum LineOp {
     Meta { key: String, value: String },
 }
 
+/// 組の行の印 (03 §6 の「組の行」、v0.5)。同じ組の行は、同じ `id` と `n` を持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Group {
+    /// 組の ID。組の最初の行の連番 (組の行は 1 回の追記で、続いた連番で書く)。
+    pub id: u64,
+    /// 組の行の数。
+    pub n: u64,
+}
+
 /// 読んだ行。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
     pub seq: u64,
     pub op: LineOp,
+    /// 組の行なら、その組 (v0.5、03 §6)。
+    pub grp: Option<Group>,
 }
 
 /// 起動時に読んだ結果。
@@ -67,6 +82,10 @@ pub struct Scan {
     /// 削除の行のある ID の `put` の行を除く書き直しが、開くときに済まなかった理由 (次に開くとき、または
     /// 次の削除の書き直しで、もう一度試す)。
     pub rewrite_failed: Option<RewriteError>,
+    /// 末尾で組の行がそろわず、当てずに捨てた組の数 (03 §6 の「組の行」)。切り詰めたバイト数は `truncated` に足す。
+    pub torn_groups: usize,
+    /// 末尾でない場所で行の欠けた組の数。当てずに残す (`doctor` が報告する)。
+    pub incomplete_groups: usize,
 }
 
 /// 書き直しで、1 つの ID の `put` の行のうち何を除くか (03 §6 の「削除と忘れる」)。
@@ -240,13 +259,98 @@ fn seal(body: String) -> Vec<u8> {
     line
 }
 
-fn encode(seq: u64, op: &LineOp) -> Vec<u8> {
+fn encode(seq: u64, op: &LineOp, grp: Option<Group>) -> Vec<u8> {
     let (name, env) = match op {
         LineOp::Put(e) => ("put", envelope_to_json(e)),
         LineOp::Delete { kind, id } => ("delete", json!({"kind": kind, "id": id.to_string()})),
         LineOp::Meta { key, value } => ("meta", json!({"key": key, "value": value})),
     };
-    seal(json!({"seq": seq, "op": name, "env": env}).to_string())
+    let mut line = json!({"seq": seq, "op": name, "env": env});
+    if let Some(g) = grp {
+        line["grp"] = json!({"id": g.id, "n": g.n});
+    }
+    seal(line.to_string())
+}
+
+/// 行の `grp` を読む。無ければ `Some(None)`。あるのに形が違う (新しい版の形) なら `None`。
+fn decode_group(v: &Json) -> Option<Option<Group>> {
+    let Some(g) = v.get("grp") else {
+        return Some(None);
+    };
+    match (
+        g.get("id").and_then(Json::as_u64),
+        g.get("n").and_then(Json::as_u64),
+    ) {
+        (Some(id), Some(n)) if n >= 1 => Some(Some(Group { id, n })),
+        _ => None,
+    }
+}
+
+/// 追記する行を組にするか ([`Journal::append_group`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grouping {
+    /// 行ごとに独り立ちさせる。
+    Lines,
+    /// 1 つの組にする。
+    Group,
+}
+
+/// 組の行のそろい方 (03 §6 の「組の行」)。
+#[derive(Debug, Default)]
+struct GroupCheck {
+    /// 当てない組 (末尾で欠けた組と、末尾でない場所の欠けた組)。
+    skip: BTreeSet<Group>,
+    /// そのうち末尾で欠けた組 (書きかけの追記。DB にはまだコミットしていない)。
+    torn: Option<Group>,
+}
+
+impl GroupCheck {
+    /// `lines` は組の行の (連番, 組)、`max_seq` はすべての読める行 (新しい版の行を含む) の連番の最大、`last_seq` は
+    /// DB が取り込んだ最後の連番。
+    fn new(lines: impl IntoIterator<Item = (u64, Group)>, max_seq: u64, last_seq: u64) -> Self {
+        struct Seen {
+            count: u64,
+            mixed: bool,
+            first: Group,
+            min: u64,
+            max: u64,
+        }
+        let mut seen: BTreeMap<u64, Seen> = BTreeMap::new();
+        for (seq, g) in lines {
+            let e = seen.entry(g.id).or_insert(Seen {
+                count: 0,
+                mixed: false,
+                first: g,
+                min: seq,
+                max: seq,
+            });
+            e.count += 1;
+            e.mixed |= e.first != g;
+            e.min = e.min.min(seq);
+            e.max = e.max.max(seq);
+        }
+        let mut out = Self::default();
+        for e in seen.into_values() {
+            if !e.mixed && e.count == e.first.n {
+                continue;
+            }
+            out.skip.insert(e.first);
+            // 書きかけの追記は、すべての行の中の最後にあり、DB がまだ取り込んでいない。
+            if !e.mixed && e.count < e.first.n && e.max == max_seq && e.min > last_seq {
+                out.torn = Some(e.first);
+            }
+        }
+        out
+    }
+
+    fn skips(&self, grp: Option<Group>) -> bool {
+        grp.is_some_and(|g| self.skip.contains(&g))
+    }
+
+    /// 末尾でない場所の欠けた組の数。
+    fn incomplete(&self) -> usize {
+        self.skip.len() - usize::from(self.torn.is_some())
+    }
 }
 
 /// 行の読み方の結果。
@@ -284,9 +388,10 @@ fn decode_value(v: &Json) -> Decoded {
         },
         _ => None,
     };
-    match op {
-        Some(op) => Decoded::Line(Line { seq, op }),
-        None => Decoded::Newer(Some(seq)),
+    match (op, decode_group(v)) {
+        (Some(op), Some(grp)) => Decoded::Line(Line { seq, op, grp }),
+        // 知らない操作と、読めない形の組の印の行は、新しい版の行として当てない。
+        _ => Decoded::Newer(Some(seq)),
     }
 }
 
@@ -402,13 +507,18 @@ pub struct Summary {
     /// 書きかけの末尾のバイト数 (次の起動で切り詰める)。
     pub partial: usize,
     pub max_seq: u64,
-    /// `last_seq` より後の行 (次の起動で取り込む)。
+    /// `last_seq` より後の行 (次の起動で取り込む)。組がそろわずに当てない行は数えない。
     pub pending: usize,
+    /// 末尾で組の行がそろわない組 (次の起動で捨てる、03 §6 の「組の行」)。
+    pub torn_groups: usize,
+    /// 末尾でない場所で行の欠けた組 (当てない)。
+    pub incomplete_groups: usize,
 }
 
 /// ジャーナルを、何も書かずに数える (`doctor`、AC-FR-207-1)。
 pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
     let mut s = Summary::default();
+    let mut read: Vec<(u64, Option<Group>)> = Vec::new();
     for path in files(&root.join(JOURNAL_DIR))? {
         s.files += 1;
         let bytes = std::fs::read(&path)?;
@@ -427,9 +537,7 @@ pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
                 Decoded::Line(line) => {
                     s.lines += 1;
                     s.max_seq = s.max_seq.max(line.seq);
-                    if line.seq > last_seq {
-                        s.pending += 1;
-                    }
+                    read.push((line.seq, line.grp));
                 }
                 Decoded::Newer(seq) => {
                     s.newer += 1;
@@ -439,38 +547,40 @@ pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
             }
         }
     }
+    let groups = GroupCheck::new(
+        read.iter().filter_map(|&(seq, g)| Some((seq, g?))),
+        s.max_seq,
+        last_seq,
+    );
+    s.pending = read
+        .iter()
+        .filter(|&&(seq, g)| seq > last_seq && !groups.skips(g))
+        .count();
+    s.torn_groups = usize::from(groups.torn.is_some());
+    s.incomplete_groups = groups.incomplete();
     Ok(s)
 }
 
-/// 書き換えずに、すべての `meta` の行を連番の順に集める (読むだけで開いたとき、03 §3.1.1)。
+/// 書き換えずに、すべての `meta` の行を連番の順に集める (読むだけで開いたとき、03 §3.1.1)。組の行がそろわない
+/// 組 (03 §6) の行は除く。
 pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
-    let dir = root.join(JOURNAL_DIR);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut metas: Vec<(u64, String, String)> = Vec::new();
-    for path in files(&dir)? {
-        let bytes = std::fs::read(&path)?;
-        for raw in bytes.split_inclusive(|&b| b == b'\n') {
-            if raw.last() != Some(&b'\n') {
-                continue; // 書きかけの末尾
-            }
-            if let Decoded::Line(line) = decode(trim_newline(raw))
-                && let LineOp::Meta { key, value } = line.op
-            {
-                metas.push((line.seq, key, value));
-            }
-        }
-    }
-    metas.sort_by_key(|m| m.0);
-    Ok(metas.into_iter().map(|(_, k, v)| (k, v)).collect())
+    let (lines, _) = read_all(root)?;
+    Ok(lines
+        .into_iter()
+        .filter_map(|line| match line.op {
+            LineOp::Meta { key, value } => Some((key, value)),
+            _ => None,
+        })
+        .collect())
 }
 
 /// 書き換えずに、読めるすべての行を連番の順に読む (`repair`、03 §10)。書きかけの末尾、チェックサムの合わない行、
-/// 新しい版の行は飛ばす。チェックサムの合わない行の数も返す。
+/// 新しい版の行と、組の行がそろわない組 (03 §6) の行は飛ばす。チェックサムの合わない行の数も返す。DB が取り込んだ
+/// 連番を見ないので、末尾で欠けた組も、末尾でない場所の欠けた組と同じく当てない。
 pub(crate) fn read_all(root: &Path) -> io::Result<(Vec<Line>, usize)> {
     let mut lines = Vec::new();
     let mut bad = 0;
+    let mut max_seq = 0;
     for path in files(&root.join(JOURNAL_DIR))? {
         let bytes = std::fs::read(&path)?;
         for raw in bytes.split_inclusive(|&b| b == b'\n') {
@@ -478,12 +588,21 @@ pub(crate) fn read_all(root: &Path) -> io::Result<(Vec<Line>, usize)> {
                 continue; // 書きかけの末尾
             }
             match decode(trim_newline(raw)) {
-                Decoded::Line(line) => lines.push(line),
+                Decoded::Line(line) => {
+                    max_seq = max_seq.max(line.seq);
+                    lines.push(line);
+                }
                 Decoded::Bad => bad += 1,
-                Decoded::Newer(_) => {}
+                Decoded::Newer(seq) => max_seq = max_seq.max(seq.unwrap_or(0)),
             }
         }
     }
+    let groups = GroupCheck::new(
+        lines.iter().filter_map(|l| Some((l.seq, l.grp?))),
+        max_seq,
+        0,
+    );
+    lines.retain(|l| !groups.skips(l.grp));
     lines.sort_by_key(|l| l.seq);
     Ok((lines, bad))
 }
@@ -533,11 +652,23 @@ impl Journal {
                 fsutil::rename_durable(&tmp, &original)?;
             }
         }
+        /// 1 つの行の、読んだ結果と、ファイルの中の位置。取り込まない `put` の行 (`last_seq` 以下) は中身を持たない。
+        struct Entry {
+            path: usize,
+            file: u32,
+            start: usize,
+            /// 読める行なら連番と組と、要る中身 (削除・`meta` と、`last_seq` より後の行)。
+            line: Option<(u64, Option<Group>, Option<LineOp>)>,
+            /// チェックサムの合わない行。
+            bad: bool,
+            /// `put` の行なら、封筒の `id` と単調に増える項目の値 (書き直しのために集める)。
+            put: Option<(Id, Option<u64>)>,
+        }
         let mut scan = Scan::default();
         let mut max_seq = last_seq;
-        let mut deleted: BTreeMap<Id, String> = BTreeMap::new();
         let mut index = PutIndex::default();
-        let mut metas: Vec<(u64, String, String)> = Vec::new();
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
         for path in files(&dir)? {
             let file = index.file(&path.file_name().unwrap_or_default().to_string_lossy());
             let mut bytes = std::fs::read(&path)?;
@@ -549,42 +680,103 @@ impl Journal {
                 f.set_len(keep as u64)?;
                 f.sync_all()?;
             }
+            let at = paths.len();
+            paths.push(path);
+            let mut start = 0;
             for raw in bytes.split_inclusive(|&b| b == b'\n') {
+                let here = start;
+                start += raw.len();
                 let l = trim_newline(raw);
                 if l.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
                 let seen = inspect(l, &monotonic);
-                if let Some((id, rev)) = seen.put {
-                    index.add(id, PutRef { file, rev });
-                }
-                match seen.decoded {
+                let mut bad = false;
+                let line = match seen.decoded {
                     Decoded::Line(line) => {
                         max_seq = max_seq.max(line.seq);
-                        match &line.op {
-                            LineOp::Delete { id, kind } => {
-                                deleted.insert(*id, kind.clone());
-                            }
-                            LineOp::Put(_) => {}
-                            LineOp::Meta { key, value } => {
-                                metas.push((line.seq, key.clone(), value.clone()));
-                            }
-                        }
-                        if line.seq > last_seq {
-                            scan.lines.push(line);
-                        }
+                        let keep = line.seq > last_seq || !matches!(line.op, LineOp::Put(_));
+                        Some((line.seq, line.grp, keep.then_some(line.op)))
                     }
                     Decoded::Newer(seq) => {
                         scan.newer += 1;
                         if let Some(s) = seq {
                             max_seq = max_seq.max(s);
                         }
+                        None
                     }
                     Decoded::Bad => {
                         scan.bad += 1;
                         index.bad.insert(file);
+                        bad = true;
+                        None
                     }
+                };
+                entries.push(Entry {
+                    path: at,
+                    file,
+                    start: here,
+                    line,
+                    bad,
+                    put: seen.put,
+                });
+            }
+        }
+        // 組の行のそろい方 (03 §6)。末尾で欠けた組は、DB にコミットしていない書きかけの追記なので、ファイルから
+        // 切り詰めて捨てる (組の行より後ろに、組の行とチェックサムの合わない行しか無いときだけ)。
+        let groups = GroupCheck::new(
+            entries
+                .iter()
+                .filter_map(|e| e.line.as_ref().and_then(|(seq, g, _)| Some((*seq, (*g)?)))),
+            max_seq,
+            last_seq,
+        );
+        let mut cut_from: Option<(usize, usize)> = None;
+        if let Some(torn) = groups.torn {
+            let in_torn = |e: &Entry| e.line.as_ref().is_some_and(|(_, g, _)| *g == Some(torn));
+            if let Some(first) = entries.iter().find(|e| in_torn(e)) {
+                let (path, cut) = (first.path, first.start);
+                let tail_only = entries
+                    .iter()
+                    .filter(|e| e.path == path && e.start >= cut)
+                    .all(|e| e.bad || in_torn(e));
+                if tail_only {
+                    let f = OpenOptions::new().write(true).open(&paths[path])?;
+                    let len = f.metadata()?.len();
+                    f.set_len(cut as u64)?;
+                    f.sync_all()?;
+                    scan.truncated += usize::try_from(len).unwrap_or(usize::MAX) - cut;
+                    cut_from = Some((path, cut));
                 }
+            }
+            scan.torn_groups = 1;
+        }
+        scan.incomplete_groups = groups.incomplete();
+        // 切り詰めた行は、書き直しのために集めない (無い行の改訂の番号で、前の行を除かないため)。
+        for e in &entries {
+            let gone = cut_from.is_some_and(|(path, cut)| e.path == path && e.start >= cut);
+            if let (Some((id, rev)), false) = (e.put, gone) {
+                index.add(id, PutRef { file: e.file, rev });
+            }
+        }
+        let mut deleted: BTreeMap<Id, String> = BTreeMap::new();
+        let mut metas: Vec<(u64, String, String)> = Vec::new();
+        for (seq, grp, op) in entries.into_iter().filter_map(|e| e.line) {
+            let Some(op) = op else { continue };
+            if groups.skips(grp) {
+                continue;
+            }
+            match &op {
+                LineOp::Delete { id, kind } => {
+                    deleted.insert(*id, kind.clone());
+                }
+                LineOp::Put(_) => {}
+                LineOp::Meta { key, value } => {
+                    metas.push((seq, key.clone(), value.clone()));
+                }
+            }
+            if seq > last_seq {
+                scan.lines.push(Line { seq, op, grp });
             }
         }
         scan.lines.sort_by_key(|l| l.seq);
@@ -619,6 +811,22 @@ impl Journal {
     /// 行を追記して書き切る。最後の行の連番を返す。失敗したらファイルを追記の前の長さに戻し、
     /// 連番を進めない。
     pub fn append(&mut self, now: Timestamp, ops: &[LineOp]) -> io::Result<u64> {
+        self.append_lines(now, ops, Grouping::Lines)
+    }
+
+    /// 1 つの操作を成す行 (忘れる・削除の 1 回の追記、03 §6 の「組の行」) を、組の行として追記する。行が 2 つ以上
+    /// なら、どの行にも同じ `grp` (組の最初の行の連番と行の数) を付ける。1 行なら組にしない (1 行の追記は、行の
+    /// 単位で書き切るか切り詰めるかなので、そろわないことが無い)。
+    pub fn append_group(&mut self, now: Timestamp, ops: &[LineOp]) -> io::Result<u64> {
+        self.append_lines(now, ops, Grouping::Group)
+    }
+
+    fn append_lines(
+        &mut self,
+        now: Timestamp,
+        ops: &[LineOp],
+        grouping: Grouping,
+    ) -> io::Result<u64> {
         if let Some(reason) = &self.stopped {
             return Err(io::Error::other(format!(
                 "journal appends are stopped: {reason}"
@@ -629,8 +837,12 @@ impl Journal {
         }
         let mut data = Vec::new();
         let mut seq = self.next_seq;
+        let grp = (grouping == Grouping::Group && ops.len() >= 2).then_some(Group {
+            id: seq,
+            n: ops.len() as u64,
+        });
         for op in ops {
-            data.extend_from_slice(&encode(seq, op));
+            data.extend_from_slice(&encode(seq, op, grp));
             seq += 1;
         }
         let name = format!("{}.jsonl", month(now));
@@ -1134,6 +1346,41 @@ mod tests {
         j.fail_next_append();
         assert!(j.append(NOW, &[LineOp::Put(env(1, "x"))]).is_err());
         assert_eq!(j.append(NOW, &[LineOp::Put(env(1, "x"))]).unwrap(), 1);
+    }
+
+    /// verifies: 03 §6 (組の行がそろわない組は、`repair` の読み方でも当てない。1 行の組は作らない)
+    #[test]
+    fn groups_missing_a_line_are_left_out_of_every_reading() {
+        let dir = TempDir::new("journal-groups");
+        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        j.append_group(NOW, &[LineOp::Put(env(1, "a")), LineOp::Put(env(2, "b"))])
+            .unwrap();
+        j.append_group(NOW, &[LineOp::Put(env(3, "1 行"))]).unwrap();
+        j.append_group(NOW, &[LineOp::Put(env(4, "c")), LineOp::Put(env(5, "d"))])
+            .unwrap();
+        j.append(NOW, &[LineOp::Put(env(6, "e"))]).unwrap();
+        drop(j);
+        let all = std::fs::read_to_string(path(&dir)).unwrap();
+        assert!(!all.lines().nth(2).unwrap().contains("\"grp\""));
+        // 最初の組の 2 行目を失う。
+        let kept: String = all
+            .split_inclusive('\n')
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, l)| l)
+            .collect();
+        std::fs::write(path(&dir), kept).unwrap();
+        let (lines, bad) = read_all(dir.path()).unwrap();
+        assert_eq!(bad, 0);
+        assert_eq!(
+            lines.iter().map(|l| l.seq).collect::<Vec<_>>(),
+            [3, 4, 5, 6]
+        );
+        let s = summarize(dir.path(), 0).unwrap();
+        assert_eq!((s.incomplete_groups, s.torn_groups, s.pending), (1, 0, 4));
+        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        assert_eq!((scan.incomplete_groups, scan.torn_groups), (1, 0));
+        assert_eq!(scan.lines.len(), 4);
     }
 
     #[test]

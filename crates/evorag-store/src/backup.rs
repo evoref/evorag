@@ -6,12 +6,63 @@
 //! この段階では、移行・作り直し・復元の前の退避 (§7.2) だけを持つ。日次の退避と世代の管理
 //! (§7.1) はこの上に載せる。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use evorag_types::Id;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 use crate::fsutil;
+use crate::key::{self, OwnedPart};
+use crate::meta;
 use crate::store::{StoreError, TABLES, db};
+
+/// 退避と書き出しに写さない種類 (03 §7.1・§11)。v0.5 の単位 (`unit`) は台帳と指示から導き直せる派生で、忘れた値の
+/// 単位を退避に残さないため。restore の後は導出の指紋が無いので、全件を導き直して作る。
+pub const UNCOPIED_KINDS: &[&str] = &["unit"];
+
+/// 退避に写さない `meta` のキー (03 §7.1。単位と組の導出の指紋)。
+pub const UNCOPIED_META: &[&str] = &[meta::DERIVE_FINGERPRINT];
+
+/// 写さない種類の記録と、その記録の関係・副索引・`blobs` を見分ける ([`UNCOPIED_KINDS`])。表は [`TABLES`] の順
+/// (`records` が `links`・`lookup`・`blobs` より前) に写すので、`records` で見つけた ID を後の表で使う。
+#[derive(Debug, Default)]
+struct Uncopied {
+    ids: BTreeSet<Id>,
+}
+
+impl Uncopied {
+    fn drops(&mut self, table: Table, k: &[u8]) -> bool {
+        let parts = || key::decode(k).ok();
+        match table {
+            Table::Meta => UNCOPIED_META.iter().any(|m| m.as_bytes() == k),
+            Table::Records => match crate::store::split_record_key(k) {
+                Some((kind, id)) if UNCOPIED_KINDS.contains(&kind.as_str()) => {
+                    self.ids.insert(id);
+                    true
+                }
+                _ => false,
+            },
+            Table::Links => {
+                !self.ids.is_empty()
+                    && parts().is_some_and(|p| {
+                        p.iter()
+                            .any(|x| matches!(x, OwnedPart::Id(id) if self.ids.contains(id)))
+                    })
+            }
+            // 副索引の最初の要素は持ち主の記録の種類。
+            Table::Lookup => parts().is_some_and(|p| {
+                matches!(p.first(), Some(OwnedPart::Str(kind)) if UNCOPIED_KINDS.contains(&kind.as_str()))
+            }),
+            Table::Blobs => {
+                !self.ids.is_empty()
+                    && parts().is_some_and(
+                        |p| matches!(p.first(), Some(OwnedPart::Id(id)) if self.ids.contains(id)),
+                    )
+            }
+        }
+    }
+}
 
 /// 退避のフォルダ (データ根から)。
 pub const BACKUPS_DIR: &str = "backups";
@@ -61,6 +112,9 @@ const TABLE_KINDS: [Table; TABLES.len()] = [
 ];
 
 /// `src` の一貫した写しを `dst` に作る (`dst` は無いこと)。一時名に書いて書き切ってから入れ替える。
+///
+/// どの写しも、[`UNCOPIED_KINDS`] の記録 (とその関係・副索引・`blobs`) と [`UNCOPIED_META`] の `meta` の値を
+/// 写さない (03 §7.1 の「v0.5 の根の退避」。忘れるの写し直しも同じ、§7.3)。
 pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError> {
     logical_copy_excluding(src, dst, &|_| false)
 }
@@ -100,6 +154,7 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
     let out = Database::create(path).map_err(db)?;
     let rtx = src.begin_read().map_err(db)?;
     let mut stats = CopyStats::default();
+    let mut uncopied = Uncopied::default();
     let mut tx = out.begin_write().map_err(db)?;
     tx.set_durability(redb::Durability::None).map_err(db)?;
     for t in TABLES {
@@ -112,6 +167,9 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let (k, v) = (k.value(), v.value());
+            if uncopied.drops(kind, k) {
+                continue;
+            }
             let replaced = match row(kind, k, v)? {
                 Row::Drop => continue,
                 Row::Keep => None,

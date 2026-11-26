@@ -32,3 +32,6 @@ pub const JOURNAL_LAST_SEQ: &str = "journal.last_seq";
 pub const PROMPT_LANGUAGE: &str = "prompt.language";
 /// 値の鍵と再び覚えない印の HMAC の鍵 (03 §3.1.1、04 §5.6、v0.3)。一度だけ書く。
 pub const FORGET_KEY: &str = "memory.forget_key";
+/// 今の単位を作った導出の指紋と、起動時の軽い検査に使う成分 (03 §3.1.1、04 §5.3、v0.5)。上書きしてよいキーで、
+/// ジャーナルにも退避にも書き出しにも写さない (導き直せる派生、03 §7.1・§11)。
+pub const DERIVE_FINGERPRINT: &str = "memory.derive_fingerprint";

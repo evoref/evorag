@@ -29,15 +29,15 @@ mod winacl;
 pub mod writer;
 
 pub use compact::{CompactStop, Compaction};
-pub use envelope::{BodyError, BodyPatch, DecodeError, Envelope};
+pub use envelope::{BodyError, BodyPatch, DecodeError, Envelope, RawValue};
 pub use journal::{JOURNAL_DIR, JournalCut, RevSpan, RewriteError, RewriteFault, RewriteReport};
 pub use json::{envelope_from_json, envelope_to_json};
 pub use relations::{LookupEntry, LookupRange};
 pub use repair::Repaired;
 pub use store::{
-    Census, DB_FILE, DeriveFn, Durability, FORMAT_MIN, FORMAT_VERSION, KIND_QUARANTINE, KindCount,
-    KindSpec, OpenError, OpenOptions, OpenReport, PendingDeletes, RESERVE_FILE, Read,
-    ReadOnlyReason, ReadTxn, Store, StoreError, WriteToken, WriteTxn,
+    Census, DB_FILE, DeriveFn, Durability, FORMAT_MIN, FORMAT_V05, FORMAT_VERSION, KIND_QUARANTINE,
+    KindCount, KindSpec, OpenError, OpenOptions, OpenReport, PendingDeletes, RESERVE_FILE, Read,
+    ReadOnlyReason, ReadTxn, RecordIds, Store, StoreError, WriteToken, WriteTxn,
 };
 pub use writer::{
     Priority, Reply, WriteError, WriteOp, WriteOutcome, WriteRequest, Writer, WriterHandle,
