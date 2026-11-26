@@ -9,8 +9,8 @@ use evorag_store::key::OwnedPart;
 use evorag_store::migrate::FormatPlan;
 use evorag_store::testutil::{TempDir, raw_set_meta};
 use evorag_store::{
-    DB_FILE, Envelope, FORMAT_V05, JOURNAL_DIR, KindSpec, LookupRange, OpenError, OpenOptions,
-    OpenReport, Read, RecordIds, Store, WriteOp, WriteRequest, Writer, meta,
+    DB_FILE, Envelope, FORMAT_V05, JOURNAL_DIR, JournalCut, KindSpec, LookupRange, OpenError,
+    OpenOptions, OpenReport, Read, RecordIds, Store, WriteOp, WriteRequest, Writer, meta,
 };
 use evorag_types::{Id, ManualClock, Timestamp, UuidV7Gen};
 use serde::Serialize;
@@ -28,6 +28,13 @@ const UNIT: KindSpec = KindSpec {
 };
 /// 作り直せないが、ジャーナルに書かない派生の種類 (v0.5 の台帳に倣う)。
 const LEDGER: KindSpec = KindSpec::new("proposal", 1);
+/// 改訂の番号 `rev` を持つ、ジャーナルに書く種類 (ターンに倣う)。
+const TURN: KindSpec = KindSpec {
+    journaled: true,
+    create_when_newer_present: true,
+    monotonic: Some("rev"),
+    ..KindSpec::new("turn", 1)
+};
 
 const T0: i64 = 1_767_614_400_000;
 
@@ -50,7 +57,7 @@ fn options(root: &Path, kinds: Vec<KindSpec>, seed: u64) -> OpenOptions {
 
 fn open_v05(root: &Path) -> (Arc<Store>, OpenReport) {
     let (store, report) = Store::open_with(
-        options(root, vec![SAMPLE, UNIT, LEDGER], 5),
+        options(root, vec![SAMPLE, UNIT, LEDGER, TURN], 5),
         FormatPlan::v05(),
     )
     .unwrap();
@@ -194,7 +201,10 @@ fn the_lines_of_one_operation_carry_the_same_group() {
     assert!(!lines[0].contains("\"grp\""), "{}", lines[0]);
     for line in &lines[1..] {
         assert!(
-            line.contains(",\"grp\":{\"id\":2,\"n\":3},\"sum\":\""),
+            line.contains(&format!(
+                ",\"grp\":{{\"id\":2,\"n\":3,\"ids\":[\"{}\",\"{}\",\"{}\"]}},\"sum\":\"",
+                ids[1], ids[2], ids[3]
+            )),
             "{line}"
         );
     }
@@ -491,4 +501,164 @@ fn units_and_the_derive_fingerprint_are_left_out_of_backups_and_exports() {
     assert_eq!(report.kinds.get("unit"), None);
     assert_eq!(report.kinds.get("proposal"), Some(&1));
     assert_eq!(report.kinds.get("sample"), Some(&1));
+}
+
+#[derive(Serialize)]
+struct TurnBody {
+    text: String,
+    rev: u32,
+}
+
+fn turn(store: &Store, id: Id, text: &str, rev: u32) -> Envelope {
+    let mut e = Envelope::new(id, "turn", 1, store.clock().now(), "");
+    e.set_body(&TurnBody {
+        text: text.into(),
+        rev,
+    })
+    .unwrap();
+    e
+}
+
+/// 忘れるの組の後に起きたこと。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum After {
+    /// 同じターンをもう一度忘れた: 後の組の書き直しで、前の組の伏せ字のターンの行を除いた。
+    ForgotAgain,
+    /// ターンを消した: 削除の書き直しで、前の組の伏せ字のターンの行を除いた。
+    Deleted,
+    /// 理由なく、前の組の伏せ字のターンの行が失われた。
+    Lost,
+}
+
+/// ターンを書いて退避を取り、忘れるの組 (指示 → 伏せ字にしたターン) を書き、`after` のことを起こす。退避のフォルダ、
+/// 前の組の指示、ターンの ID を返す。
+fn forget_then(root: &Path, after: After) -> (PathBuf, Id, Id) {
+    let (store, _) = open_v05(root);
+    let t = store.ids().next_id();
+    write_all(
+        &store,
+        vec![WriteRequest::conversation(vec![WriteOp::Put(turn(
+            &store,
+            t,
+            "見本の町に住んでいます",
+            0,
+        ))])],
+    );
+    drop(store);
+    let (store, _) = open_v05(root);
+    let backup = store.daily_backup(None).unwrap().unwrap();
+    let directive = store.ids().next_id();
+    let mut reqs = vec![WriteRequest::conversation(vec![
+        WriteOp::Put(record(&store, "sample", directive, "1 回目の忘れる")),
+        WriteOp::Put(turn(&store, t, "[伏せ字]に住んでいます", 1)),
+        WriteOp::GroupJournalLines,
+        WriteOp::RewriteJournal([(t, JournalCut::Below(1))].into()),
+    ])];
+    match after {
+        After::ForgotAgain => {
+            let second = store.ids().next_id();
+            reqs.push(WriteRequest::conversation(vec![
+                WriteOp::Put(record(&store, "sample", second, "2 回目の忘れる")),
+                WriteOp::Put(turn(&store, t, "[伏せ字]に[伏せ字]", 2)),
+                WriteOp::GroupJournalLines,
+                WriteOp::RewriteJournal([(t, JournalCut::Below(2))].into()),
+            ]));
+        }
+        After::Deleted => reqs.push(WriteRequest::conversation(vec![WriteOp::Delete {
+            kind: "turn".into(),
+            id: t,
+        }])),
+        After::Lost => {}
+    }
+    write_all(&store, reqs);
+    drop(store);
+    // どの場合も、前の組の伏せ字のターンの行はジャーナルに無い。
+    let mut lines = journal_lines(root);
+    let first_group = lines
+        .iter()
+        .position(|l| l.contains(&directive.to_string()))
+        .unwrap();
+    let turn_line = first_group + 1;
+    if after == After::Lost {
+        assert!(lines[turn_line].contains(&t.to_string()));
+        lines.remove(turn_line);
+        // 理由なく失われた後にも、ほかの行が続く (末尾ではない)。
+        write_journal_lines(root, &lines);
+        let (store, _) = open_v05(root);
+        write_all(
+            &store,
+            vec![WriteRequest::conversation(vec![WriteOp::Put(record(
+                &store,
+                "sample",
+                store.ids().next_id(),
+                "後の行",
+            ))])],
+        );
+    } else {
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("\"rev\":1") && l.contains(&t.to_string())),
+            "the redacted line of the first group was rewritten away"
+        );
+    }
+    (backup, directive, t)
+}
+
+/// 書き直しで正しく除いた行の欠けた組は、そろった組として当てる。理由なく欠けた組は当てない (restore の経路)。
+/// verifies: 03 §6 (組の行の欠けを、後の削除の行か同じ ID の後の `put` の行で、正しく除いたものと見分ける), AC-FR-317-4 (退避から戻してジャーナルを当て直すと、退避の後に足した指示が戻る)
+#[test]
+fn a_group_whose_line_was_rewritten_away_is_still_applied_on_restore() {
+    for after in [After::ForgotAgain, After::Deleted, After::Lost] {
+        let dir = TempDir::new("v05-group-restore");
+        let (backup, directive, t) = forget_then(dir.path(), after);
+        evorag_store::restore::restore(dir.path(), &backup, T0, None, &|_| false).unwrap();
+        let (store, report) = open_v05(dir.path());
+        let applied = after != After::Lost;
+        assert_eq!(has(&store, "sample", directive), applied, "{after:?}");
+        assert_eq!(
+            report.journal_incomplete_groups,
+            usize::from(!applied),
+            "{after:?}"
+        );
+        let rev = match store.read().unwrap().get("turn", t).unwrap() {
+            Some(Read::Ok(e)) => Some(e.body_uint("rev").unwrap()),
+            _ => None,
+        };
+        let want = match after {
+            After::ForgotAgain => Some(2),
+            After::Deleted => None,
+            // 組を当てないので、退避のときの本文のまま (伏せ字の前の行は書き直しで除いたので、戻らない)。
+            After::Lost => Some(0),
+        };
+        assert_eq!(rev, want, "{after:?}");
+    }
+}
+
+/// 同じ判定を、ジャーナルから記録を戻す `repair` の経路でも当てる。
+/// verifies: 03 §6 (組の行の欠けの判定は `repair` の読み方でも同じ), 03 §10 (`repair` はジャーナルから失った記録を戻す)
+#[test]
+fn a_group_whose_line_was_rewritten_away_is_still_applied_by_repair() {
+    for after in [After::ForgotAgain, After::Deleted, After::Lost] {
+        let dir = TempDir::new("v05-group-repair");
+        let (_, directive, _) = forget_then(dir.path(), after);
+        evorag_store::testutil::raw_remove_record(dir.path(), "sample", directive);
+        let (store, _) = open_v05(dir.path());
+        assert!(!has(&store, "sample", directive));
+        store.repair(|_| false).unwrap();
+        assert_eq!(
+            has(&store, "sample", directive),
+            after != After::Lost,
+            "{after:?}"
+        );
+        drop(store);
+        let summary = evorag_store::inspect::inspect(dir.path(), vec![SAMPLE, TURN], None)
+            .map(|r| r.journal)
+            .unwrap();
+        assert_eq!(
+            summary.incomplete_groups,
+            usize::from(after == After::Lost),
+            "{after:?}"
+        );
+    }
 }
