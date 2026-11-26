@@ -1,7 +1,7 @@
 //! 会話の層の種類 (03 §3.3、04 §2)。本体は項目を省略せずに書く (値の無い項目は null、03 §4.2 の規則 7)。
 
 use evorag_store::key::OwnedPart;
-use evorag_store::{DeriveFn, Envelope, KindSpec, WriteOp};
+use evorag_store::{DeriveFn, Envelope, KindSpec, RecordIds, WriteOp};
 use evorag_types::Id;
 use serde::{Deserialize, Serialize};
 
@@ -121,7 +121,7 @@ pub struct NoteBody {
 pub const TURN_REV_FIELD: &str = "rev";
 
 /// 派生の記録の出典のターンと、作ったときのその改訂の番号 (03 §3.3 の `src_revs`、04 §7.7 の 4)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SrcRev {
     pub turn: Id,
     pub rev: u32,
@@ -215,6 +215,7 @@ pub fn kinds() -> Vec<KindSpec> {
         derived_rels: rels,
         derived_lookups: lookups,
         monotonic: None,
+        ids: RecordIds::Generated,
     };
     vec![
         append(KIND_SESSION, derive_session, &[], &[LOOKUP_UPDATED_AT]),
@@ -295,6 +296,62 @@ pub fn kinds() -> Vec<KindSpec> {
             )
         },
     ]
+}
+
+/// v0.5 の根で作らない種類 (03 §3.3)。v0.5 は、v0.4 のデータ根から取り込むときにだけ読む (`import-v04`)。
+pub const V04_ONLY_KINDS: [&str; 4] = [
+    crate::facts::KIND_FACT,
+    crate::correction::KIND_CORRECTION,
+    KIND_NOTE,
+    crate::facts::KIND_FACT_DIRECTIVE,
+];
+
+/// v0.5 の新しいデータ根 (形式の版 `0.5`、03 §12.4) の種類。会話の層の種類 ([`kinds`] から v0.4 だけの種類
+/// [`V04_ONLY_KINDS`] を除いたもの) に、指示・区切り・台帳・単位を足す。耐久性とジャーナルの正本は 03 §3.3 の
+/// 「v0.5 の種類の耐久性とジャーナル」。
+pub fn kinds_v05() -> Vec<KindSpec> {
+    let mut out: Vec<KindSpec> = kinds()
+        .into_iter()
+        .filter(|k| !V04_ONLY_KINDS.contains(&k.name))
+        .collect();
+    out.extend([
+        // 指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
+        KindSpec {
+            create_when_newer_present: true,
+            journaled: true,
+            derive: Some(crate::directive::derive_directive),
+            derived_rels: crate::directive::DIRECTIVE_RELS,
+            derived_lookups: crate::directive::DIRECTIVE_LOOKUPS,
+            ..KindSpec::new(
+                crate::directive::KIND_DIRECTIVE,
+                crate::directive::DIRECTIVE_V,
+            )
+        },
+        // 区切りは派生 (ジャーナルに書かない)。ID は最初の往復の発話のターンから作る (04 §2)。
+        KindSpec {
+            derive: Some(crate::segment::derive_segment),
+            derived_rels: crate::segment::SEGMENT_RELS,
+            derived_lookups: crate::segment::SEGMENT_LOOKUPS,
+            ids: RecordIds::Content,
+            ..KindSpec::new(crate::segment::KIND_SEGMENT, crate::segment::SEGMENT_V)
+        },
+        // 台帳は派生だが作り直せない (`Immediate` と退避で守る、03 §3.4)。ジャーナルには書かない。
+        KindSpec {
+            derive: Some(crate::ledger::derive_ledger),
+            derived_rels: crate::ledger::LEDGER_RELS,
+            derived_lookups: crate::ledger::LEDGER_LOOKUPS,
+            ..KindSpec::new(crate::ledger::KIND_PROPOSAL, crate::ledger::PROPOSAL_V)
+        },
+        // 単位は導出で作り直す派生 (ジャーナル・退避・書き出しに写さない)。ID は中身から作る (04 §5.1)。
+        KindSpec {
+            derive: Some(crate::unit::derive_unit),
+            derived_rels: crate::unit::UNIT_RELS,
+            derived_lookups: crate::unit::UNIT_LOOKUPS,
+            ids: RecordIds::Content,
+            ..KindSpec::new(crate::unit::KIND_UNIT, crate::unit::UNIT_V)
+        },
+    ]);
+    out
 }
 
 /// モデルの性質の点検の結果 (06 §3.3、v0.2)。
@@ -781,7 +838,7 @@ mod derived_names {
     use crate::write::{AssistantTurn, Writes};
 
     /// 関係の名前と副索引の項目 (種類の名前の下の `field`) を、記録の種類ごとに集めたもの。
-    #[derive(Debug, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     struct Names {
         rels: BTreeSet<String>,
         lookups: BTreeSet<String>,
@@ -958,6 +1015,99 @@ mod derived_names {
             out.push(ops);
         }
         out
+    }
+
+    /// v0.5 の種類の、どの項目も埋めた本体の例 (`private` でない単位と、`private` の単位)。
+    fn v05_examples(ids: &dyn IdGen) -> Vec<Envelope> {
+        let t = |n: u8| Id::from_bytes([n; 16]);
+        let span = serde_json::json!({"turn": t(1), "rev": 0, "start": 0, "end": 3});
+        let unit = |private: bool| {
+            sample(
+                ids,
+                crate::unit::KIND_UNIT,
+                &serde_json::json!({
+                    "entity": "self", "aspect": "residence", "vk": "ab".repeat(32),
+                    "private": private,
+                    "when": {"from": "2026-01", "to": null, "basis": "stated"},
+                    "anchors": [{"turn": t(1)}, {"turn": t(2)}],
+                }),
+            )
+        };
+        vec![
+            sample(
+                ids,
+                crate::directive::KIND_DIRECTIVE,
+                &serde_json::json!({
+                    "op": "forget", "entity": "self", "vks": ["ab", "cd"], "at": span,
+                    "target": t(9), "turns": [t(1)], "redactions": [{"turn": t(2)}],
+                    "hidden": [span], "turn": t(3),
+                }),
+            ),
+            sample(
+                ids,
+                crate::segment::KIND_SEGMENT,
+                &serde_json::json!({"session": t(8), "pairs": [t(1), t(2)]}),
+            ),
+            sample(
+                ids,
+                crate::ledger::KIND_PROPOSAL,
+                &serde_json::json!({
+                    "segment": t(7), "model_key": "m", "variant": "v1",
+                    "sentences": [{"turn": t(1)}], "inputs": {"refs": [{"turn": t(2)}]},
+                }),
+            ),
+            unit(false),
+            unit(true),
+        ]
+    }
+
+    /// v0.5 の種類の `derive` は、宣言したすべての名前を作りうり、宣言の外の名前を作らない。private の単位は `vk` と
+    /// `date` の副索引を持たない (03 §3.3)。v0.5 の根は v0.4 だけの種類を持たない。
+    #[test]
+    fn v05_derived_names_are_declared_on_the_kind() {
+        let specs: BTreeMap<&str, KindSpec> =
+            kinds_v05().into_iter().map(|k| (k.name, k)).collect();
+        for name in V04_ONLY_KINDS {
+            assert!(
+                !specs.contains_key(name),
+                "{name} is not made in a v0.5 root"
+            );
+        }
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
+        let ids = UuidV7Gen::with_seed(clock, 4);
+        let mut derived: BTreeMap<String, Names> = BTreeMap::new();
+        for e in v05_examples(&ids) {
+            let spec = &specs[e.kind.as_str()];
+            let kinds_of: BTreeMap<Id, String> = [(e.id, e.kind.clone())].into();
+            let names = names_by_kind(&spec.derive.expect("derive")(&e), &kinds_of);
+            let got = names.get(&e.kind).cloned().unwrap_or_default();
+            #[derive(serde::Deserialize)]
+            struct Flag {
+                #[serde(default)]
+                private: bool,
+            }
+            if e.kind == crate::unit::KIND_UNIT && e.body_as::<Flag>().is_ok_and(|f| f.private) {
+                assert!(
+                    !got.lookups.contains(crate::unit::LOOKUP_UNIT_VK)
+                        && !got.lookups.contains(crate::unit::LOOKUP_UNIT_DATE),
+                    "{got:?}"
+                );
+            }
+            derived.entry(e.kind.clone()).or_default().extend(got);
+        }
+        for name in [
+            crate::directive::KIND_DIRECTIVE,
+            crate::segment::KIND_SEGMENT,
+            crate::ledger::KIND_PROPOSAL,
+            crate::unit::KIND_UNIT,
+        ] {
+            assert_eq!(derived[name], declared(&specs[name]), "{name}");
+        }
+        // 退避と書き出しに写さない種類は、ストアの層の一覧と同じ (03 §7.1・§11)。
+        assert_eq!(
+            evorag_store::backup::UNCOPIED_KINDS,
+            [crate::unit::KIND_UNIT]
+        );
     }
 
     /// 書き込みの経路と `derive` が作る関係の名前と副索引の項目は、どれも種類の宣言 (`derived_rels`・
