@@ -42,7 +42,7 @@ evorag/
 
 - 使う Rust の版は `rust-toolchain.toml` で 1 つに固定し、手元と CI で同じ版を使う (確定 (ユーザー回答、2026-11-09))。今の版は 1.99。
 - workspace の `rust-version` (MSRV) は、固定した版と同じにする。古い版で作れることは約束しないので、MSRV の CI のジョブは持たない。
-- 下限の理由: redb 4.5 は 1.90 以上、std の `File::try_lock` (03 §9) は 1.89 以上が要る。
+- 下限の理由: redb 4.6 は 1.90 以上、std の `File::try_lock` (03 §9) は 1.89 以上が要る。
 - 版を上げるときは、`rust-toolchain.toml` と `rust-version` を同じ PR (`chore:`) で上げ、CI が全部通ることを確かめる。
 
 ## 2. 仕様と実装の対応 (`spec:` / `verifies:`)

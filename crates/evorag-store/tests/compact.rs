@@ -75,7 +75,10 @@ fn contains(hay: &[u8], needle: &str) -> bool {
 /// ターンを 2 つ書き、片方を利用者の削除で消す。消したターンの ID と残すターンの ID を返す。
 fn write_and_delete(root: &Path) -> (Id, Id) {
     let (store, _) = open(root);
-    let gone = env(&store, "turn", &GONE_TEXT.repeat(8));
+    // 消すターンの本文は、多くのページにまたがる大きさにする。小さい本文 (数ページ以内) だと、redb 4.6 以降は
+    // 空いたページを次のコミット (閉じるときの空きの記録など) ですぐに使い直すので、compact の前から本文が消え、
+    // 試験の前提 (空いたページに本文が残る) が成り立たない。
+    let gone = env(&store, "turn", &GONE_TEXT.repeat(2000));
     let kept = env(&store, "turn", KEPT_TEXT);
     let (gone_id, kept_id) = (gone.id, kept.id);
     // 消すターンの後にも書く (消したページがファイルの末尾に来て、切り詰めで消えることのないように)。
