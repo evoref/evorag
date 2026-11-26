@@ -10,6 +10,14 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    # 自動の PR に混ぜずに、別に検討して上げるもの。
+    # - redb のメジャー版: 保存形式に関わるので、03 §12.2 の手順 (OQ-16) で上げる。
+    # - blake2 の 0.x の版上げ (0.11 は digest 0.11 で API が変わる): 更新の署名の検証に使うので、別の PR で試験を付けて上げる。
+    ignore:
+      - dependency-name: "redb"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "blake2"
+        update-types: ["version-update:semver-minor"]
     groups:
       cargo-dependencies:
         patterns: ["*"]
