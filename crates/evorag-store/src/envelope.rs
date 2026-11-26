@@ -218,6 +218,16 @@ impl Envelope {
         Ok(())
     }
 
+    /// 本体の CBOR のバイト列の SHA-256 ([`crate::WriteOp::ExpectBody`] で、読んだときの本体と同じかを確かめる)。
+    #[must_use]
+    pub fn body_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&self.body, &mut cbor)
+            .expect("a CBOR value always encodes into memory");
+        Sha256::digest(&cbor).into()
+    }
+
     /// 本体の整数の項目 `name`。項目が無ければ 0 (03 §4.2 の規則 1 の既定値)、整数でなければ `None`。
     pub fn body_uint(&self, name: &str) -> Option<u64> {
         map_uint(&self.body, name)

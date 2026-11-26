@@ -195,7 +195,8 @@ pub struct OpenReport {
     /// ジャーナルの末尾で組の行がそろわず (書きかけの追記の途中で止まった)、当てずに捨てた組の数 (03 §6 の
     /// 「組の行」、v0.5)。DB にはコミットしていないので、操作は無かったことになる。
     pub journal_torn_groups: usize,
-    /// ジャーナルの末尾でない場所で行の欠けた組の数。当てずに残す (`doctor` が報告する)。
+    /// ジャーナルの行の欠けた組 (末尾の書きかけを除く) の数。読める行は当てる (`doctor` が報告する。
+    /// [`Store::partial_groups`])。
     pub journal_incomplete_groups: usize,
     /// DB に無かった `memory.forget_key` を、ジャーナルの行から入れた (03 §3.1.1)。
     pub forget_key_recovered: bool,
@@ -584,12 +585,12 @@ fn needs_compact_after_old_writer(existing: &BTreeMap<String, String>, ours: &Ve
             .is_some_and(|w| w < since)
 }
 
-/// ストアが自分で持つ種類と、渡された種類。
 /// v0.5 の形式の版 ([`FORMAT_V05`])。
 fn v05() -> Version {
     FORMAT_V05.parse().expect("FORMAT_V05 is a version")
 }
 
+/// ストアが自分で持つ種類と、渡された種類。
 pub(crate) fn kind_map(kinds: Vec<KindSpec>) -> BTreeMap<&'static str, KindSpec> {
     let mut m: BTreeMap<&'static str, KindSpec> =
         BUILTIN_KINDS.iter().map(|k| (k.name, k.clone())).collect();
@@ -829,7 +830,17 @@ impl Store {
             .values()
             .filter_map(|k| Some((k.name, k.monotonic?)))
             .collect();
-        let (journal, scan) = Journal::open(&self.root, last, monotonic)?;
+        // 末尾の書きかけの組を捨ててよいのは、書き手が使っていた DB だけ (03 §6 の「組の行」)。
+        let tail_unknown = self
+            .meta(meta::JOURNAL_TAIL_UNKNOWN)
+            .map_err(|e| OpenError::BadMeta(e.to_string()))?
+            .is_some();
+        let tail = if report.created || tail_unknown {
+            crate::journal::Tail::Unknown
+        } else {
+            crate::journal::Tail::Uncommitted
+        };
+        let (journal, scan) = Journal::open(&self.root, last, monotonic, tail)?;
         self.deleted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -854,7 +865,7 @@ impl Store {
                 }
             }
         }
-        if !scan.lines.is_empty() || !stale_alive.is_empty() {
+        if !scan.lines.is_empty() || !stale_alive.is_empty() || tail_unknown {
             let mut tx = self
                 .write_internal(Durability::Immediate)
                 .map_err(unreadable)?;
@@ -888,6 +899,15 @@ impl Store {
                 tx.add_pending_deletes(&report.journal_deletes)
                     .map_err(unreadable)?;
             }
+            // 行の欠けた組の読める行を当てた: 忘れるの `end` を計画し直す印に、その組の記録の ID を残す (03 §6)。
+            if !scan.partial.is_empty() {
+                tx.add_ids_meta(meta::JOURNAL_PARTIAL_GROUPS, &scan.partial)
+                    .map_err(unreadable)?;
+            }
+            if tail_unknown {
+                tx.remove_meta(meta::JOURNAL_TAIL_UNKNOWN)
+                    .map_err(unreadable)?;
+            }
             if let Some(last_line) = scan.lines.last() {
                 tx.set_journal_seq(last_line.seq).map_err(unreadable)?;
             }
@@ -918,6 +938,18 @@ impl Store {
     pub fn pending_deletes(&self) -> Result<PendingDeletes, StoreError> {
         Ok(self
             .meta(meta::PENDING_DELETES)?
+            .map(|v| parse_ids(&v))
+            .unwrap_or_default())
+    }
+
+    /// 行の欠けた組の読める行を当てたときの、その組の記録の ID (`meta` の `journal.partial_groups`、03 §6)。忘れるの
+    /// 組で `end` が欠けたときに `end` を計画し直す印 (04 §7.4、M5.4)。
+    ///
+    /// # Errors
+    /// `meta` を読めないとき。
+    pub fn partial_groups(&self) -> Result<PendingDeletes, StoreError> {
+        Ok(self
+            .meta(meta::JOURNAL_PARTIAL_GROUPS)?
             .map(|v| parse_ids(&v))
             .unwrap_or_default())
     }
@@ -1202,6 +1234,13 @@ impl Store {
     }
 
     /// その種類をジャーナルにも書くか。
+    /// その種類の ID が中身から作るものか ([`RecordIds::Content`])。消した ID として覚えない (03 §4.2 の規則 0)。
+    pub(crate) fn has_content_ids(&self, kind: &str) -> bool {
+        self.kinds
+            .get(kind)
+            .is_some_and(|k| k.ids == RecordIds::Content)
+    }
+
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
     }
@@ -1605,9 +1644,14 @@ impl WriteTxn<'_> {
 
     /// 索引と退避から除く ID を `meta` に足す ([`Store::pending_deletes`])。
     pub(crate) fn add_pending_deletes(&mut self, ids: &[Id]) -> Result<(), StoreError> {
+        self.add_ids_meta(meta::PENDING_DELETES, ids)
+    }
+
+    /// 空白区切りの ID の並びの `meta` の値 `key` に、`ids` を足す (重ねない)。
+    pub(crate) fn add_ids_meta(&mut self, key: &str, ids: &[Id]) -> Result<(), StoreError> {
         let mut m = self.tx.open_table(META).map_err(db)?;
         let mut all: BTreeSet<Id> = m
-            .get(meta::PENDING_DELETES.as_bytes())
+            .get(key.as_bytes())
             .map_err(db)?
             .map(|v| parse_ids(&String::from_utf8_lossy(v.value())).ids)
             .unwrap_or_default()
@@ -1615,8 +1659,15 @@ impl WriteTxn<'_> {
             .collect();
         all.extend(ids.iter().copied());
         let value: Vec<String> = all.iter().map(Id::to_string).collect();
-        m.insert(meta::PENDING_DELETES.as_bytes(), value.join(" ").as_bytes())
+        m.insert(key.as_bytes(), value.join(" ").as_bytes())
             .map_err(db)?;
+        Ok(())
+    }
+
+    /// 書き換えてよい `meta` の値を消す。
+    pub(crate) fn remove_meta(&mut self, key: &str) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        m.remove(key.as_bytes()).map_err(db)?;
         Ok(())
     }
 

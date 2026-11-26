@@ -35,3 +35,11 @@ pub const FORGET_KEY: &str = "memory.forget_key";
 /// 今の単位を作った導出の指紋と、起動時の軽い検査に使う成分 (03 §3.1.1、04 §5.3、v0.5)。上書きしてよいキーで、
 /// ジャーナルにも退避にも書き出しにも写さない (導き直せる派生、03 §7.1・§11)。
 pub const DERIVE_FINGERPRINT: &str = "memory.derive_fingerprint";
+/// DB が、ジャーナルの末尾の書きかけの組をコミットしたか分からないこと (値は `1`、03 §6 の「組の行」、v0.5)。restore
+/// で戻した DB と、repair で作り直した DB に書く。立っている間 (と、DB を新しく作ったとき) は、末尾の組を切り詰めずに
+/// 読める行を当てる。開くときの取り込みのコミットで消す。書き換えてよいキーで、ジャーナルには書かない。
+pub const JOURNAL_TAIL_UNKNOWN: &str = "journal.tail_unknown";
+/// 行の欠けた組 (03 §6) の読める行を当てたときの、その組の `put` の行の記録の ID (空白区切り、v0.5)。忘れるの組で
+/// `forget` の指示があるのに `end` が欠けたときに、`end` を計画し直す印にする (04 §7.4。計画し直しと印を消すのは
+/// M5.4)。足すだけにし、ジャーナルには書かない。
+pub const JOURNAL_PARTIAL_GROUPS: &str = "journal.partial_groups";

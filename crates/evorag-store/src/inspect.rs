@@ -178,7 +178,8 @@ pub fn inspect_collect(
         .get(meta::JOURNAL_LAST_SEQ)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    out.journal = journal::summarize(root, last)?;
+    let tail = journal::Tail::of((!out.meta.is_empty()).then_some(&out.meta));
+    out.journal = journal::summarize(root, last, tail)?;
     if let Ok(rd) = std::fs::read_dir(root.join(BROKEN_DIR)) {
         for e in rd.filter_map(Result::ok) {
             let f = e.path().join(DB_FILE);

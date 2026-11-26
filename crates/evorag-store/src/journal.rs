@@ -47,31 +47,33 @@ pub enum LineOp {
     Meta { key: String, value: String },
 }
 
-/// 組の行の印 (03 §6 の「組の行」、v0.5)。同じ組の行は、同じ `id`・`n`・`ids` を持つ。
+/// 組の行の印 (03 §6 の「組の行」、v0.5)。同じ組の行は、同じ `id`・`n` を持つ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     /// 組の ID。組の最初の行の連番 (組の行は 1 回の追記で、続いた連番で書く。行の組の中の位置は `連番 - id`)。
     pub id: u64,
     /// 組の行の数。
     pub n: u64,
-    /// 組の行ごとの (位置の順の) `put` の行の封筒の ID。`put` でない行は `None`。行の数は `n`。欠けた行が何だったかを
-    /// 決めるのに使う (書き直しで正しく除いた `put` の行か、03 §6)。
-    pub ids: Vec<Option<Id>>,
+    /// 組の最初の行 (位置 0) だけが持つ、位置の順の `put` の行の封筒の ID (`put` でない行は `None`。長さは `n`)。
+    /// 欠けた行が何だったかを決めるのに使う (書き直しで正しく除いた `put` の行か、03 §6)。ほかの行は持たない
+    /// (ジャーナルを組の行の数の 2 乗で太らせないため)。
+    pub ids: Option<Vec<Option<Id>>>,
 }
 
 impl Group {
-    /// `ops` を 1 つの組にするときの印。`first` は組の最初の行の連番。
-    fn of(first: u64, ops: &[LineOp]) -> Self {
+    /// `ops` を 1 つの組にするときの、`i` 番目の行の印。`first` は組の最初の行の連番。
+    fn line(first: u64, ops: &[LineOp], i: usize) -> Self {
         Self {
             id: first,
             n: ops.len() as u64,
-            ids: ops
-                .iter()
-                .map(|op| match op {
-                    LineOp::Put(e) => Some(e.id),
-                    _ => None,
-                })
-                .collect(),
+            ids: (i == 0).then(|| {
+                ops.iter()
+                    .map(|op| match op {
+                        LineOp::Put(e) => Some(e.id),
+                        _ => None,
+                    })
+                    .collect()
+            }),
         }
     }
 }
@@ -106,8 +108,10 @@ pub struct Scan {
     pub rewrite_failed: Option<RewriteError>,
     /// 末尾で組の行がそろわず、当てずに捨てた組の数 (03 §6 の「組の行」)。切り詰めたバイト数は `truncated` に足す。
     pub torn_groups: usize,
-    /// 末尾でない場所で行の欠けた組の数。当てずに残す (`doctor` が報告する)。
+    /// 行の欠けた組 (末尾の書きかけを除く) の数。読める行は当てる (`doctor` が報告する)。
     pub incomplete_groups: usize,
+    /// 行の欠けた組のうち、`last_seq` より後の組の `put` の行の記録の ID (当て直しの印、03 §6)。
+    pub partial: Vec<Id>,
 }
 
 /// 書き直しで、1 つの ID の `put` の行のうち何を除くか (03 §6 の「削除と忘れる」)。
@@ -289,12 +293,15 @@ fn encode(seq: u64, op: &LineOp, grp: Option<&Group>) -> Vec<u8> {
     };
     let mut line = json!({"seq": seq, "op": name, "env": env});
     if let Some(g) = grp {
-        let ids: Vec<Json> = g
-            .ids
-            .iter()
-            .map(|id| id.map_or(Json::Null, |id| Json::String(id.to_string())))
-            .collect();
-        line["grp"] = json!({"id": g.id, "n": g.n, "ids": ids});
+        let mut grp = json!({"id": g.id, "n": g.n});
+        if let Some(ids) = &g.ids {
+            let ids: Vec<Json> = ids
+                .iter()
+                .map(|id| id.map_or(Json::Null, |id| Json::String(id.to_string())))
+                .collect();
+            grp["ids"] = Json::Array(ids);
+        }
+        line["grp"] = grp;
     }
     seal(line.to_string())
 }
@@ -306,60 +313,25 @@ fn decode_group(v: &Json) -> Option<Option<Group>> {
     };
     let id = g.get("id").and_then(Json::as_u64)?;
     let n = g.get("n").and_then(Json::as_u64).filter(|n| *n >= 1)?;
-    let ids = g
-        .get("ids")?
-        .as_array()?
-        .iter()
-        .map(|x| match x {
-            Json::Null => Some(None),
-            Json::String(s) => s.parse().ok().map(Some),
-            _ => None,
-        })
-        .collect::<Option<Vec<Option<Id>>>>()?;
-    (ids.len() as u64 == n).then_some(Some(Group { id, n, ids }))
-}
-
-/// 組の欠けた行を、書き直しで正しく除いた行と見分ける材料 (03 §6 の「組の行」)。ID ごとの、削除の行と `put` の行の
-/// 連番の最大。
-#[derive(Debug, Default)]
-struct Later {
-    deleted: BTreeMap<Id, u64>,
-    put: BTreeMap<Id, u64>,
-}
-
-impl Later {
-    fn note_delete(&mut self, id: Id, seq: u64) {
-        let e = self.deleted.entry(id).or_insert(seq);
-        *e = (*e).max(seq);
-    }
-
-    fn note_put(&mut self, id: Id, seq: u64) {
-        let e = self.put.entry(id).or_insert(seq);
-        *e = (*e).max(seq);
-    }
-
-    /// 1 行の削除と `put` を数える。
-    fn note(&mut self, seen: &Seen) {
-        let seq = match &seen.decoded {
-            Decoded::Line(line) => {
-                if let LineOp::Delete { id, .. } = &line.op {
-                    self.note_delete(*id, line.seq);
-                }
-                Some(line.seq)
+    let ids = match g.get("ids") {
+        None => None,
+        Some(ids) => {
+            let ids = ids
+                .as_array()?
+                .iter()
+                .map(|x| match x {
+                    Json::Null => Some(None),
+                    Json::String(s) => s.parse().ok().map(Some),
+                    _ => None,
+                })
+                .collect::<Option<Vec<Option<Id>>>>()?;
+            if ids.len() as u64 != n {
+                return None;
             }
-            Decoded::Newer(seq) => *seq,
-            Decoded::Bad => None,
-        };
-        if let (Some((id, _)), Some(seq)) = (seen.put, seq) {
-            self.note_put(id, seq);
+            Some(ids)
         }
-    }
-
-    /// 連番 `at` の `put` の行 (記録 `id`) が無いのは、書き直しで正しく除いたものか: その後に `id` の削除の行がある
-    /// (削除の書き直し) か、その後に `id` の `put` の行がある (忘れるの書き直しで前の版を除いた)。
-    fn explains(&self, id: Id, at: u64) -> bool {
-        self.deleted.get(&id).is_some_and(|&s| s > at) || self.put.get(&id).is_some_and(|&s| s > at)
-    }
+    };
+    Some(Some(Group { id, n, ids }))
 }
 
 /// 追記する行を組にするか ([`Journal::append_group`])。
@@ -371,81 +343,214 @@ enum Grouping {
     Group,
 }
 
+/// 末尾の書きかけの組を、まだコミットしていないものとして捨ててよいか (03 §6 の「組の行」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tail {
+    /// DB は、書き手が使っていたもの: `journal.last_seq` より後の書きかけの組は、まだコミットしていない。
+    Uncommitted,
+    /// DB を restore で戻した・失って新しく作った・repair で作り直した (または読むだけで数える): 末尾の組を
+    /// コミットしたか分からないので、切り詰めずに読める行を当てる。
+    Unknown,
+}
+
+impl Tail {
+    /// DB の `meta` (DB が無ければ `None`) から決める (03 §6)。
+    pub(crate) fn of(meta: Option<&BTreeMap<String, String>>) -> Self {
+        match meta {
+            Some(m) if !m.contains_key(crate::meta::JOURNAL_TAIL_UNKNOWN) => Tail::Uncommitted,
+            _ => Tail::Unknown,
+        }
+    }
+}
+
+/// 組の判定に使う 1 行の要約 (本文を持たない)。
+#[derive(Debug)]
+struct Row {
+    /// ファイルの番号 (同じファイルの行を見分ける)。
+    file: usize,
+    /// 読める行 (新しい版の行を含む) の連番。
+    seq: Option<u64>,
+    /// この版が読める行か (新しい版の行でない)。
+    known: bool,
+    grp: Option<Group>,
+    bad: bool,
+    delete: Option<Id>,
+    put: Option<Id>,
+}
+
+impl Row {
+    fn of(file: usize, seen: &Seen) -> Self {
+        let mut row = Self {
+            file,
+            seq: None,
+            known: false,
+            grp: None,
+            bad: false,
+            delete: None,
+            put: seen.put.map(|(id, _)| id),
+        };
+        match &seen.decoded {
+            Decoded::Line(line) => {
+                row.seq = Some(line.seq);
+                row.known = true;
+                row.grp = line.grp.clone();
+                if let LineOp::Delete { id, .. } = &line.op {
+                    row.delete = Some(*id);
+                }
+            }
+            Decoded::Newer(seq) => row.seq = *seq,
+            Decoded::Bad => {
+                row.bad = true;
+                row.put = None;
+            }
+        }
+        row
+    }
+}
+
+/// 組の欠けた行を、書き直しで正しく除いた行と見分ける材料 (03 §6 の「組の行」)。当てる行の、ID ごとの削除の行と
+/// `put` の行の連番の最大。
+#[derive(Debug, Default)]
+struct Later {
+    deleted: BTreeMap<Id, u64>,
+    put: BTreeMap<Id, u64>,
+}
+
+impl Later {
+    fn note(map: &mut BTreeMap<Id, u64>, id: Id, seq: u64) {
+        let e = map.entry(id).or_insert(seq);
+        *e = (*e).max(seq);
+    }
+
+    /// 連番 `at` の `put` の行 (記録 `id`) が無いのは、書き直しで正しく除いたものか: その後に `id` の削除の行がある
+    /// (削除の書き直し) か、その後に `id` の `put` の行がある (忘れるの書き直しで前の版を除いた)。
+    fn explains(&self, id: Id, at: u64) -> bool {
+        self.deleted.get(&id).is_some_and(|&s| s > at) || self.put.get(&id).is_some_and(|&s| s > at)
+    }
+}
+
 /// 組の行のそろい方 (03 §6 の「組の行」)。
 #[derive(Debug, Default)]
 struct GroupCheck {
-    /// 当てない組の ID (末尾で欠けた組と、末尾でない場所の、理由なく欠けた組)。
-    skip: BTreeSet<u64>,
-    /// そのうち末尾で欠けた組 (書きかけの追記。DB にはまだコミットしていない)。
-    torn: Option<u64>,
+    /// 当てずに切り詰める、末尾の書きかけの組の ID と、その最初の行 (`rows` の添字)。
+    torn: Option<(u64, usize)>,
+    /// 行の欠けた組 (書きかけを除く)。読める行は当てる。
+    partial: BTreeSet<u64>,
 }
 
 impl GroupCheck {
-    /// `lines` は組の行の (連番, 組)、`later` は欠けた行を正しく除いたものと見分ける材料、`max_seq` はすべての読める
-    /// 行 (新しい版の行を含む) の連番の最大、`last_seq` は DB が取り込んだ最後の連番。
+    /// `rows` はすべての行の要約 (ファイルと行の順)、`max_seq` はすべての読める行 (新しい版の行を含む) の連番の最大、
+    /// `last_seq` は DB が取り込んだ最後の連番。
     ///
-    /// 組は、組の行がすべてあるか、欠けた行がどれも書き直しで正しく除いた `put` の行 ([`Later::explains`]) なら、
-    /// そろったものとする。
-    fn new<'g>(
-        lines: impl IntoIterator<Item = (u64, &'g Group)>,
-        later: &Later,
-        max_seq: u64,
-        last_seq: u64,
-    ) -> Self {
-        struct Seen<'g> {
-            first: &'g Group,
+    /// - 組の行がすべてあるか、欠けた行がどれも書き直しで正しく除いた `put` の行 ([`Later::explains`]) なら、そろった組。
+    /// - 末尾の書きかけ (`tail` が [`Tail::Uncommitted`] で、組がファイルの末尾にあり、読める行が位置 0 から続き、
+    ///   間にチェックサムの合わない行が無く、すべての行の中の最後で、`last_seq` より後) は、当てずに切り詰める組。
+    /// - それ以外の欠けた組は、読める行を当てる組 ([`GroupCheck::is_partial`])。
+    fn new(rows: &[Row], max_seq: u64, last_seq: u64, tail: Tail) -> Self {
+        struct Seen<'r> {
+            first: usize,
+            n: u64,
+            ids: Option<&'r [Option<Id>]>,
             at: BTreeSet<u64>,
             mixed: bool,
             min: u64,
             max: u64,
         }
-        let mut seen: BTreeMap<u64, Seen<'g>> = BTreeMap::new();
-        for (seq, g) in lines {
+        let mut seen: BTreeMap<u64, Seen<'_>> = BTreeMap::new();
+        for (i, row) in rows.iter().enumerate() {
+            let (Some(seq), Some(g)) = (row.seq, &row.grp) else {
+                continue;
+            };
             let e = seen.entry(g.id).or_insert(Seen {
-                first: g,
+                first: i,
+                n: g.n,
+                ids: None,
                 at: BTreeSet::new(),
                 mixed: false,
                 min: seq,
                 max: seq,
             });
             let pos = seq.checked_sub(g.id).filter(|p| *p < g.n);
-            // 組の印の食い違い・組の外の連番・同じ位置の 2 行は、そろわない組とする。
-            e.mixed |= e.first != g || pos.is_none_or(|p| !e.at.insert(p));
+            // 組の印の食い違い・組の外の連番・同じ位置の 2 行・位置 0 でない行の `ids` は、形の崩れた組とする。
+            e.mixed |= e.n != g.n || pos.is_none_or(|p| !e.at.insert(p));
+            if let Some(ids) = &g.ids {
+                e.mixed |= e.ids.is_some() || pos != Some(0);
+                e.ids = Some(ids);
+            }
             e.min = e.min.min(seq);
             e.max = e.max.max(seq);
         }
         let mut out = Self::default();
-        for (id, e) in seen {
-            let g = e.first;
-            let explained = || {
-                (0..g.n).filter(|p| !e.at.contains(p)).all(|p| {
-                    let at = usize::try_from(p)
-                        .ok()
-                        .and_then(|i| g.ids.get(i))
-                        .copied()
-                        .flatten();
-                    at.is_some_and(|rec| later.explains(rec, g.id + p))
+        if tail == Tail::Uncommitted {
+            out.torn = seen
+                .iter()
+                .find(|(id, e)| {
+                    let prefix = e.at.iter().copied().eq(0..e.at.len() as u64);
+                    !e.mixed
+                        && (e.at.len() as u64) < e.n
+                        && prefix
+                        && e.max == max_seq
+                        && e.min > last_seq
+                        && Self::ends_its_file(rows, e.first, **id)
                 })
-            };
-            if !e.mixed && explained() {
+                .map(|(id, e)| (*id, e.first));
+        }
+        let torn = out.torn.map(|(id, _)| id);
+        let mut later = Later::default();
+        for row in rows {
+            if row.grp.as_ref().is_some_and(|g| Some(g.id) == torn) {
                 continue;
             }
-            out.skip.insert(id);
-            // 書きかけの追記は、すべての行の中の最後にあり、DB がまだ取り込んでいない。
-            if !e.mixed && (e.at.len() as u64) < g.n && e.max == max_seq && e.min > last_seq {
-                out.torn = Some(id);
+            if let Some(seq) = row.seq {
+                if let Some(id) = row.delete {
+                    Later::note(&mut later.deleted, id, seq);
+                }
+                if let Some(id) = row.put {
+                    Later::note(&mut later.put, id, seq);
+                }
+            }
+        }
+        for (id, e) in seen {
+            if Some(id) == torn {
+                continue;
+            }
+            let explained = !e.mixed
+                && (0..e.n).filter(|p| !e.at.contains(p)).all(|p| {
+                    let rec = e
+                        .ids
+                        .and_then(|ids| ids.get(usize::try_from(p).ok()?).copied().flatten());
+                    let at = id.checked_add(p);
+                    matches!((rec, at), (Some(rec), Some(at)) if later.explains(rec, at))
+                });
+            if !explained {
+                out.partial.insert(id);
             }
         }
         out
     }
 
-    fn skips(&self, grp: Option<&Group>) -> bool {
-        grp.is_some_and(|g| self.skip.contains(&g.id))
+    /// 組 `id` の最初の行 `first` から、そのファイルの終わりまでが、その組の行だけか。
+    fn ends_its_file(rows: &[Row], first: usize, id: u64) -> bool {
+        let file = rows[first].file;
+        rows[first..]
+            .iter()
+            .take_while(|r| r.file == file)
+            .all(|r| !r.bad && r.grp.as_ref().is_some_and(|g| g.id == id))
     }
 
-    /// 末尾でない場所の欠けた組の数。
+    /// その行を当てるか (末尾の書きかけの組の行だけを当てない)。
+    fn applies(&self, grp: Option<&Group>) -> bool {
+        !grp.is_some_and(|g| self.torn.is_some_and(|(t, _)| t == g.id))
+    }
+
+    /// その行が、行の欠けた組 (読める行を当てる) の行か。
+    fn is_partial(&self, grp: Option<&Group>) -> bool {
+        grp.is_some_and(|g| self.partial.contains(&g.id))
+    }
+
+    /// 行の欠けた組の数 (書きかけを除く)。
     fn incomplete(&self) -> usize {
-        self.skip.len() - usize::from(self.torn.is_some())
+        self.partial.len()
     }
 }
 
@@ -597,64 +702,103 @@ pub struct Summary {
     pub pending: usize,
     /// 末尾で組の行がそろわない組 (次の起動で捨てる、03 §6 の「組の行」)。
     pub torn_groups: usize,
-    /// 末尾でない場所で行の欠けた組 (当てない)。
+    /// 行の欠けた組 (末尾の書きかけを除く。読める行は当てる)。
     pub incomplete_groups: usize,
 }
 
-/// ジャーナルを、何も書かずに数える (`doctor`、AC-FR-207-1)。
-pub fn summarize(root: &Path, last_seq: u64) -> io::Result<Summary> {
-    let mut s = Summary::default();
-    let mut read: Vec<(u64, Option<Group>)> = Vec::new();
-    let mut later = Later::default();
-    for path in files(&root.join(JOURNAL_DIR))? {
-        s.files += 1;
+/// ジャーナルの全体を読んだ結果 (書き換えない)。`lines` には `keep` が残した行だけを持つ。
+struct Pass {
+    rows: Vec<Row>,
+    lines: Vec<Line>,
+    files: usize,
+    bad: usize,
+    newer: usize,
+    known: usize,
+    partial_bytes: usize,
+    max_seq: u64,
+}
+
+/// すべてのファイルを、書き換えずに行の順に読む。書きかけの末尾 (改行で終わらない最後の行) は数えるだけにする。
+fn read_pass(root: &Path, keep: &dyn Fn(&LineOp) -> bool) -> io::Result<Pass> {
+    let mut p = Pass {
+        rows: Vec::new(),
+        lines: Vec::new(),
+        files: 0,
+        bad: 0,
+        newer: 0,
+        known: 0,
+        partial_bytes: 0,
+        max_seq: 0,
+    };
+    let none = Monotonic::new();
+    for (file, path) in files(&root.join(JOURNAL_DIR))?.into_iter().enumerate() {
+        p.files += 1;
         let bytes = std::fs::read(&path)?;
-        let keep = if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        let full = if bytes.is_empty() || bytes.last() == Some(&b'\n') {
             bytes.len()
         } else {
-            bytes.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1)
+            bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
         };
-        s.partial += bytes.len() - keep;
-        for raw in bytes[..keep].split_inclusive(|&b| b == b'\n') {
+        p.partial_bytes += bytes.len() - full;
+        for raw in bytes[..full].split_inclusive(|&b| b == b'\n') {
             let l = trim_newline(raw);
             if l.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let seen = inspect(l, &Monotonic::new());
-            later.note(&seen);
+            let seen = inspect(l, &none);
+            p.rows.push(Row::of(file, &seen));
             match seen.decoded {
                 Decoded::Line(line) => {
-                    s.lines += 1;
-                    s.max_seq = s.max_seq.max(line.seq);
-                    read.push((line.seq, line.grp));
+                    p.known += 1;
+                    p.max_seq = p.max_seq.max(line.seq);
+                    if keep(&line.op) {
+                        p.lines.push(line);
+                    }
                 }
                 Decoded::Newer(seq) => {
-                    s.newer += 1;
-                    s.max_seq = s.max_seq.max(seq.unwrap_or(0));
+                    p.newer += 1;
+                    p.max_seq = p.max_seq.max(seq.unwrap_or(0));
                 }
-                Decoded::Bad => s.bad += 1,
+                Decoded::Bad => p.bad += 1,
             }
         }
     }
-    let groups = GroupCheck::new(
-        read.iter().filter_map(|(seq, g)| Some((*seq, g.as_ref()?))),
-        &later,
-        s.max_seq,
-        last_seq,
-    );
-    s.pending = read
-        .iter()
-        .filter(|(seq, g)| *seq > last_seq && !groups.skips(g.as_ref()))
-        .count();
-    s.torn_groups = usize::from(groups.torn.is_some());
-    s.incomplete_groups = groups.incomplete();
-    Ok(s)
+    Ok(p)
 }
 
-/// 書き換えずに、すべての `meta` の行を連番の順に集める (読むだけで開いたとき、03 §3.1.1)。組の行がそろわない
-/// 組 (03 §6) の行は除く。
+/// ジャーナルを、何も書かずに数える (`doctor`、AC-FR-207-1)。`tail` は、DB が末尾の書きかけの組をコミットして
+/// いないと分かるか (03 §6)。
+pub(crate) fn summarize(root: &Path, last_seq: u64, tail: Tail) -> io::Result<Summary> {
+    let p = read_pass(root, &|_| false)?;
+    let groups = GroupCheck::new(&p.rows, p.max_seq, last_seq, tail);
+    Ok(Summary {
+        files: p.files,
+        lines: p.known,
+        bad: p.bad,
+        newer: p.newer,
+        partial: p.partial_bytes,
+        max_seq: p.max_seq,
+        pending: p
+            .rows
+            .iter()
+            .filter(|r| r.known && r.seq.is_some_and(|s| s > last_seq))
+            .filter(|r| groups.applies(r.grp.as_ref()))
+            .count(),
+        torn_groups: usize::from(groups.torn.is_some()),
+        incomplete_groups: groups.incomplete(),
+    })
+}
+
+/// 書き換えずに、すべての `meta` の行を連番の順に集める (読むだけで開いたとき、03 §3.1.1)。ほかの行の本文は持たない。
 pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
-    let (lines, _) = read_all(root)?;
+    let p = read_pass(root, &|op| matches!(op, LineOp::Meta { .. }))?;
+    let groups = GroupCheck::new(&p.rows, p.max_seq, 0, Tail::Unknown);
+    let mut lines: Vec<Line> = p
+        .lines
+        .into_iter()
+        .filter(|l| groups.applies(l.grp.as_ref()))
+        .collect();
+    lines.sort_by_key(|l| l.seq);
     Ok(lines
         .into_iter()
         .filter_map(|line| match line.op {
@@ -664,41 +808,39 @@ pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// [`read_all`] の結果。
+#[derive(Debug, Default)]
+pub(crate) struct ReadAll {
+    /// 当てる行 (連番の順)。
+    pub lines: Vec<Line>,
+    /// チェックサムの合わない行の数。
+    pub bad: usize,
+    /// 行の欠けた組の数 (読める行は `lines` に入れた)。
+    pub incomplete_groups: usize,
+    /// 行の欠けた組の `put` の行の記録の ID (`journal.partial_groups`、03 §6)。
+    pub partial: Vec<Id>,
+}
+
 /// 書き換えずに、読めるすべての行を連番の順に読む (`repair`、03 §10)。書きかけの末尾、チェックサムの合わない行、
-/// 新しい版の行と、組の行がそろわない組 (03 §6) の行は飛ばす。チェックサムの合わない行の数も返す。DB が取り込んだ
-/// 連番を見ないので、末尾で欠けた組も、末尾でない場所の欠けた組と同じく当てない。
-pub(crate) fn read_all(root: &Path) -> io::Result<(Vec<Line>, usize)> {
-    let mut lines = Vec::new();
-    let mut bad = 0;
-    let mut max_seq = 0;
-    let mut later = Later::default();
-    for path in files(&root.join(JOURNAL_DIR))? {
-        let bytes = std::fs::read(&path)?;
-        for raw in bytes.split_inclusive(|&b| b == b'\n') {
-            if raw.last() != Some(&b'\n') {
-                continue; // 書きかけの末尾
-            }
-            let seen = inspect(trim_newline(raw), &Monotonic::new());
-            later.note(&seen);
-            match seen.decoded {
-                Decoded::Line(line) => {
-                    max_seq = max_seq.max(line.seq);
-                    lines.push(line);
-                }
-                Decoded::Bad => bad += 1,
-                Decoded::Newer(seq) => max_seq = max_seq.max(seq.unwrap_or(0)),
-            }
+/// 新しい版の行は飛ばす。DB が末尾の組をコミットしたか分からないので、行の欠けた組も読める行を当てる (03 §6)。
+pub(crate) fn read_all(root: &Path) -> io::Result<ReadAll> {
+    let p = read_pass(root, &|_| true)?;
+    let groups = GroupCheck::new(&p.rows, p.max_seq, 0, Tail::Unknown);
+    let mut out = ReadAll {
+        bad: p.bad,
+        incomplete_groups: groups.incomplete(),
+        ..ReadAll::default()
+    };
+    for line in p.lines {
+        if groups.is_partial(line.grp.as_ref())
+            && let LineOp::Put(e) = &line.op
+        {
+            out.partial.push(e.id);
         }
+        out.lines.push(line);
     }
-    let groups = GroupCheck::new(
-        lines.iter().filter_map(|l| Some((l.seq, l.grp.as_ref()?))),
-        &later,
-        max_seq,
-        0,
-    );
-    lines.retain(|l| !groups.skips(l.grp.as_ref()));
-    lines.sort_by_key(|l| l.seq);
-    Ok((lines, bad))
+    out.lines.sort_by_key(|l| l.seq);
+    Ok(out)
 }
 
 /// 書き換えずに、種類 `kind` の `put` の行の単調に増える項目 `field` の値を、ID ごとに行の数だけ集める (`doctor`、
@@ -727,7 +869,12 @@ pub(crate) fn put_revs(
 impl Journal {
     /// 開いて読む。`last_seq` より大きい行を返す。書きかけの末尾を切り詰め、残っている一時のファイルを消し、
     /// 削除の後始末をする。`monotonic` は、種類ごとの単調に増える項目 (集める値)。
-    pub fn open(root: &Path, last_seq: u64, monotonic: Monotonic) -> io::Result<(Self, Scan)> {
+    pub fn open(
+        root: &Path,
+        last_seq: u64,
+        monotonic: Monotonic,
+        tail: Tail,
+    ) -> io::Result<(Self, Scan)> {
         let dir = root.join(JOURNAL_DIR);
         fsutil::create_private_dir(&dir)?;
         // 残っている一時のファイル (03 §6)。元のファイルがあれば、入れ替えの前に止まったので要らない。元のファイルが
@@ -746,15 +893,12 @@ impl Journal {
                 fsutil::rename_durable(&tmp, &original)?;
             }
         }
-        /// 1 つの行の、読んだ結果と、ファイルの中の位置。取り込まない `put` の行 (`last_seq` 以下) は中身を持たない。
+        /// 1 つの行の、ファイルの中の位置と、要る中身 (削除・`meta` と、`last_seq` より後の行)。
         struct Entry {
             path: usize,
             file: u32,
             start: usize,
-            /// 読める行なら連番と組と、要る中身 (削除・`meta` と、`last_seq` より後の行)。
-            line: Option<(u64, Option<Group>, Option<LineOp>)>,
-            /// チェックサムの合わない行。
-            bad: bool,
+            op: Option<LineOp>,
             /// `put` の行なら、封筒の `id` と単調に増える項目の値 (書き直しのために集める)。
             put: Option<(Id, Option<u64>)>,
         }
@@ -763,7 +907,7 @@ impl Journal {
         let mut index = PutIndex::default();
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut entries: Vec<Entry> = Vec::new();
-        let mut later = Later::default();
+        let mut rows: Vec<Row> = Vec::new();
         for path in files(&dir)? {
             let file = index.file(&path.file_name().unwrap_or_default().to_string_lossy());
             let mut bytes = std::fs::read(&path)?;
@@ -786,13 +930,12 @@ impl Journal {
                     continue;
                 }
                 let seen = inspect(l, &monotonic);
-                later.note(&seen);
-                let mut bad = false;
-                let line = match seen.decoded {
+                rows.push(Row::of(at, &seen));
+                let op = match seen.decoded {
                     Decoded::Line(line) => {
                         max_seq = max_seq.max(line.seq);
                         let keep = line.seq > last_seq || !matches!(line.op, LineOp::Put(_));
-                        Some((line.seq, line.grp, keep.then_some(line.op)))
+                        keep.then_some(line.op)
                     }
                     Decoded::Newer(seq) => {
                         scan.newer += 1;
@@ -804,7 +947,6 @@ impl Journal {
                     Decoded::Bad => {
                         scan.bad += 1;
                         index.bad.insert(file);
-                        bad = true;
                         None
                     }
                 };
@@ -812,64 +954,41 @@ impl Journal {
                     path: at,
                     file,
                     start: here,
-                    line,
-                    bad,
+                    op,
                     put: seen.put,
                 });
             }
         }
-        // 組の行のそろい方 (03 §6)。末尾で欠けた組は、DB にコミットしていない書きかけの追記なので、ファイルから
-        // 切り詰めて捨てる (組の行より後ろに、組の行とチェックサムの合わない行しか無いときだけ)。
-        let groups = GroupCheck::new(
-            entries.iter().filter_map(|e| {
-                e.line
-                    .as_ref()
-                    .and_then(|(seq, g, _)| Some((*seq, g.as_ref()?)))
-            }),
-            &later,
-            max_seq,
-            last_seq,
-        );
+        // 組の行のそろい方 (03 §6)。末尾の書きかけの組は、DB にコミットしていないので、ファイルから切り詰めて捨てる。
+        let groups = GroupCheck::new(&rows, max_seq, last_seq, tail);
         let mut cut_from: Option<(usize, usize)> = None;
-        if let Some(torn) = groups.torn {
-            let in_torn = |e: &Entry| {
-                e.line
-                    .as_ref()
-                    .is_some_and(|(_, g, _)| g.as_ref().is_some_and(|g| g.id == torn))
-            };
-            if let Some(first) = entries.iter().find(|e| in_torn(e)) {
-                let (path, cut) = (first.path, first.start);
-                let tail_only = entries
-                    .iter()
-                    .filter(|e| e.path == path && e.start >= cut)
-                    .all(|e| e.bad || in_torn(e));
-                if tail_only {
-                    let f = OpenOptions::new().write(true).open(&paths[path])?;
-                    let len = f.metadata()?.len();
-                    f.set_len(cut as u64)?;
-                    f.sync_all()?;
-                    scan.truncated += usize::try_from(len).unwrap_or(usize::MAX) - cut;
-                    cut_from = Some((path, cut));
-                }
-            }
+        if let Some((_, first)) = groups.torn {
+            let (path, cut) = (entries[first].path, entries[first].start);
+            let f = OpenOptions::new().write(true).open(&paths[path])?;
+            let len = f.metadata()?.len();
+            f.set_len(cut as u64)?;
+            f.sync_all()?;
+            scan.truncated += usize::try_from(len).unwrap_or(usize::MAX) - cut;
+            cut_from = Some((path, cut));
             scan.torn_groups = 1;
         }
         scan.incomplete_groups = groups.incomplete();
-        // 切り詰めた行は、書き直しのために集めない (無い行の改訂の番号で、前の行を除かないため)。
-        for e in &entries {
+        let mut deleted: BTreeMap<Id, String> = BTreeMap::new();
+        let mut metas: Vec<(u64, String, String)> = Vec::new();
+        for (e, row) in entries.into_iter().zip(rows) {
+            // 切り詰めた行は、書き直しのために集めない (無い行の改訂の番号で、前の行を除かないため)。
             let gone = cut_from.is_some_and(|(path, cut)| e.path == path && e.start >= cut);
             if let (Some((id, rev)), false) = (e.put, gone) {
                 index.add(id, PutRef { file: e.file, rev });
             }
-        }
-        let mut deleted: BTreeMap<Id, String> = BTreeMap::new();
-        let mut metas: Vec<(u64, String, String)> = Vec::new();
-        for (seq, grp, op) in entries.into_iter().filter_map(|e| e.line) {
-            let Some(op) = op else { continue };
-            if groups.skips(grp.as_ref()) {
+            let (Some(op), Some(seq)) = (e.op, row.seq) else {
+                continue;
+            };
+            if !groups.applies(row.grp.as_ref()) {
                 continue;
             }
             match &op {
+                // 組の中の削除の行も、いつも削除として扱う (行の欠けた組でも、消したものを蘇らせない)。
                 LineOp::Delete { id, kind } => {
                     deleted.insert(*id, kind.clone());
                 }
@@ -879,7 +998,16 @@ impl Journal {
                 }
             }
             if seq > last_seq {
-                scan.lines.push(Line { seq, op, grp });
+                if groups.is_partial(row.grp.as_ref())
+                    && let LineOp::Put(env) = &op
+                {
+                    scan.partial.push(env.id);
+                }
+                scan.lines.push(Line {
+                    seq,
+                    op,
+                    grp: row.grp,
+                });
             }
         }
         scan.lines.sort_by_key(|l| l.seq);
@@ -887,7 +1015,7 @@ impl Journal {
         scan.metas = metas.into_iter().map(|(_, k, v)| (k, v)).collect();
         let mut journal = Self {
             dir,
-            next_seq: max_seq + 1,
+            next_seq: max_seq.saturating_add(1),
             monotonic,
             index,
             stopped: None,
@@ -940,8 +1068,10 @@ impl Journal {
         }
         let mut data = Vec::new();
         let mut seq = self.next_seq;
-        let grp = (grouping == Grouping::Group && ops.len() >= 2).then(|| Group::of(seq, ops));
-        for op in ops {
+        let first = seq;
+        let grouped = grouping == Grouping::Group && ops.len() >= 2;
+        for (i, op) in ops.iter().enumerate() {
+            let grp = grouped.then(|| Group::line(first, ops, i));
             data.extend_from_slice(&encode(seq, op, grp.as_ref()));
             seq += 1;
         }
@@ -967,8 +1097,13 @@ impl Journal {
         }
         let written = f.write_all(&data).and_then(|()| f.sync_data());
         if let Err(e) = written {
-            // 追記の前の長さに戻す (書きかけの断片を残さない)。
-            let _ = f.set_len(len).and_then(|()| f.sync_all());
+            // 追記の前の長さに戻す (書きかけの断片を残さない)。戻せなければ、以後は追記しない (断片の後ろに同じ連番と
+            // 組の ID の行を書かないため)。
+            if let Err(undo) = f.set_len(len).and_then(|()| f.sync_all()) {
+                self.stopped = Some(format!(
+                    "a failed append could not be undone ({undo}); the next start cleans up"
+                ));
+            }
             return Err(e);
         }
         drop(f);
@@ -1317,7 +1452,7 @@ mod tests {
     #[test]
     fn appends_and_reads_back_in_order_with_exact_floats() {
         let dir = TempDir::new("journal");
-        let (mut j, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert!(scan.lines.is_empty());
         assert_eq!(j.append(NOW, &[LineOp::Put(env(1, "一"))]).unwrap(), 1);
         let meta = LineOp::Meta {
@@ -1329,18 +1464,18 @@ mod tests {
             3
         );
         drop(j);
-        let (_, scan) = Journal::open(dir.path(), 1, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 1, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(scan.lines.iter().map(|l| l.seq).collect::<Vec<_>>(), [2, 3]);
         assert_eq!(scan.lines[0].op, LineOp::Put(env(2, "二")));
         assert_eq!((scan.bad, scan.newer), (0, 0));
-        let (j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(j.next_seq, 4);
     }
 
     #[test]
     fn a_partial_tail_is_truncated_and_a_changed_line_is_bad() {
         let dir = TempDir::new("journal-partial");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "a")), LineOp::Put(env(2, "b"))])
             .unwrap();
         drop(j);
@@ -1348,7 +1483,7 @@ mod tests {
         text = text.replacen("\"a\"", "\"X\"", 1);
         text.push_str("{\"seq\":10,\"op\":\"pu");
         std::fs::write(path(&dir), &text).unwrap();
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(scan.lines.len(), 1);
         assert_eq!(scan.bad, 1);
         assert_eq!(scan.truncated, "{\"seq\":10,\"op\":\"pu".len());
@@ -1361,7 +1496,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(JOURNAL_DIR)).unwrap();
         let line = seal(json!({"seq": 41, "op": "future", "env": {}}).to_string());
         std::fs::write(path(&dir), &line).unwrap();
-        let (mut j, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!((scan.bad, scan.newer), (0, 1));
         assert_eq!(j.append(NOW, &[LineOp::Put(env(1, "x"))]).unwrap(), 42);
     }
@@ -1369,14 +1504,14 @@ mod tests {
     #[test]
     fn appending_after_a_partial_line_does_not_break_the_new_line() {
         let dir = TempDir::new("journal-append-after-partial");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "a"))]).unwrap();
         let mut f = OpenOptions::new().append(true).open(path(&dir)).unwrap();
         f.write_all(b"{\"seq\":2,\"op\"").unwrap();
         drop(f);
         j.append(NOW, &[LineOp::Put(env(2, "b"))]).unwrap();
         drop(j);
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(scan.lines.len(), 2, "the new line must survive");
         assert_eq!(
             scan.bad, 1,
@@ -1387,7 +1522,7 @@ mod tests {
     #[test]
     fn removing_ids_drops_their_lines_keeps_the_delete_line_and_survives_bad_bytes() {
         let dir = TempDir::new("journal-remove");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(
             NOW,
             &[LineOp::Put(env(1, "消す")), LineOp::Put(env(2, "残す"))],
@@ -1411,7 +1546,7 @@ mod tests {
         let text = String::from_utf8_lossy(&std::fs::read(path(&dir)).unwrap()).into_owned();
         assert!(!text.contains("消す"));
         assert!(text.contains("残す"));
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert!(matches!(
             scan.lines.last().unwrap().op,
             LineOp::Delete { .. }
@@ -1421,7 +1556,7 @@ mod tests {
     #[test]
     fn a_delete_whose_lines_were_not_removed_is_cleaned_up_at_startup() {
         let dir = TempDir::new("journal-cleanup");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         let gone = Id::from_bytes([1; 16]);
         j.append(NOW, &[LineOp::Put(env(1, "残ってはいけない"))])
             .unwrap();
@@ -1434,7 +1569,7 @@ mod tests {
         )
         .unwrap();
         drop(j); // 書き直しの前に止まった
-        Journal::open(dir.path(), 0, mono()).unwrap();
+        Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         let text = std::fs::read_to_string(path(&dir)).unwrap();
         assert!(!text.contains("残ってはいけない"));
     }
@@ -1442,7 +1577,7 @@ mod tests {
     #[test]
     fn an_injected_failure_does_not_advance_the_sequence() {
         let dir = TempDir::new("journal-fail");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.fail_next_append();
         assert!(j.append(NOW, &[LineOp::Put(env(1, "x"))]).is_err());
         assert_eq!(j.append(NOW, &[LineOp::Put(env(1, "x"))]).unwrap(), 1);
@@ -1452,7 +1587,7 @@ mod tests {
     #[test]
     fn groups_missing_a_line_are_left_out_of_every_reading() {
         let dir = TempDir::new("journal-groups");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append_group(NOW, &[LineOp::Put(env(1, "a")), LineOp::Put(env(2, "b"))])
             .unwrap();
         j.append_group(NOW, &[LineOp::Put(env(3, "1 行"))]).unwrap();
@@ -1461,8 +1596,11 @@ mod tests {
         j.append(NOW, &[LineOp::Put(env(6, "e"))]).unwrap();
         drop(j);
         let all = std::fs::read_to_string(path(&dir)).unwrap();
-        assert!(!all.lines().nth(2).unwrap().contains("\"grp\""));
-        // 最初の組の 2 行目を失う。
+        let lines: Vec<&str> = all.lines().collect();
+        // `ids` は組の最初の行だけが持つ。1 行の追記は組にしない。
+        assert!(lines[0].contains("\"ids\":[") && !lines[1].contains("\"ids\""));
+        assert!(!lines[2].contains("\"grp\""));
+        // 最初の組の 2 行目を、理由なく失う。
         let kept: String = all
             .split_inclusive('\n')
             .enumerate()
@@ -1470,17 +1608,23 @@ mod tests {
             .map(|(_, l)| l)
             .collect();
         std::fs::write(path(&dir), kept).unwrap();
-        let (lines, bad) = read_all(dir.path()).unwrap();
-        assert_eq!(bad, 0);
+        // 行の欠けた組も、読める行を当てる (どの読み方でも)。
+        let read = read_all(dir.path()).unwrap();
+        assert_eq!(read.bad, 0);
         assert_eq!(
-            lines.iter().map(|l| l.seq).collect::<Vec<_>>(),
-            [3, 4, 5, 6]
+            read.lines.iter().map(|l| l.seq).collect::<Vec<_>>(),
+            [1, 3, 4, 5, 6]
         );
-        let s = summarize(dir.path(), 0).unwrap();
-        assert_eq!((s.incomplete_groups, s.torn_groups, s.pending), (1, 0, 4));
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        assert_eq!(
+            (read.incomplete_groups, read.partial.as_slice()),
+            (1, &[Id::from_bytes([1; 16])][..])
+        );
+        let s = summarize(dir.path(), 0, Tail::Uncommitted).unwrap();
+        assert_eq!((s.incomplete_groups, s.torn_groups, s.pending), (1, 0, 5));
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!((scan.incomplete_groups, scan.torn_groups), (1, 0));
-        assert_eq!(scan.lines.len(), 4);
+        assert_eq!(scan.lines.len(), 5);
+        assert_eq!(scan.partial, [Id::from_bytes([1; 16])]);
     }
 
     #[test]
@@ -1549,7 +1693,7 @@ mod tests {
         let dir = TempDir::new("journal-rewrite-delete");
         let gone = Id::from_bytes([1; 16]);
         let g = gone.to_string();
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "消す本文"))]).unwrap();
         j.append(
             NOW,
@@ -1570,7 +1714,7 @@ mod tests {
         );
         push_raw(&p, broken.as_bytes());
         push_raw(&p, b"{\"seq\":13,\"broken\":true,\"sum\":\"0\"}\n");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(
             NOW,
             &[LineOp::Delete {
@@ -1595,7 +1739,7 @@ mod tests {
         assert!(after.iter().any(|l| has(l, "\"delete\"")));
         assert!(tmp_files(&dir).is_empty());
         // 開き直しても、もう除く行は無い。
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(scan.rewrite_failed, None);
         assert_eq!(raw_lines(&p), expected);
     }
@@ -1608,7 +1752,7 @@ mod tests {
         let dir = TempDir::new("journal-rewrite-forget");
         let id = Id::from_bytes([1; 16]);
         let i = id.to_string();
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "伏せる前・番号なし"))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前・確定", 0))])
@@ -1637,7 +1781,7 @@ mod tests {
             "id": i, "kind": "turn", "v": "new", "body": {"rev": "x", "text": "番号を読めない"}
         }});
         push_raw(&p, &seal(odd_rev.to_string()));
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(j.rev_span(id), Some(RevSpan { min: 0, max: 1 }));
         let report = j.rewrite(&cut(id, JournalCut::Below(1))).unwrap();
         assert_eq!(report.removed, 3);
@@ -1666,7 +1810,7 @@ mod tests {
     fn a_forget_rewrite_keeps_everything_without_a_line_at_the_revision() {
         let dir = TempDir::new("journal-rewrite-no-after");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         let before = raw_lines(&path(&dir));
@@ -1683,7 +1827,7 @@ mod tests {
     fn a_rewrite_that_does_not_verify_leaves_the_file_as_it_was() {
         let dir = TempDir::new("journal-rewrite-verify");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
@@ -1708,7 +1852,7 @@ mod tests {
     fn a_failed_swap_is_retryable_and_the_retry_finishes() {
         let dir = TempDir::new("journal-rewrite-swap");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
@@ -1734,7 +1878,7 @@ mod tests {
     fn a_stop_after_the_temporary_file_leaves_the_original_and_the_tmp_is_removed_at_open() {
         let dir = TempDir::new("journal-rewrite-stop-tmp");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
@@ -1752,7 +1896,7 @@ mod tests {
             );
         }
         assert_eq!(raw_lines(&path(&dir)), before);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert!(
             tmp_files(&dir).is_empty(),
             "a leftover tmp is removed at open"
@@ -1769,7 +1913,7 @@ mod tests {
     fn a_stop_after_the_swap_opens_fine_next_time() {
         let dir = TempDir::new("journal-rewrite-stop-swap");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])
@@ -1777,7 +1921,7 @@ mod tests {
         j.inject_rewrite_fault(RewriteFault::StopAfterSwap);
         assert!(j.rewrite(&cut(id, JournalCut::Below(1))).is_err());
         drop(j);
-        let (mut j, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!((scan.bad, scan.lines.len()), (0, 1));
         assert_eq!(j.rev_span(id), Some(RevSpan { min: 1, max: 1 }));
         assert_eq!(j.append(NOW, &[LineOp::Put(env(2, "次"))]).unwrap(), 3);
@@ -1792,7 +1936,7 @@ mod tests {
     fn a_partly_rewritten_set_of_months_is_finished_after_reopening() {
         let dir = TempDir::new("journal-rewrite-months");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前・11月", 0))])
             .unwrap();
         // 古い版が後の月に足した、同じターンの伏せ字の前の行。
@@ -1811,7 +1955,7 @@ mod tests {
                 .any(|l| has(l, "伏せる前・12月"))
         );
         drop(j);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         let span = j.rev_span(id).unwrap();
         assert!(span.min < 1 && 1 <= span.max, "unfinished: {span:?}");
         let report = j.rewrite(&cut(id, JournalCut::Below(1))).unwrap();
@@ -1826,7 +1970,7 @@ mod tests {
     #[test]
     fn a_leftover_tmp_is_renamed_back_only_when_the_original_is_missing() {
         let dir = TempDir::new("journal-tmp-recover");
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "一"))]).unwrap();
         j.append(LATER, &[LineOp::Put(env(2, "二"))]).unwrap();
         drop(j);
@@ -1835,7 +1979,7 @@ mod tests {
         std::fs::rename(jdir.join("2025-11.jsonl"), jdir.join("2025-11.jsonl.tmp")).unwrap();
         // 12 月: 元のファイルも一時のファイルもある。
         std::fs::write(jdir.join("2025-12.jsonl.tmp"), b"stale").unwrap();
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert!(tmp_files(&dir).is_empty());
         assert_eq!(scan.lines.len(), 2, "the November line is read back");
         assert!(raw_lines(&path(&dir)).iter().any(|l| has(l, "一")));
@@ -1853,7 +1997,7 @@ mod tests {
     fn a_bad_line_naming_a_deleted_id_is_removed_at_the_next_open() {
         let dir = TempDir::new("journal-bad-after-partial");
         let gone = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(env(1, "消す本文"))]).unwrap();
         j.append(LATER, &[LineOp::Put(env(2, "残す"))]).unwrap();
         drop(j);
@@ -1862,7 +2006,7 @@ mod tests {
             "{{\"seq\":9,\"op\":\"put\",\"env\":{{\"id\":\"{gone}\",\"body\":{{\"text\":\"壊れた本文\"}}}},\"sum\":\"0\"}}\n"
         );
         push_raw(&december, broken.as_bytes());
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(
             LATER,
             &[LineOp::Delete {
@@ -1877,7 +2021,7 @@ mod tests {
         assert!(!raw_lines(&path(&dir)).iter().any(|l| has(l, "消す本文")));
         assert!(raw_lines(&december).iter().any(|l| has(l, "壊れた本文")));
         drop(j);
-        let (_, scan) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (_, scan) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         assert_eq!(scan.rewrite_failed, None);
         let after = raw_lines(&december);
         assert!(!after.iter().any(|l| has(l, "壊れた本文")));
@@ -1891,7 +2035,7 @@ mod tests {
     fn appends_stop_when_the_current_month_cannot_be_reopened() {
         let dir = TempDir::new("journal-reopen-fails");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         let other = Id::from_bytes([3; 16]);
         j.append(NOW, &[LineOp::Put(turn(3, "11月だけ", 0))])
             .unwrap();
@@ -1923,7 +2067,7 @@ mod tests {
     fn a_transient_reopen_failure_is_retried() {
         let dir = TempDir::new("journal-reopen-busy");
         let id = Id::from_bytes([1; 16]);
-        let (mut j, _) = Journal::open(dir.path(), 0, mono()).unwrap();
+        let (mut j, _) = Journal::open(dir.path(), 0, mono(), Tail::Uncommitted).unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "伏せる前", 0))])
             .unwrap();
         j.append(NOW, &[LineOp::Put(turn(1, "[伏せ字]", 1))])

@@ -204,12 +204,13 @@ pub fn export(
     } else {
         None
     };
-    let last_seq = database
+    let meta_map = database.as_ref().and_then(|d| read_meta_db_any(d).ok());
+    let last_seq = meta_map
         .as_ref()
-        .and_then(|d| read_meta_db_any(d).ok())
         .and_then(|m| m.get(meta::JOURNAL_LAST_SEQ)?.parse().ok())
         .unwrap_or(0);
-    let pending = journal::summarize(root, last_seq)?.pending;
+    let tail = journal::Tail::of(meta_map.as_ref());
+    let pending = journal::summarize(root, last_seq, tail)?.pending;
     if pending > 0 {
         return Err(ExportError::PendingJournal { lines: pending });
     }

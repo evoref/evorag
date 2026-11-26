@@ -24,25 +24,63 @@ pub const UNCOPIED_KINDS: &[&str] = &["unit"];
 /// 退避に写さない `meta` のキー (03 §7.1。単位と組の導出の指紋)。
 pub const UNCOPIED_META: &[&str] = &[meta::DERIVE_FINGERPRINT];
 
-/// 写さない種類の記録と、その記録の関係・副索引・`blobs` を見分ける ([`UNCOPIED_KINDS`])。表は [`TABLES`] の順
-/// (`records` が `links`・`lookup`・`blobs` より前) に写すので、`records` で見つけた ID を後の表で使う。
-#[derive(Debug, Default)]
+/// 写さない種類の記録と、その記録の関係・副索引・`blobs`・隔離の記録を見分ける ([`UNCOPIED_KINDS`])。表は
+/// [`TABLES`] の順 (`records` が `links`・`lookup`・`blobs` より前) に写すので、`records` で見つけた ID を後の表で
+/// 使う。
+#[derive(Debug)]
 struct Uncopied {
     ids: BTreeSet<Id>,
+    /// 写さない種類の、キーの接頭辞 (`records` と `lookup` のキーは種類の名前で始まる)。
+    prefixes: Vec<Vec<u8>>,
+    /// 隔離の記録のキーの接頭辞。
+    quarantine: Vec<u8>,
+}
+
+fn kind_prefix(kind: &str) -> Vec<u8> {
+    let mut k = key::KeyBuf::new();
+    k.str(kind);
+    k.into_bytes()
+}
+
+/// 隔離の記録 (`quarantine`) の、元の記録の種類 (本体の `kind`)。
+fn quarantined_kind(k: &[u8], v: &[u8]) -> Option<String> {
+    let env = crate::envelope::Envelope::decode(k, v).ok()?;
+    let ciborium::Value::Map(map) = &env.body else {
+        return None;
+    };
+    map.iter()
+        .find(|(k, _)| k.as_text() == Some("kind"))
+        .and_then(|(_, v)| v.as_text())
+        .map(str::to_owned)
 }
 
 impl Uncopied {
-    fn drops(&mut self, table: Table, k: &[u8]) -> bool {
+    fn new() -> Self {
+        Self {
+            ids: BTreeSet::new(),
+            prefixes: UNCOPIED_KINDS.iter().map(|k| kind_prefix(k)).collect(),
+            quarantine: kind_prefix(crate::store::KIND_QUARANTINE),
+        }
+    }
+
+    fn uncopied_kind(&self, k: &[u8]) -> bool {
+        self.prefixes.iter().any(|p| k.starts_with(p))
+    }
+
+    fn drops(&mut self, table: Table, k: &[u8], v: &[u8]) -> bool {
         let parts = || key::decode(k).ok();
         match table {
             Table::Meta => UNCOPIED_META.iter().any(|m| m.as_bytes() == k),
-            Table::Records => match crate::store::split_record_key(k) {
-                Some((kind, id)) if UNCOPIED_KINDS.contains(&kind.as_str()) => {
+            Table::Records => {
+                let gone = self.uncopied_kind(k)
+                    || (k.starts_with(&self.quarantine)
+                        && quarantined_kind(k, v)
+                            .is_some_and(|kind| UNCOPIED_KINDS.contains(&kind.as_str())));
+                if gone && let Some((_, id)) = crate::store::split_record_key(k) {
                     self.ids.insert(id);
-                    true
                 }
-                _ => false,
-            },
+                gone
+            }
             Table::Links => {
                 !self.ids.is_empty()
                     && parts().is_some_and(|p| {
@@ -50,10 +88,8 @@ impl Uncopied {
                             .any(|x| matches!(x, OwnedPart::Id(id) if self.ids.contains(id)))
                     })
             }
-            // 副索引の最初の要素は持ち主の記録の種類。
-            Table::Lookup => parts().is_some_and(|p| {
-                matches!(p.first(), Some(OwnedPart::Str(kind)) if UNCOPIED_KINDS.contains(&kind.as_str()))
-            }),
+            // 副索引のキーは、持ち主の記録の種類で始まる。
+            Table::Lookup => self.uncopied_kind(k),
             Table::Blobs => {
                 !self.ids.is_empty()
                     && parts().is_some_and(
@@ -154,7 +190,7 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
     let out = Database::create(path).map_err(db)?;
     let rtx = src.begin_read().map_err(db)?;
     let mut stats = CopyStats::default();
-    let mut uncopied = Uncopied::default();
+    let mut uncopied = Uncopied::new();
     let mut tx = out.begin_write().map_err(db)?;
     tx.set_durability(redb::Durability::None).map_err(db)?;
     for t in TABLES {
@@ -167,7 +203,7 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let (k, v) = (k.value(), v.value());
-            if uncopied.drops(kind, k) {
+            if uncopied.drops(kind, k, v) {
                 continue;
             }
             let replaced = match row(kind, k, v)? {
