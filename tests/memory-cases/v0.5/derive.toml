@@ -1,0 +1,344 @@
+# 導出の決定性・導出の指紋・プロファイル・辞書の版を上げた前後 (v0.5)。
+# 09 §3.5.1 の「導出の決定性」「指紋」「プロファイル」、09 §3.5.2 の 5 つの事例の (5)、04 §5.1・§5.3・§5.4・§7.4・§7.6。
+# 書式は README.md。会話はすべて架空 (11 §9.7)。
+
+# ---- 5 つの事例の (5): 辞書の採用の前後で指示が当たる単位の集合が縮まない (AC-FR-318-3 (e)) ----
+
+[[case]]
+id = "DR01"
+title = "辞書の版を上げて自由記述の属性が辞書の属性に写った後も、private が当たる単位の集合は縮まず、忘れた値は辞書の属性の候補からも単位にならない"
+spec = "09 §3.5.2 の 5 つの事例の 5、04 §5.1 の辞書 (別名)、§5.2 の属性の決め方、§7.5 の当て方の述語、§7.6 の entity の同値類"
+ac = ["AC-FR-318-3"]
+stage = "M5.4"
+note = "private の当て方 (04 §7.5) は、値の鍵か根拠の位置のどちらかで当たるとだけ書き、属性の比べ方を書いていない。ここでは忘れるの当て方の述語と同じく、自由記述の属性の private は属性を見ずに当たり、加えて根拠の位置で当たると読んだ。hits は、その指示を除いて導いた単位のうち、指示の当て方で当たるもの"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-02-01T10:00:00Z", text = "住まいは港町です。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "住まい", value = "港町" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-08T10:00:00Z", text = "前の住まいは霧ヶ丘でした。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["前の住まい"], units = [{ sentence = 1, aspect = "前の住まい", value = "霧ヶ丘", tense = "past" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "住まい", free = true, value = "港町", state = "Live", anchors = ["a1"] },
+  { aspect = "前の住まい", free = true, value = "霧ヶ丘", state = "Superseded", by = "(none)", anchors = ["b1"] },
+], profile = [] }
+[[case.step]]
+op = { kind = "private", name = "P1", target = { aspect = "住まい", free = true, value = "港町" }, scope = "value_only" }
+[[case.step]]
+op = { kind = "forget", name = "F1", target = { aspect = "前の住まい", free = true, value = "霧ヶ丘" }, redact = false }
+[[case.step]]
+expect = { units = [
+  { aspect = "住まい", free = true, value = "港町", state = "Live", private = true, anchors = ["a1"] },
+], hits = [{ directive = "P1", units = ["self/住まい=港町"] }] }
+[[case.step]]
+op = { kind = "dict", version = 3, aliases = { residence = ["住まい"] } }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港町", state = "Live", private = true, anchors = ["a1"] },
+], hits = [{ directive = "P1", units = ["self/residence=港町"] }], profile = [], fingerprint = "changed" }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-01T10:00:00Z", text = "住まいは霧ヶ丘です。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["住まい"], units = [{ sentence = 1, aspect = "住まい", value = "霧ヶ丘" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港町", state = "Live", private = true, anchors = ["a1"] },
+], ledgers = [{ name = "L3", units = [], keys = [] }], not_live = ["self/residence=霧ヶ丘"] }
+
+[[case]]
+id = "DR02"
+title = "自由記述の属性の end は、辞書の版を上げてその属性が辞書の属性に写っても当たり続け、前の値を Live に戻さない"
+spec = "04 §7.4 の end の形・当て方、§5.1 の辞書、§5.2 の属性の決め方"
+ac = ["AC-FR-317-1", "AC-FR-318-3"]
+stage = "M5.4"
+note = "04 §7.4 は、end の entity を今の規則で解き直すと書くが、aspect (自由記述の属性の aspect_mac) を写した後の辞書の属性と比べる規則を書いていない。ここでは、end の aspect_mac は、候補の写す前の自由記述の属性の鍵とも比べる (写した後の属性が辞書の属性でも当たる) と読んだ。仕様の補いが要る"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-20T10:00:00Z", text = "住まいは北町の団地です。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "住まい", value = "北町" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-20T10:00:00Z", text = "北町からは先月引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "住まい", value = "北町", tense = "past" }] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-03-20T10:00:00Z", text = "住まいは南浜です。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["住まい"], units = [{ sentence = 1, aspect = "住まい", value = "南浜" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "住まい", free = true, value = "北町", state = "Superseded", by = "(none)", anchors = ["a1", "b1"] },
+  { aspect = "住まい", free = true, value = "南浜", state = "Live", anchors = ["c1"] },
+] }
+[[case.step]]
+op = { kind = "delete_session", session = "B" }
+[[case.step]]
+expect = { units = [
+  { aspect = "住まい", free = true, value = "北町", state = "Superseded", by = "(none)", anchors = ["a1"] },
+  { aspect = "住まい", free = true, value = "南浜", state = "Live", anchors = ["c1"] },
+], ends = [{ aspect = "住まい", free = true, value = "北町", turn = "b1", origin = "delete" }] }
+[[case.step]]
+op = { kind = "dict", version = 3, aliases = { residence = ["住まい"] } }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "北町", state = "Superseded", by = "(none)", anchors = ["a1"] },
+  { aspect = "residence", value = "南浜", state = "Live", anchors = ["c1"] },
+], not_live = ["self/residence=北町"], profile = ["self/residence=南浜"], fingerprint = "changed" }
+
+# ---- 導出の決定性 (09 §3.5.1・§3.5.2、AC-FR-315-1) ----
+
+[[case]]
+id = "DR03"
+title = "台帳と指示を読む順 (区切りの到着の順・台帳の書かれた順・同じ区切りの複数の選択の台帳の順) を乱しても、単位の集合・本体・指紋が同じ"
+spec = "09 §3.5.1 の導出の決定性、04 §5.3 の全件の導出・入力の順・到着の順に依らない"
+ac = ["AC-FR-315-1"]
+stage = "M5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-04-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-04-01T10:01:00Z", text = "趣味は将棋です。" } # 2
+[[case.step]]
+segment = { name = "S1", pairs = ["a1", "a3"] }
+[[case.step]]
+op = { kind = "select", model = "m1" }
+[[case.step]]
+ledger = { name = "L1m1", seg = "S1", keys = ["住まいと趣味"], units = [
+  { sentence = 1, aspect = "residence", value = "港南台" },
+] }
+[[case.step]]
+op = { kind = "select", model = "m2" }
+[[case.step]]
+ledger = { name = "L1m2", seg = "S1", keys = ["住まい", "将棋"], units = [
+  { sentence = 1, aspect = "residence", value = "港南台" },
+  { sentence = 2, aspect = "hobby", value = "将棋" },
+] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-08T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+turn = { id = "b3", session = "B", at = "2026-04-08T10:01:00Z", text = "最近は囲碁も始めました。" } # 2
+[[case.step]]
+segment = { name = "S2", pairs = ["b1", "b3"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し", "囲碁"], units = [
+  { sentence = 1, aspect = "residence", value = "汐見坂" },
+  { sentence = 2, aspect = "hobby", value = "囲碁" },
+] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-04-15T10:00:00Z", text = "昨日、海辺の公園でバーベキューをしました。" } # 1
+[[case.step]]
+turn = { id = "c3", session = "C", at = "2026-04-15T10:01:00Z", text = "霧笛町に住んでるよ。" } # 2
+[[case.step]]
+segment = { name = "S3", pairs = ["c1", "c3"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["バーベキュー"], units = [
+  { sentence = 1, layer = "episode", aspect = "したこと", value = "バーベキュー", when = "昨日" },
+  { sentence = 2, aspect = "residence", value = "霧笛町" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { label = "base", units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+  { aspect = "residence", value = "霧笛町", state = "Contested", against = "汐見坂", anchors = ["c3"] },
+  { aspect = "hobby", value = "将棋", state = "Live", anchors = ["a3"] },
+  { aspect = "hobby", value = "囲碁", state = "Live", anchors = ["b3"] },
+  { layer = "episode", aspect = "したこと", free = true, value = "バーベキュー", anchors = ["c1"], when = { from = "2026-04-14", to = "2026-04-14", basis = "relative" } },
+] }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 1 }
+[[case.step]]
+expect = { same_as = "base" }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 2 }
+[[case.step]]
+expect = { same_as = "base" }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 3 }
+[[case.step]]
+expect = { same_as = "base" }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { same_as = "base" }
+
+[[case]]
+id = "DR04"
+title = "忘れるの後の導出を、到着の順を乱して 2 回流しても同じ結果になる"
+spec = "09 §3.5.2 の導出の決定性、04 §5.3、§7.2"
+ac = ["AC-FR-315-1", "AC-FR-318-1"]
+stage = "M5.4"
+modes = ["redact", "keep"]
+markers = ["汐見坂"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-04-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-08T10:00:00Z", text = "先月、汐見坂に引っ越しました。趣味は将棋です。" } # 1・2
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し", "将棋"], units = [
+  { sentence = 1, aspect = "residence", value = "汐見坂" },
+  { sentence = 2, aspect = "hobby", value = "将棋" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { label = "after_forget", units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+  { aspect = "hobby", value = "将棋", state = "Live", anchors = ["b1"] },
+], ends = [{ aspect = "residence", value = "港南台", turn = "b1" }] }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 21 }
+[[case.step]]
+expect = { same_as = "after_forget" }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 22 }
+[[case.step]]
+expect = { same_as = "after_forget" }
+
+# ---- 導出の指紋 (09 §3.5.1、AC-FR-315-2) ----
+
+[[case]]
+id = "DR05"
+title = "入力を変える操作 (台帳の追加・掃除・置き換え・指示の追加・辞書と規則の版・選択) のどれでも導出の指紋が変わり、変えない操作では変わらない"
+spec = "09 §3.5.1 の指紋、04 §5.3 の導出の指紋"
+ac = ["AC-FR-315-2"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-04-20T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { label = "base" }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { fingerprint = "same" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-21T10:00:00Z", text = "趣味は将棋です。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"], closed = false }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["趣味"], units = [{ sentence = 1, aspect = "hobby", value = "将棋" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+turn = { id = "b3", session = "B", at = "2026-04-21T10:02:00Z", text = "最近は囲碁も始めました。" } # 2
+[[case.step]]
+turn = { id = "b5", session = "B", at = "2026-04-21T10:04:00Z", text = "週末は碁会所に行きます。" } # 3
+[[case.step]]
+segment = { name = "S2", pairs = ["b1", "b3", "b5"], closed = false }
+[[case.step]]
+ledger = { name = "L2b", seg = "S2", keys = ["趣味"], units = [
+  { sentence = 1, aspect = "hobby", value = "将棋" },
+  { sentence = 2, aspect = "hobby", value = "囲碁" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { fingerprint = "changed", ledgers = [{ name = "L2", present = false }] }
+[[case.step]]
+op = { kind = "private", target = { aspect = "hobby", value = "将棋" } }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "hobby", value = "囲碁" }, redact = false }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+op = { kind = "dict", version = 3, aliases = { residence = ["住まい"] } }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+op = { kind = "rules", name = "prefilter" }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+op = { kind = "select", model = "m9" }
+[[case.step]]
+expect = { fingerprint = "changed" }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { fingerprint = "same" }
+
+# ---- プロファイル (09 §3.5.1、AC-FR-316-1) ----
+
+[[case]]
+id = "DR06"
+title = "プロファイルは辞書の属性の world の Live で private でない単位だけ (予定は印付き)。自由記述の属性と出来事は入らず、forget_key が使えない間は置かない"
+spec = "04 §5.4、§5.1 の日付 (相対の日付を UTC からのずれで解く)"
+ac = ["AC-FR-316-1", "AC-FR-315-4"]
+stage = "M5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-05-20T01:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-05-20T01:01:00Z", text = "昨日、海辺の公園でバーベキューをしました。" } # 2
+[[case.step]]
+turn = { id = "a4", session = "A", at = "2026-05-20T01:02:00Z", text = "来年、汐見坂に引っ越す予定です。" } # 3
+[[case.step]]
+turn = { id = "a5", session = "A", at = "2026-05-20T01:03:00Z", text = "よく行く店は喫茶ミモザです。" } # 4
+[[case.step]]
+turn = { id = "a6", session = "A", at = "2026-05-20T01:04:00Z", tz = "none", text = "先週、山登りをしました。" } # 5
+[[case.step]]
+segment = { name = "S1", pairs = ["a1", "a3", "a4", "a5", "a6"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まいと週末"], units = [
+  { sentence = 1, aspect = "residence", value = "港南台" },
+  { sentence = 2, layer = "episode", aspect = "したこと", value = "バーベキュー", when = "昨日" },
+  { sentence = 3, aspect = "residence", value = "汐見坂", tense = "planned", when = "来年" },
+  { sentence = 4, aspect = "よく行く店", value = "喫茶ミモザ" },
+  { sentence = 5, layer = "episode", aspect = "したこと", value = "山登り", when = "先週" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Live", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", tense = "planned", anchors = ["a4"] },
+  { aspect = "よく行く店", free = true, value = "喫茶ミモザ", state = "Live", anchors = ["a5"] },
+  { layer = "episode", aspect = "したこと", free = true, value = "バーベキュー", anchors = ["a3"], when = { from = "2026-05-19", to = "2026-05-19", basis = "relative" } },
+  { layer = "episode", aspect = "したこと", free = true, value = "山登り", anchors = ["a6"], when = { basis = "no_offset" } },
+], profile = ["self/residence=港南台", "self/residence=汐見坂 (予定)"] }
+[[case.step]]
+op = { kind = "forget_key", available = false }
+[[case.step]]
+expect = { profile = { absent = true } }
+[[case.step]]
+op = { kind = "forget_key", available = true }
+[[case.step]]
+expect = { profile = ["self/residence=港南台", "self/residence=汐見坂 (予定)"] }

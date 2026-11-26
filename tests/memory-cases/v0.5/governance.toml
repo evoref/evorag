@@ -1,0 +1,437 @@
+# 統治の指示 (private・private_off・accept・revert・削除で足す指示) と import-v04 の end、古い根の処分 (v0.5)。
+# 09 §3.5.2 の 5 つの事例の (4)・置き場所の表の「古い根」、04 §7.4・§7.5、03 §10.2・§12.4。
+# 書式は README.md。会話はすべて架空 (11 §9.7)。
+
+# ---- 5 つの事例の (4): 後から private (AC-FR-318-3 (d)、AC-FR-317-3) ----
+
+[[case]]
+id = "GV01"
+title = "台帳を作った後に private にした値が、台帳を作り直さずに検索の鍵・プロファイル・添える往復から除かれ、/private off の次のターンで元に戻る"
+spec = "09 §3.5.2 の 5 つの事例の 4、04 §5.4 の作り直す時機、§5.5 の区切りの鍵の検査、§7.5 の想起での private"
+ac = ["AC-FR-317-3", "AC-FR-318-3", "AC-FR-303-2"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-01T10:00:00Z", text = "くるみは食べられません。" } # 1
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-10-01T10:00:10Z", role = "assistant", text = "くるみを使わないお菓子にしましょう。" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-10-01T10:01:00Z", text = "私は港南台に住んでいます。" } # 2
+[[case.step]]
+segment = { name = "S1", pairs = ["a1", "a3"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["食べられないもの", "くるみの代わり"], units = [
+  { sentence = 1, aspect = "dietary", value = "くるみ" },
+  { sentence = 2, aspect = "residence", value = "港南台" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "jobs" }
+[[case.step]]
+op = { kind = "send", session = "B", text = "おやつの相談をさせてください。" }
+[[case.step]]
+expect = { label = "before", profile = ["self/residence=港南台", "self/dietary=くるみ"], seg_keys = { S1 = ["食べられないもの", "くるみの代わり"] }, unit_keys = ["residence 港南台", "dietary くるみ"], chat_request = { present = ["くるみ"] } }
+[[case.step]]
+op = { kind = "private", name = "P1", target = { aspect = "dietary", value = "くるみ" } }
+[[case.step]]
+op = { kind = "send", session = "B", text = "おすすめの焼き菓子はありますか？" }
+[[case.step]]
+expect = { units = [
+  { aspect = "dietary", value = "くるみ", state = "Live", private = true, anchors = ["a1"] },
+  { aspect = "residence", value = "港南台", state = "Live", anchors = ["a3"] },
+], profile = ["self/residence=港南台"], seg_keys = { S1 = ["食べられないもの"] }, unit_keys = ["residence 港南台"], recall = [
+  { turn = "a1", text = "[非表示]は食べられません。" },
+  { turn = "a2", text = "[非表示]を使わないお菓子にしましょう。" },
+], ledgers = [{ name = "L1", unchanged = true }], chat_request = { absent = ["くるみ"] } }
+[[case.step]]
+op = { kind = "private_off", target = { aspect = "dietary", value = "くるみ" } }
+[[case.step]]
+op = { kind = "send", session = "B", text = "ありがとう、参考にします。" }
+[[case.step]]
+expect = { profile = ["self/residence=港南台", "self/dietary=くるみ"], seg_keys = { S1 = ["食べられないもの", "くるみの代わり"] }, unit_keys = ["residence 港南台", "dietary くるみ"], ledgers = [{ name = "L1", unchanged = true }], chat_request = { profile_same_as = "before" } }
+
+[[case]]
+id = "GV02"
+title = "private では台帳を掃除しない (台帳はバイト列まで同じで scrubbed は 0)。/private off で鍵が戻る"
+spec = "04 §7.2 の台帳の掃除 (private は掃除しない)、§5.5、§7.9 の台帳の行"
+ac = ["AC-FR-317-3"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-02T10:00:00Z", text = "えびは食べられません。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["えびの代わり", "食べられないもの"], units = [{ sentence = 1, aspect = "dietary", value = "えび" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { ledgers = [{ name = "L1", scrubbed = 0, input_hash = "set" }], seg_keys = { S1 = ["えびの代わり", "食べられないもの"] } }
+[[case.step]]
+op = { kind = "private", target = { aspect = "dietary", value = "えび" } }
+[[case.step]]
+expect = { ledgers = [{ name = "L1", unchanged = true, scrubbed = 0, input_hash = "set" }], seg_keys = { S1 = ["食べられないもの"] }, fingerprint = "changed", requests = 0 }
+[[case.step]]
+op = { kind = "private_off", target = { aspect = "dietary", value = "えび" } }
+[[case.step]]
+expect = { ledgers = [{ name = "L1", unchanged = true, scrubbed = 0, input_hash = "set" }], seg_keys = { S1 = ["えびの代わり", "食べられないもの"] }, units = [
+  { aspect = "dietary", value = "えび", state = "Live", private = false, anchors = ["a1"] },
+], requests = 0 }
+
+[[case]]
+id = "GV03"
+title = "private の後継: 多値の属性であとで足した値も private になる。「この値だけ」では後の値は private にならない"
+spec = "04 §7.5 の後継、private の効く範囲 (OQ-47)"
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-03T10:00:00Z", text = "くるみは食べられません。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["食べられないもの"], units = [{ sentence = 1, aspect = "dietary", value = "くるみ" }] }
+[[case.step]]
+turn = { id = "a3", session = "A2", at = "2026-10-03T11:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1b", pairs = ["a3"] }
+[[case.step]]
+ledger = { name = "L1b", seg = "S1b", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "private", target = { aspect = "dietary", value = "くるみ" } }
+[[case.step]]
+op = { kind = "private", target = { aspect = "residence", value = "港南台" }, scope = "value_only" }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-10-10T10:00:00Z", text = "落花生も食べられません。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["食べられないもの"], units = [{ sentence = 1, aspect = "dietary", value = "落花生" }] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-10-17T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "dietary", value = "くるみ", state = "Live", private = true, anchors = ["a1"] },
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", private = true, anchors = ["a3"] },
+  { aspect = "dietary", value = "落花生", state = "Live", private = true, anchors = ["b1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", private = false, anchors = ["c1"] },
+], profile = ["self/residence=汐見坂"] }
+
+[[case]]
+id = "GV04"
+title = "採る (accept) は指示の時点で Contested を今の値にし、導き直しても同じ。採った値を忘れると前の値は end で終わる"
+spec = "04 §7.4 の /memory accept、§7.5 の accept・revert の当て方、当てる時点"
+ac = ["AC-FR-317-1"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-04T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-10-11T10:00:00Z", text = "汐見坂に住んでるよ。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Live", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Contested", against = "港南台", anchors = ["b1"] },
+] }
+[[case.step]]
+op = { kind = "accept", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { label = "accepted", units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], profile = ["self/residence=汐見坂"] }
+[[case.step]]
+op = { kind = "derive", order = "shuffle", seed = 3 }
+[[case.step]]
+expect = { same_as = "accepted" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], ends = [{ aspect = "residence", value = "港南台", turn = "b1" }], not_live = ["self/residence=港南台"], profile = [] }
+
+[[case]]
+id = "GV05"
+title = "戻す (revert) は履歴の値を今の値にし、後から置き換えの条件を満たす値が来れば通常どおり置き換わる"
+spec = "04 §7.4 の /memory revert、§7.5 の accept・revert の当て方"
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-05T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-10-12T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "revert", target = { aspect = "residence", value = "港南台" } }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Live", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Superseded", by = "港南台", anchors = ["b1"] },
+], profile = ["self/residence=港南台"] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-10-19T10:00:00Z", text = "先週、霧笛町に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "霧笛町" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "霧笛町", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Superseded", by = "港南台", anchors = ["b1"] },
+  { aspect = "residence", value = "霧笛町", state = "Live", anchors = ["c1"] },
+], profile = ["self/residence=霧笛町"] }
+
+[[case]]
+id = "GV06"
+title = "セッションの削除で後継でなくなる値には、「この値だけ」の private (origin = delete) を足し、private のまま残す"
+spec = "04 §7.1 のセッションの削除、§7.5 の後継"
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-10-06T10:00:00Z", text = "くるみと落花生は食べられません。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["食べられないもの"], units = [
+  { sentence = 1, aspect = "dietary", value = "くるみ" },
+  { sentence = 1, aspect = "dietary", value = "落花生" },
+] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "private", target = { aspect = "dietary", value = "くるみ" } }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-10-13T10:00:00Z", text = "落花生は今も食べられません。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["食べられないもの"], units = [{ sentence = 1, aspect = "dietary", value = "落花生" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "dietary", value = "くるみ", state = "Live", private = true, anchors = ["a1"] },
+  { aspect = "dietary", value = "落花生", state = "Live", private = true, anchors = ["a1", "c1"] },
+], profile = [] }
+[[case.step]]
+op = { kind = "delete_session", session = "C" }
+[[case.step]]
+expect = { units = [
+  { aspect = "dietary", value = "くるみ", state = "Live", private = true, anchors = ["a1"] },
+  { aspect = "dietary", value = "落花生", state = "Live", private = true, anchors = ["a1"] },
+], directives = [{ op = "private", aspect = "dietary", value = "落花生", scope = "value_only", origin = "delete" }], ends = [], profile = [] }
+
+# ---- import-v04 の end (AC-FR-219-4、03 §12.4、04 §7.4) ----
+
+[[case]]
+id = "GV10"
+title = "import-v04: v0.4 で Superseded だった値は Live に戻らず (import.v04_ended の end)、v0.4 で Live だった値は Live のまま。取り込みの後に言い直した値は Live になる"
+spec = "03 §12.4 の指示の写し方 (end を足す)、04 §7.4 の import-v04 の end、09 §3.6"
+ac = ["AC-FR-219-4"]
+stage = "M5.3"
+note = "v0.4 では、訂正の検証で 港南台 → 汐見坂 と置き換えていた。v0.5 の B2 は同じ訂正を unclear と判定し、導出だけでは 港南台 が Live・汐見坂 が Contested になる組を作る"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-01T10:00:00Z", text = "港南台じゃなくて汐見坂に住んでいます。" } # 1。訂正の候補 1
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [
+  { aspect = "residence", value = "港南台", state = "Superseded", sources = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", sources = ["b1"] },
+], directives = [] } }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], ends = [{ aspect = "residence", value = "港南台", turn = "a1", origin = "import" }], profile = [] }
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["住まいの訂正"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂", old = "港南台" }], corrections = [{ id = 1, verdict = "unclear" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], ends = [{ aspect = "residence", value = "港南台", turn = "a1", origin = "import" }], not_live = ["self/residence=港南台"], profile = ["self/residence=汐見坂"] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-12-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Live", anchors = ["a1", "c1"] },
+  { aspect = "residence", value = "汐見坂", state = "Superseded", by = "港南台", anchors = ["b1"] },
+], profile = ["self/residence=港南台"] }
+
+[[case]]
+id = "GV11"
+title = "import-v04: v0.4 で今の値が無かった属性 (今の値を伏せ字にして忘れた) の古い値は Live に戻らない。写した忘れるは取り込みの後の言い直しにも当たる"
+spec = "03 §12.4、04 §7.4 の import-v04 の end、OQ-49"
+ac = ["AC-FR-219-4"]
+stage = "M5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-02T10:00:00Z", text = "私は会社員です。" } # 1
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-02T10:00:00Z", text = "今は[伏せ字]です。" } # 1。v0.4 で伏せ字にした本文
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [
+  { aspect = "occupation", value = "会社員", state = "Superseded", sources = ["a1"] },
+  { aspect = "occupation", value = "大学院生", state = "Retracted", sources = ["b1"] },
+], directives = [
+  { op = "forget", target = { aspect = "occupation", value = "大学院生" }, redact = true },
+] } }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["仕事"], units = [{ sentence = 1, aspect = "occupation", value = "会社員" }] }
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["近況"], units = [] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "occupation", value = "会社員", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], ends = [{ aspect = "occupation", value = "会社員", turn = "a1", origin = "import" }], not_live = ["self/occupation=会社員"], profile = [] }
+[[case.step]]
+turn = { id = "c1", session = "C", at = "2026-12-02T10:00:00Z", text = "今も大学院生です。" } # 1
+[[case.step]]
+segment = { name = "S3", pairs = ["c1"] }
+[[case.step]]
+ledger = { name = "L3", seg = "S3", keys = ["近況"], units = [{ sentence = 1, aspect = "occupation", value = "大学院生" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "occupation", value = "会社員", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], ledgers = [{ name = "L3", units = [], keys = [] }], profile = [] }
+
+[[case]]
+id = "GV12"
+title = "import-v04: 取り込んだ private は範囲が重なれば当たる (値の鍵が違っても)。どの単位にも当たらなかった取り込みの private は doctor に出る"
+spec = "04 §7.5 の取り込んだ指示の位置、03 §12.4"
+ac = ["AC-FR-219-4"]
+stage = "M5.3"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-03T10:00:00Z", text = "甘えびは食べられません。" } # 1
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-04-03T10:00:00Z", text = "週末はラーメン屋めぐりをしています。" } # 1
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [
+  { aspect = "dietary", value = "甘えび", state = "Live", sources = ["a1"] },
+  { aspect = "likes", value = "ラーメン", state = "Live", sources = ["b1"] },
+], directives = [
+  { op = "private", target = { aspect = "dietary", value = "甘えび" }, at = { turn = "a1", text = "甘えび" } },
+  { op = "private", target = { aspect = "likes", value = "ラーメン" }, at = { turn = "b1", text = "ラーメン" } },
+] } }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["食べられないもの"], units = [{ sentence = 1, aspect = "dietary", value = "えび" }] }
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["週末の過ごし方"], units = [] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { units = [
+  { aspect = "dietary", value = "えび", state = "Live", private = true, anchors = ["a1"] },
+], profile = [], doctor = ["import_private_unmatched"] }
+
+# ---- 古い根 (取り込みの後) (09 §3.5.2 の表、AC-FR-220-1) ----
+
+[[case]]
+id = "GV13"
+title = "古い根が残っている間は、最初の忘れるとセッションの削除を実行しない。古い根を処分すると、古い根と外の退避の置き場所の退避が消えてから実行する"
+spec = "09 §3.5.2 (古い根)、04 §7.1 の古い根の処分を先に求める、03 §10.2"
+ac = ["AC-FR-220-1"]
+stage = "M5.4"
+markers = ["汐見坂"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-04T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [{ aspect = "residence", value = "汐見坂", state = "Live", sources = ["a1"] }], directives = [] }, old_root = "kept" }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { refused = "old_root_kept", units = [{ aspect = "residence", value = "汐見坂", state = "Live", anchors = ["a1"] }], turns = [{ id = "a1", text = "先月、汐見坂に引っ越しました。", rev = 0 }] }
+[[case.step]]
+op = { kind = "delete_session", session = "A" }
+[[case.step]]
+expect = { refused = "old_root_kept" }
+[[case.step]]
+op = { kind = "dispose_old_root" }
+[[case.step]]
+expect = { old_root = { exists = false }, scan = { places = ["old_root", "backup_dir"] } }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { units = [], turns = [{ id = "a1", text = "先月、[伏せ字]に引っ越しました。", rev = 1 }] }
+
+[[case]]
+id = "GV14"
+title = "取り込みの後に v0.4 で古い根を使っていたら (要約が変わった)、処分を断り、忘れるも実行しない"
+spec = "04 §7.1 の古い根の処分を先に求める、03 §10.2 の手順 (0)"
+ac = ["AC-FR-220-1"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-05T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [{ aspect = "residence", value = "汐見坂", state = "Live", sources = ["a1"] }], directives = [] }, old_root = "kept" }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "dispose_old_root", changed = true }
+[[case.step]]
+expect = { refused = "old_root_changed", old_root = { exists = true, intact = true } }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+expect = { refused = "old_root_kept", units = [{ aspect = "residence", value = "汐見坂", state = "Live", anchors = ["a1"] }] }

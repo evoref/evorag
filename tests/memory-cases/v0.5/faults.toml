@@ -1,0 +1,364 @@
+# 障害の注入の v0.5 の点 (09 §4 の表の v0.5 の行と、§3.5 の v0.3 の止める点)。
+# 書式は README.md の「障害の注入」。`points` の点ごとに事例を 1 回ずつ流す。`crash = true` の段の操作の途中で、
+# その回の点で強制終了 (子プロセスを kill) し、続く `op = { kind = "restart" }` で起動し直す。
+# 会話はすべて架空 (11 §9.7)。
+
+[[case]]
+id = "FI01"
+title = "台帳の書き込みの前後で止めても、コミットした台帳は残り、コミットの前の区切りは台帳が無いものとして呼び直す。会話とほかの区切りの台帳は失わない"
+spec = "09 §4 (台帳の書き込みの前後の強制終了)、04 §5.2.1、03 §3.4"
+ac = ["AC-FR-313-2"]
+stage = "M5.2"
+points = ["call_in_flight", "before_ledger_commit", "after_ledger_commit"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-06-02T10:00:00Z", text = "趣味は将棋です。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["趣味"], units = [{ sentence = 1, aspect = "hobby", value = "将棋" }], crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は港南台に住んでいます。" },
+  { id = "b1", text = "趣味は将棋です。" },
+], ledgers = [{ name = "L1", present = true, unchanged = true }] }
+[[case.step]]
+expect = { point = ["call_in_flight", "before_ledger_commit"], ledgers = [{ name = "L2", present = false }], needs_call = ["S2"] }
+[[case.step]]
+expect = { point = ["after_ledger_commit"], ledgers = [{ name = "L2", present = true }], needs_call = [] }
+
+[[case]]
+id = "FI02"
+title = "単位と導出の指紋 (None) の書き込みの途中で止めても、起動の後に指紋が合わないことに気付いて全件を導き直し、止めずに通したときと同じ単位になる"
+spec = "09 §4 (導出の結果の書き込みの途中の強制終了)、04 §5.3 の導出の指紋、§4 の要る作り直しは状態から求める"
+ac = ["AC-FR-315-2"]
+stage = "M5.3"
+points = ["during_unit_write"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-03T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-06-04T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive", crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], profile = ["self/residence=汐見坂"] }
+
+[[case]]
+id = "FI03"
+title = "忘れるの途中 (ジャーナルの組を書き終えた後の各点) で止めても、起動と job の後に、忘れた値が置き場所のどこにも無く、ほかのターンの本文とほかの区切りの台帳が変わらない"
+spec = "09 §4 (忘れる (v0.5) の途中の強制終了)、§3.5 の v0.3 の止める点、04 §7.2 の当て直し、03 §6・§7.3・§8"
+ac = ["AC-FR-318-4", "AC-FR-318-1"]
+stage = "M5.4"
+modes = ["redact", "keep"]
+markers = ["青葉台"]
+points = ["after_journal_group", "before_txn_commit", "after_commit_before_purge", "after_commit_before_journal_rewrite", "journal_rewrite_tmp_written", "journal_rewrite_after_swap", "backup_rewrite_after_first", "backup_rewrite_during_scrub", "compact_midway"]
+[[case.step]]
+turn = { id = "z1", session = "Z", at = "2026-06-05T09:00:00Z", text = "趣味は将棋です。" } # 1
+[[case.step]]
+segment = { name = "S0", pairs = ["z1"] }
+[[case.step]]
+ledger = { name = "L0", seg = "S0", keys = ["趣味"], units = [{ sentence = 1, aspect = "hobby", value = "将棋" }] }
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-06T10:00:00Z", text = "私は青葉台に住んでいます。" } # 1
+[[case.step]]
+turn = { id = "a2", session = "A", at = "2026-06-06T10:00:10Z", role = "assistant", text = "青葉台は緑が多い町ですね。" }
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["青葉台の暮らし"], units = [{ sentence = 1, aspect = "residence", value = "青葉台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "jobs" }
+[[case.step]]
+op = { kind = "backup", name = "K1" }
+[[case.step]]
+op = { kind = "backup", name = "K2" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "青葉台" }, crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+op = { kind = "jobs" }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { units = [{ aspect = "hobby", value = "将棋", state = "Live", anchors = ["z1"] }], turns = [
+  { id = "z1", text = "趣味は将棋です。", rev = 0 },
+], ledgers = [{ name = "L0", unchanged = true }, { name = "L1", units = [], keys = [] }], profile = ["self/hobby=将棋"], scan = { places = ["ledgers", "units", "seg_keys", "unit_keys", "embeddings", "profile", "quarantine"] } }
+[[case.step]]
+expect = { mode = "redact", turns = [
+  { id = "a1", text = "私は[伏せ字]に住んでいます。", rev = 1 },
+  { id = "a2", text = "[伏せ字]は緑が多い町ですね。", rev = 1 },
+], scan = { places = ["turns", "journal", "backups", "chunks", "lex_index", "vec_index", "db_file"] } }
+[[case.step]]
+expect = { mode = "keep", recall = [
+  { turn = "a1", text = "私は[非表示]に住んでいます。" },
+  { turn = "a2", text = "[非表示]は緑が多い町ですね。" },
+], backups = [{ name = "K1", ledgers = { L1 = { units = [], keys = [] } } }, { name = "K2", ledgers = { L1 = { units = [], keys = [] } } }] }
+
+[[case]]
+id = "FI04"
+title = "ジャーナルの組の行がそろわない (forget の行の後・end の行の後で止めた) ときは、取り込みは組を捨てて当てない。操作をやり直すと当たる"
+spec = "09 §4 (forget の行の後・end の行の前、end の行の後・伏せ字のターンの行の前)、03 §6 の組の行、04 §7.2 のジャーナル"
+ac = ["AC-FR-318-4"]
+stage = "M5.4"
+points = ["after_forget_line", "after_end_line"]
+note = "伏せ字にしない忘れるは組に伏せ字のターンの行を持たない (forget と end の 2 行) ので、after_end_line は組がそろってしまう。伏せ字にする忘れるだけで流す"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-10T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-10T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+expect = { label = "before_forget" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" }, redact = true, crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { same_as = "before_forget", units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], turns = [{ id = "b1", text = "先月、汐見坂に引っ越しました。", rev = 0 }], ends = [], ledgers = [{ name = "L2", unchanged = true }] }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" }, redact = true }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], turns = [{ id = "b1", text = "先月、[伏せ字]に引っ越しました。", rev = 1 }], ends = [{ aspect = "residence", value = "港南台", turn = "b1" }] }
+
+[[case]]
+id = "FI05"
+title = "ジャーナルの末尾でない場所の欠けた組は当てずに数え、doctor が報告する"
+spec = "03 §6 の組の行 (末尾でない場所の欠けた組)"
+ac = ["AC-FR-318-4"]
+stage = "M5.4"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-10T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-10T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "backup", name = "K1" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "汐見坂" } }
+[[case.step]]
+op = { kind = "send", session = "C", text = "今日は雨ですね。" }
+[[case.step]]
+op = { kind = "journal_drop", group_line = "end" }
+[[case.step]]
+op = { kind = "restore", backup = "K1" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], ends = [], doctor = ["journal_incomplete_group"] }
+
+[[case]]
+id = "FI06"
+title = "削除の途中 (delete の行の後・end・private の行の前) で止めると、組がそろわない操作は当たらずセッションが残る。やり直すと消えて、前の値が Live に戻らない"
+spec = "09 §4 (削除 (v0.5) の途中の強制終了)、03 §6 の組の行、04 §7.4"
+ac = ["AC-FR-317-1"]
+stage = "M5.4"
+points = ["after_delete_line"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-01-10T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-02-10T10:00:00Z", text = "先月、汐見坂に引っ越しました。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L2", seg = "S2", keys = ["引っ越し"], units = [{ sentence = 1, aspect = "residence", value = "汐見坂" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "delete_session", session = "B", crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { turns = [{ id = "b1", text = "先月、汐見坂に引っ越しました。" }], units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "汐見坂", anchors = ["a1"] },
+  { aspect = "residence", value = "汐見坂", state = "Live", anchors = ["b1"] },
+], ends = [] }
+[[case.step]]
+op = { kind = "delete_session", session = "B" }
+[[case.step]]
+expect = { units = [
+  { aspect = "residence", value = "港南台", state = "Superseded", by = "(none)", anchors = ["a1"] },
+], ends = [{ aspect = "residence", value = "港南台", turn = "b1", origin = "delete" }], not_live = ["self/residence=港南台"] }
+
+[[case]]
+id = "FI07"
+title = "B2 の途中の忘れる: 飛んでいる区切りの呼び出しを止めて確かめてからスロットの消去を求め、止めた呼び出しの partial の台帳にも書く前の掃除が当たる。伏せ字にしたときは改訂の番号が合わずに捨てる"
+spec = "09 §4 (B2 の途中の忘れる)、04 §4 (台帳を書く前の確かめと掃除)、§5.2.1 の止められたとき、§7.2 の順、§7.5 の読んだ後に足された忘れる"
+ac = ["AC-FR-318-1"]
+stage = "M5.4"
+modes = ["redact", "keep"]
+markers = ["青葉台"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-07T10:00:00Z", text = "私は青葉台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"], closed = false }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "青葉台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+turn = { id = "a3", session = "A", at = "2026-06-07T10:03:00Z", text = "最近は朝に散歩をしています。" } # 2
+[[case.step]]
+turn = { id = "a5", session = "A", at = "2026-06-07T10:05:00Z", text = "散歩のあとはコーヒーを飲みます。" } # 3
+[[case.step]]
+segment = { name = "S1", pairs = ["a1", "a3", "a5"], closed = false }
+[[case.step]]
+call = { seg = "S1" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "青葉台" } }
+[[case.step]]
+ledger = { name = "L1p", seg = "S1", status = "partial", keys = ["青葉台の朝"], units = [
+  { sentence = 1, aspect = "residence", value = "青葉台" },
+  { sentence = 2, aspect = "hobby", value = "散歩" },
+] }
+[[case.step]]
+expect = { events = ["background_stopped", "slot_erase:memory"], needs_call = ["S1"], scan = { places = ["ledgers", "units", "seg_keys", "unit_keys", "profile"] } }
+[[case.step]]
+expect = { mode = "keep", ledgers = [{ name = "L1p", present = true, status = "partial", units = ["hobby=散歩"], keys = [], input_hash = "null" }] }
+[[case.step]]
+expect = { mode = "redact", ledgers = [{ name = "L1p", present = false }] }
+
+[[case]]
+id = "FI08"
+title = "import-v04 の途中 (書き込みの途中・照合の後・1 つ目の改名の後) で止めても、次の起動か次の import-v04 の後に、古い根が無傷で、新しい根が入れ替わっているか作りかけが消えている"
+spec = "09 §4 (import-v04 の途中の強制終了)、03 §12.4"
+ac = ["AC-FR-219-3"]
+stage = "M5.1"
+points = ["import_during_write", "import_after_verify", "import_after_first_rename"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-01T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [{ aspect = "residence", value = "港南台", state = "Live", sources = ["a1"] }], directives = [] }, crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { old_root = { exists = true, intact = true }, new_root = "swapped_or_absent" }
+[[case.step]]
+op = { kind = "import_v04", v04 = { facts = [{ aspect = "residence", value = "港南台", state = "Live", sources = ["a1"] }], directives = [] } }
+[[case.step]]
+expect = { old_root = { exists = true, intact = true }, new_root = "swapped", turns = [{ id = "a1", text = "私は港南台に住んでいます。" }] }
+
+[[case]]
+id = "FI09"
+title = "reset の途中 (改名の後・外の退避の置き場所の削除の途中・中身の削除の途中) で止めても、次の reset で続きが終わり、ほかの根とフォルダの外に触れない"
+spec = "09 §4 (reset の途中の強制終了)、03 §10.2"
+ac = ["AC-FR-218-1"]
+stage = "M5.1"
+points = ["reset_after_rename", "reset_during_backup_delete", "reset_during_content_delete"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-03-02T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+op = { kind = "backup", name = "K1" }
+[[case.step]]
+op = { kind = "reset", crash = true }
+[[case.step]]
+op = { kind = "reset" }
+[[case.step]]
+expect = { root = { exists = false }, others_intact = true, config_kept = true }
+
+[[case]]
+id = "FI10"
+title = "evorag sleep の途中の停止 (Ctrl+C) では 1 秒以内に裏の要求が止まり、書き終えた台帳が残って 1 で終わる。強制終了でも会話と台帳を失わない"
+spec = "09 §4 (evorag sleep の途中の停止と強制終了)、04 §4 の手動の実行、07 §5"
+ac = ["AC-FR-319-1"]
+stage = "M5.2"
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-08T10:00:00Z", text = "私は港南台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+turn = { id = "b1", session = "B", at = "2026-06-09T10:00:00Z", text = "趣味は将棋です。" } # 1
+[[case.step]]
+segment = { name = "S2", pairs = ["b1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "港南台" }] }
+[[case.step]]
+op = { kind = "sleep", interrupt = "ctrl_c" }
+[[case.step]]
+expect = { exit = 1, stop_within_ms = 1000, ledgers = [{ name = "L1", present = true }], needs_call = ["S2"] }
+[[case.step]]
+op = { kind = "sleep", interrupt = "kill" }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { turns = [
+  { id = "a1", text = "私は港南台に住んでいます。" },
+  { id = "b1", text = "趣味は将棋です。" },
+], ledgers = [{ name = "L1", present = true, unchanged = true }] }
+
+[[case]]
+id = "FI11"
+title = "当て直しがターンの伏せ字の行をジャーナルに書いた後・コミットの前で止めても、次の起動で取り込みと当て直しが同じ結果にする"
+spec = "09 §3.5 の v0.3 の止める点 (当て直し)、04 §7.2 の当て直し (伏せ字の行を先に書く)"
+ac = ["AC-FR-318-4"]
+stage = "M5.4"
+points = ["reapply_after_turn_line"]
+markers = ["青葉台"]
+[[case.step]]
+turn = { id = "a1", session = "A", at = "2026-06-10T10:00:00Z", text = "私は青葉台に住んでいます。" } # 1
+[[case.step]]
+segment = { name = "S1", pairs = ["a1"] }
+[[case.step]]
+ledger = { name = "L1", seg = "S1", keys = ["住まい"], units = [{ sentence = 1, aspect = "residence", value = "青葉台" }] }
+[[case.step]]
+op = { kind = "derive" }
+[[case.step]]
+op = { kind = "backup", name = "K1" }
+[[case.step]]
+op = { kind = "forget", target = { aspect = "residence", value = "青葉台" } }
+[[case.step]]
+op = { kind = "restore", backup = "K1", crash = true }
+[[case.step]]
+op = { kind = "restart" }
+[[case.step]]
+expect = { turns = [{ id = "a1", text = "私は[伏せ字]に住んでいます。", rev = 1 }], units = [], ledgers = [{ name = "L1", units = [], keys = [] }], scan = { places = ["turns", "ledgers", "units", "journal"] } }
