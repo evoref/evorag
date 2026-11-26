@@ -1,0 +1,109 @@
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `\\?\E:\tmp\evorag-v040-target\debug\incremental\inspect_v04_root-2j917u21fnlcr\s-hoj1ebx8q1-05qc4fi-working`
+
+## meta
+created_by = 0.4.0
+data_root.id = 01a1dc4a-0180-7000-9d0b-14e4db018fed
+envelope.layout = 1
+format.min_read = 0.1
+format.min_write = 0.1
+format.version = 0.3
+journal.last_seq = 109
+key_encoding.version = 1
+last_writer = 0.4.0
+max_writer = 0.4.0
+memory.forget_key = (64 hex)
+migration.state = none
+prompt.language = ja
+writer.0.4.0 = 1794697200000
+## census
+chunk: KindCount { ok: 26, newer_v: 0, unreadable: 0, corrupt: 0 }
+fact: KindCount { ok: 9, newer_v: 0, unreadable: 0, corrupt: 0 }
+fact_directive: KindCount { ok: 10, newer_v: 0, unreadable: 0, corrupt: 0 }
+job: KindCount { ok: 1, newer_v: 0, unreadable: 0, corrupt: 0 }
+model_binding: KindCount { ok: 2, newer_v: 0, unreadable: 0, corrupt: 0 }
+model_probe: KindCount { ok: 1, newer_v: 0, unreadable: 0, corrupt: 0 }
+note: KindCount { ok: 5, newer_v: 0, unreadable: 0, corrupt: 0 }
+recall_feedback: KindCount { ok: 2, newer_v: 0, unreadable: 0, corrupt: 0 }
+session: KindCount { ok: 5, newer_v: 0, unreadable: 0, corrupt: 0 }
+setting: KindCount { ok: 2, newer_v: 0, unreadable: 0, corrupt: 0 }
+signal: KindCount { ok: 1, newer_v: 0, unreadable: 0, corrupt: 0 }
+threshold: KindCount { ok: 1, newer_v: 0, unreadable: 0, corrupt: 0 }
+turn: KindCount { ok: 26, newer_v: 0, unreadable: 0, corrupt: 0 }
+unknown: {} bad_keys: 0
+## journal
+Summary { files: 1, lines: 91, bad: 0, newer: 0, partial: 0, max_seq: 109, pending: 0 }
+## session
+01a1dc8a-17c0-7000-a698-4080bab12a02 v1 {"title":"暮らしの話","mode":"chat","state":"active"}
+01a1dca1-e580-7000-880e-43ed5da9a60f v1 {"title":"近況","mode":"chat","state":"active"}
+01a1dcac-e200-7000-9098-7a47c025a152 v1 {"title":"観葉植物","mode":"chat","state":"active"}
+01a1dcb7-de80-7000-9211-e20229fc1eaa v1 {"title":"車","mode":"chat","state":"active"}
+01a1dcc2-db00-7000-b6a3-dec45265c099 v1 {"title":"今日","mode":"chat","state":"active"}
+## turn
+01a1dc8b-ec80-7000-953a-eb70673e29cb v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="私は大阪に住んでいます"
+01a1dc8b-ec80-7002-bfda-be86cbbeaa11 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc8b-ec80-7000-953a-eb70673e29cb" attached=[] text="了解です"
+01a1dc8d-c140-7000-a9c3-a27688795369 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="猫を飼っています"
+01a1dc8d-c140-7002-b5ba-4eb728dd632c v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc8d-c140-7000-a9c3-a27688795369" attached=[] text="了解です"
+01a1dc8f-9600-7000-9d2f-9b2d0b5f15e6 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="パン屋で働いています"
+01a1dc8f-9600-7002-a12e-5d006cd3d6af v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc8f-9600-7000-9d2f-9b2d0b5f15e6" attached=[] text="了解です"
+01a1dc91-6ac0-7000-81df-da7a5eb236f8 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="実は、えびは食べられないんです"
+01a1dc91-6ac0-7002-9b50-51c62d0332cd v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc91-6ac0-7000-81df-da7a5eb236f8" attached=[] text="了解です"
+01a1dc93-3f80-7000-a70c-d6df5d49ce30 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=1 tz=540 reply_to=null attached=[] text="実は、[伏せ字]も食べられないんです"
+01a1dc93-3f80-7002-93a1-6201310d9aba v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc93-3f80-7000-a70c-d6df5d49ce30" attached=[] text="了解です"
+01a1dc95-1440-7000-aa3f-7fb9fcd4241d v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="趣味は将棋です"
+01a1dc95-1440-7002-8de2-b0ab6b89f8ac v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc95-1440-7000-aa3f-7fb9fcd4241d" attached=[] text="了解です"
+01a1dc96-e900-7000-8eb6-7bb2bf528e01 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=1 tz=540 reply_to=null attached=[] text="[伏せ字]が好きです"
+01a1dc96-e900-7002-9363-f25caeb7c570 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc96-e900-7000-8eb6-7bb2bf528e01" attached=[] text="了解です"
+01a1dc98-bdc0-7000-ad0d-723fd1859e5b v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="user" state="confirmed" rev=1 tz=540 reply_to=null attached=[] text="誕生日は[伏せ字]でした"
+01a1dc98-bdc0-7002-ab7a-07aacd555fc9 v1 session="01a1dc8a-17c0-7000-a698-4080bab12a02" role="assistant" state="completed" rev=null tz=null reply_to="01a1dc98-bdc0-7000-ad0d-723fd1859e5b" attached=[] text="了解です"
+01a1dca3-ba40-7000-93f1-83c986aec07e v1 session="01a1dca1-e580-7000-880e-43ed5da9a60f" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="東京に住んでるよ"
+01a1dca3-ba40-7002-a4d2-1225283af2e8 v1 session="01a1dca1-e580-7000-880e-43ed5da9a60f" role="assistant" state="completed" rev=null tz=null reply_to="01a1dca3-ba40-7000-93f1-83c986aec07e" attached=[] text="了解です"
+01a1dcae-b6c0-7000-80a7-6d853561f4e6 v1 session="01a1dcac-e200-7000-9098-7a47c025a152" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="モンステラの水やりは、どれくらいの頻度がいい？"
+01a1dcae-b6c0-7002-b8dd-a1232865cd13 v1 session="01a1dcac-e200-7000-9098-7a47c025a152" role="assistant" state="completed" rev=null tz=null reply_to="01a1dcae-b6c0-7000-80a7-6d853561f4e6" attached=[] text="了解です"
+01a1dcb9-b340-7000-9dc4-43bfb29af542 v1 session="01a1dcb7-de80-7000-9211-e20229fc1eaa" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="車のオイル交換の頻度は、どのくらいがいい？"
+01a1dcb9-b340-7002-9ede-cf33512736da v1 session="01a1dcb7-de80-7000-9211-e20229fc1eaa" role="assistant" state="completed" rev=null tz=null reply_to="01a1dcb9-b340-7000-9dc4-43bfb29af542" attached=[] text="了解です"
+01a1dcc4-afc0-7000-9bb8-bbc2e5a4476b v1 session="01a1dcc2-db00-7000-b6a3-dec45265c099" role="user" state="confirmed" rev=null tz=540 reply_to=null attached=[] text="前に聞いたモンステラの水やりの頻度、もう一度教えて"
+01a1dcc4-afc0-7002-8722-d16d8c3f0f43 v1 session="01a1dcc2-db00-7000-b6a3-dec45265c099" role="assistant" state="completed" rev=null tz=null reply_to="01a1dcc4-afc0-7000-9bb8-bbc2e5a4476b" attached=[] text="了解です"
+01a1dcc4-afc0-7007-86ed-f4f59f79586c v1 session="01a1dcc2-db00-7000-b6a3-dec45265c099" role="assistant" state="completed" rev=null tz=null reply_to="01a1dcc4-afc0-7000-9bb8-bbc2e5a4476b" attached=["01a1dcae-b6c0-7000-80a7-6d853561f4e6","01a1dcae-b6c0-7002-b8dd-a1232865cd13"] text="了解です"
+01a1dd27-9040-7000-bdd7-32262feb6e95 v1 session="01a1dced-e2a0-7000-a57b-445f1ff82bc7" role="user" state="pending" rev=null tz=null reply_to=null attached=[] text="さっきの続きだけど、明日は雨らしいよ"
+## fact
+01a1dc8b-ec80-7004-93fc-d6513d02befe v1 attr="residence" value="大阪" state="live" private=false by=null sources=[{"turn":"01a1dc8b-ec80-7000-953a-eb70673e29cb","rev":0,"start":0,"end":33}]
+01a1dc8d-c140-7004-9f0f-9924a3016430 v1 attr="pet" value="猫" state="live" private=false by=null sources=[{"turn":"01a1dc8d-c140-7000-a9c3-a27688795369","rev":0,"start":0,"end":24}]
+01a1dc8f-9600-7004-9e7e-b00e4c9c9e35 v1 attr="occupation" value="パン屋" state="superseded" private=false by="01a1dce1-fbc0-7004-af12-2be4b8beb6f5" sources=[{"turn":"01a1dc8f-9600-7000-9d2f-9b2d0b5f15e6","rev":0,"start":0,"end":30}]
+01a1dc91-6ac0-7004-ac7c-5b1c60b890ff v1 attr="dietary" value="えび" state="live" private=true by=null sources=[{"turn":"01a1dc91-6ac0-7000-81df-da7a5eb236f8","rev":0,"start":9,"end":36}]
+01a1dc93-3f80-7004-a6df-52ffdf834b47 v1 attr="dietary" value=null state="retracted" private=false by=null sources=[{"turn":"01a1dc93-3f80-7000-a70c-d6df5d49ce30","rev":1,"start":null,"end":null}]
+01a1dc95-1440-7004-8857-c52e70ded4d2 v1 attr="hobby" value=null state="retracted" private=false by=null sources=[{"turn":"01a1dc95-1440-7000-aa3f-7fb9fcd4241d","rev":0,"start":null,"end":null}]
+01a1dc96-e900-7004-b5e1-803bf4585807 v1 attr="likes" value=null state="retracted" private=false by=null sources=[{"turn":"01a1dc96-e900-7000-8eb6-7bb2bf528e01","rev":1,"start":null,"end":null}]
+01a1dc98-bdc0-7005-8a45-f286b9e7d382 v1 attr="birthday" value=null state="retracted" private=false by=null sources=[{"turn":"01a1dc98-bdc0-7000-ad0d-723fd1859e5b","rev":1,"start":null,"end":null}]
+01a1dca3-ba40-7004-9c90-961b7f936d22 v1 attr="residence" value="東京" state="superseded" private=false by="01a1dc8b-ec80-7004-93fc-d6513d02befe" sources=[{"turn":"01a1dca3-ba40-7000-93f1-83c986aec07e","rev":0,"start":0,"end":24}]
+## fact_directive
+01a1dcc6-8480-7000-a7c9-2cf10f4bb044 v1 op="accept" attr="residence" scope=null target=null redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dcc8-5940-7000-b0b4-b1b94408ab71 v1 op="revert" attr="residence" scope=null target=null redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dcca-2e00-7000-b884-f50d388dc242 v1 op="private" attr="pet" scope="successors" target=null redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dccc-02c0-7000-9b96-d654f1c64b88 v1 op="private_off" attr="pet" scope=null target="01a1dcca-2e00-7000-b884-f50d388dc242" redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dccd-d780-7000-8747-d9fb9bc44a54 v1 op="private" attr="dietary" scope="value_only" target=null redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dccf-ac40-7003-9386-7f8a1972b8d6 v1 op="forget" attr="dietary" scope=null target=null redact=true history=false turns=["01a1dc93-3f80-7000-a70c-d6df5d49ce30"] redactions=1 hidden=0 marks=1 origin="user"
+01a1dcd1-8100-7003-b460-25fd97f61d68 v1 op="forget" attr="hobby" scope=null target=null redact=false history=false turns=["01a1dc95-1440-7000-aa3f-7fb9fcd4241d"] redactions=0 hidden=1 marks=1 origin="user"
+01a1dcd3-55c0-7003-a3db-a190ee1d952a v1 op="forget" attr="likes" scope=null target=null redact=true history=false turns=["01a1dc96-e900-7000-8eb6-7bb2bf528e01"] redactions=1 hidden=0 marks=1 origin="user"
+01a1dcd5-2a80-7000-8e49-039ddbf556df v1 op="unblock" attr="likes" scope=null target="01a1dcd3-55c0-7003-a3db-a190ee1d952a" redact=false history=false turns=[] redactions=0 hidden=0 marks=0 origin="user"
+01a1dcd6-ff40-7003-b5b1-461ad985b3e8 v1 op="forget" attr="birthday" scope=null target=null redact=true history=false turns=["01a1dc98-bdc0-7000-ad0d-723fd1859e5b"] redactions=1 hidden=0 marks=1 origin="user"
+## signal
+01a1dc98-bdc0-7006-91ce-3318362240f6 v1 {"kind":"good","target":"01a1dc98-bdc0-7002-ab7a-07aacd555fc9","reason":null}
+## recall_feedback
+01a1dcc4-afc0-7005-9d39-af06bf6896ce v1 {"op":"irrelevant","answer":"01a1dcc4-afc0-7002-8722-d16d8c3f0f43","target":"01a1dcb9-b340-7000-9dc4-43bfb29af542","score":-3.0,"reranker":"b7ce5eec1ba77a6537dd8b48d28b9184"}
+01a1dcc4-afc0-7006-8669-9985f30963e5 v1 {"op":"attach","answer":"01a1dcc4-afc0-7002-8722-d16d8c3f0f43","target":"01a1dcae-b6c0-7000-80a7-6d853561f4e6","score":3.0,"reranker":"b7ce5eec1ba77a6537dd8b48d28b9184"}
+## setting
+01a1dcf0-a1c0-7001-b558-d10cbb86dcf2 v1 {"name":"answer.length","value":"short"}
+01a1dcf0-a1c0-7002-a195-202dc964d425 v1 {"name":"answer.format","value":"plain"}
+## model_binding
+01a1dc80-f000-7000-a3cb-e1e459320dd7 v1 {"role":"chat","current":{"model_key":"7196f354cdc691fb8e3680cf488a4c3b","file_name":"chat.gguf","model_name":"test","n_params":1,"size":2,"n_vocab":3,"build_info":"b1-test"},"history":[]}
+01a1dc80-f000-7001-844c-3cd7f43c661c v1 {"role":"rerank","current":{"model_key":"b7ce5eec1ba77a6537dd8b48d28b9184","file_name":"rr.gguf","model_name":"rr","n_params":5,"size":6,"n_vocab":7,"build_info":"b1-test"},"history":[]}
+## threshold
+01a1dc4a-0180-7002-9ceb-e8a6d050dd01 v1 {"reranker_key":"b7ce5eec1ba77a6537dd8b48d28b9184","target":"conversation","version":1,"method":"bundled","cases":"ja-1","passed":true,"threshold":4.0,"band_low":-4.0,"stats":{}}
+## note
+01a1dcae-b6c0-7004-95f0-53ed7217c6a7 v1 {"session":"01a1dca1-e580-7000-880e-43ed5da9a60f","exchanges":["01a1dca3-ba40-7000-93f1-83c986aec07e"],"keys":["会話"],"model_key":"7196f354cdc691fb8e3680cf488a4c3b","rules":1,"src_revs":[{"turn":"01a1dca3-ba40-7000-93f1-83c986aec07e","rev":0},{"turn":"01a1dca3-ba40-7002-a4d2-1225283af2e8","rev":0}],"forgets_seen":null}
+01a1dcb9-b340-7004-a6cd-25813e9b65b8 v1 {"session":"01a1dcac-e200-7000-9098-7a47c025a152","exchanges":["01a1dcae-b6c0-7000-80a7-6d853561f4e6"],"keys":["会話"],"model_key":"7196f354cdc691fb8e3680cf488a4c3b","rules":1,"src_revs":[{"turn":"01a1dcae-b6c0-7000-80a7-6d853561f4e6","rev":0},{"turn":"01a1dcae-b6c0-7002-b8dd-a1232865cd13","rev":0}],"forgets_seen":null}
+01a1dcc4-afc0-7004-b43e-f5f607528fb6 v1 {"session":"01a1dcb7-de80-7000-9211-e20229fc1eaa","exchanges":["01a1dcb9-b340-7000-9dc4-43bfb29af542"],"keys":["会話"],"model_key":"7196f354cdc691fb8e3680cf488a4c3b","rules":1,"src_revs":[{"turn":"01a1dcb9-b340-7000-9dc4-43bfb29af542","rev":0},{"turn":"01a1dcb9-b340-7002-9ede-cf33512736da","rev":0}],"forgets_seen":null}
+01a1dccd-d780-7001-b558-9b4b7d95746b v1 {"session":"01a1dcc2-db00-7000-b6a3-dec45265c099","exchanges":["01a1dcc4-afc0-7000-9bb8-bbc2e5a4476b"],"keys":["会話"],"model_key":"7196f354cdc691fb8e3680cf488a4c3b","rules":1,"src_revs":[{"turn":"01a1dcc4-afc0-7000-9bb8-bbc2e5a4476b","rev":0},{"turn":"01a1dcc4-afc0-7007-86ed-f4f59f79586c","rev":0}],"forgets_seen":null}
+01a1dd5e-7ec0-7004-8336-b3782f5887a1 v1 {"session":"01a1dc8a-17c0-7000-a698-4080bab12a02","exchanges":["01a1dc8b-ec80-7000-953a-eb70673e29cb","01a1dc8d-c140-7000-a9c3-a27688795369","01a1dc8f-9600-7000-9d2f-9b2d0b5f15e6","01a1dc91-6ac0-7000-81df-da7a5eb236f8","01a1dc93-3f80-7000-a70c-d6df5d49ce30","01a1dc95-1440-7000-aa3f-7fb9fcd4241d","01a1dc96-e900-7000-8eb6-7bb2bf528e01"],"keys":["会話"],"model_key":"7196f354cdc691fb8e3680cf488a4c3b","rules":1,"src_revs":[{"turn":"01a1dc8b-ec80-7000-953a-eb70673e29cb","rev":0},{"turn":"01a1dc8b-ec80-7002-bfda-be86cbbeaa11","rev":0},{"turn":"01a1dc8d-c140-7000-a9c3-a27688795369","rev":0},{"turn":"01a1dc8d-c140-7002-b5ba-4eb728dd632c","rev":0},{"turn":"01a1dc8f-9600-7000-9d2f-9b2d0b5f15e6","rev":0},{"turn":"01a1dc8f-9600-7002-a12e-5d006cd3d6af","rev":0},{"turn":"01a1dc91-6ac0-7000-81df-da7a5eb236f8","rev":0},{"turn":"01a1dc91-6ac0-7002-9b50-51c62d0332cd","rev":0},{"turn":"01a1dc93-3f80-7000-a70c-d6df5d49ce30","rev":1},{"turn":"01a1dc93-3f80-7002-93a1-6201310d9aba","rev":0},{"turn":"01a1dc95-1440-7000-aa3f-7fb9fcd4241d","rev":0},{"turn":"01a1dc95-1440-7002-8de2-b0ab6b89f8ac","rev":0},{"turn":"01a1dc96-e900-7000-8eb6-7bb2bf528e01","rev":1},{"turn":"01a1dc96-e900-7002-9363-f25caeb7c570","rev":0}],"forgets_seen":"01a1dcd6-ff40-7003-b5b1-461ad985b3e8"}
+## job
+01a1dc8b-ec80-7005-a25e-c07a99506761 v1 {"task":"extract_facts","ids":["01a1dd27-9040-7000-bdd7-32262feb6e95"],"version":2,"model_key":"7196f354cdc691fb8e3680cf488a4c3b"}

@@ -1,0 +1,11 @@
+{
+  "format": "evorag-lex-segment",
+  "version": 1,
+  "rules": 1,
+  "docs": 1,
+  "created_ms": 1795717168586,
+  "files": {
+    "ids.bin": "2b452bd078dbf5e2",
+    "lex.bin": "dc8030f2f019b6ba"
+  }
+}
