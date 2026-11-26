@@ -308,9 +308,9 @@ mod db {
             let mut all = Vec::new();
             for op in ops {
                 if let WriteOp::Put(e) = &op
-                    && e.kind == crate::facts::KIND_FACT_DIRECTIVE
+                    && e.kind == crate::import_v04::KIND_FACT_DIRECTIVE
                 {
-                    all.extend(crate::facts::derive_directive(e));
+                    all.extend(crate::import_v04::derive_directive(e));
                 }
                 all.push(op);
             }
@@ -456,7 +456,7 @@ mod db {
         /// すべての事実の記録について、本体から作る関係と副索引の集合と、ストアに実際にある集合が
         /// 一致する (書き込みの差と、repair・ジャーナルの取り込みでの作り直しが同じ結果になる)。
         pub fn check_indexes(&self, id: &str) {
-            use crate::facts::{IndexEntry, KIND_FACT, REL_FACT_SRC, fact_entries};
+            use crate::import_v04::{IndexEntry, KIND_FACT, REL_FACT_SRC, fact_entries};
             use evorag_store::key::OwnedPart;
             use evorag_store::{LookupRange, Read};
             let tx = self.store.read().expect("read");
@@ -686,7 +686,7 @@ impl Runner {
         // 鏡: 指示 (と伏せ字にしたターン) だけを取り込み、当て直す。
         for (m, with_turns) in &mut self.mirrors {
             let mut records: Vec<(&str, Id)> =
-                vec![(crate::facts::KIND_FACT_DIRECTIVE, plan.directive)];
+                vec![(crate::import_v04::KIND_FACT_DIRECTIVE, plan.directive)];
             if *with_turns {
                 records.extend(plan.redacted_turns.iter().map(|t| (KIND_TURN, *t)));
             }

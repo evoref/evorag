@@ -87,13 +87,8 @@ pub struct EmbeddingBody {
     pub src_rev: Option<u32>,
 }
 
-/// 関係: ノート → 出典の往復の発話のターン (04 §2)。
-pub const REL_NOTE_OF: &str = "note_of";
-
-/// 話題の検索の鍵 (04 §2、v0.2)。作り直せる派生の記録なので、ジャーナルに書かない。
-pub const KIND_NOTE: &str = "note";
-
-/// `note` の本体 (v1)。出典の往復の発話のターンの ID を本体にも持つ (03 §4.2 の規則 12)。
+/// `note` の本体 (v1、種類 [`KIND_NOTE`](crate::import_v04::KIND_NOTE))。出典の往復の発話のターンの ID を
+/// 本体にも持つ (03 §4.2 の規則 12)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteBody {
     pub session: Id,
@@ -199,12 +194,18 @@ pub struct RecallFeedbackBody {
 /// 副索引: セッションの更新時刻 (一覧を新しい順に並べる)。
 pub(crate) const LOOKUP_UPDATED_AT: &str = "updated_at";
 
-/// この版が書く、会話の層の種類。会話の追記は、新しい版の記録があっても今の `v` で足してよい
+/// v0.4 のデータ根 (形式の版 `0.3`) の種類。今の版が開く根の種類で、[`crate::import_v04::kinds_v04`] と同じ
+/// (会話の層の種類に、v0.4 だけの種類 [`V04_ONLY_KINDS`](crate::import_v04::V04_ONLY_KINDS) を足したもの)。
+pub fn kinds() -> Vec<KindSpec> {
+    crate::import_v04::kinds_v04()
+}
+
+/// 会話の層の種類 (v0.4 の根と v0.5 の根に共通)。会話の追記は、新しい版の記録があっても今の `v` で足してよい
 /// (巻き戻した後も会話を続けられるように、03 §4.2 の規則 6)。
 ///
-/// どれも会話と利用者の明示の操作なので、ジャーナルにも書く (03 §6)。ジャーナルから取り込むときは、
-/// 本体から関係と副索引を作り直す。
-pub fn kinds() -> Vec<KindSpec> {
+/// 会話と利用者の明示の操作は、ジャーナルにも書く (03 §6)。ジャーナルから取り込むときは、本体から関係と
+/// 副索引を作り直す。
+pub(crate) fn conversation_kinds() -> Vec<KindSpec> {
     // `derive` の関数と、それが作りうる関係の名前・副索引の項目 (`repair` が作り直すときに消すのはこれだけ)。
     let append = |name, derive: DeriveFn, rels, lookups| KindSpec {
         name,
@@ -245,7 +246,7 @@ pub fn kinds() -> Vec<KindSpec> {
         },
         // 点検の結果は作り直せる派生の記録なので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_MODEL_PROBE, 1),
-        // チャンク・埋め込み・ノートは作り直せる派生の記録 (05 §2.4・§2.2、04 §2)。関係は書くときに足し、
+        // チャンクと埋め込みは作り直せる派生の記録 (05 §2.4・§2.2)。関係は書くときに足し、
         // `repair` は本体から作り直す (03 §10)。
         KindSpec {
             derive: Some(derive_chunk),
@@ -257,63 +258,18 @@ pub fn kinds() -> Vec<KindSpec> {
             derived_rels: &[REL_EMBEDDING_OF],
             ..KindSpec::new(KIND_EMBEDDING, 1)
         },
-        KindSpec {
-            derive: Some(derive_note),
-            derived_rels: &[REL_NOTE_OF],
-            ..KindSpec::new(KIND_NOTE, 1)
-        },
         // v0.2 のしきい値は同梱の事例から求め直せるので、ジャーナルには書かない (03 §3.3)。
         KindSpec::new(KIND_THRESHOLD, 1),
         // job は作り直せる手順の記録なので、ジャーナルには書かない。
         KindSpec::new(KIND_JOB, 1),
-        // 事実は LLM で作る派生の記録 (04 §2)。ジャーナルに書かない。関係と副索引は本体から作り直せる。
-        KindSpec {
-            derive: Some(crate::facts::derive_fact),
-            derived_rels: crate::facts::FACT_RELS,
-            derived_lookups: crate::facts::FACT_LOOKUPS,
-            ..KindSpec::new(crate::facts::KIND_FACT, crate::facts::FACT_V)
-        },
-        // 訂正の候補と検証済みの訂正は、字句の規則と LLM で作る派生の記録 (04 §6)。ジャーナルに書かない。関係は
-        // 本体 (`turn`) から作り直せる。
-        KindSpec {
-            derive: Some(crate::correction::derive_correction),
-            derived_rels: &[crate::correction::REL_CORRECTION_OF],
-            ..KindSpec::new(
-                crate::correction::KIND_CORRECTION,
-                crate::correction::CORRECTION_V,
-            )
-        },
-        // 事実への指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
-        KindSpec {
-            create_when_newer_present: true,
-            journaled: true,
-            derive: Some(crate::facts::derive_directive),
-            derived_rels: crate::facts::DIRECTIVE_RELS,
-            derived_lookups: crate::facts::DIRECTIVE_LOOKUPS,
-            ..KindSpec::new(
-                crate::facts::KIND_FACT_DIRECTIVE,
-                crate::facts::FACT_DIRECTIVE_V,
-            )
-        },
     ]
 }
 
-/// v0.5 の根で作らない種類 (03 §3.3)。v0.5 は、v0.4 のデータ根から取り込むときにだけ読む (`import-v04`)。
-pub const V04_ONLY_KINDS: [&str; 4] = [
-    crate::facts::KIND_FACT,
-    crate::correction::KIND_CORRECTION,
-    KIND_NOTE,
-    crate::facts::KIND_FACT_DIRECTIVE,
-];
-
 /// v0.5 の新しいデータ根 (形式の版 `0.5`、03 §12.4) の種類。会話の層の種類 ([`kinds`] から v0.4 だけの種類
-/// [`V04_ONLY_KINDS`] を除いたもの) に、指示・区切り・台帳・単位を足す。耐久性とジャーナルの正本は 03 §3.3 の
+/// [`V04_ONLY_KINDS`](crate::import_v04::V04_ONLY_KINDS) を除いたもの) に、指示・区切り・台帳・単位を足す。耐久性とジャーナルの正本は 03 §3.3 の
 /// 「v0.5 の種類の耐久性とジャーナル」。
 pub fn kinds_v05() -> Vec<KindSpec> {
-    let mut out: Vec<KindSpec> = kinds()
-        .into_iter()
-        .filter(|k| !V04_ONLY_KINDS.contains(&k.name))
-        .collect();
+    let mut out = conversation_kinds();
     out.extend([
         // 指示は利用者の明示の操作の正本 (04 §7.5)。ジャーナルに書き、追記だけにする。
         KindSpec {
@@ -549,23 +505,6 @@ struct EmbeddingLinks {
 fn derive_embedding(e: &Envelope) -> Vec<WriteOp> {
     match e.body_as::<EmbeddingLinks>() {
         Ok(b) => vec![link(e.id, REL_EMBEDDING_OF, b.target)],
-        Err(_) => Vec::new(),
-    }
-}
-
-/// ノートの本体のうち、関係を作るのに要る項目だけ。
-#[derive(Deserialize)]
-struct NoteLinks {
-    exchanges: Vec<Id>,
-}
-
-fn derive_note(e: &Envelope) -> Vec<WriteOp> {
-    match e.body_as::<NoteLinks>() {
-        Ok(b) => b
-            .exchanges
-            .into_iter()
-            .map(|t| link(e.id, REL_NOTE_OF, t))
-            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -841,6 +780,7 @@ mod derived_names {
     use evorag_types::{Clock, IdGen, ManualClock, Timestamp, UuidV7Gen};
 
     use super::*;
+    use crate::import_v04::V04_ONLY_KINDS;
     use crate::write::{AssistantTurn, Writes};
 
     /// 関係の名前と副索引の項目 (種類の名前の下の `field`) を、記録の種類ごとに集めたもの。
@@ -993,7 +933,7 @@ mod derived_names {
         let examples = [
             sample(
                 &ids,
-                crate::facts::KIND_FACT,
+                crate::import_v04::KIND_FACT,
                 &serde_json::json!({
                     "subject": "user", "attribute": "lives_in", "vk": vk,
                     "sources": [{"turn": user_id, "rev": 0, "start": null, "end": null}],
@@ -1001,12 +941,12 @@ mod derived_names {
             ),
             sample(
                 &ids,
-                crate::correction::KIND_CORRECTION,
+                crate::import_v04::KIND_CORRECTION,
                 &serde_json::json!({"turn": user_id, "previous": answer}),
             ),
             sample(
                 &ids,
-                crate::facts::KIND_FACT_DIRECTIVE,
+                crate::import_v04::KIND_FACT_DIRECTIVE,
                 &serde_json::json!({
                     "op": "forget", "subject": "user", "attribute": "lives_in", "vk": vk,
                     "marks": ["ab"], "target": answer,

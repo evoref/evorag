@@ -4,6 +4,7 @@ use evorag_store::key::OwnedPart;
 use evorag_store::{BodyError, BodyPatch, Envelope, WriteOp};
 use evorag_types::{Clock, Id, IdGen, Timestamp};
 
+use crate::import_v04::{KIND_CORRECTION, KIND_NOTE, REL_CORRECTION_OF, REL_NOTE_OF};
 use crate::kinds::*;
 
 /// 書いたチャンク (ID と本体)。
@@ -583,9 +584,9 @@ pub fn delete_session(
         }
         // 訂正の候補と検証済みの訂正は、候補の発話と一緒に消す (出典の無い派生の記録、03 §4.2 の規則 12)。
         // 直前の応答は同じセッションにあるので、出典のターンはすべて消える。
-        for (c, _) in tx.links_to(turn, crate::correction::REL_CORRECTION_OF)? {
+        for (c, _) in tx.links_to(turn, REL_CORRECTION_OF)? {
             ops.push(WriteOp::Delete {
-                kind: crate::correction::KIND_CORRECTION.into(),
+                kind: KIND_CORRECTION.into(),
                 id: c,
             });
             ops.push(WriteOp::DeleteLinksOf(c));

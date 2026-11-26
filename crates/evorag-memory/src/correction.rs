@@ -25,6 +25,7 @@ use crate::fold::{Source, VerifiedCorrection};
 use crate::gates::{
     QuoteRegions, Safety, Utterance, check_text, hits_in, locate_evidence, value_positions,
 };
+use crate::import_v04::{CORRECTION_V, KIND_CORRECTION, REL_CORRECTION_OF, derive_correction};
 use crate::kinds::KIND_TURN;
 use crate::lexical::{evidence_language, find_all};
 use crate::prefilter::{MODE_CHAT, Prefiltered};
@@ -35,12 +36,6 @@ use crate::value_key::{
     value_key,
 };
 
-/// 訂正の候補と検証済みの訂正 (04 §6、03 §3.3、v0.3)。作り直せる派生の記録なので、ジャーナルに書かない。
-pub const KIND_CORRECTION: &str = "correction";
-/// 関係: 訂正 → 候補の発話のターン (03 §3.3 の「対象のターンへ」)。
-pub const REL_CORRECTION_OF: &str = "correction_of";
-/// `correction` の本体の版。これより新しい `v` の記録は読むだけにし、書き換えない (03 §4.2 の規則 6)。
-pub(crate) const CORRECTION_V: u32 = 1;
 /// 検証の手順の版 (プロンプトと出力の型)。
 pub const VERIFY_VERSION: u32 = 1;
 /// 検証の呼び出しの生成の上限 (トークン)。出力は 4 つの短い文字列だけ。
@@ -1444,12 +1439,6 @@ impl CorrectionBody {
     }
 }
 
-/// 本体の `turn` だけ (関係を作り直すのに要る項目、03 §4.2 の規則 11)。
-#[derive(Deserialize)]
-struct TurnField {
-    turn: Id,
-}
-
 /// 本体の出典のターンだけ (03 §4.2 の規則 11)。
 #[derive(Deserialize)]
 struct SourcesField {
@@ -1464,20 +1453,6 @@ pub fn correction_sources(e: &Envelope) -> Option<(Id, Option<Id>)> {
     e.body_as::<SourcesField>()
         .ok()
         .map(|b| (b.turn, b.previous))
-}
-
-/// `correction` の関係 (ジャーナルの取り込みや repair で、本体から作り直すときにも使う)。
-pub(crate) fn derive_correction(e: &Envelope) -> Vec<WriteOp> {
-    e.body_as::<TurnField>()
-        .map(|b| {
-            vec![WriteOp::PutLink {
-                from: e.id,
-                rel: REL_CORRECTION_OF.into(),
-                to: b.turn,
-                attrs: Vec::new(),
-            }]
-        })
-        .unwrap_or_default()
 }
 
 /// 候補を書かなかった理由 (04 §6 の「候補を見つける時機」)。

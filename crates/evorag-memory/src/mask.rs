@@ -246,8 +246,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::facts::HiddenBody;
     use crate::fold::{Fact, Tense};
+    use crate::import_v04::HiddenBody;
     use crate::value_key::{ForgetKey, value_key};
 
     fn id(n: u8) -> Id {
