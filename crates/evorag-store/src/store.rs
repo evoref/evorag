@@ -1081,6 +1081,15 @@ impl Store {
             }
             // `memory.forget_key` は `check_forget_key` だけで扱う (03 §3.1.1)。
             LineOp::Meta { key, .. } if key == meta::FORGET_KEY => {}
+            // 上書きしてよいキーは、連番の最も大きい行の値を採る (行は連番の順に当てる。03 §3.1.1)。
+            LineOp::Meta { key, value }
+                if key == meta::IMPORT_OLD_ROOT || key == meta::IMPORT_V04_ENDED =>
+            {
+                match tx.set_meta_latest(key, value) {
+                    Ok(()) | Err(StoreError::MetaConflict { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
             LineOp::Meta { key, value } => match tx.set_meta_once(key, value) {
                 Ok(()) | Err(StoreError::MetaConflict { .. } | StoreError::MetaNotWritable(_)) => {}
                 Err(e) => return Err(e),
@@ -1755,9 +1764,16 @@ impl WriteTxn<'_> {
 
     /// `meta` の値を一度だけ書く。同じ値ならそのまま、違う値なら `MetaConflict`。
     /// 書いてよいのは、一度書いたら変えないキー (`prompt.language`、07 §6.1。v0.3 から
-    /// `memory.forget_key`、03 §3.1.1) だけ。
+    /// `memory.forget_key`、03 §3.1.1。v0.5 から `import.source`・`import.report`、03 §12.4) だけ。
     pub fn set_meta_once(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
-        if key != meta::PROMPT_LANGUAGE && key != meta::FORGET_KEY {
+        if ![
+            meta::PROMPT_LANGUAGE,
+            meta::FORGET_KEY,
+            meta::IMPORT_SOURCE,
+            meta::IMPORT_REPORT,
+        ]
+        .contains(&key)
+        {
             return Err(StoreError::MetaNotWritable(key.to_owned()));
         }
         // 鍵は形を確かめ、食い違いがある間は書かせない (03 §3.1.1)。
@@ -1780,6 +1796,34 @@ impl WriteTxn<'_> {
                 Ok(())
             }
         }
+    }
+
+    /// 上書きしてよい、ジャーナルにも書く `meta` の値 (`import.old_root`・`import.v04_ended`、03 §3.1.1) を書く。
+    /// 古い根を処分した印 (`import.old_root` の `disposed:…`) は `kept` に戻さない (`MetaConflict`)。
+    ///
+    /// # Errors
+    /// ほかのキーのとき (`MetaNotWritable`)、処分した印を戻そうとしたとき (`MetaConflict`)、DB を書けないとき。
+    pub fn set_meta_latest(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
+        if key != meta::IMPORT_OLD_ROOT && key != meta::IMPORT_V04_ENDED {
+            return Err(StoreError::MetaNotWritable(key.to_owned()));
+        }
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        let existing = m
+            .get(key.as_bytes())
+            .map_err(db)?
+            .map(|v| String::from_utf8_lossy(v.value()).into_owned());
+        if key == meta::IMPORT_OLD_ROOT
+            && let Some(e) = existing
+            && e.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED)
+            && !value.starts_with(meta::IMPORT_OLD_ROOT_DISPOSED)
+        {
+            return Err(StoreError::MetaConflict {
+                key: key.to_owned(),
+                existing: e,
+            });
+        }
+        m.insert(key.as_bytes(), value.as_bytes()).map_err(db)?;
+        Ok(())
     }
 
     pub fn commit(self) -> Result<(), StoreError> {

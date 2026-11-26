@@ -318,8 +318,9 @@ impl Store {
     }
 }
 
-/// ジャーナルの `meta` の行を、DB にそのキーが無いときだけ書く (一度だけ書くキーの規則、`set_meta_once`)。
-/// `memory.forget_key` は開くときの照合 (`check_forget_key`) だけが扱うので、ここでは書かない (03 §3.1.1)。
+/// ジャーナルの `meta` の行を、DB にそのキーが無いときだけ書く (一度だけ書くキーの規則、`set_meta_once`)。上書きして
+/// よいキーは、連番の最も大きい行の値にする (行は連番の順)。`memory.forget_key` は開くときの照合
+/// (`check_forget_key`) だけが扱うので、ここでは書かない (03 §3.1.1)。
 /// 書いたキーの数を返す。
 fn restore_metas(
     tx: &mut WriteTxn<'_>,
@@ -330,6 +331,17 @@ fn restore_metas(
         let LineOp::Meta { key, value } = &line.op else {
             continue;
         };
+        // 上書きしてよいキー (`import.old_root`・`import.v04_ended`) は、連番の最も大きい行の値を採る (03 §3.1.1)。
+        if key == crate::meta::IMPORT_OLD_ROOT || key == crate::meta::IMPORT_V04_ENDED {
+            if meta_in(tx, key)?.as_deref() != Some(value.as_str()) {
+                match tx.set_meta_latest(key, value) {
+                    Ok(()) => n += 1,
+                    Err(StoreError::MetaConflict { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            continue;
+        }
         if key == crate::meta::FORGET_KEY || meta_in(tx, key)?.is_some() {
             continue;
         }

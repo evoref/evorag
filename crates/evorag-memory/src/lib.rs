@@ -72,10 +72,11 @@ pub use gates::{
     Utterance, check_candidate, check_candidates, check_subject, check_text, check_value,
 };
 pub use import_v04::{
-    FactBody, FactDirectiveBody, HiddenBody, KIND_CORRECTION, KIND_FACT, KIND_FACT_DIRECTIVE,
-    KIND_NOTE, OP_FORGET, OP_UNBLOCK, ORIGIN_DELETE, ORIGIN_USER, Origin, REL_CANCELS,
-    REL_CORRECTION_OF, REL_FACT_SRC, REL_NOTE_OF, RedactionBody, SourceBody, V04_ONLY_KINDS,
-    kinds_v04,
+    COPY_KINDS, Disposition, EndedValue, Exclusion, FactBody, FactDirectiveBody, HiddenBody,
+    KIND_CORRECTION, KIND_FACT, KIND_FACT_DIRECTIVE, KIND_NOTE, OP_FORGET, OP_UNBLOCK,
+    ORIGIN_DELETE, ORIGIN_USER, Origin, REL_CANCELS, REL_CORRECTION_OF, REL_FACT_SRC, REL_NOTE_OF,
+    RedactionBody, Selector, SourceBody, V04_ENDED_V, V04_ONLY_KINDS, V04Ended, copy_ops,
+    imported_directive, kinds_v04, read_fact_directives, read_facts, read_kind, v04_ended,
 };
 pub use kinds::{
     ChunkBody, DEGRADED_EMBED_DEADLINE, DEGRADED_NO_EMBED, DEGRADED_NO_INDEX, DEGRADED_NO_RERANK,

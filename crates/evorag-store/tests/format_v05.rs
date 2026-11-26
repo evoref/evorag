@@ -1063,3 +1063,82 @@ fn a_quarantined_unit_is_not_backed_up() {
     assert_eq!(census.known.get("quarantine").map_or(0, |c| c.ok), 0);
     assert_eq!(census.known.get("unit").map_or(0, |c| c.ok + c.corrupt), 0);
 }
+
+/// 取り込みの `meta` のキー (03 §3.1.1): `import.source` は一度だけ書き、`import.old_root`・`import.v04_ended` は
+/// 上書きしてよく (処分した印は `kept` に戻さない)、どれもジャーナルにも書く。`import.report` はジャーナルに書かない。
+/// ジャーナルだけから作り直すと、上書きしてよいキーは連番の最も大きい行の値になる。
+#[test]
+fn import_meta_keys_are_journaled_and_replayed_latest_first() {
+    let dir = TempDir::new("v05-import-meta");
+    let root = dir.path().join("root");
+    let (store, _) = open_v05(&root);
+    let set = |key: &str, value: &str| WriteOp::SetMeta {
+        key: key.into(),
+        value: value.into(),
+    };
+    let once = |key: &str, value: &str| WriteOp::SetMetaOnce {
+        key: key.into(),
+        value: value.into(),
+    };
+    // 書き手はストアごとに 1 つ (02 §5)。
+    let (writer, handle) = Writer::new(store.clone()).unwrap();
+    let t = std::thread::spawn(move || writer.run());
+    for req in [
+        WriteRequest::conversation(vec![
+            once(meta::IMPORT_SOURCE, "{\"v\":1}"),
+            set(meta::IMPORT_OLD_ROOT, meta::IMPORT_OLD_ROOT_KEPT),
+            set(meta::IMPORT_V04_ENDED, "{\"done\":false}"),
+        ]),
+        WriteRequest::conversation(vec![set(meta::IMPORT_V04_ENDED, "{\"done\":true}")]),
+        WriteRequest::conversation(vec![set(meta::IMPORT_OLD_ROOT, "disposed:1")]),
+        WriteRequest::conversation(vec![once(meta::IMPORT_REPORT, "{}")]),
+    ] {
+        handle.submit_wait(req).unwrap();
+    }
+    // 処分した印は戻せず、ほかのキーは上書きの口で書けず、一度だけ書くキーは書き換えられない。
+    for (op, conflict) in [
+        (set(meta::IMPORT_OLD_ROOT, meta::IMPORT_OLD_ROOT_KEPT), true),
+        (set(meta::PROMPT_LANGUAGE, "en"), false),
+        (once(meta::IMPORT_SOURCE, "{\"v\":2}"), true),
+    ] {
+        match handle.submit_wait(WriteRequest::conversation(vec![op])) {
+            Err(WriteError::Store(StoreError::MetaConflict { .. })) if conflict => {}
+            Err(WriteError::Store(StoreError::MetaNotWritable(_))) if !conflict => {}
+            other => panic!("expected a refusal (conflict {conflict}), got {other:?}"),
+        }
+    }
+    handle.shutdown();
+    t.join().unwrap();
+    assert_eq!(
+        meta_of(&store, meta::IMPORT_OLD_ROOT).as_deref(),
+        Some("disposed:1")
+    );
+    let lines = journal_lines(&root);
+    assert_eq!(lines.len(), 5, "{lines:#?}");
+    assert!(lines.iter().all(|l| !l.contains(meta::IMPORT_REPORT)));
+    let file = journal_file(&root);
+    drop(store);
+
+    // ジャーナルだけから作り直す。
+    let rebuilt = dir.path().join("rebuilt");
+    std::fs::create_dir_all(rebuilt.join(JOURNAL_DIR)).unwrap();
+    std::fs::copy(
+        &file,
+        rebuilt.join(JOURNAL_DIR).join(file.file_name().unwrap()),
+    )
+    .unwrap();
+    let (store, _) = open_v05(&rebuilt);
+    assert_eq!(
+        meta_of(&store, meta::IMPORT_SOURCE).as_deref(),
+        Some("{\"v\":1}")
+    );
+    assert_eq!(
+        meta_of(&store, meta::IMPORT_OLD_ROOT).as_deref(),
+        Some("disposed:1")
+    );
+    assert_eq!(
+        meta_of(&store, meta::IMPORT_V04_ENDED).as_deref(),
+        Some("{\"done\":true}")
+    );
+    assert_eq!(meta_of(&store, meta::IMPORT_REPORT), None);
+}

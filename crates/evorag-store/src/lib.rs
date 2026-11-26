@@ -8,6 +8,7 @@ pub mod envelope;
 pub mod export;
 pub mod forget;
 pub mod fsutil;
+pub mod import_v04;
 pub mod inspect;
 mod journal;
 mod json;
