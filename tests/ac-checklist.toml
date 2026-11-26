@@ -1375,10 +1375,10 @@ note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.4 (private と導出) で�
 id = "AC-NFR-304-3"
 requirement = "NFR-304"
 level = "Must"
-status = "later"
-tests = []
+status = "test"
+tests = ["crates/evorag-memory/tests/golden_kinds_v05.rs::proposal_v0_5_0_sample_stays_readable", "crates/evorag-memory/tests/golden_kinds_v05.rs::unknown_fields_of_a_ledger_survive_a_rewrite", "crates/evorag-memory/tests/golden_kinds_v05.rs::elements_with_unknown_values_are_counted_and_the_ledger_stays_readable"]
 manual = ""
-note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.1 (新しい根と取り込み) で試験を書く。"
+note = "v0.5 の AC (M5.0 で足した)。M5.1 の種類の封筒と副索引の PR で試験を書いた。台帳の v0.5.0 の見本は tests/fixtures/proposal/v0.5.0.value (作り直さない)。"
 
 [[ac]]
 id = "AC-NFR-504-3"

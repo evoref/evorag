@@ -2,7 +2,8 @@
 //!
 //! - `<出力先>/<kind>.jsonl`。先頭の行は形式名 `evorag-export` と形式の版、以降の行は封筒
 //!   (`body` は JSON に写す。JSON にそのまま写せない値は `{"$cbor": …}`)。
-//! - 含めないもの: `quarantine` の記録、呼ぶ側が挙げた作り直せる種類 (点検の結果など、03 §11)、
+//! - 含めないもの: `quarantine` の記録、導き直せる派生 ([`crate::backup::UNCOPIED_KINDS`]。v0.5 の単位)、
+//!   呼ぶ側が挙げた作り直せる種類 (点検の結果など、03 §11)、
 //!   [`ExportChecks::include`] が外した記録 (出典の無い派生の記録など)、DB の外にある索引。読めない記録は数えて
 //!   飛ばす。
 //! - 断るとき: 取り込んでいないジャーナルの行があるとき ([`ExportError::PendingJournal`])、当て直しの済んで
@@ -203,12 +204,13 @@ pub fn export(
     } else {
         None
     };
-    let last_seq = database
+    let meta_map = database.as_ref().and_then(|d| read_meta_db_any(d).ok());
+    let last_seq = meta_map
         .as_ref()
-        .and_then(|d| read_meta_db_any(d).ok())
         .and_then(|m| m.get(meta::JOURNAL_LAST_SEQ)?.parse().ok())
         .unwrap_or(0);
-    let pending = journal::summarize(root, last_seq)?.pending;
+    let tail = journal::Tail::of(meta_map.as_ref());
+    let pending = journal::summarize(root, last_seq, tail)?.pending;
     if pending > 0 {
         return Err(ExportError::PendingJournal { lines: pending });
     }
@@ -247,7 +249,11 @@ fn write_records(
             report.skipped_corrupt += 1;
             continue;
         };
-        if kind == KIND_QUARANTINE || opts.exclude.contains(&kind.as_str()) {
+        // 導き直せる派生 (v0.5 の単位) は、呼ぶ側の指定に関わらず書かない (03 §11)。
+        if kind == KIND_QUARANTINE
+            || opts.exclude.contains(&kind.as_str())
+            || crate::backup::UNCOPIED_KINDS.contains(&kind.as_str())
+        {
             continue;
         }
         let env = match classify(&kind, id, k.value(), v.value()) {

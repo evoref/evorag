@@ -7,6 +7,9 @@
 
 mod chars;
 mod correction;
+mod derived;
+pub use derived::RecordError;
+mod directive;
 mod extract;
 mod facts;
 mod fold;
@@ -15,13 +18,16 @@ mod fold_cases;
 mod forget;
 mod gates;
 mod kinds;
+mod ledger;
 mod lexical;
 mod mask;
 mod note;
 mod prefilter;
 mod read;
 mod rules;
+mod segment;
 mod table;
+mod unit;
 mod value_key;
 mod view;
 mod write;
@@ -33,6 +39,11 @@ pub use correction::{
     VerifyOutput, candidate_ops, checked_op, correction_sources, find_correction, load_corrections,
     match_correction, parse_verify, previous_answer, tail_excerpt, utterance_excerpt, verify,
     verify_input, verify_schema, verify_system,
+};
+pub use directive::{
+    DirectiveBody, DirectiveOp, DirectiveOrigin, DirectiveRedaction, KIND_DIRECTIVE,
+    LOOKUP_DIRECTIVE_ENT, LOOKUP_DIRECTIVE_TURN, LOOKUP_DIRECTIVE_VK, PrivateScope,
+    REL_DIRECTIVE_CANCELS, TurnSpan,
 };
 pub use extract::{
     BUDGET_MARGIN, Batch, Counting, EXTRACT_MAX_TOKENS, EXTRACT_VERSION, ExtractJobBody,
@@ -75,7 +86,16 @@ pub use kinds::{
     RecallFeedbackBody, RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE,
     SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody,
     SignalBody, SignalKind, SrcRev, TARGET_CONVERSATION, TURN_REV_FIELD, ThresholdBody, TurnBody,
-    TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, WindowRef, carried_on_restore, kinds,
+    TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, V04_ONLY_KINDS, WindowRef,
+    carried_on_restore, kinds, kinds_v05, v05_root,
+};
+pub use ledger::{
+    ByteRange, CALL_SEGMENT, CorrInput, KIND_PROPOSAL, LEDGER_SCHEMA, LOOKUP_LEDGER_SEGMENT,
+    LOOKUP_LEDGER_SELECTION, LedgerBody, LedgerCorrection, LedgerCorrectionOut, LedgerError,
+    LedgerHead, LedgerInputs, LedgerLayer, LedgerMood, LedgerOutput, LedgerOutputError, LedgerRead,
+    LedgerStatus, LedgerTense, LedgerTokens, LedgerUnit, LedgerUnitOut, LedgerVerdict,
+    REL_LEDGER_SEGMENT, REL_LEDGER_TURN, Section, SegmentUpdate, SentenceSpan, Through,
+    read_ledger, selection_key,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use mask::{
@@ -99,9 +119,18 @@ pub use rules::{
     MAX_VALUE_CHARS, Prefilter, Quote, RULE_LANGUAGES, ReadingRules, SafetyRules,
     all_language_rules, attributes, common_rules, language_rules,
 };
+pub use segment::{
+    KIND_SEGMENT, LOOKUP_SEGMENT_FIRST, LOOKUP_SEGMENT_SESSION, REL_SEGMENT_SESSION,
+    REL_SEGMENT_TURN, SegmentBody, SegmentError, segment_id,
+};
 pub use table::{
     FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
     table_head, table_rows, table_version,
+};
+pub use unit::{
+    Anchor, AnchorKind, KIND_UNIT, LOOKUP_UNIT_DATE, LOOKUP_UNIT_EA, LOOKUP_UNIT_SRC,
+    LOOKUP_UNIT_VK, REL_UNIT_ANCHOR, UnitBody, UnitLayer, UnitState, UnitTense, UnitWhen,
+    WhenBasis, entity_aspect_key, unit_delete_ops, unit_ops, units_request,
 };
 pub use value_key::{
     BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, loose_key, normalize_loose, normalize_v1,

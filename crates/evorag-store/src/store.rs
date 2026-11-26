@@ -38,6 +38,11 @@ pub const FORMAT_VERSION: &str = "0.3";
 /// にし、v0.1.2・v0.2.x に戻しても読み書きできるようにする (03 §12.1)。
 pub const FORMAT_MIN: &str = "0.1";
 
+/// v0.5 の新しいデータ根の形式の版 (03 §3.1.1・§12.4)。`format.min_read`・`format.min_write` も同じ値にし、
+/// v0.4 以前の版には読むだけでも開かせない (台帳と指示を知らずに会話だけを見せ、忘れる・private を当てずに
+/// 使うのを防ぐため)。v0.4 の根 (形式の版 `0.3`) は在り場所で移行せず、`import-v04` で新しい根へ取り込む。
+pub const FORMAT_V05: &str = "0.5";
+
 pub(crate) type Raw = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub(crate) const META: Raw = TableDefinition::new("meta");
 pub(crate) const RECORDS: Raw = TableDefinition::new("records");
@@ -97,6 +102,19 @@ pub struct KindSpec {
     /// (と repair) は、DB の記録のこの値を小さくする `put` の行を当てない (03 §6 の「突き合わせ」)。ジャーナルを
     /// 開くときに、この値を ID ごとに集める (04 §7.2 の「ジャーナルの層の見つけ方」)。
     pub monotonic: Option<&'static str>,
+    /// 記録の ID の作り方 (03 §3.3)。中身から作る種類 (v0.5 の `segment`・`unit`) の ID は時刻の順に並ばないので、
+    /// `IdGen` の下限 ([`Store::max_record_id`]) に入れない。
+    pub ids: RecordIds,
+}
+
+/// 記録の ID の作り方 ([`KindSpec::ids`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordIds {
+    /// `IdGen` が出す、時刻の順に並ぶ UUID v7 (02 §6)。
+    #[default]
+    Generated,
+    /// 中身から決定論で作るハッシュ (04 §2 の区切りの ID、§5.1 の単位の ID)。時刻の順に並ばない。
+    Content,
 }
 
 impl KindSpec {
@@ -110,6 +128,7 @@ impl KindSpec {
             derived_rels: &[],
             derived_lookups: &[],
             monotonic: None,
+            ids: RecordIds::Generated,
         }
     }
 
@@ -173,6 +192,12 @@ pub struct OpenReport {
     pub journal_truncated: usize,
     /// ジャーナルの新しい版の行 (チェックサムは合うが読めない) の数。
     pub journal_newer_lines: usize,
+    /// ジャーナルの末尾で組の行がそろわず (書きかけの追記の途中で止まった)、当てずに捨てた組の数 (03 §6 の
+    /// 「組の行」、v0.5)。DB にはコミットしていないので、操作は無かったことになる。
+    pub journal_torn_groups: usize,
+    /// ジャーナルの行の欠けた組 (末尾の書きかけを除く) の数。読める行は当てる (`doctor` が報告する。
+    /// [`Store::partial_groups`])。
+    pub journal_incomplete_groups: usize,
     /// DB に無かった `memory.forget_key` を、ジャーナルの行から入れた (03 §3.1.1)。
     pub forget_key_recovered: bool,
     /// ジャーナルの `memory.forget_key` が 2 つ以上あるか、DB の値と違う。書き換えていない。
@@ -227,6 +252,10 @@ pub enum OpenError {
         "the database needs a newer evorag to read (format {format}, needs at least {min_read})"
     )]
     TooNew { format: String, min_read: String },
+    /// v0.5 の形式 ([`FORMAT_V05`]) で開こうとした DB が、それより古い形式の版で書かれている。在り場所で移行せず、
+    /// `import-v04` で新しい根へ取り込む (03 §12.4)。何も書いていない。
+    #[error("the database is in format {format}; import it into a new data root (import-v04)")]
+    NeedsImport { format: String },
     /// `meta` が読めない・形式の版が無い。
     #[error("the database metadata is unreadable: {0}")]
     BadMeta(String),
@@ -556,6 +585,11 @@ fn needs_compact_after_old_writer(existing: &BTreeMap<String, String>, ours: &Ve
             .is_some_and(|w| w < since)
 }
 
+/// v0.5 の形式の版 ([`FORMAT_V05`])。
+fn v05() -> Version {
+    FORMAT_V05.parse().expect("FORMAT_V05 is a version")
+}
+
 /// ストアが自分で持つ種類と、渡された種類。
 pub(crate) fn kind_map(kinds: Vec<KindSpec>) -> BTreeMap<&'static str, KindSpec> {
     let mut m: BTreeMap<&'static str, KindSpec> =
@@ -652,6 +686,12 @@ impl Store {
                 return Err(OpenError::TooNew {
                     format: format.to_string(),
                     min_read: min_read.to_string(),
+                });
+            }
+            // v0.5 の根は、v0.4 以前の形式の根を在り場所で移行しない (03 §4.1・§12.1・§12.4)。
+            if format < ours && ours >= v05() && format < v05() {
+                return Err(OpenError::NeedsImport {
+                    format: format.to_string(),
                 });
             }
             if format < ours {
@@ -790,13 +830,25 @@ impl Store {
             .values()
             .filter_map(|k| Some((k.name, k.monotonic?)))
             .collect();
-        let (journal, scan) = Journal::open(&self.root, last, monotonic)?;
+        // 末尾の書きかけの組を捨ててよいのは、書き手が使っていた DB だけ (03 §6 の「組の行」)。
+        let tail_unknown = self
+            .meta(meta::JOURNAL_TAIL_UNKNOWN)
+            .map_err(|e| OpenError::BadMeta(e.to_string()))?
+            .is_some();
+        let tail = if report.created || tail_unknown {
+            crate::journal::Tail::Unknown
+        } else {
+            crate::journal::Tail::Uncommitted
+        };
+        let (journal, scan) = Journal::open(&self.root, last, monotonic, tail)?;
         self.deleted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .extend(scan.deleted.keys().copied());
         report.journal_bad_lines = scan.bad;
         report.journal_newer_lines = scan.newer;
+        report.journal_torn_groups = scan.torn_groups;
+        report.journal_incomplete_groups = scan.incomplete_groups;
         report.journal_truncated = scan.truncated;
         report.journal_rewrite_failed = scan.rewrite_failed.clone();
         let unreadable = |e: StoreError| OpenError::Unreadable(e.to_string());
@@ -813,7 +865,7 @@ impl Store {
                 }
             }
         }
-        if !scan.lines.is_empty() || !stale_alive.is_empty() {
+        if !scan.lines.is_empty() || !stale_alive.is_empty() || tail_unknown {
             let mut tx = self
                 .write_internal(Durability::Immediate)
                 .map_err(unreadable)?;
@@ -845,6 +897,15 @@ impl Store {
             // job にしてから消す。job を書く前に落ちても失わないため)。
             if !report.journal_deletes.is_empty() {
                 tx.add_pending_deletes(&report.journal_deletes)
+                    .map_err(unreadable)?;
+            }
+            // 行の欠けた組の読める行を当てた: 忘れるの `end` を計画し直す印に、その組の記録の ID を残す (03 §6)。
+            if !scan.partial.is_empty() {
+                tx.add_ids_meta(meta::JOURNAL_PARTIAL_GROUPS, &scan.partial)
+                    .map_err(unreadable)?;
+            }
+            if tail_unknown {
+                tx.remove_meta(meta::JOURNAL_TAIL_UNKNOWN)
                     .map_err(unreadable)?;
             }
             if let Some(last_line) = scan.lines.last() {
@@ -881,12 +942,30 @@ impl Store {
             .unwrap_or_default())
     }
 
+    /// 行の欠けた組の読める行を当てたときの、その組の記録の ID (`meta` の `journal.partial_groups`、03 §6)。忘れるの
+    /// 組で `end` が欠けたときに `end` を計画し直す印 (04 §7.4、M5.4)。
+    ///
+    /// # Errors
+    /// `meta` を読めないとき。
+    pub fn partial_groups(&self) -> Result<PendingDeletes, StoreError> {
+        Ok(self
+            .meta(meta::JOURNAL_PARTIAL_GROUPS)?
+            .map(|v| parse_ids(&v))
+            .unwrap_or_default())
+    }
+
     /// 知っている種類の記録の ID の最大 (種類ごとの最後の記録を見る。全件は読まない、NFR-101)。
     pub fn max_record_id(&self) -> Result<Option<Id>, StoreError> {
         let tx = self.db.begin_read().map_err(db)?;
         let table = tx.open_table(RECORDS).map_err(db)?;
         let mut max = None;
-        for kind in self.kinds.keys().copied().chain([KIND_QUARANTINE]) {
+        // 中身から ID を作る種類は時刻の順に並ばないので、下限に入れない (03 §3.3)。
+        let generated = self
+            .kinds
+            .values()
+            .filter(|k| k.ids == RecordIds::Generated)
+            .map(|k| k.name);
+        for kind in generated.chain([KIND_QUARANTINE]) {
             let start = kind_prefix(kind);
             let end = key::prefix_end(&start);
             let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
@@ -1155,6 +1234,13 @@ impl Store {
     }
 
     /// その種類をジャーナルにも書くか。
+    /// その種類の ID が中身から作るものか ([`RecordIds::Content`])。消した ID として覚えない (03 §4.2 の規則 0)。
+    pub(crate) fn has_content_ids(&self, kind: &str) -> bool {
+        self.kinds
+            .get(kind)
+            .is_some_and(|k| k.ids == RecordIds::Content)
+    }
+
     pub(crate) fn is_journaled(&self, kind: &str) -> bool {
         self.kinds.get(kind).is_some_and(|k| k.journaled)
     }
@@ -1219,6 +1305,20 @@ impl Store {
 
     pub fn evorag_version(&self) -> &str {
         &self.version
+    }
+
+    /// この版が書く DB の形式の版 (開くときに渡した [`FormatPlan`] の版)。v0.5 の根なら [`FORMAT_V05`]。
+    pub fn format_version(&self) -> &str {
+        &self.plan.version
+    }
+
+    /// v0.5 の新しいデータ根 (形式の版 [`FORMAT_V05`] 以上) として開いているか (03 §3.3 の「v0.5 の根で作らない
+    /// 種類」・§6 の組の行・§7.1・§11 の範囲を決める)。
+    pub fn is_v05_root(&self) -> bool {
+        self.plan
+            .version
+            .parse::<Version>()
+            .is_ok_and(|v| v >= v05())
     }
 
     pub fn clock(&self) -> &Arc<dyn Clock> {
@@ -1544,9 +1644,14 @@ impl WriteTxn<'_> {
 
     /// 索引と退避から除く ID を `meta` に足す ([`Store::pending_deletes`])。
     pub(crate) fn add_pending_deletes(&mut self, ids: &[Id]) -> Result<(), StoreError> {
+        self.add_ids_meta(meta::PENDING_DELETES, ids)
+    }
+
+    /// 空白区切りの ID の並びの `meta` の値 `key` に、`ids` を足す (重ねない)。
+    pub(crate) fn add_ids_meta(&mut self, key: &str, ids: &[Id]) -> Result<(), StoreError> {
         let mut m = self.tx.open_table(META).map_err(db)?;
         let mut all: BTreeSet<Id> = m
-            .get(meta::PENDING_DELETES.as_bytes())
+            .get(key.as_bytes())
             .map_err(db)?
             .map(|v| parse_ids(&String::from_utf8_lossy(v.value())).ids)
             .unwrap_or_default()
@@ -1554,8 +1659,15 @@ impl WriteTxn<'_> {
             .collect();
         all.extend(ids.iter().copied());
         let value: Vec<String> = all.iter().map(Id::to_string).collect();
-        m.insert(meta::PENDING_DELETES.as_bytes(), value.join(" ").as_bytes())
+        m.insert(key.as_bytes(), value.join(" ").as_bytes())
             .map_err(db)?;
+        Ok(())
+    }
+
+    /// 書き換えてよい `meta` の値を消す。
+    pub(crate) fn remove_meta(&mut self, key: &str) -> Result<(), StoreError> {
+        let mut m = self.tx.open_table(META).map_err(db)?;
+        m.remove(key.as_bytes()).map_err(db)?;
         Ok(())
     }
 

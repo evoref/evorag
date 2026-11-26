@@ -6,12 +6,99 @@
 //! この段階では、移行・作り直し・復元の前の退避 (§7.2) だけを持つ。日次の退避と世代の管理
 //! (§7.1) はこの上に載せる。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use evorag_types::Id;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 use crate::fsutil;
+use crate::key::{self, OwnedPart};
+use crate::meta;
 use crate::store::{StoreError, TABLES, db};
+
+/// 退避と書き出しに写さない種類 (03 §7.1・§11)。v0.5 の単位 (`unit`) は台帳と指示から導き直せる派生で、忘れた値の
+/// 単位を退避に残さないため。restore の後は導出の指紋が無いので、全件を導き直して作る。
+pub const UNCOPIED_KINDS: &[&str] = &["unit"];
+
+/// 退避に写さない `meta` のキー (03 §7.1。単位と組の導出の指紋)。
+pub const UNCOPIED_META: &[&str] = &[meta::DERIVE_FINGERPRINT];
+
+/// 写さない種類の記録と、その記録の関係・副索引・`blobs`・隔離の記録を見分ける ([`UNCOPIED_KINDS`])。表は
+/// [`TABLES`] の順 (`records` が `links`・`lookup`・`blobs` より前) に写すので、`records` で見つけた ID を後の表で
+/// 使う。
+#[derive(Debug)]
+struct Uncopied {
+    ids: BTreeSet<Id>,
+    /// 写さない種類の、キーの接頭辞 (`records` と `lookup` のキーは種類の名前で始まる)。
+    prefixes: Vec<Vec<u8>>,
+    /// 隔離の記録のキーの接頭辞。
+    quarantine: Vec<u8>,
+}
+
+fn kind_prefix(kind: &str) -> Vec<u8> {
+    let mut k = key::KeyBuf::new();
+    k.str(kind);
+    k.into_bytes()
+}
+
+/// 隔離の記録 (`quarantine`) の、元の記録の種類 (本体の `kind`)。
+fn quarantined_kind(k: &[u8], v: &[u8]) -> Option<String> {
+    let env = crate::envelope::Envelope::decode(k, v).ok()?;
+    let ciborium::Value::Map(map) = &env.body else {
+        return None;
+    };
+    map.iter()
+        .find(|(k, _)| k.as_text() == Some("kind"))
+        .and_then(|(_, v)| v.as_text())
+        .map(str::to_owned)
+}
+
+impl Uncopied {
+    fn new() -> Self {
+        Self {
+            ids: BTreeSet::new(),
+            prefixes: UNCOPIED_KINDS.iter().map(|k| kind_prefix(k)).collect(),
+            quarantine: kind_prefix(crate::store::KIND_QUARANTINE),
+        }
+    }
+
+    fn uncopied_kind(&self, k: &[u8]) -> bool {
+        self.prefixes.iter().any(|p| k.starts_with(p))
+    }
+
+    fn drops(&mut self, table: Table, k: &[u8], v: &[u8]) -> bool {
+        let parts = || key::decode(k).ok();
+        match table {
+            Table::Meta => UNCOPIED_META.iter().any(|m| m.as_bytes() == k),
+            Table::Records => {
+                let gone = self.uncopied_kind(k)
+                    || (k.starts_with(&self.quarantine)
+                        && quarantined_kind(k, v)
+                            .is_some_and(|kind| UNCOPIED_KINDS.contains(&kind.as_str())));
+                if gone && let Some((_, id)) = crate::store::split_record_key(k) {
+                    self.ids.insert(id);
+                }
+                gone
+            }
+            Table::Links => {
+                !self.ids.is_empty()
+                    && parts().is_some_and(|p| {
+                        p.iter()
+                            .any(|x| matches!(x, OwnedPart::Id(id) if self.ids.contains(id)))
+                    })
+            }
+            // 副索引のキーは、持ち主の記録の種類で始まる。
+            Table::Lookup => self.uncopied_kind(k),
+            Table::Blobs => {
+                !self.ids.is_empty()
+                    && parts().is_some_and(
+                        |p| matches!(p.first(), Some(OwnedPart::Id(id)) if self.ids.contains(id)),
+                    )
+            }
+        }
+    }
+}
 
 /// 退避のフォルダ (データ根から)。
 pub const BACKUPS_DIR: &str = "backups";
@@ -61,6 +148,9 @@ const TABLE_KINDS: [Table; TABLES.len()] = [
 ];
 
 /// `src` の一貫した写しを `dst` に作る (`dst` は無いこと)。一時名に書いて書き切ってから入れ替える。
+///
+/// どの写しも、[`UNCOPIED_KINDS`] の記録 (とその関係・副索引・`blobs`) と [`UNCOPIED_META`] の `meta` の値を
+/// 写さない (03 §7.1 の「v0.5 の根の退避」。忘れるの写し直しも同じ、§7.3)。
 pub fn logical_copy(src: &Database, dst: &Path) -> Result<CopyStats, StoreError> {
     logical_copy_excluding(src, dst, &|_| false)
 }
@@ -100,6 +190,7 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
     let out = Database::create(path).map_err(db)?;
     let rtx = src.begin_read().map_err(db)?;
     let mut stats = CopyStats::default();
+    let mut uncopied = Uncopied::new();
     let mut tx = out.begin_write().map_err(db)?;
     tx.set_durability(redb::Durability::None).map_err(db)?;
     for t in TABLES {
@@ -112,6 +203,9 @@ fn copy_into(src: &Database, path: &Path, row: &mut RowFn<'_>) -> Result<CopySta
         for item in table.iter().map_err(db)? {
             let (k, v) = item.map_err(db)?;
             let (k, v) = (k.value(), v.value());
+            if uncopied.drops(kind, k, v) {
+                continue;
+            }
             let replaced = match row(kind, k, v)? {
                 Row::Drop => continue,
                 Row::Keep => None,

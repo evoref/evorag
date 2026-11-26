@@ -367,6 +367,12 @@ fn write_carried(file: &Path, carried: &Carried) -> Result<(), StoreError> {
             crate::meta::FORGET_RECHECK_SET.as_bytes(),
         )
         .map_err(crate::store::db)?;
+        // 戻した DB は、ジャーナルの末尾の組をコミットしたか分からない (切り詰めずに読める行を当てる、03 §6)。
+        m.insert(
+            crate::meta::JOURNAL_TAIL_UNKNOWN.as_bytes(),
+            b"1".as_slice(),
+        )
+        .map_err(crate::store::db)?;
     }
     tx.commit().map_err(crate::store::db)
 }

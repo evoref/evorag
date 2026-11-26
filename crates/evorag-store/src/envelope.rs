@@ -89,6 +89,55 @@ impl BodyPatch {
     }
 }
 
+/// 本体の中で、型を決めずにそのまま保存する値 (CBOR の値を、知らない項目や知らない列挙の値も含めて運ぶ)。
+///
+/// 読み手が後で型を決めて読む項目に使う (台帳の `output` は節ごとに保存し、導出のときに読むときの型で読む、
+/// 04 §5.2)。書き戻すと元の値のまま残る (03 §4.2 の規則 7)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawValue(Value);
+
+impl RawValue {
+    /// `value` を CBOR の値にする。
+    ///
+    /// # Errors
+    /// 値を CBOR にできないとき。
+    pub fn from_serialize<T: Serialize>(value: &T) -> Result<Self, BodyError> {
+        Value::serialized(value)
+            .map(Self)
+            .map_err(|e| BodyError::Serialize(e.to_string()))
+    }
+
+    /// 型として読む。知らない項目は型の側の決め方で扱う (既定は無視する)。
+    ///
+    /// # Errors
+    /// 型に合わないとき。
+    pub fn to<T: DeserializeOwned>(&self) -> Result<T, BodyError> {
+        self.0
+            .deserialized()
+            .map_err(|e| BodyError::Deserialize(e.to_string()))
+    }
+
+    /// 並び (配列) なら、その要素。並びでなければ `None`。要素ごとに型を確かめて読むときに使う。
+    pub fn elements(&self) -> Option<Vec<RawValue>> {
+        match &self.0 {
+            Value::Array(items) => Some(items.iter().cloned().map(Self).collect()),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for RawValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RawValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Value::deserialize(d).map(Self)
+    }
+}
+
 /// 本体 (map) の整数の項目 `name`。項目が無いか null なら 0 (03 §4.2 の規則 1 の既定値)、整数でない・本体が
 /// map でないなら `None`。
 pub(crate) fn map_uint(body: &Value, name: &str) -> Option<u64> {
@@ -167,6 +216,16 @@ impl Envelope {
             }
         }
         Ok(())
+    }
+
+    /// 本体の CBOR のバイト列の SHA-256 ([`crate::WriteOp::ExpectBody`] で、読んだときの本体と同じかを確かめる)。
+    #[must_use]
+    pub fn body_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&self.body, &mut cbor)
+            .expect("a CBOR value always encodes into memory");
+        Sha256::digest(&cbor).into()
     }
 
     /// 本体の整数の項目 `name`。項目が無ければ 0 (03 §4.2 の規則 1 の既定値)、整数でなければ `None`。

@@ -47,6 +47,8 @@ pub struct Repaired {
     pub metas_restored: usize,
     /// ジャーナルの、チェックサムの合わない (読まなかった) 行の数。
     pub journal_bad_lines: usize,
+    /// ジャーナルの行の欠けた組の数 (読める行は戻した、03 §6)。
+    pub journal_incomplete_groups: usize,
     /// 書き足した関係 (逆向きの行を含む)。
     pub links_added: usize,
     /// 消した関係 (記録から作れない・記録の無いもの。逆向きの行を含む)。
@@ -91,10 +93,12 @@ impl Store {
         if self.token_issued.load(Ordering::SeqCst) {
             return Err(StoreError::TokenTaken);
         }
-        let (lines, bad) = crate::journal::read_all(self.data_root())
+        let read = crate::journal::read_all(self.data_root())
             .map_err(|e| StoreError::Io(format!("journal: {e}")))?;
+        let lines = read.lines;
         let mut out = Repaired {
-            journal_bad_lines: bad,
+            journal_bad_lines: read.bad,
+            journal_incomplete_groups: read.incomplete_groups,
             ..Repaired::default()
         };
         let mut tx = self.write_internal(Durability::Immediate)?;
@@ -109,6 +113,19 @@ impl Store {
             )
             .map_err(db)?;
             out.forget_recheck = true;
+        }
+        // 作り直した DB は、ジャーナルの末尾の組をコミットしたか分からない (次に開くときに切り詰めない、03 §6)。
+        // 行の欠けた組の読める行を当てたなら、その記録の ID を `end` の計画し直しの印に残す。
+        {
+            let mut m = tx.tx.open_table(META).map_err(db)?;
+            m.insert(
+                crate::meta::JOURNAL_TAIL_UNKNOWN.as_bytes(),
+                b"1".as_slice(),
+            )
+            .map_err(db)?;
+        }
+        if !read.partial.is_empty() {
+            tx.add_ids_meta(crate::meta::JOURNAL_PARTIAL_GROUPS, &read.partial)?;
         }
         tx.commit()?;
         // 戻した記録の ID を、新しい ID の下限に入れる (03 §3.3)。
