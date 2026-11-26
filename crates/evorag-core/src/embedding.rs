@@ -495,7 +495,9 @@ async fn embed_each(client: &dyn LlmClient, texts: &[String]) -> Vec<Option<Vec<
 }
 
 /// 裏の処理の手順: 足りないチャンクを埋め込む (数回分で区切る)。利用者の操作で落とされても、済んだ分は
-/// 残る。1 件でも足せたら `true`。
+/// 残る。1 件でも足せたか飛ばしたら (足りないものが減ったら) `true`。断られた単位を飛ばしただけの回を
+/// 「進まなかった」とすると、その間に新しいチャンク (応答のチャンクなど) が増えたときに、手順ごと待たされる
+/// (sleep.rs の `BACKOFF`)。
 pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     let Some((client, key)) = embedder(inner) else {
         return false;
@@ -511,11 +513,19 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         let read: HashSet<Id> = items.iter().map(|i| i.id).collect();
         // 読めないチャンク (区切りの作り直しで消えた直後など) は、このプロセスの間は飛ばす
         // (次の起動の突き合わせで片付く)。
-        inner
-            .embed_skip
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(batch.iter().filter(|id| !read.contains(id)));
+        let unreadable: Vec<Id> = batch
+            .iter()
+            .filter(|id| !read.contains(id))
+            .copied()
+            .collect();
+        if !unreadable.is_empty() {
+            progressed = true;
+            inner
+                .embed_skip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(unreadable);
+        }
         if items.is_empty() {
             continue;
         }
@@ -530,6 +540,7 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
             .map(|(i, _)| i.id)
             .collect();
         if !refused.is_empty() {
+            progressed = true;
             tracing::warn!(
                 n = refused.len(),
                 "some units were refused by the embedding server; skipping them"

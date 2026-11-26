@@ -345,7 +345,7 @@ pub(crate) async fn run(inner: Arc<Inner>) {
 }
 
 /// 手順を 1 つ動かす。利用者が操作したら future を落として止め、`None` を返す。終えたら、進んだか
-/// (埋め込みは 1 件でも足せたか。ほかの手順は「進まなかった」として、まだ要れば待たせる)。
+/// (埋め込みは 1 件でも足せたか飛ばしたか。ほかの手順は「進まなかった」として、まだ要れば待たせる)。
 async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<bool> {
     let touched = inner.activity.touched_notify().notified();
     tokio::pin!(touched);
