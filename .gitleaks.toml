@@ -1,0 +1,15 @@
+# gitleaks の設定 (docs/11-dev-workflow.md §9.7)。既定の規則をすべて使い、誤検知だけを狭く除く。
+# 除外は、場所 (paths) と形 (regexes) の両方に当たるときだけ効かせる (condition = "AND")。
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+# データ根の見本 (tests/fixtures/db/<版>/) のジャーナルと点検の出力に入る model_key・reranker_key
+# (docs/06-llm.md §5)。モデルのメタデータから作る 32 桁の 16 進のハッシュで、秘密ではない。
+# 見本は作った版のバイト列のまま置くので、書き換えずにここで除く。
+description = "model_key hashes in data-root fixtures"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/fixtures/''']
+regexes = ['''(?:model_key|reranker_key)":"[0-9a-f]{32}"''']
