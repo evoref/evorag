@@ -5,6 +5,7 @@
 //! 書き込みは、書き手 (`evorag_store::Writer`) に送る操作の列 (`WriteOp`) として組み立てる。
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
+mod apply;
 mod chars;
 mod correction;
 mod derived;
@@ -33,6 +34,11 @@ mod value_key;
 mod view;
 mod write;
 
+pub use apply::{
+    AdoptHit, AdoptOp, Adoption, DirectiveSet, End, Forget, Located, Phase, Private, PrivateHit,
+    Probe, ProbeAspect, RevText, ScrubContext, Scrubbed, Slot, Timed, TurnRedactions, UnitProbe,
+    ValueKeys, hidden_in_evidence, locate_forgotten, scrub_ledger,
+};
 pub use correction::{
     CandidateSkip, CorrectionBody, CorrectionCandidate, DIR_MAX_CHARS, LoadedCorrections,
     MATCH_MAX_CHARS, PatternMatch, Rejection, Target, Unverifiable, VERIFY_EXCERPT_CHARS,
@@ -138,8 +144,8 @@ pub use unit::{
     WhenBasis, entity_aspect_key, unit_delete_ops, unit_ops, units_request,
 };
 pub use value_key::{
-    BlockMark, ForgetKey, NORM_V1, ValueKey, block_mark, loose_key, normalize_loose, normalize_v1,
-    value_key,
+    BlockMark, ForgetKey, NORM_V1, ValueKey, aspect_key, block_mark, loose_key, normalize_loose,
+    normalize_v1, value_key,
 };
 pub use view::{
     fact_history, fact_list, find_row, private_info, row_key, rule_only, subject_name, subject_of,

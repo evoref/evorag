@@ -410,6 +410,25 @@ impl LedgerOutput {
             .filter(|n| *n != Self::INVALID)
     }
 
+    /// 節の保存した値 (wire の形のまま。台帳の掃除が要素ごとに除くために読む、04 §7.2)。
+    pub(crate) fn raw_section(&self, name: &str) -> Option<&RawValue> {
+        (name != Self::INVALID).then(|| self.0.get(name)).flatten()
+    }
+
+    /// 節の値を、保存した値のまま置き換える (台帳の掃除が残した要素で書き戻す)。予約の名前には書かない。
+    pub(crate) fn put_raw_section(&mut self, name: &str, value: RawValue) {
+        if name != Self::INVALID {
+            self.0.insert(name.to_owned(), value);
+        }
+    }
+
+    /// 節を除く (台帳の掃除で、並びでない節の全体を除くとき)。
+    pub(crate) fn remove_raw_section(&mut self, name: &str) {
+        if name != Self::INVALID {
+            self.0.remove(name);
+        }
+    }
+
     /// 節を要素ごとに型 `T` で読む。節が無ければ空。並びでない節は、要素が 1 つの型の合わない節として数える。
     fn section<T: DeserializeOwned>(&self, name: &str) -> Section<T> {
         let Some(raw) = self.0.get(name) else {

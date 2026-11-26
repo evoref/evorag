@@ -23,6 +23,8 @@ pub const NORM_V1: u32 = 1;
 const VK_TAG: &[u8] = b"evorag.vk.1\0";
 /// 再び覚えない印の入力の用途の印 (04 §5.6)。
 const MARK_TAG: &[u8] = b"evorag.mark.1\0";
+/// 自由記述の属性の鍵の入力の用途の印 (04 §5.6、v0.5)。
+const ASP_TAG: &[u8] = b"evorag.asp.1\0";
 
 /// 値の鍵の正規化 v1 (04 §5.6)。主語の呼び名にも同じものを当てる (04 §5.1)。
 pub fn normalize_v1(s: &str) -> String {
@@ -531,6 +533,16 @@ fn key_of(key: &ForgetKey, n: &str) -> ValueKey {
     ValueKey(hmac_sha256(&key.0, &msg))
 }
 
+/// 自由記述の属性の鍵 (v0.5): HMAC-SHA256(K, "evorag.asp.1" ‖ 0x00 ‖ UTF-8 (正規化 v1 (属性)))。指示の `aspect_mac`
+/// に、自由記述の属性の文字列の代わりに 16 進で書く (属性の名前が値に近い内容を含みうるため、04 §5.6)。
+pub fn aspect_key(key: &ForgetKey, aspect: &str) -> ValueKey {
+    let n = normalize_v1(aspect);
+    let mut msg = Vec::with_capacity(ASP_TAG.len() + n.len());
+    msg.extend_from_slice(ASP_TAG);
+    msg.extend_from_slice(n.as_bytes());
+    ValueKey(hmac_sha256(&key.0, &msg))
+}
+
 /// 再び覚えない印: HMAC-SHA256(K, "evorag.mark.1" ‖ 0x00 ‖ u32be(len S) ‖ S ‖ u32be(len A) ‖ A ‖ vk)。
 /// S は正規化 v1 の後の主語、A は属性の名前。
 pub fn block_mark(key: &ForgetKey, subject: &str, attribute: &str, vk: &ValueKey) -> BlockMark {
@@ -601,6 +613,26 @@ mod tests {
 
     fn hex(b: &[u8]) -> String {
         encode_hex(b)
+    }
+
+    /// verifies: 04 §5.6 (自由記述の属性の鍵: "evorag.asp.1" ‖ 0x00 ‖ 正規化 v1 (属性) の HMAC)
+    #[test]
+    fn aspect_keys_are_normalized_and_separated_from_value_keys() {
+        let key = ForgetKey::from_bytes([1; 32]);
+        let mut msg = b"evorag.asp.1\0".to_vec();
+        msg.extend_from_slice("よく行く店".as_bytes());
+        assert_eq!(
+            aspect_key(&key, "よく行く店").0,
+            hmac_sha256(&[1; 32], &msg)
+        );
+        assert_eq!(
+            aspect_key(&key, " よく行く店 "),
+            aspect_key(&key, "よく行く店")
+        );
+        assert_ne!(
+            aspect_key(&key, "よく行く店"),
+            value_key(&key, "よく行く店")
+        );
     }
 
     #[test]
