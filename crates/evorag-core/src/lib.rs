@@ -1051,20 +1051,25 @@ impl Core {
             .await;
     }
 
-    /// 試験のため: 裏の処理の要る手順が無くなるまで、`limit` まで待つ (実際のサーバを使う試験)。
+    /// 試験のため: 裏の処理の要る手順が無くなるまで、`limit` まで待つ (実際のサーバを使う試験)。起動の後の
+    /// 裏の task (索引の突き合わせ・ベクトルの索引を開く) を終えるまでは、手順が要るかを決められない
+    /// (埋め込みなどは、その前は「要らない」と見える) ので、それも待つ。
     #[doc(hidden)]
     pub async fn settle_background_within(&self, limit: std::time::Duration) {
+        use std::sync::atomic::Ordering;
         let rounds = (limit.as_millis() / 20).max(1);
         for _ in 0..rounds {
-            if !sleep::pending(&self.inner)
-                && !self.inner.working.load(std::sync::atomic::Ordering::SeqCst)
+            if self.inner.startup_done.load(Ordering::SeqCst)
+                && !sleep::pending(&self.inner)
+                && !self.inner.working.load(Ordering::SeqCst)
             {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!(
-            "background work did not settle within {limit:?}: {:?}",
+            "background work did not settle within {limit:?}: startup done {}, {:?}",
+            self.inner.startup_done.load(Ordering::SeqCst),
             sleep::pending_steps(&self.inner)
         );
     }
