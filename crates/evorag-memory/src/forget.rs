@@ -24,21 +24,21 @@ use evorag_types::{Id, IdGen, Timestamp};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::correction::{CorrectionBody, KIND_CORRECTION, REL_CORRECTION_OF};
+use crate::correction::CorrectionBody;
 use crate::extract::turn_rev_checked;
-use crate::facts::{
-    FACT_DIRECTIVE_V, FactDirectiveBody, HiddenBody, KIND_FACT_DIRECTIVE, OP_FORGET, ORIGIN_USER,
-    RedactionBody, derive_directive, diff_ops, for_each_directive_body, load_directives,
-    load_facts,
-};
+use crate::facts::{diff_ops, for_each_directive_body, load_directives, load_facts};
 use crate::fold::{
     Directive, DirectiveKind, Fact, FactSet, FactState, Source, VerifiedCorrection,
     refresh_private, retract,
 };
+use crate::import_v04::{
+    FACT_DIRECTIVE_V, FactDirectiveBody, HiddenBody, KIND_CORRECTION, KIND_FACT_DIRECTIVE,
+    KIND_NOTE, OP_FORGET, ORIGIN_USER, REL_CORRECTION_OF, REL_NOTE_OF, RedactionBody,
+    derive_directive,
+};
 use crate::kinds::{
     ChunkBody, EmbeddingBody, JOB_FORGET_BACKUPS, JOB_PURGE_INDEXES, JobBody, KIND_CHUNK,
-    KIND_EMBEDDING, KIND_JOB, KIND_NOTE, KIND_TURN, NoteBody, REL_CHUNK_OF, REL_EMBEDDING_OF,
-    REL_NOTE_OF, REL_REPLY_TO,
+    KIND_EMBEDDING, KIND_JOB, KIND_TURN, NoteBody, REL_CHUNK_OF, REL_EMBEDDING_OF, REL_REPLY_TO,
 };
 use crate::mask::apply_ranges;
 use crate::note::note_matches;

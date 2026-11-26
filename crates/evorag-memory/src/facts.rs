@@ -1,17 +1,16 @@
 //! 事実と事実への指示の記録 (04 §5.1・§7.5、03 §3.3)。純粋な核 (`fold`) と保存の形をつなぎ、書き込みの
 //! 入口を 1 つにする (04 §5.3 の「書き込みの入口は 1 つ」)。
 //!
-//! - 本体は最上位を平らにし、状態と `op` は文字列で持つ (知らない値の記録も丸ごと読めなくならないように、
-//!   03 §4.2 の規則 7・11)。
+//! - 本体の型・種類の名前・関係と副索引の作り方は、v0.4 の読み手 (`import_v04`) が持つ (旧エンジンを外した後も
+//!   `import-v04` が v0.4 の根を読むため、03 §12.4)。ここは核の形との行き来と、読み書きの手順だけを持つ。
 //! - 書き込みの入口は、読む → 核で畳む → 前後の差を `WriteOp` にする、だけを行う。書き手のトランザクション
 //!   の中で読み直すのは、呼ぶ側 (書き込みの依頼) の仕事にする。
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use evorag_store::key::OwnedPart;
 use evorag_store::{BodyError, Envelope, Read, ReadTxn, WriteOp};
 use evorag_types::{Id, IdGen, Timestamp};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::extract::turn_rev;
 use crate::fold::{
@@ -19,58 +18,16 @@ use crate::fold::{
     FoldEnv, Report, Scope, Source, Tense, drop_sources, fold,
 };
 use crate::gates::{Safety, check_subject, check_text, check_value};
+use crate::import_v04::{
+    FACT_DIRECTIVE_V, FACT_V, FactBody, FactDirectiveBody, HiddenBody, KIND_FACT,
+    KIND_FACT_DIRECTIVE, MarksField, OP_ACCEPT, OP_FORGET, OP_PRIVATE, OP_PRIVATE_OFF, OP_REVERT,
+    OP_UNBLOCK, Origin, SourceBody, SourcesField, SubjectAttribute, derive_directive, fact_entries,
+    origin_user,
+};
 use crate::kinds::KIND_TURN;
 use crate::read::MemoryError;
 use crate::rules::Attributes;
 use crate::value_key::{BlockMark, ForgetKey, NORM_V1, ValueKey};
-
-/// 事実 (04 §5.1、v0.3)。作り直せる派生の記録なので、ジャーナルに書かない。
-pub const KIND_FACT: &str = "fact";
-/// 事実への指示 (04 §7.5、v0.3)。利用者の明示の操作なのでジャーナルに書く。追記だけ。
-pub const KIND_FACT_DIRECTIVE: &str = "fact_directive";
-/// 関係: 事実 → 出典のターン (03 §3.3)。
-pub const REL_FACT_SRC: &str = "fact_src";
-/// 関係: 指示 → 解く相手の指示。
-pub const REL_CANCELS: &str = "cancels";
-/// 副索引: 主語・U+0000・属性 (03 §3.3)。
-const LOOKUP_SA: &str = "sa";
-/// 副索引: 値の鍵の 16 進。
-const LOOKUP_VK: &str = "vk";
-/// 副索引: 再び覚えない印の 16 進 (指示だけ)。
-const LOOKUP_MARK: &str = "mark";
-
-fn sa_key(subject: &str, attribute: &str) -> String {
-    format!("{subject}\u{0}{attribute}")
-}
-
-/// 事実の出典 (保存の形)。`Retracted` では `turn` だけを残す。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceBody {
-    pub turn: Id,
-    pub rev: u32,
-    pub start: Option<u32>,
-    pub end: Option<u32>,
-}
-
-/// `fact` の本体 (v1、04 §5.1 の「本体の形」)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactBody {
-    pub subject: String,
-    pub attribute: String,
-    pub value: Option<String>,
-    pub vk: Option<String>,
-    pub norm: u32,
-    pub tense: String,
-    pub valid_from: Option<String>,
-    pub valid_to: Option<String>,
-    pub state: String,
-    pub against: Option<Id>,
-    pub by: Option<Id>,
-    pub state_at: Option<i64>,
-    pub recorded_at: i64,
-    pub private: bool,
-    pub sources: Vec<SourceBody>,
-}
 
 fn tense_name(t: Tense) -> &'static str {
     match t {
@@ -174,98 +131,6 @@ impl FactBody {
     }
 }
 
-/// 伏せ字 1 つ (04 §7.5 の忘れるの指示。M3.4 で使う)。範囲は伏せ字の前の本文の UTF-8 のバイト位置。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RedactionBody {
-    pub turn: Id,
-    pub rev_before: u32,
-    pub rev_after: u32,
-    pub start: u32,
-    pub end: u32,
-    /// 伏せ字の後の本文の SHA-256 (16 進)。
-    pub hash: String,
-}
-
-/// 伏せ字にしないで忘れたときに、想起で `[非表示]` にする範囲 (04 §7.1。M3.4 で使う)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HiddenBody {
-    pub turn: Id,
-    pub rev: u32,
-    pub start: u32,
-    pub end: u32,
-}
-
-/// `fact_directive` の本体 (v1、04 §7.5 の「本体の形」)。使わない項目は null か空の並び。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactDirectiveBody {
-    pub op: String,
-    pub subject: String,
-    pub attribute: String,
-    pub vk: Option<String>,
-    pub norm: Option<u32>,
-    /// 操作したときの事実の ID (参考。当てるときは使わない)。
-    pub fact: Option<Id>,
-    /// 解く相手の指示 (`private_off`・`unblock`)。
-    pub target: Option<Id>,
-    /// `successors`・`value_only` (`private`)。
-    pub scope: Option<String>,
-    #[serde(default)]
-    pub marks: Vec<String>,
-    /// 忘れた値の鍵の 16 進の並び (忘れる、04 §7.5 の「忘れると訂正」)。ほかの指示では空。
-    #[serde(default)]
-    pub vks: Vec<String>,
-    #[serde(default)]
-    pub turns: Vec<Id>,
-    #[serde(default)]
-    pub redactions: Vec<RedactionBody>,
-    #[serde(default)]
-    pub hidden: Vec<HiddenBody>,
-    #[serde(default)]
-    pub history: bool,
-    #[serde(default)]
-    pub redact: bool,
-    /// 指示を足した経路 (04 §7.5): `user` (利用者の操作) か `delete` (セッションの削除・規則 12 の掃除で足した、
-    /// その値だけの private)。無い記録と知らない値は `user` として読む ([`FactDirectiveBody::origin`])。
-    #[serde(default = "origin_user")]
-    pub origin: String,
-}
-
-/// 指示の経路: 利用者の操作 (既定)。
-pub const ORIGIN_USER: &str = "user";
-/// 指示の経路: セッションの削除・出典の無い事実の掃除で足した (04 §7.5 の「後継」)。
-pub const ORIGIN_DELETE: &str = "delete";
-
-fn origin_user() -> String {
-    ORIGIN_USER.to_owned()
-}
-
-/// 指示を足した経路 (04 §7.5)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    /// 利用者の操作。`origin` の無い記録と知らない値も、こちらとして読む。
-    User,
-    /// セッションの削除・出典の無い事実の掃除で足した。
-    Delete,
-}
-
-impl Origin {
-    fn as_str(self) -> &'static str {
-        match self {
-            Origin::User => ORIGIN_USER,
-            Origin::Delete => ORIGIN_DELETE,
-        }
-    }
-}
-
-/// 指示の `op`: 忘れる (04 §7.5)。
-pub const OP_FORGET: &str = "forget";
-const OP_PRIVATE: &str = "private";
-const OP_PRIVATE_OFF: &str = "private_off";
-const OP_ACCEPT: &str = "accept";
-const OP_REVERT: &str = "revert";
-/// 指示の `op`: 印を解く (04 §7.5)。
-pub const OP_UNBLOCK: &str = "unblock";
-
 /// 記録が忘れるの指示か (`repair` が `forget.recheck` を立てるかを決める、03 §10)。本体の `op` だけを読む
 /// (新しい版の指示も、`op` が読めれば含める。印を立てすぎても当て直しが job を作り直すだけで、害が無いため)。
 #[must_use]
@@ -349,180 +214,7 @@ impl FactDirectiveBody {
             origin: origin_user(),
         }
     }
-
-    /// 指示を足した経路。知らない値は利用者の操作として読む。
-    #[must_use]
-    pub fn origin(&self) -> Origin {
-        if self.origin == ORIGIN_DELETE {
-            Origin::Delete
-        } else {
-            Origin::User
-        }
-    }
 }
-
-// 関係と副索引を作るのに要る項目は、1 つずつ別の型で読む (03 §4.2 の規則 11)。新しい版でほかの項目の
-// 型が変わっても、読める項目の関係と副索引 (特に再び覚えない印の `mark`) を失わないようにする。
-
-#[derive(Deserialize)]
-struct SubjectAttribute {
-    subject: String,
-    attribute: String,
-}
-
-#[derive(Deserialize)]
-struct VkField {
-    #[serde(default)]
-    vk: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SourcesField {
-    #[serde(default)]
-    sources: Vec<SourceTurn>,
-}
-
-#[derive(Deserialize)]
-struct SourceTurn {
-    turn: Id,
-}
-
-#[derive(Deserialize)]
-struct TargetField {
-    #[serde(default)]
-    target: Option<Id>,
-}
-
-#[derive(Deserialize)]
-struct MarksField {
-    #[serde(default)]
-    marks: Vec<String>,
-}
-
-/// 記録から作る関係と副索引の 1 項目。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum IndexEntry {
-    Lookup { field: &'static str, value: String },
-    Link { rel: &'static str, to: Id },
-}
-
-impl IndexEntry {
-    fn put(&self, kind: &str, id: Id) -> WriteOp {
-        match self {
-            IndexEntry::Lookup { field, value } => WriteOp::PutLookup {
-                kind: kind.into(),
-                field: (*field).into(),
-                value: OwnedPart::Str(value.clone()),
-                id,
-            },
-            IndexEntry::Link { rel, to } => WriteOp::PutLink {
-                from: id,
-                rel: (*rel).into(),
-                to: *to,
-                attrs: Vec::new(),
-            },
-        }
-    }
-
-    fn delete(&self, kind: &str, id: Id) -> WriteOp {
-        match self {
-            IndexEntry::Lookup { field, value } => WriteOp::DeleteLookup {
-                kind: kind.into(),
-                field: (*field).into(),
-                value: OwnedPart::Str(value.clone()),
-                id,
-            },
-            IndexEntry::Link { rel, to } => WriteOp::DeleteLink {
-                from: id,
-                rel: (*rel).into(),
-                to: *to,
-            },
-        }
-    }
-}
-
-/// `fact` の関係と副索引の集合 (本体から決まる)。
-pub(crate) fn fact_entries(e: &Envelope) -> BTreeSet<IndexEntry> {
-    let mut out = BTreeSet::new();
-    if let Ok(b) = e.body_as::<SubjectAttribute>() {
-        out.insert(IndexEntry::Lookup {
-            field: LOOKUP_SA,
-            value: sa_key(&b.subject, &b.attribute),
-        });
-    }
-    if let Ok(VkField { vk: Some(vk) }) = e.body_as::<VkField>() {
-        out.insert(IndexEntry::Lookup {
-            field: LOOKUP_VK,
-            value: vk,
-        });
-    }
-    if let Ok(b) = e.body_as::<SourcesField>() {
-        out.extend(b.sources.into_iter().map(|s| IndexEntry::Link {
-            rel: REL_FACT_SRC,
-            to: s.turn,
-        }));
-    }
-    out
-}
-
-/// `fact_directive` の関係と副索引の集合。
-fn directive_entries(e: &Envelope) -> BTreeSet<IndexEntry> {
-    let mut out = BTreeSet::new();
-    if let Ok(b) = e.body_as::<SubjectAttribute>() {
-        out.insert(IndexEntry::Lookup {
-            field: LOOKUP_SA,
-            value: sa_key(&b.subject, &b.attribute),
-        });
-    }
-    if let Ok(VkField { vk: Some(vk) }) = e.body_as::<VkField>() {
-        out.insert(IndexEntry::Lookup {
-            field: LOOKUP_VK,
-            value: vk,
-        });
-    }
-    if let Ok(b) = e.body_as::<MarksField>() {
-        out.extend(b.marks.into_iter().map(|m| IndexEntry::Lookup {
-            field: LOOKUP_MARK,
-            value: m,
-        }));
-    }
-    if let Ok(TargetField { target: Some(t) }) = e.body_as::<TargetField>() {
-        out.insert(IndexEntry::Link {
-            rel: REL_CANCELS,
-            to: t,
-        });
-    }
-    out
-}
-
-/// [`derive_fact`] が作りうる関係の名前 ([`fact_entries`])。
-pub(crate) const FACT_RELS: &[&str] = &[REL_FACT_SRC];
-/// [`derive_fact`] が作りうる副索引の項目。
-pub(crate) const FACT_LOOKUPS: &[&str] = &[LOOKUP_SA, LOOKUP_VK];
-/// [`derive_directive`] が作りうる関係の名前 ([`directive_entries`])。
-pub(crate) const DIRECTIVE_RELS: &[&str] = &[REL_CANCELS];
-/// [`derive_directive`] が作りうる副索引の項目。
-pub(crate) const DIRECTIVE_LOOKUPS: &[&str] = &[LOOKUP_SA, LOOKUP_VK, LOOKUP_MARK];
-
-/// `fact` の関係と副索引 (ジャーナルの取り込みや repair で、本体から作り直すときにも使う)。
-pub(crate) fn derive_fact(e: &Envelope) -> Vec<WriteOp> {
-    fact_entries(e)
-        .iter()
-        .map(|x| x.put(KIND_FACT, e.id))
-        .collect()
-}
-
-/// `fact_directive` の関係と副索引。
-pub(crate) fn derive_directive(e: &Envelope) -> Vec<WriteOp> {
-    directive_entries(e)
-        .iter()
-        .map(|x| x.put(KIND_FACT_DIRECTIVE, e.id))
-        .collect()
-}
-/// `fact` の本体の版 (03 §3.3)。これより新しい `v` の記録は読むだけにし、書き換えない (03 §4.2 の規則 6)。
-pub(crate) const FACT_V: u32 = 1;
-/// `fact_directive` の本体の版。
-pub(crate) const FACT_DIRECTIVE_V: u32 = 1;
 
 /// 読んだ事実。`envelopes` は畳みの前の封筒 (差を作るのに使う)。
 #[derive(Debug, Clone, Default)]
@@ -1160,6 +852,11 @@ pub fn load_forgets(tx: &ReadTxn<'_>) -> Result<Vec<ForgetRecord>, MemoryError> 
 mod tests {
     use super::*;
     use evorag_types::Timestamp;
+    use serde::Serialize;
+
+    use crate::import_v04::{
+        IndexEntry, LOOKUP_MARK, LOOKUP_VK, REL_FACT_SRC, derive_fact, directive_entries,
+    };
 
     fn envelope(kind: &str, v: u32, body: &impl Serialize) -> Envelope {
         let mut e = Envelope::new(
@@ -1519,29 +1216,6 @@ mod tests {
         drop(tx);
         handle.shutdown();
         thread.join().expect("writer");
-    }
-
-    /// `origin` の無い記録 (古い版) と知らない値は利用者の操作として読み、`delete` だけを削除で足した指示とする
-    /// (04 §7.5)。
-    #[test]
-    fn a_missing_or_unknown_origin_reads_as_user() {
-        let body = |origin: Option<&str>| {
-            let mut v = serde_json::json!({
-                "op": "private", "subject": "self", "attribute": "dietary",
-                "vk": "ab".repeat(32), "norm": 1, "scope": "value_only",
-            });
-            if let Some(o) = origin {
-                v["origin"] = o.into();
-            }
-            envelope(KIND_FACT_DIRECTIVE, FACT_DIRECTIVE_V, &v)
-                .body_as::<FactDirectiveBody>()
-                .expect("a readable body")
-        };
-        assert_eq!(body(None).origin(), Origin::User);
-        assert_eq!(body(None).origin, ORIGIN_USER);
-        assert_eq!(body(Some("someday")).origin(), Origin::User);
-        assert_eq!(body(Some("user")).origin(), Origin::User);
-        assert_eq!(body(Some("delete")).origin(), Origin::Delete);
     }
 
     #[test]
