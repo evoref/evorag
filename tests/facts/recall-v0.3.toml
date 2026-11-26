@@ -19,6 +19,9 @@
 #              で残るのはよい)。
 #              どちらも、答えと同じ正規化をしてから比べる。書いた事例は「事実の正しさ」(facts_correct) に数える
 #              が、合否 (expect) には使わない (09 §5.2)。答えからは見えにくい抽出の誤りを確かめる事例に書く。
+#              v0.5 の誤った事実の率 (09 §5.3) のために、2026-11-26 に、facts_forbid の無かった事例に足した
+#              (問いの中の語、応答だけにある値、他人の値、住まい・出身・予定の取り違え、属性の誤った写し)。
+#              v0.4 の判定に使った expect と既存の項目は変えていない。
 
 # --- 1 回言った事実 (日本語) ---
 
@@ -35,6 +38,7 @@ sessions = [[
 question = "私が住んでいる街、どこだったか覚えてる？"
 expect = ["仙台"]
 facts_expect = ["self/residence=仙台 (Live, Current)"]
+facts_forbid = ["self/hobby=加湿", "self/hometown=仙台"]
 
 [[case]]
 id = "F02"
@@ -49,6 +53,7 @@ sessions = [[
 question = "私のこと、何て呼ぶことになってたっけ？"
 expect = ["ミナト"]
 facts_expect = ["self/name=ミナト (Live, Current)"]
+facts_forbid = ["self/name=ミナトさん", "self/hobby=読書の記録の付け方"]
 
 [[case]]
 id = "F03"
@@ -77,6 +82,7 @@ sessions = [[
 question = "私が食べられない食材って何だっけ？"
 expect = ["えび"]
 facts_expect = ["self/dietary=えび (Live, Current)"]
+facts_forbid = ["self/likes=中華料理", "self/dietary=点心", "self/dietary=焼売"]
 
 [[case]]
 id = "F05"
@@ -90,6 +96,7 @@ sessions = [[
 ]]
 question = "私の仕事、何か覚えてる？"
 expect = ["教員"]
+facts_forbid = ["self/education=小学校", "self/occupation=学年の先生"]
 
 [[case]]
 id = "F06"
@@ -103,6 +110,7 @@ sessions = [[
 ]]
 question = "私の年齢、覚えてる？"
 expect = ["34"]
+facts_forbid = ["self/hobby=筋トレ", "self/hobby=早歩き"]
 
 [[case]]
 id = "F07"
@@ -131,6 +139,7 @@ sessions = [[
 question = "私が勉強している外国語は何だっけ？"
 expect = ["スペイン語"]
 facts_expect = ["self/spoken_language=スペイン語 (Live, Current)"]
+facts_forbid = ["self/skill=スペイン語", "self/hobby=シャドーイング"]
 
 [[case]]
 id = "F09"
@@ -144,6 +153,7 @@ sessions = [[
 ]]
 question = "私の出身地はどこだっけ？"
 expect = ["高知"]
+facts_forbid = ["self/residence=高知", "self/likes=かつおのたたき"]
 
 [[case]]
 id = "F10"
@@ -158,6 +168,7 @@ sessions = [[
 question = "私の誕生日、いつか覚えてる？"
 expect = ["7月22日"]
 facts_expect = ["self/birthday=7月22日 (Live, Current)"]
+facts_forbid = ["self/hobby=楽器", "self/hobby=ウクレレ"]
 
 [[case]]
 id = "F11"
@@ -171,6 +182,7 @@ sessions = [[
 ]]
 question = "私が大学で学んでいた分野って何だった？"
 expect = [["農学", "土壌"]]
+facts_forbid = ["self/occupation=土壌の研究"]
 
 [[case]]
 id = "F12"
@@ -185,6 +197,7 @@ sessions = [[
 question = "私が持っている資格は何？"
 expect = ["簿記2級"]
 facts_expect = ["self/skill=簿記2級 (Live, Current)"]
+facts_forbid = ["self/software=表計算ソフト"]
 
 [[case]]
 id = "F13"
@@ -198,6 +211,7 @@ sessions = [[
 ]]
 question = "私が家で使っているパソコン、何だったっけ？"
 expect = ["ThinkPad"]
+facts_forbid = ["self/residence=家"]
 
 [[case]]
 id = "F14"
@@ -212,6 +226,7 @@ sessions = [[
 question = "私がメモに使っているアプリは何だっけ？"
 expect = ["Obsidian"]
 facts_expect = ["self/software=Obsidian (Live, Current)"]
+facts_forbid = ["self/hobby=日記"]
 
 [[case]]
 id = "F15"
@@ -226,6 +241,7 @@ sessions = [[
 question = "私が週末によくしていることって何だっけ？"
 expect = ["ボルダリング"]
 facts_expect = ["self/hobby=ボルダリング (Live, Current)"]
+facts_forbid = ["self/hobby=ストレッチ"]
 
 [[case]]
 id = "F16"
@@ -255,6 +271,7 @@ sessions = [[
 question = "私が苦手なものって何だった？"
 expect = ["人混み"]
 facts_expect = ["self/dislikes=人混み (Live, Current)"]
+facts_forbid = ["self/hobby=旅行"]
 
 [[case]]
 id = "F18"
@@ -268,6 +285,7 @@ sessions = [[
 ]]
 question = "私が今目指している資格の試験は何だっけ？"
 expect = ["気象予報士"]
+facts_forbid = ["self/occupation=気象予報士", "self/skill=気象予報士"]
 
 [[case]]
 id = "F19"
@@ -295,6 +313,7 @@ sessions = [[
 ]]
 question = "真壁さんって、私とどういう関係だったっけ？"
 expect = ["友人"]
+facts_forbid = ["self/relation=大学時代の友人", "self/relation=友人"]
 
 # --- 訂正・言い直し・複数のセッション (日本語) ---
 
@@ -374,6 +393,7 @@ sessions = [
 question = "私の趣味を全部挙げてみて。"
 expect = ["将棋", "囲碁"]
 facts_expect = ["self/hobby=将棋 (Live, Current)", "self/hobby=囲碁 (Live, Current)"]
+facts_forbid = ["self/hobby=詰碁", "self/hobby=九路盤"]
 
 # --- 英語 ---
 
@@ -421,6 +441,7 @@ sessions = [[
 ]]
 question = "What do I do for a living?"
 expect = ["dental hygienist"]
+facts_forbid = ["self/hobby=shoulder rolls", "self/hobby=stretches"]
 
 [[case]]
 id = "F28"
@@ -435,6 +456,7 @@ sessions = [[
 ]]
 question = "Which food can't I eat?"
 expect = ["peanut"]
+facts_forbid = ["self/dietary=sunflower seeds", "self/hobby=hike"]
 
 [[case]]
 id = "F29"
@@ -466,6 +488,7 @@ sessions = [[
 question = "Which language am I learning?"
 expect = ["Korean"]
 facts_expect = ["self/spoken_language=Korean (Live, Current)"]
+facts_forbid = ["self/skill=Korean"]
 
 # --- 言っていない事実を問う (Abstain) ---
 
@@ -495,6 +518,7 @@ sessions = [[
 ]]
 question = "私の誕生日はいつだったっけ？"
 expect = []
+facts_forbid = ["self/pet=ポトス"]
 
 [[case]]
 id = "A03"
@@ -508,6 +532,7 @@ sessions = [[
 ]]
 question = "私が飼っているペットの名前、何だったっけ？"
 expect = []
+facts_forbid = ["self/hobby=構図"]
 
 [[case]]
 id = "A04"
@@ -522,3 +547,4 @@ sessions = [[
 ]]
 question = "What's my favorite food?"
 expect = []
+facts_forbid = ["self/occupation=manager"]

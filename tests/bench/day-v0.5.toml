@@ -1,0 +1,113 @@
+# BM-108 の見本の会話 (09 §5.1 の「BM-108 の流し方」、NFR-108、AC-NFR-108-1)。
+# 作った 1 日分の会話。会話はすべて架空で、実在の人物・個人情報・利用者の会話の実例を含まない (11 §9.7)。
+#
+# 大きさ (09 §5.1): セッション 4、利用者の発話 30 (うち前のふるいで送らない挨拶・相槌・短いもの 5)。
+# 短い発話と長い発話 (約 300 字のメモ 1 件)、ja を主に en を少し (en のセッション 1 と、ja のセッションの中の en の発話 1)。
+# 区切り (04 §2) の決め方を通すために、次を含める。
+#   - S1 の中の 25 分の間 (10 分を過ぎるので、そこで区切りが閉じる)。
+#   - S3 の 9 往復 (区切りの上限の候補 8 往復を超える)。
+#   - 訂正の候補 (「六歳じゃなくて七歳」) と、予定 (planned) の値。
+#
+# 書式:
+#   version   見本の版 (中身を変えたら上げる。BM-108.json には、このファイルの SHA-256 を書く)。
+#   tz        発話のターンに記録する UTC からのずれ。
+#   [[session]]
+#     id      事例の中のセッションの名前。
+#     title   セッションの題名 (データ根に書く)。
+#     start   セッションの最初のターンの時刻 (RFC 3339、tz と同じずれ)。
+#     turns   ターンの並び。各々 { dt, role, text }。dt は前のターン (最初のターンはセッションの start) からの秒数。
+#             role は user か assistant。利用者から始めて交互にする。応答は固定の文 (BM-108 では chat を呼ばない)。
+#
+# 流し方 (09 §5.1): 事例ごとに新しいデータ根を作り、この会話を書き込みの入口で時刻どおりに書いてから、
+# 裏の処理を最後まで流す。捨てた率を測る回では、day-v0.5-ops.toml の操作の注入の列で裏の要求を止める。
+
+version = 1
+tz = "+09:00"
+
+[[session]]
+id = "S1"
+title = "在宅勤務の資料作り"
+start = "2026-06-10T07:40:00+09:00"
+turns = [
+  { dt = 0, role = "user", text = "おはよう" },
+  { dt = 8, role = "assistant", text = "おはようございます。今日もよろしくお願いします。" },
+  { dt = 40, role = "user", text = "今日は在宅勤務の日なので、午前中に資料作りを終わらせたいです。段取りを一緒に考えてもらえますか？" },
+  { dt = 15, role = "assistant", text = "いいですね。まず資料の目的と読み手を一行で書き出し、次に見出しだけを並べて骨組みを作ると、午前中に収まりやすくなります。" },
+  { dt = 90, role = "user", text = "読み手は部長と、隣の課のリーダーが二人です。" },
+  { dt = 12, role = "assistant", text = "三人とも忙しい方なら、最初のページに結論と頼みたいことをまとめておくと、読んでもらいやすいです。" },
+  { dt = 70, role = "user", text = "なるほど。ちなみに私は港南台に住んでいて、出社の日は電車で四十分かかります。" },
+  { dt = 10, role = "assistant", text = "港南台から四十分の通勤ですね。在宅の日は、その時間を資料作りに回せるのが助かりますね。" },
+  { dt = 120, role = "user", text = "うちの柴犬のコムギが散歩を待っているので、少し抜けます。" },
+  { dt = 8, role = "assistant", text = "いってらっしゃい。コムギちゃんとの散歩を楽しんでください。" },
+  { dt = 1500, role = "user", text = "戻りました。見出しは五つにしました。" },
+  { dt = 10, role = "assistant", text = "五つなら読みやすい量です。見出しごとに、伝えたいことを一文ずつ書いてみましょう。" },
+  { dt = 180, role = "user", text = "三つ目の見出しの中身がうまく書けません。数字の比べ方で迷っています。" },
+  { dt = 15, role = "assistant", text = "前の年と今年を並べた表にして、差がいちばん大きい項目だけを文で説明すると、伝わりやすくなります。" },
+  { dt = 60, role = "user", text = "ok" },
+  { dt = 5, role = "assistant", text = "ほかにも詰まったら、いつでも声をかけてください。" },
+]
+
+[[session]]
+id = "S2"
+title = "Lunch break English practice"
+start = "2026-06-10T12:15:00+09:00"
+turns = [
+  { dt = 0, role = "user", text = "Hi! Can we practice English during my lunch break? I have a video call with an overseas team next week." },
+  { dt = 10, role = "assistant", text = "Sure! Let's practice. What will the call be about?" },
+  { dt = 45, role = "user", text = "It's a project kickoff. I need to introduce myself and explain my role in about one minute." },
+  { dt = 12, role = "assistant", text = "Great. A simple structure works well: your name, your team, what you do, and one thing you are looking forward to in the project." },
+  { dt = 120, role = "user", text = "Let me try: I'm a planner on the product team. I make schedules and connect the design and sales teams." },
+  { dt = 14, role = "assistant", text = "That's clear and natural. You could add one detail, like how long you've been on the team, to make it more personal." },
+  { dt = 90, role = "user", text = "I've been on the team for three years. Before that, I worked in customer support." },
+  { dt = 12, role = "assistant", text = "Perfect. That background is worth mentioning, because it shows you understand what customers need." },
+  { dt = 60, role = "user", text = "How do I politely ask someone to repeat what they said?" },
+  { dt = 12, role = "assistant", text = "You can say, \"Sorry, could you say that again?\" or \"Could you repeat the last part, please?\" Both are polite and common." },
+  { dt = 40, role = "user", text = "Thanks, that's helpful." },
+  { dt = 6, role = "assistant", text = "You're welcome! Good luck with the call." },
+]
+
+[[session]]
+id = "S3"
+title = "週末の家族旅行の計画"
+start = "2026-06-10T19:30:00+09:00"
+turns = [
+  { dt = 0, role = "user", text = "週末に家族で一泊旅行をしようと思っています。候補は箱根と伊豆です。" },
+  { dt = 12, role = "assistant", text = "どちらも週末の一泊にちょうどいい距離ですね。ご家族は何人で、どんな過ごし方がしたいですか？" },
+  { dt = 60, role = "user", text = "妻と六歳の娘と三人です。娘は海が好きなので、できれば海の近くがいいです。" },
+  { dt = 14, role = "assistant", text = "それなら伊豆が向いていそうです。砂浜のある海水浴場や、水族館のある町もあります。" },
+  { dt = 240, role = "user", text = "参考までに、去年の旅行で困ったことをメモにまとめてあります。行きの高速道路が朝から渋滞して、着いたのが昼過ぎになりました。宿の夕食が十八時からで、娘が昼寝をしてしまい、起こすのが大変でした。部屋が二階で、荷物を運ぶ階段が急でした。帰りは日曜の夕方で、また渋滞に巻き込まれて、家に着いたのは夜の九時でした。今年は、朝早く出るか、電車で行くかを考えています。宿は、夕食の時間を選べるところで、できれば一階か、エレベーターのあるところがいいです。娘が飽きないように、移動の途中で休める場所も知りたいです。それから、雨が降ったときに室内で遊べる場所があると安心です。予算は、宿代と食事で五万円くらいを考えています。" },
+  { dt = 20, role = "assistant", text = "メモをありがとうございます。早い時間の電車で行き、駅から近くて夕食の時間を選べる宿にすると、去年の困りごとの多くを避けられそうです。雨の日は、水族館や体験工房が候補になります。" },
+  { dt = 120, role = "user", text = "電車なら、特急で二時間くらいですか？" },
+  { dt = 10, role = "assistant", text = "特急を使えば、二時間前後で着く区間が多いです。座席を指定しておくと、子ども連れでも落ち着いて移動できます。" },
+  { dt = 100, role = "user", text = "あ、娘は六歳じゃなくて七歳でした。先月が誕生日だったので。" },
+  { dt = 10, role = "assistant", text = "七歳になったんですね。おめでとうございます。七歳なら、磯遊びや短いハイキングも楽しめそうです。" },
+  { dt = 80, role = "user", text = "磯遊びはいいですね。必要な持ち物を教えてください。" },
+  { dt = 12, role = "assistant", text = "濡れてもいい靴、帽子、着替え、小さなバケツと網があると楽しめます。日焼け止めと飲み物も忘れずに。" },
+  { dt = 70, role = "user", text = "宿は七月の第二土曜日で予約しようと思います。" },
+  { dt = 10, role = "assistant", text = "七月の第二土曜日ですね。夏休みの前なので、まだ取りやすいかもしれません。早めに予約しておくと安心です。" },
+  { dt = 90, role = "user", text = "了解です" },
+  { dt = 6, role = "assistant", text = "ほかに決めておきたいことがあれば、いつでもどうぞ。" },
+  { dt = 60, role = "user", text = "最後に、娘が電車で退屈しないように、何か工夫はありますか？" },
+  { dt = 12, role = "assistant", text = "小さな絵本やシール帳、窓の外の景色を使ったクイズなどが手軽です。おやつを少し用意しておくのもおすすめです。" },
+]
+
+[[session]]
+id = "S4"
+title = "寝る前の振り返り"
+start = "2026-06-10T22:40:00+09:00"
+turns = [
+  { dt = 0, role = "user", text = "今日はけっこう進みました。資料は八割できました。" },
+  { dt = 10, role = "assistant", text = "お疲れさまでした。八割まで進めば、明日は見直しと仕上げに集中できますね。" },
+  { dt = 60, role = "user", text = "明日は出社の日なので、電車の中で見直すつもりです。" },
+  { dt = 12, role = "assistant", text = "四十分あれば、見出しと数字の確認には十分です。気になった箇所をメモしておくと、出社してすぐ直せます。" },
+  { dt = 90, role = "user", text = "最近、寝る前にスマホを見すぎてしまいます。何かいい方法はありますか？" },
+  { dt = 12, role = "assistant", text = "寝る三十分前にスマホを別の部屋で充電する、通知を夜だけ止める、紙の本を枕元に置く、などが試しやすいです。" },
+  { dt = 60, role = "user", text = "紙の本なら、今は推理小説を読んでいます。" },
+  { dt = 10, role = "assistant", text = "推理小説は続きが気になってしまいますね。一章ずつと決めて読むと、夜更かしを防げます。" },
+  { dt = 45, role = "user", text = "I also want to try a short stretching routine before bed. Any ideas?" },
+  { dt = 12, role = "assistant", text = "Sure. Try a gentle neck stretch, a seated forward bend, and slow deep breathing for a few minutes. Keep it relaxed rather than intense." },
+  { dt = 30, role = "user", text = "ありがとう" },
+  { dt = 5, role = "assistant", text = "どういたしまして。" },
+  { dt = 20, role = "user", text = "おやすみ" },
+  { dt = 5, role = "assistant", text = "おやすみなさい。ゆっくり休んでください。" },
+]
