@@ -12,7 +12,7 @@ use evorag_types::Id;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::derived::{Record, link, lookup};
+use crate::derived::{Record, RecordError, link, lookup};
 use crate::write::Writes;
 
 /// 話題の区切り (04 §2、v0.5)。派生だが、閉じた区切りは決め直さないので `Immediate` で書く。ジャーナルには書かない。
@@ -131,7 +131,7 @@ pub(crate) fn derive_segment(e: &Envelope) -> Vec<WriteOp> {
 }
 
 impl Writes<'_> {
-    /// 区切りを書く操作 (封筒と、その関係・副索引)。`previous` は読み直した前の区切りの記録 (開いている末尾の区切り
+    /// 区切りを書く操作 (前の状態の確かめと、封筒と、その関係・副索引)。`previous` は読み直した前の区切りの記録 (開いている末尾の区切り
     /// に往復を足すとき)。知らない項目と作成の時刻を残す。台帳と同じコミットに入れるときは、この操作を台帳の依頼に
     /// 足す ([`Writes::ledger`])。
     ///
@@ -151,15 +151,25 @@ impl Writes<'_> {
                 return Err(SegmentError::Closed);
             }
         }
-        let ops = Record {
+        // 外で読んだ前の区切りが、書き手のトランザクションの中でも同じ本体のまま (無かったなら無いまま) であること
+        // (その間に閉じた区切りを、古い本体で上書きしないため、04 §2)。
+        let mut ops = vec![WriteOp::ExpectBody {
+            kind: KIND_SEGMENT.into(),
+            id,
+            body: previous.map(Envelope::body_digest),
+        }];
+        let record = Record {
             kind: KIND_SEGMENT,
             v: SEGMENT_V,
             id,
             now: self.clock.now(),
             body,
             derive: derive_segment,
-        }
-        .ops(previous)?;
+        };
+        ops.extend(record.ops(previous).map_err(|e| match e {
+            RecordError::Body(e) => SegmentError::Body(e),
+            RecordError::WrongPrevious { .. } => SegmentError::WrongPrevious,
+        })?);
         Ok((id, ops))
     }
 

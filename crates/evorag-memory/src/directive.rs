@@ -391,14 +391,20 @@ pub(crate) fn derive_directive(e: &Envelope) -> Vec<WriteOp> {
             e.id,
         ));
     }
-    ops.extend(directive_turns(e).into_iter().map(|t| {
-        lookup(
-            KIND_DIRECTIVE,
-            LOOKUP_DIRECTIVE_TURN,
-            OwnedPart::Id(t),
-            e.id,
-        )
-    }));
+    // 指示自身の ID (`end` の位置が決まらないとき) は、ターンではないので副索引に入れない。
+    ops.extend(
+        directive_turns(e)
+            .into_iter()
+            .filter(|t| *t != e.id)
+            .map(|t| {
+                lookup(
+                    KIND_DIRECTIVE,
+                    LOOKUP_DIRECTIVE_TURN,
+                    OwnedPart::Id(t),
+                    e.id,
+                )
+            }),
+    );
     if let Ok(TargetField { target: Some(t) }) = e.body_as::<TargetField>() {
         ops.push(link(e.id, REL_DIRECTIVE_CANCELS, t));
     }
@@ -421,7 +427,7 @@ impl Writes<'_> {
             body,
             derive: derive_directive,
         }
-        .ops(None)?;
+        .new_ops()?;
         Ok((id, ops))
     }
 }

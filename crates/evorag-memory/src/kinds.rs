@@ -354,6 +354,12 @@ pub fn kinds_v05() -> Vec<KindSpec> {
     out
 }
 
+/// v0.5 の新しいデータ根を開くときの、種類と形式の組 (03 §3.1.1・§12.4)。`Store::open_with` に渡す。
+#[must_use]
+pub fn v05_root() -> (Vec<KindSpec>, evorag_store::migrate::FormatPlan) {
+    (kinds_v05(), evorag_store::migrate::FormatPlan::v05())
+}
+
 /// モデルの性質の点検の結果 (06 §3.3、v0.2)。
 pub const KIND_MODEL_PROBE: &str = "model_probe";
 

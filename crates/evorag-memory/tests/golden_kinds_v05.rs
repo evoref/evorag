@@ -554,3 +554,68 @@ fn a_unit_body_round_trips() {
     add_field(&mut odd, "state", &serde_json::json!("frozen"));
     assert!(odd.body_as::<UnitBody>().is_err());
 }
+
+/// 台帳は先に頭だけを読み、`segment` 以外の呼び出しなら本体を読まない。項目を欠く台帳は既定値で読み (有効でない側)、
+/// 型として読めない台帳も読めない記録にしない。
+/// verifies: 04 §5.2.1 (台帳の読み方), 03 §3.3 (`call` が `segment` 以外の台帳は読み飛ばして残す)
+#[test]
+fn a_ledger_is_read_head_first_and_missing_fields_read_as_invalid() {
+    let key = key_of(KIND_PROPOSAL, t(44));
+    let read = |body: &serde_json::Value| {
+        let e = envelope(KIND_PROPOSAL, t(44), body);
+        read_ledger(&Envelope::decode(&key, &e.encode(&key)).unwrap())
+    };
+    // ほかの呼び出し (v0.7 の見出しなど): 本体の形が違っても、頭だけで止まる。
+    let other = read(&serde_json::json!({"call": "topic_title", "sentences": "not a list"}));
+    assert!(matches!(other, Some(LedgerRead::OtherCall(ref h)) if h.call == "topic_title"));
+    // 項目を欠く区切りの台帳: 既定値で読む (規則の版 0・状態は知らない値)。
+    let Some(LedgerRead::Segment(bare)) = read(&serde_json::json!({"call": "segment"})) else {
+        panic!("a segment ledger with missing fields is still read");
+    };
+    assert_eq!(bare.status(), LedgerStatus::Unknown);
+    assert_eq!((bare.schema, bare.inputs.prefilter), (0, 0));
+    assert!(bare.sentences.is_empty() && bare.output.sections().next().is_none());
+    // 本体を型として読めない区切りの台帳: 有効でない台帳として扱う (消さない)。
+    let broken = read(
+        &serde_json::json!({"call": "segment", "status": "complete", "sentences": [{"s": 1}]}),
+    );
+    assert!(
+        matches!(broken, Some(LedgerRead::Unreadable(ref h)) if h.status() == LedgerStatus::Complete)
+    );
+    // 今の見本は、区切りの台帳として読める。
+    let Some(LedgerRead::Segment(full)) = read(&serde_json::to_value(sample_ledger()).unwrap())
+    else {
+        panic!("the sample is a segment ledger");
+    };
+    assert_eq!(*full, sample_ledger());
+}
+
+/// `output` の節の名前 `invalid` は予約で、節として書けない。合わなかった理由が読めない形なら、上書きしない。
+/// verifies: 04 §5.2.1 (`output` の `invalid` は予約の名前)
+#[test]
+fn the_reserved_section_name_is_refused() {
+    let mut output = LedgerOutput::default();
+    assert!(matches!(
+        output.set_section(LedgerOutput::INVALID, &serde_json::json!({})),
+        Err(LedgerOutputError::Reserved(_))
+    ));
+    assert!(matches!(
+        output.set_invalid(LedgerOutput::INVALID, "x"),
+        Err(LedgerOutputError::Reserved(_))
+    ));
+    // 読めない形の `invalid` (新しい版が書いた形など) は書き換えない。
+    let mut ledger = sample_ledger();
+    let mut e = envelope(KIND_PROPOSAL, t(45), &ledger);
+    let mut body = envelope_to_json(&e)["body"].clone();
+    body["output"]["invalid"] = serde_json::json!(["not", "a", "map"]);
+    e.set_body(&body).unwrap();
+    ledger = e.body_as().unwrap();
+    assert!(matches!(
+        ledger.output.set_section(LedgerOutput::KEYS, &vec!["鍵"]),
+        Err(LedgerOutputError::UnreadableInvalid)
+    ));
+    assert!(matches!(
+        ledger.output.set_invalid(LedgerOutput::UNITS, "x"),
+        Err(LedgerOutputError::UnreadableInvalid)
+    ));
+}

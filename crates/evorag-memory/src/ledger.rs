@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::derived::{Record, delete_ops, link, lookup};
 use crate::kinds::SrcRev;
 use crate::segment::{SegmentBody, SegmentError};
-use crate::write::{Writes, expect_turn};
+use crate::write::{Writes, expect_record, expect_turn};
 
 /// 台帳 (04 §5.2.1、v0.5)。`Immediate` で書き、退避と書き出しに含める。ジャーナルには書かない。
 pub const KIND_PROPOSAL: &str = "proposal";
@@ -93,8 +93,10 @@ pub struct CorrInput {
     pub old: Option<ByteRange>,
 }
 
-/// 呼び出しの入力の対応表と版 (04 §5.2.1 の `inputs`)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 呼び出しの入力の対応表と版 (04 §5.2.1 の `inputs`)。無い項目は既定値 (版は 0) で読み、規則の版の合わない台帳
+/// (有効でない側) に倒す。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LedgerInputs {
     /// 前のふるいの規則の版。
     pub prefilter: u32,
@@ -122,6 +124,7 @@ pub struct LedgerInputs {
 
 /// 呼び出しのトークン数と時間 (04 §5.2.1 の `tokens`)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LedgerTokens {
     /// 入力 (プロンプト) のトークン数。
     pub input: u32,
@@ -170,7 +173,11 @@ impl LedgerStatus {
 }
 
 /// `proposal` の本体 (v1、04 §5.2.1 の「台帳の本体」)。項目は足すだけ (最上位か `output` の節に足す)。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// 無い項目は既定値で読む (`status` は空で [`LedgerStatus::Unknown`]、`schema` と規則の版は 0、`sentences` は空)。
+/// 項目を欠く台帳を、台帳の全体を読めない記録にせず、有効でない台帳の側に倒すため。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LedgerBody {
     /// 呼び出しの種類 ([`CALL_SEGMENT`])。`segment` 以外の台帳は、v0.5 の選び方と導出で読み飛ばす (残す)。
     pub call: String,
@@ -225,6 +232,71 @@ impl LedgerBody {
     }
 }
 
+/// 台帳の頭 (呼び出しの種類と、選び方に要る項目)。台帳を読むときは、先にこれだけを読み、`call` が `segment` で
+/// なければ本体を読まない (v0.5 は `segment` 以外の台帳を読み飛ばして残す、03 §3.3)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LedgerHead {
+    pub call: String,
+    pub segment: Option<Id>,
+    pub schema: u32,
+    pub variant: String,
+    pub model_key: String,
+    pub status: String,
+}
+
+impl LedgerHead {
+    /// 区切りの呼び出し (B2) の台帳か。
+    #[must_use]
+    pub fn is_segment_call(&self) -> bool {
+        self.call == CALL_SEGMENT
+    }
+
+    /// 台帳の `status`。知らない値は [`LedgerStatus::Unknown`]。
+    #[must_use]
+    pub fn status(&self) -> LedgerStatus {
+        LedgerStatus::of(&self.status)
+    }
+}
+
+/// 台帳の記録の読み方 ([`read_ledger`])。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LedgerRead {
+    /// 区切りの呼び出しの台帳。
+    Segment(Box<LedgerBody>),
+    /// `segment` 以外の呼び出しの台帳 (読み飛ばして残す)。
+    OtherCall(LedgerHead),
+    /// 区切りの呼び出しの台帳だが、本体を型として読めない (有効でない台帳として扱う。消さない)。
+    Unreadable(LedgerHead),
+}
+
+/// 台帳の記録を読む。先に頭 ([`LedgerHead`]) を読み、`call` が `segment` のときだけ本体を読む。頭も読めなければ
+/// `None` (本体が map でない)。
+#[must_use]
+pub fn read_ledger(e: &Envelope) -> Option<LedgerRead> {
+    let head: LedgerHead = e.body_as().ok()?;
+    if !head.is_segment_call() {
+        return Some(LedgerRead::OtherCall(head));
+    }
+    Some(match e.body_as::<LedgerBody>() {
+        Ok(body) => LedgerRead::Segment(Box::new(body)),
+        Err(_) => LedgerRead::Unreadable(head),
+    })
+}
+
+/// 台帳の `output` を書き換えられない理由。
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerOutputError {
+    /// 節の名前が予約の名前 ([`LedgerOutput::INVALID`]) である。
+    #[error("`{0}` is reserved and is not a section name")]
+    Reserved(String),
+    /// 合わなかった節の理由 ([`LedgerOutput::INVALID`]) が読めない形で入っている (上書きしない)。
+    #[error("the reasons of the invalid sections cannot be read")]
+    UnreadableInvalid,
+    #[error(transparent)]
+    Body(#[from] BodyError),
+}
+
 /// 台帳の `output` (04 §5.2 の「出力の型」の wire の節の名前 → その節の値)。節ごとに型を確かめ、合った節だけを
 /// 入れる。合わなかった節は、名前 [`LedgerOutput::INVALID`] の下に理由だけを書く。知らない節も残す。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -262,11 +334,16 @@ impl LedgerOutput {
     /// 型の合った節を入れる (同じ名前の節は置き換える。合わなかった理由があれば消す)。
     ///
     /// # Errors
-    /// 値を CBOR にできないとき。
-    pub fn set_section<T: Serialize>(&mut self, name: &str, value: &T) -> Result<(), BodyError> {
+    /// 名前が予約の名前のとき、合わなかった理由が読めない形のとき、値を CBOR にできないとき。
+    pub fn set_section<T: Serialize>(
+        &mut self,
+        name: &str,
+        value: &T,
+    ) -> Result<(), LedgerOutputError> {
+        Self::check_name(name)?;
+        let mut invalid = self.read_invalid()?;
         self.0
             .insert(name.to_owned(), RawValue::from_serialize(value)?);
-        let mut invalid = self.invalid();
         if invalid.remove(name).is_some() {
             self.put_invalid(&invalid)?;
         }
@@ -276,12 +353,28 @@ impl LedgerOutput {
     /// 型の合わなかった節の理由を書く (その節の値は入れない)。
     ///
     /// # Errors
-    /// 値を CBOR にできないとき。
-    pub fn set_invalid(&mut self, name: &str, reason: &str) -> Result<(), BodyError> {
+    /// 名前が予約の名前のとき、合わなかった理由が読めない形のとき、値を CBOR にできないとき。
+    pub fn set_invalid(&mut self, name: &str, reason: &str) -> Result<(), LedgerOutputError> {
+        Self::check_name(name)?;
+        let mut invalid = self.read_invalid()?;
         self.0.remove(name);
-        let mut invalid = self.invalid();
         invalid.insert(name.to_owned(), reason.to_owned());
-        self.put_invalid(&invalid)
+        Ok(self.put_invalid(&invalid)?)
+    }
+
+    fn check_name(name: &str) -> Result<(), LedgerOutputError> {
+        if name == Self::INVALID {
+            return Err(LedgerOutputError::Reserved(name.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// 合わなかった節の理由 (無ければ空)。読めない形なら `Err`。
+    fn read_invalid(&self) -> Result<BTreeMap<String, String>, LedgerOutputError> {
+        match self.0.get(Self::INVALID) {
+            None => Ok(BTreeMap::new()),
+            Some(v) => v.to().map_err(|_| LedgerOutputError::UnreadableInvalid),
+        }
     }
 
     fn put_invalid(&mut self, invalid: &BTreeMap<String, String>) -> Result<(), BodyError> {
@@ -579,6 +672,8 @@ impl Writes<'_> {
             if old.kind != KIND_PROPOSAL {
                 return Err(LedgerError::NotALedger(old.id));
             }
+            // 置き換える前の台帳が残っていること (同じ依頼を送り直して、台帳が 2 つ残らないため)。
+            ops.push(expect_record(KIND_PROPOSAL, old.id));
             ops.extend(delete_ops(old, derive_ledger));
         }
         let id = self.ids.next_id();
@@ -591,7 +686,7 @@ impl Writes<'_> {
                 body: ledger,
                 derive: derive_ledger,
             }
-            .ops(None)?,
+            .new_ops()?,
         );
         Ok((id, WriteRequest::background_durable(ops)))
     }

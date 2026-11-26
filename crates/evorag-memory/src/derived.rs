@@ -56,10 +56,34 @@ pub(crate) struct Record<'a, T> {
     pub derive: DeriveFn,
 }
 
+/// 前の封筒の上に記録を書けない理由。
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    /// 前の封筒が、書く記録 (種類と ID) のものではない。
+    #[error("the previous record is {kind}/{id}, not the record being written")]
+    WrongPrevious { kind: String, id: Id },
+    #[error(transparent)]
+    Body(#[from] BodyError),
+}
+
 impl<T: Serialize> Record<'_, T> {
-    pub(crate) fn ops(&self, previous: Option<&Envelope>) -> Result<Vec<WriteOp>, BodyError> {
+    /// 新しい記録を書く操作。
+    pub(crate) fn new_ops(&self) -> Result<Vec<WriteOp>, BodyError> {
+        self.ops(None).map_err(|e| match e {
+            RecordError::Body(e) => e,
+            RecordError::WrongPrevious { .. } => unreachable!("no previous record was given"),
+        })
+    }
+
+    pub(crate) fn ops(&self, previous: Option<&Envelope>) -> Result<Vec<WriteOp>, RecordError> {
         let mut ops = Vec::new();
         let mut env = match previous {
+            Some(old) if old.id != self.id || old.kind != self.kind => {
+                return Err(RecordError::WrongPrevious {
+                    kind: old.kind.clone(),
+                    id: old.id,
+                });
+            }
             Some(old) => {
                 ops.extend(undo((self.derive)(old)));
                 let mut e = old.clone();

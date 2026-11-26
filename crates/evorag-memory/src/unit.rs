@@ -10,11 +10,11 @@
 use std::collections::BTreeSet;
 
 use evorag_store::key::OwnedPart;
-use evorag_store::{BodyError, Envelope, WriteOp, WriteRequest};
+use evorag_store::{Envelope, WriteOp, WriteRequest};
 use evorag_types::{Id, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::derived::{Record, link, lookup};
+use crate::derived::{Record, RecordError, link, lookup};
 
 /// 単位 (04 §5.1、v0.5)。導出で作り直す派生の記録。ジャーナル・退避・書き出しに写さない。
 pub const KIND_UNIT: &str = "unit";
@@ -243,13 +243,13 @@ pub(crate) fn derive_unit(e: &Envelope) -> Vec<WriteOp> {
 /// 前の同じ単位の記録 (あれば、作成の時刻と知らない項目を残し、前の関係と副索引を作り直す)。
 ///
 /// # Errors
-/// 本体を CBOR にできないとき。
+/// `previous` が同じ単位の記録でないとき、本体を CBOR にできないとき。
 pub fn unit_ops(
     id: Id,
     now: Timestamp,
     body: &UnitBody,
     previous: Option<&Envelope>,
-) -> Result<Vec<WriteOp>, BodyError> {
+) -> Result<Vec<WriteOp>, RecordError> {
     Record {
         kind: KIND_UNIT,
         v: UNIT_V,

@@ -8,6 +8,7 @@
 mod chars;
 mod correction;
 mod derived;
+pub use derived::RecordError;
 mod directive;
 mod extract;
 mod facts;
@@ -86,14 +87,15 @@ pub use kinds::{
     SETTING_ANSWER_LENGTH, SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody,
     SignalBody, SignalKind, SrcRev, TARGET_CONVERSATION, TURN_REV_FIELD, ThresholdBody, TurnBody,
     TurnObs, TurnRole, TurnState, UNIT_CHUNK, UNIT_KEY, V04_ONLY_KINDS, WindowRef,
-    carried_on_restore, kinds, kinds_v05,
+    carried_on_restore, kinds, kinds_v05, v05_root,
 };
 pub use ledger::{
     ByteRange, CALL_SEGMENT, CorrInput, KIND_PROPOSAL, LEDGER_SCHEMA, LOOKUP_LEDGER_SEGMENT,
     LOOKUP_LEDGER_SELECTION, LedgerBody, LedgerCorrection, LedgerCorrectionOut, LedgerError,
-    LedgerInputs, LedgerLayer, LedgerMood, LedgerOutput, LedgerStatus, LedgerTense, LedgerTokens,
-    LedgerUnit, LedgerUnitOut, LedgerVerdict, REL_LEDGER_SEGMENT, REL_LEDGER_TURN, Section,
-    SegmentUpdate, SentenceSpan, Through, selection_key,
+    LedgerHead, LedgerInputs, LedgerLayer, LedgerMood, LedgerOutput, LedgerOutputError, LedgerRead,
+    LedgerStatus, LedgerTense, LedgerTokens, LedgerUnit, LedgerUnitOut, LedgerVerdict,
+    REL_LEDGER_SEGMENT, REL_LEDGER_TURN, Section, SegmentUpdate, SentenceSpan, Through,
+    read_ledger, selection_key,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use mask::{

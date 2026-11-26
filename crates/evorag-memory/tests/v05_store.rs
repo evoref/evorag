@@ -7,7 +7,6 @@ use std::thread::JoinHandle;
 use evorag_memory::*;
 use evorag_store::export::{ExportOptions, NoChecks, export};
 use evorag_store::key::{OwnedPart, Part};
-use evorag_store::migrate::FormatPlan;
 use evorag_store::testutil::TempDir;
 use evorag_store::{
     DB_FILE, Durability, Envelope, JOURNAL_DIR, LookupEntry, LookupRange, OpenOptions, Priority,
@@ -29,16 +28,17 @@ impl Env {
     fn open(root: &Path) -> Self {
         let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0)));
         let ids = Arc::new(UuidV7Gen::with_seed(clock.clone(), 11));
+        let (kinds, plan) = v05_root();
         let (store, _) = Store::open_with(
             OpenOptions {
                 data_root: root.to_path_buf(),
                 evorag_version: "0.5.0".into(),
-                kinds: kinds_v05(),
+                kinds,
                 clock: clock.clone(),
                 ids: ids.clone(),
                 config_file: None,
             },
-            FormatPlan::v05(),
+            plan,
         )
         .unwrap();
         let store = Arc::new(store);
@@ -238,7 +238,7 @@ fn journal_text(root: &Path) -> String {
 }
 
 /// 指示・区切り・台帳・単位を書いて読み、副索引と関係で引ける。指示だけがジャーナルに入る。
-/// verifies: 03 §3.3 (v0.5 の種類の関係と副索引), 03 §6 (v0.5 の根のジャーナルの書く物: `directive` を書き、`segment`・`proposal`・`unit` を書かない), AC-FR-317-4 (指示は DB とジャーナルの 2 か所に持つ)
+/// verifies: 03 §3.3 (v0.5 の種類の関係と副索引), 03 §6 (v0.5 の根のジャーナルの書く物: `directive` を書き、`segment`・`proposal`・`unit` を書かない)
 #[test]
 fn v05_records_round_trip_and_are_found_through_their_indexes() {
     let dir = TempDir::new("v05-records");
@@ -421,7 +421,7 @@ fn v05_records_round_trip_and_are_found_through_their_indexes() {
 
 /// 台帳と閉じた区切りは `Immediate` で、開いている末尾の区切りと単位は `None` で書く (どれも会話の追記より後に回す)。
 /// 台帳を置き換えるときは、前の台帳を消すことを同じコミットにする。書く前に出典のターンの改訂の番号を確かめる。
-/// verifies: AC-FR-313-2 (台帳は `Immediate`), 03 §3.4 (台帳と閉じた区切りは `Immediate`、導出の結果は `None`), 04 §5.2.1 (置き換えは同じ `Immediate` のコミット)
+/// verifies: 03 §3.4 (台帳と閉じた区切りは `Immediate`、導出の結果は `None`), 04 §5.2.1 (置き換えは同じ `Immediate` のコミット)
 #[test]
 fn ledgers_and_closed_segments_are_written_immediately_and_replaced_in_one_commit() {
     let dir = TempDir::new("v05-durability");
@@ -532,7 +532,7 @@ fn ledgers_and_closed_segments_are_written_immediately_and_replaced_in_one_commi
 }
 
 /// 退避と書き出しに、指示・区切り・台帳を含め、単位を含めない。
-/// verifies: 03 §7.1 (v0.5 の根の退避に単位を写さない), 03 §11 (v0.5 の根の書き出しの範囲), AC-FR-313-2 (退避と書き出しに台帳が含まれる)
+/// verifies: 03 §7.1 (v0.5 の根の退避に単位を写さない), 03 §11 (v0.5 の根の書き出しの範囲)
 #[test]
 fn units_are_left_out_of_backups_and_exports_but_ledgers_are_kept() {
     let dir = TempDir::new("v05-copies");
@@ -609,4 +609,138 @@ fn units_are_left_out_of_backups_and_exports_but_ledgers_are_kept() {
     for kind in [KIND_DIRECTIVE, KIND_SEGMENT, KIND_PROPOSAL] {
         assert_eq!(report.kinds.get(kind), Some(&1), "{kind}");
     }
+}
+
+/// 置き換える前の台帳が無ければ (同じ依頼を送り直した)、依頼の全体を断る。区切りも、外で読んだ後に書き換えられて
+/// いれば (その間に閉じた)、古い本体の上に書かない。
+/// verifies: 04 §5.2.1 (置き換える前の台帳が残っていることを確かめる), 04 §2 (区切りは読んだときの本体と同じであることを確かめて書く)
+#[test]
+fn a_resent_replacement_and_a_stale_segment_are_refused() {
+    let dir = TempDir::new("v05-resend");
+    let env = Env::open(dir.path());
+    let (session, u1, u2) = env.conversation();
+    let w = env.writes();
+    let open = SegmentBody {
+        session,
+        pairs: vec![u1],
+        closed: false,
+        chars: 15,
+    };
+    let (seg_id, req) = w.segment_request(&open, None).unwrap();
+    env.submit(req).unwrap();
+    let (first, req) = w
+        .ledger(
+            &ledger_for(seg_id, u1, u2, LedgerStatus::Partial),
+            None,
+            &[],
+        )
+        .unwrap();
+    env.submit(req).unwrap();
+    let old = env.get(KIND_PROPOSAL, first).unwrap();
+    let complete = ledger_for(seg_id, u1, u2, LedgerStatus::Complete);
+    let (_, req) = w
+        .ledger(&complete, None, std::slice::from_ref(&old))
+        .unwrap();
+    env.submit(req.clone()).unwrap();
+    // 送り直し: 前の台帳はもう無いので、2 つ目の台帳を書かない。
+    let (resent, req) = w.ledger(&complete, None, &[old]).unwrap();
+    assert!(matches!(
+        env.submit(req),
+        Err(WriteError::Store(StoreError::Stale { .. }))
+    ));
+    assert!(env.get(KIND_PROPOSAL, resent).is_none());
+    assert_eq!(
+        env.lookup(KIND_PROPOSAL, LOOKUP_LEDGER_SEGMENT, Part::Id(seg_id))
+            .len(),
+        1
+    );
+
+    // 区切り: 読んだ後に閉じられた。
+    let read = env.get(KIND_SEGMENT, seg_id).unwrap();
+    let closed = SegmentBody {
+        pairs: vec![u1, u2],
+        closed: true,
+        chars: 30,
+        ..open.clone()
+    };
+    let (_, req) = w.segment_request(&closed, Some(&read)).unwrap();
+    env.submit(req).unwrap();
+    let grown = SegmentBody {
+        pairs: vec![u1, u2],
+        closed: false,
+        chars: 30,
+        ..open.clone()
+    };
+    let (_, req) = w.segment_request(&grown, Some(&read)).unwrap();
+    assert!(matches!(
+        env.submit(req),
+        Err(WriteError::Store(StoreError::Stale { .. }))
+    ));
+    // 無かったはずの区切りを新しく作る依頼も、その間に作られていれば断る。
+    let (_, req) = w.segment_request(&grown, None).unwrap();
+    assert!(matches!(
+        env.submit(req),
+        Err(WriteError::Store(StoreError::Stale { .. }))
+    ));
+    assert!(
+        env.get(KIND_SEGMENT, seg_id)
+            .unwrap()
+            .body_as::<SegmentBody>()
+            .unwrap()
+            .closed
+    );
+    env.close();
+}
+
+/// `end` の位置が決まらないとき (位置が指示自身の ID) は、指示の副索引 `turn` にその ID を入れない。前の封筒の違う
+/// 単位の上には書かない。
+/// verifies: 03 §3.3 (指示の副索引 `turn` は根拠と伏せ字のターン), 04 §7.5 (`end` の位置が決まらなければ指示の ID)
+#[test]
+fn an_end_without_a_position_does_not_index_its_own_id_as_a_turn() {
+    let dir = TempDir::new("v05-end-self");
+    let env = Env::open(dir.path());
+    let (_, u1, _) = env.conversation();
+    let w = env.writes();
+    let end = DirectiveBody {
+        entity: Some("self".into()),
+        vks: vec!["ab".repeat(32)],
+        ..DirectiveBody::new(DirectiveOp::End)
+    };
+    let (_, mut ops) = w.directive(&end).unwrap();
+    // 位置が決まらないときの形にする (封筒の ID を位置にする)。
+    let WriteOp::Put(e) = &mut ops[0] else {
+        panic!("the directive is put first");
+    };
+    let own = e.id;
+    let mut body: DirectiveBody = e.body_as().unwrap();
+    body.turn = Some(own);
+    e.set_body(&body).unwrap();
+    let rederived = evorag_store::Envelope::clone(e);
+    let spec = kinds_v05()
+        .into_iter()
+        .find(|k| k.name == KIND_DIRECTIVE)
+        .unwrap();
+    let mut ops = vec![WriteOp::Put(rederived.clone())];
+    ops.extend(spec.derive.unwrap()(&rederived));
+    env.write(ops);
+    assert!(
+        env.lookup(KIND_DIRECTIVE, LOOKUP_DIRECTIVE_TURN, Part::Id(own))
+            .is_empty()
+    );
+    // 違う単位の封筒の上には書かない。
+    let other = Id::from_bytes([0x44; 16]);
+    let previous = unit_ops(other, env.clock.now(), &unit_body(false, u1), None).unwrap();
+    let WriteOp::Put(prev) = &previous[0] else {
+        panic!("the unit is put first");
+    };
+    assert!(matches!(
+        unit_ops(
+            Id::from_bytes([0x45; 16]),
+            env.clock.now(),
+            &unit_body(false, u1),
+            Some(prev)
+        ),
+        Err(RecordError::WrongPrevious { .. })
+    ));
+    env.close();
 }
