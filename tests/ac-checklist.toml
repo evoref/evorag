@@ -1334,3 +1334,57 @@ status = "review"
 tests = ["crates/evorag-core/tests/live_ttft.rs::bm_107_ttft_by_prefetch_kind"]
 manual = "リリースのゲートで docs/perf/<X.Y.Z>/BM-107.json があることを確かめる (cargo xtask live-llm --out docs/perf/<X.Y.Z>)"
 note = "実際の llama-server が要るので CI では流さない (09 §5.1)。v0.4 は記録だけ (08 §2.5 の合格条件 (4))。"
+
+[[ac]]
+id = "AC-FR-207-2"
+requirement = "FR-207"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.4 (doctor --deep) で試験を書く。"
+
+[[ac]]
+id = "AC-FR-303-2"
+requirement = "FR-303"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.2 (台帳の keys) で試験を書く。"
+
+[[ac]]
+id = "AC-FR-309-4"
+requirement = "FR-309"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.4 (忘れるの操作) で試験を書く。"
+
+[[ac]]
+id = "AC-FR-310-3"
+requirement = "FR-310"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.4 (private と導出) で試験を書く。"
+
+[[ac]]
+id = "AC-NFR-304-3"
+requirement = "NFR-304"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.1 (新しい根と取り込み) で試験を書く。"
+
+[[ac]]
+id = "AC-NFR-504-3"
+requirement = "NFR-504"
+level = "Must"
+status = "later"
+tests = []
+manual = ""
+note = "v0.5 の AC (M5.0 で足した)。v0.5 の M5.2〜M5.3 (関門と導出、同梱の攻撃の事例) で試験を書く。"
