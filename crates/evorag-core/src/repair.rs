@@ -35,6 +35,8 @@ use crate::PromptLanguage;
 /// `repair` の設定。
 pub struct RepairOptions {
     pub data_root: PathBuf,
+    /// 開くデータ根の形式 (製品は [`crate::RootFormat::V05`]。v0.4 の根は [`OpenError::NeedsImport`] で断る)。
+    pub root_format: crate::RootFormat,
     pub evorag_version: String,
     /// 退避に含める `config.toml`。
     pub config_file: Option<PathBuf>,
@@ -116,14 +118,17 @@ pub fn run(o: RepairOptions) -> Result<RepairReport, RepairError> {
     if !o.data_root.is_dir() {
         return Err(RepairError::NoDataRoot(o.data_root));
     }
-    let (store, opened) = Store::open(OpenOptions {
-        data_root: o.data_root.clone(),
-        evorag_version: o.evorag_version.clone(),
-        kinds: evorag_memory::kinds(),
-        clock: o.clock.clone(),
-        ids: o.ids.clone(),
-        config_file: o.config_file.clone(),
-    })?;
+    let (store, opened) = o.root_format.open(
+        OpenOptions {
+            data_root: o.data_root.clone(),
+            evorag_version: o.evorag_version.clone(),
+            kinds: Vec::new(),
+            clock: o.clock.clone(),
+            ids: o.ids.clone(),
+            config_file: o.config_file.clone(),
+        },
+        None,
+    )?;
     if let Some(r) = store.read_only() {
         return Err(RepairError::ReadOnly(r.clone()));
     }

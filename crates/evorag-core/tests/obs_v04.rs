@@ -31,6 +31,7 @@ fn cassette() -> ReplayClient {
 
 fn config(root: &Path, clock: Arc<ManualClock>) -> CoreConfig {
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.4.0".into(),

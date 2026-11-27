@@ -384,6 +384,7 @@ impl App {
                 FactsUnavailable::SleepTimeOff => MessageKey::UiFactsNoteSleepOff,
                 FactsUnavailable::StoppedByProbe => MessageKey::UiFactsNoteProbe,
                 FactsUnavailable::KeyUnavailable => MessageKey::UiFactsNoteKey,
+                FactsUnavailable::DevelopmentBuild => MessageKey::UiFactsNoteDevelopmentBuild,
             }));
         }
         let rows = fact_rows(list);
@@ -3555,6 +3556,7 @@ mod tests {
             FactsUnavailable::SleepTimeOff,
             FactsUnavailable::StoppedByProbe,
             FactsUnavailable::KeyUnavailable,
+            FactsUnavailable::DevelopmentBuild,
         ] {
             let text = a.facts_text(
                 &FactList {

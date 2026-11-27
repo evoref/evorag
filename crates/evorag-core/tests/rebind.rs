@@ -26,6 +26,7 @@ fn server(file: &str, size: u64) -> ReplayClient {
 fn config(root: &Path, seed: u64) -> CoreConfig {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),
@@ -55,6 +56,7 @@ fn open(root: &Path, seed: u64) -> Result<DataRootModels, evorag_store::OpenErro
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_100_000)));
     DataRootModels::open(
         root,
+        evorag_core::RootFormat::V04Bench,
         "0.0.6",
         clock.clone(),
         Arc::new(UuidV7Gen::with_seed(clock, seed)),

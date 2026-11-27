@@ -182,16 +182,21 @@ fn evorag_with_stdin(dir: &Path, config: &str, args: &[&str], stdin: &str) -> Ou
     child.wait_with_output().unwrap()
 }
 
+/// v0.5 の根 (製品が開く形式、03 §12.4) を作り、日次の退避を 1 つ作る。
 fn make_data_root_with_backup(root: &Path) -> std::path::PathBuf {
     let clock = Arc::new(SystemClock);
-    let (store, _) = Store::open(OpenOptions {
-        data_root: root.to_path_buf(),
-        evorag_version: "0.0.5".into(),
-        kinds: Vec::new(),
-        clock: clock.clone(),
-        ids: Arc::new(UuidV7Gen::new(clock)),
-        config_file: None,
-    })
+    let (kinds, plan) = evorag_memory::v05_root();
+    let (store, _) = Store::open_with(
+        OpenOptions {
+            data_root: root.to_path_buf(),
+            evorag_version: "0.0.5".into(),
+            kinds,
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::new(clock)),
+            config_file: None,
+        },
+        plan,
+    )
     .unwrap();
     store.daily_backup(None).unwrap().unwrap()
 }
@@ -310,6 +315,12 @@ fn doctor_reports_without_writing_anything() {
         );
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("quarantine の記録: 1 件"), "{text}");
+        // v0.4 の形式の根は、読むだけで点検し、取り込みを案内する (03 §12.4)。
+        assert!(
+            text.contains("v0.4 の形式 (形式の版 0.3) のデータ根です"),
+            "{text}"
+        );
+        assert!(text.contains("evorag import-v04"), "{text}");
         assert!(text.contains("壊れた記録 1 件"), "{text}");
         // 日次と、その週の最初の日次を残す週次の 2 個。
         assert!(text.contains("退避: 2 個"), "{text}");
@@ -338,14 +349,18 @@ fn backups_list_shows_the_backups() {
 /// データ根を書き込みで開いて持つ (TUI が動いている状態をまねる)。
 fn hold_data_root(root: &Path) -> Store {
     let clock = Arc::new(SystemClock);
-    Store::open(OpenOptions {
-        data_root: root.to_path_buf(),
-        evorag_version: "0.0.5".into(),
-        kinds: Vec::new(),
-        clock: clock.clone(),
-        ids: Arc::new(UuidV7Gen::new(clock)),
-        config_file: None,
-    })
+    let (kinds, plan) = evorag_memory::v05_root();
+    Store::open_with(
+        OpenOptions {
+            data_root: root.to_path_buf(),
+            evorag_version: "0.0.5".into(),
+            kinds,
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::new(clock)),
+            config_file: None,
+        },
+        plan,
+    )
     .unwrap()
     .0
 }
@@ -694,21 +709,25 @@ fn version_shows_the_build_and_how_it_was_installed() {
     }
 }
 
-/// 03 §10: `evorag rebuild --facts` は、llama-server に繋がらなければ、退避も作らずに終了コード 3 で止める
-/// (事実と派生データは変えない)。`--index` とは一緒に使えない。
+/// 03 §10 (v0.5 の根): `evorag rebuild --facts` は v0.5 では受け付けず、データ根を開かずに (退避も作らずに) 終了
+/// コード 1 で止める (OQ-55 の 5)。`--index` とは一緒に使えない。旧エンジンの `--facts` は比較の台
+/// (`evorag-core` の試験) で確かめる。
 #[test]
-fn rebuild_facts_stops_with_3_when_llama_server_is_unreachable() {
+fn rebuild_facts_is_refused_in_v05_without_opening_the_data_root() {
     let dir = TempDir::new("cli-rebuild-facts");
-    make_data_root_with_backup(&dir.path().join("data"));
+    let data = dir.path().join("data");
+    make_data_root_with_backup(&data);
+    let db_before = mtime_and_len(&data.join("evorag.redb"));
     let url = closed_port();
     let config = format!("[llm.chat]\nurl = \"{url}\"\n");
     let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--facts"], "");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(3), "{err}");
-    assert!(err.contains("前のまま変えていません"), "{err}");
-    assert!(err.contains("evorag rebuild --facts"), "{err}");
-    let pre = dir.path().join("data").join("backups").join("pre-op");
-    assert!(!pre.exists(), "no backup is made before the checks pass");
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("--facts を受け付けません"), "{err}");
+    assert!(err.contains("何も変えていません"), "{err}");
+    let pre = data.join("backups").join("pre-op");
+    assert!(!pre.exists(), "no backup is made");
+    assert_eq!(mtime_and_len(&data.join("evorag.redb")), db_before);
 
     let out = evorag_with_stdin(dir.path(), &config, &["rebuild", "--index", "--facts"], "");
     assert_ne!(out.status.code(), Some(0));

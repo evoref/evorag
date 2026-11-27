@@ -43,6 +43,7 @@ fn config(root: &Path, seed: u64) -> CoreConfig {
         serde_json::json!({"enable_thinking": false}),
     );
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),
@@ -239,6 +240,7 @@ async fn a_failed_probe_from_before_v0_4_is_redone_once() {
         let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_001)));
         let m = evorag_core::rebind::DataRootModels::open(
             dir.path(),
+            evorag_core::RootFormat::V04Bench,
             "0.0.6",
             clock.clone(),
             Arc::new(UuidV7Gen::with_seed(clock, 9)),

@@ -266,6 +266,16 @@ fn latest(inner: &Inner, seq: u64) -> bool {
 
 /// `PreviewForget`: 忘れるの見本 (04 §7.1 の「見本と計画」)。記録は変えない。最後の求めの見本だけを知らせる。
 pub(crate) fn preview(inner: &Arc<Inner>, target: FactKey, options: ForgetOptions) {
+    // v0.5 の根では、旧エンジンの忘れる (`fact_directive`) を書かない (08 §2.6)。
+    if !crate::old_engine(inner) {
+        rejected(
+            inner,
+            Message::new(MessageKey::FactsDevelopmentBuild),
+            None,
+            None,
+        );
+        return;
+    }
     let Some(key) = inner.facts_key.key().cloned() else {
         rejected(inner, Message::new(MessageKey::FactsDisabled), None, None);
         return;
@@ -337,6 +347,15 @@ pub(crate) fn run(
     options: ForgetOptions,
     plan: ForgetPlanHash,
 ) {
+    if !crate::old_engine(inner) {
+        rejected(
+            inner,
+            Message::new(MessageKey::FactsDevelopmentBuild),
+            None,
+            None,
+        );
+        return;
+    }
     if inner.facts_key.key().is_none() {
         rejected(inner, Message::new(MessageKey::FactsDisabled), None, None);
         return;

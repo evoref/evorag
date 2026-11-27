@@ -30,6 +30,7 @@ fn cassette(replies: usize) -> ReplayClient {
 async fn start(root: &Path, llm: &ReplayClient, seed: u64) -> (Core, UnboundedReceiver<Event>) {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     let config = CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),

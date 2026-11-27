@@ -188,6 +188,8 @@ message_keys! {
     FactsNotAllowed => "error.facts.not_allowed",
     /// `memory.forget_key` が使えないので、事実への操作ができない。
     FactsDisabled => "error.facts.disabled",
+    /// v0.5 の根を開いた開発中の版なので、事実への操作はまだできない (08 §2.6 の M5.1〜M5.3)。
+    FactsDevelopmentBuild => "error.facts.development_build",
     /// 戻す値が忘れた値 (再び覚えない印に当たる)。
     FactsBlocked => "error.facts.blocked",
     /// 引数: `detail`。
@@ -220,6 +222,7 @@ message_keys! {
     UiFactsNoteSleepOff => "ui.facts.note_sleep_off",
     UiFactsNoteProbe => "ui.facts.note_probe",
     UiFactsNoteKey => "ui.facts.note_key",
+    UiFactsNoteDevelopmentBuild => "ui.facts.note_development_build",
     UiFactsHint => "ui.facts.hint",
     /// 引数: `subject`・`attr`。
     UiFactsHistoryTitle => "ui.facts.history_title",
@@ -939,6 +942,18 @@ message_keys! {
     ImportV04ForeignSource => "import_v04.foreign_source",
     /// データ根が無く、入れ替えが途中 (根を作らずに断った)。引数: `new`。
     CliImportPending => "cli.import_pending",
+    /// v0.4 の根なので、在り場所では開かずに断った (何も書いていない、03 §12.4)。引数: `path`・`format`。
+    CliNeedsImport => "cli.needs_import",
+    /// v0.5 の根へ、v0.4 以前の形式の退避を戻そうとした (何も変えていない)。引数: `backup`・`format`。
+    CliRestoreBackupV04 => "cli.restore_backup_v04",
+    /// `rebuild --facts` は v0.5 では受け付けない (03 §10、OQ-55 の 5)。
+    CliRebuildFactsV05 => "cli.rebuild_facts_v05",
+    /// TUI の起動で v0.4 の根を開こうとした (取り込むかを尋ねる前の説明、03 §12.4)。引数: `path`・`format`。
+    ImportV04AtStartup => "import_v04.at_startup",
+    /// TUI の起動の取り込みの確認で y 以外を答えた (何も変えずに 2 で終わる)。
+    ImportV04DeclinedAtStartup => "import_v04.declined_at_startup",
+    /// `doctor`: v0.4 の根 (v0.5 では取り込みが要る)。引数: `format`。
+    DoctorNeedsImport => "doctor.needs_import",
     /// `backups list` の、ID の分からない退避の行。引数: `kind`, `dir`, `seq`。
     BackupsItemUnknownRoot => "backups.item_unknown_root",
     /// 起動の前に、止まった入れ替えを続けて終えた。引数: `root`・`renamed`。

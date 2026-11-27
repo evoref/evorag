@@ -50,21 +50,26 @@ pub struct DataRootModels {
 }
 
 impl DataRootModels {
-    /// データ根を開く。TUI が動いていれば、ロックが取れずに `OpenError::Lock` になる。
+    /// データ根を `root_format` の形式で開く (製品は [`crate::RootFormat::V05`])。TUI が動いていれば、ロックが取れずに
+    /// `OpenError::Lock` になる。v0.5 の形式で v0.4 の根を開こうとすると `OpenError::NeedsImport` (何も書かない)。
     pub fn open(
         data_root: &Path,
+        root_format: crate::RootFormat,
         evorag_version: &str,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGen>,
     ) -> Result<Self, OpenError> {
-        let (store, _) = Store::open(OpenOptions {
-            data_root: data_root.to_path_buf(),
-            evorag_version: evorag_version.to_owned(),
-            kinds: evorag_memory::kinds(),
-            clock: clock.clone(),
-            ids: ids.clone(),
-            config_file: None,
-        })?;
+        let (store, _) = root_format.open(
+            OpenOptions {
+                data_root: data_root.to_path_buf(),
+                evorag_version: evorag_version.to_owned(),
+                kinds: Vec::new(),
+                clock: clock.clone(),
+                ids: ids.clone(),
+                config_file: None,
+            },
+            None,
+        )?;
         let store = Arc::new(store);
         let (writer, handle) =
             Writer::new(store.clone()).map_err(|e| OpenError::Unreadable(e.to_string()))?;

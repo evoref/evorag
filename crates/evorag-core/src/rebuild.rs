@@ -25,6 +25,8 @@ pub use facts::{ExtractionStop, FactsRebuilt, FactsSource, FactsUnavailable, LOS
 /// 作り直しの設定。
 pub struct RebuildOptions {
     pub data_root: PathBuf,
+    /// 開くデータ根の形式 (製品は [`crate::RootFormat::V05`]。v0.4 の根は [`OpenError::NeedsImport`] で断る)。
+    pub root_format: crate::RootFormat,
     pub evorag_version: String,
     /// 退避に含める `config.toml`。
     pub config_file: Option<PathBuf>,
@@ -66,6 +68,9 @@ pub enum RebuildError {
     /// `--index` と `--facts` を一緒に指定した。
     #[error("--index and --facts cannot be used together")]
     IndexWithFacts,
+    /// `--facts` は v0.5 では受け付けない (事実は台帳からの導出になった。03 §10、OQ-55 の 5)。何も開いていない。
+    #[error("--facts is not accepted in v0.5; the default rebuild derives the memory again")]
+    FactsNotInV05,
     /// 確かめの段階で llama-server に繋がらない (退避も作らず、事実は変えていない)。
     #[error("llama-server is unreachable: {0}")]
     LlmUnreachable(LlmError),
@@ -116,14 +121,21 @@ pub async fn run(o: RebuildOptions) -> Result<RebuildReport, RebuildError> {
     if o.index_only && o.facts.is_some() {
         return Err(RebuildError::IndexWithFacts);
     }
-    let (store, _) = Store::open(OpenOptions {
-        data_root: o.data_root.clone(),
-        evorag_version: o.evorag_version.clone(),
-        kinds: evorag_memory::kinds(),
-        clock: o.clock.clone(),
-        ids: o.ids.clone(),
-        config_file: o.config_file.clone(),
-    })?;
+    // v0.5 は事実を抽出し直さない。データ根を開く前に断る (03 §10、OQ-55 の 5)。
+    if o.facts.is_some() && o.root_format == crate::RootFormat::V05 {
+        return Err(RebuildError::FactsNotInV05);
+    }
+    let (store, _) = o.root_format.open(
+        OpenOptions {
+            data_root: o.data_root.clone(),
+            evorag_version: o.evorag_version.clone(),
+            kinds: Vec::new(),
+            clock: o.clock.clone(),
+            ids: o.ids.clone(),
+            config_file: o.config_file.clone(),
+        },
+        None,
+    )?;
     if let Some(r) = store.read_only() {
         return Err(RebuildError::ReadOnly(format!("{r:?}")));
     }

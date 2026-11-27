@@ -56,7 +56,14 @@ pub fn run(
         MessageKey::DoctorRoot,
         &[("path", &data_root.display().to_string())],
     );
-    let mut kinds = evorag_memory::kinds();
+    // 種類は根の形式で選ぶ (v0.4 の根は、読むだけで点検し、取り込みを案内する、03 §12.4)。
+    let v04_root = evorag_store::inspect::format_version(&data_root.join(evorag_store::DB_FILE))
+        .is_some_and(|f| crate::import::older_than_v05(&f));
+    let mut kinds = if v04_root {
+        evorag_memory::kinds()
+    } else {
+        evorag_memory::kinds_v05()
+    };
     kinds.sort_by_key(|k| k.name);
     let report = match inspect_collect(
         data_root,
@@ -100,6 +107,13 @@ pub fn run(
                     ("writer", &get("last_writer")),
                 ],
             );
+            if crate::import::older_than_v05(&get("format.version")) {
+                say(
+                    c,
+                    MessageKey::DoctorNeedsImport,
+                    &[("format", &get("format.version"))],
+                );
+            }
             let (mut unreadable, mut corrupt, mut newer) = (0, 0, 0);
             for (kind, n) in &report.census.known {
                 say(

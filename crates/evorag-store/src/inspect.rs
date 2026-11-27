@@ -131,6 +131,21 @@ pub fn read_meta_locked(
     }
 }
 
+/// DB のファイル `db_file` (データ根か退避の `evorag.redb`) の形式の版 (`meta` の `format.version`) を、何も書かずに
+/// 読むだけで開いて読む。ファイルが無い・読むだけでは開けない (修復が要る・ほかのプロセスが開いている)・`meta` を
+/// 読めないときは `None` (v0.5 の CLI が、v0.4 の根に書く前に断るため、03 §12.4)。
+#[must_use]
+pub fn format_version(db_file: &Path) -> Option<String> {
+    if !db_file.is_file() {
+        return None;
+    }
+    let db = ReadOnlyDatabase::open(db_file).ok()?;
+    let m = read_meta_db_any(&db).ok();
+    // 閉じるときも書かない (読むだけの取っ手)。
+    let _ = db.close();
+    m?.get(meta::FORMAT_VERSION).cloned()
+}
+
 /// [`inspect`] に加えて、`collect` の種類の読める記録を集める (`doctor` が中身を見せるため)。
 pub fn inspect_collect(
     root: &Path,

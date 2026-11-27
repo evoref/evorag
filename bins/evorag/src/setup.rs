@@ -614,11 +614,16 @@ pub fn run(
     let clock = Arc::new(SystemClock);
     let models = match DataRootModels::open(
         data_root,
+        evorag_core::RootFormat::V05,
         env!("CARGO_PKG_VERSION"),
         clock.clone(),
         Arc::new(UuidV7Gen::new(clock)),
     ) {
         Ok(m) => m,
+        // v0.4 の根には書かない (設定は書いた。モデルの記録は取り込んだ後の新しい根で、03 §12.4)。
+        Err(evorag_store::OpenError::NeedsImport { format }) => {
+            return crate::import::needs_import(c, data_root, &format);
+        }
         Err(e) => {
             say(
                 MessageKey::CliDataRootUnusable,

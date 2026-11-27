@@ -616,6 +616,14 @@ fn is_unfinished_import(m: &BTreeMap<String, String>) -> bool {
     m.contains_key(meta::IMPORT_SOURCE) && !m.contains_key(meta::IMPORT_REPORT)
 }
 
+/// v0.5 の形式 (`plan`) で開こうとした根の `meta` が、v0.5 より古い形式の版 (v0.4 以前の根) なら、その版。在り場所
+/// で移行せず、`import-v04` で取り込む (03 §4.1・§12.1・§12.4)。
+fn needs_import(m: &BTreeMap<String, String>, plan: &FormatPlan) -> Option<String> {
+    let ours: Version = plan.version.parse().ok()?;
+    let format: Version = m.get(meta::FORMAT_VERSION)?.parse().ok()?;
+    (ours >= v05() && format < v05()).then(|| format.to_string())
+}
+
 /// v0.5 の形式の版 ([`FORMAT_V05`])。
 fn v05() -> Version {
     FORMAT_V05.parse().expect("FORMAT_V05 is a version")
@@ -646,7 +654,20 @@ impl Store {
         opts: OpenOptions,
         lock: DataRootLock,
     ) -> Result<(Self, OpenReport), OpenError> {
-        Self::open_inner(opts, FormatPlan::current(), Some(lock), Unfinished::Refuse)
+        Self::open_locked_with(opts, FormatPlan::current(), lock)
+    }
+
+    /// [`Store::open_locked`] の、書く形式 `plan` を指定する形 (v0.5 の根を、起動の更新の片付けや `import-v04` から
+    /// 受け取ったロックを持ったまま開く、03 §12.4)。
+    ///
+    /// # Panics
+    /// [`Store::open_locked`] と同じ (`lock` が `opts.data_root` のロックでないとき、debug のビルド)。
+    pub fn open_locked_with(
+        opts: OpenOptions,
+        plan: FormatPlan,
+        lock: DataRootLock,
+    ) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(opts, plan, Some(lock), Unfinished::Refuse)
     }
 
     /// 書く形式と移行を指定して開く (移行の試験のため)。
@@ -713,13 +734,18 @@ impl Store {
                 DataRootLock::acquire(&opts.data_root)?
             }
         };
-        // 作りかけの取り込みの根は、書き込みで開く前に、読むだけで開いて見分ける (何も書かずに断る、03 §12.4)。
-        // 読むだけで開けない (修復が要る) ときは、開いた後の `meta` で見分ける。
-        if unfinished == Unfinished::Refuse
-            && let Ok(ro) = redb::ReadOnlyDatabase::open(opts.data_root.join(DB_FILE))
-            && read_meta_db_any(&ro).is_ok_and(|m| is_unfinished_import(&m))
+        // 作りかけの取り込みの根と、v0.5 の形式で開こうとした v0.4 以前の根は、書き込みで開く前に、読むだけで開いて
+        // 見分ける (何も書かずに断る。redb を書き込みで開くと DB のファイルを書き換えうるため、03 §12.4)。読むだけで
+        // 開けない (修復が要る) ときは、開いた後の `meta` で見分ける。
+        if let Ok(ro) = redb::ReadOnlyDatabase::open(opts.data_root.join(DB_FILE))
+            && let Ok(m) = read_meta_db_any(&ro)
         {
-            return Err(OpenError::UnfinishedImport);
+            if unfinished == Unfinished::Refuse && is_unfinished_import(&m) {
+                return Err(OpenError::UnfinishedImport);
+            }
+            if let Some(format) = needs_import(&m, &plan) {
+                return Err(OpenError::NeedsImport { format });
+            }
         }
         migrate::recover(&opts.data_root)?;
         crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;

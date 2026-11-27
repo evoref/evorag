@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, LazyLock};
 
 use clap::{FromArgMatches, Parser};
-use evorag_core::{Core, CoreConfig, PromptLanguage, StartError};
+use evorag_core::{Core, CoreConfig, PromptLanguage, RootFormat, StartError};
 use evorag_llm::{Endpoint, Generation, HttpClient, RetryPolicy};
 use evorag_store::lock::LockError;
 use evorag_store::{OpenError, ReadOnlyReason};
@@ -41,7 +41,7 @@ db format: {}",
         env!("EVORAG_TARGET"),
         env!("EVORAG_RUSTC"),
         env!("EVORAG_CHANNEL"),
-        evorag_store::FORMAT_VERSION,
+        evorag_store::FORMAT_V05,
     )
 });
 
@@ -340,6 +340,7 @@ fn rebuild(
     match rt.block_on(evorag_core::rebuild::run(
         evorag_core::rebuild::RebuildOptions {
             data_root: data_root.to_path_buf(),
+            root_format: RootFormat::V05,
             // semver だけを書く (`VERSION` は作りの情報を含み、`meta` の版として読めない)。
             evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
             config_file: Some(config_file.to_path_buf()),
@@ -402,6 +403,10 @@ fn rebuild(
         Err(RebuildError::Open(OpenError::Lock(LockError::InUse { pid }))) => {
             data_root_in_use(catalog, data_root, pid)
         }
+        Err(RebuildError::Open(OpenError::NeedsImport { format })) => {
+            import::needs_import(catalog, data_root, &format)
+        }
+        Err(RebuildError::FactsNotInV05) => fail(catalog, 1, MessageKey::CliRebuildFactsV05, &[]),
         // 事実の作り直しを、何も書かずに止めた (07 §5 の終了コード: 3 は llama-server、4 はルーターの設定、6 は
         // モデルの違い)。
         Err(
@@ -471,6 +476,7 @@ fn repair(
     let ids = Arc::new(UuidV7Gen::new(clock.clone()));
     match evorag_core::repair::run(RepairOptions {
         data_root: data_root.to_path_buf(),
+        root_format: RootFormat::V05,
         // semver だけを書く (`VERSION` は作りの情報を含み、`meta` の版として読めない)。
         evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
         config_file: Some(config_file.to_path_buf()),
@@ -522,6 +528,9 @@ fn repair(
         }
         Err(RepairError::Open(OpenError::Lock(LockError::InUse { pid }))) => {
             data_root_in_use(catalog, data_root, pid)
+        }
+        Err(RepairError::Open(OpenError::NeedsImport { format })) => {
+            import::needs_import(catalog, data_root, &format)
         }
         Err(RepairError::NoDataRoot(path)) => fail(
             catalog,
@@ -612,6 +621,10 @@ fn purge_backups(
         Ok(l) => l,
         Err(code) => return code,
     };
+    // v0.4 の根には書かない (03 §12.4)。退避の整理も、取り込んだ後の古い根の処分 (`reset --old`) に任せる。
+    if let Some(code) = import::refuse_v04_root(catalog, data_root) {
+        return code;
+    }
     let count = list_backups(data_root, backup_dir).len();
     // 消す退避が無くても、作りかけの退避は消す (尋ねない。戻せるものを消さないため)。
     if count > 0 {
@@ -998,6 +1011,9 @@ fn main() -> ExitCode {
         );
     }
     if let Some(Sub::Restore { backup }) = &args.command {
+        if let Some(code) = import::check_restore(&catalog, &data_root, backup) {
+            return code;
+        }
         return match evorag_store::restore::restore(
             &data_root,
             backup,
@@ -1079,6 +1095,7 @@ fn main() -> ExitCode {
     let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
+        root_format: RootFormat::V05,
         config_file: Some(config_file.clone()),
         evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_language,
@@ -1177,7 +1194,22 @@ fn main() -> ExitCode {
             // 退避が無ければ、ジャーナルだけから作り直す (開くと全部の行が取り込まれる)。
             eprintln!("{}", catalog.key(MessageKey::CliRestoredFromJournal));
         }
-        started = rt.block_on(Core::start(make_cfg(), llm));
+        started = rt.block_on(Core::start(make_cfg(), llm.clone()));
+    }
+    // v0.4 の根は、在り場所で移行せずに、取り込むかを尋ねる (03 §12.4)。y なら取り込んで、新しい根のロックを
+    // 持ったまま新しい根で続ける。y 以外は何も変えずに 2 で終わる。
+    if let Err(StartError::Store(OpenError::NeedsImport { format })) = &started {
+        let lock = match import::import_at_startup(
+            &catalog,
+            &data_root,
+            format,
+            cfg.storage.allow_unsafe_location.unwrap_or(false),
+            clock.clone(),
+        ) {
+            Ok(lock) => lock,
+            Err(code) => return code,
+        };
+        started = rt.block_on(Core::start_locked(make_cfg(), llm, Some(lock)));
     }
     let (core, events, report) = match started {
         Ok(v) => v,
@@ -1430,6 +1462,7 @@ mod tests {
             let clock: Arc<dyn evorag_types::Clock> = Arc::new(SystemClock);
             let core_cfg = CoreConfig {
                 data_root: root.to_path_buf(),
+                root_format: RootFormat::V05,
                 config_file: None,
                 evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
                 prompt_language: cfg.prompt_language(),

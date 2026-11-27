@@ -61,6 +61,8 @@ pub fn run(c: &Catalog, data_root: &Path, config_file: &Path, out: &Path, now_ms
             evorag_memory::KIND_CHUNK,
             evorag_memory::KIND_EMBEDDING,
             evorag_memory::KIND_JOB,
+            // 単位は台帳と指示から導き直せる (v0.5 の根、03 §11)。
+            evorag_memory::KIND_UNIT,
         ],
         checks: &checks,
     };
