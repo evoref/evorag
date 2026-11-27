@@ -490,15 +490,19 @@ mod imp {
             (Ok(f), Ok(t)) => (f, t),
             (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
         };
+        // musl の C ライブラリは renameat2 の包みを持たない (配布物は musl で作る、12 §5) ので、システムコールを
+        // 番号で直接呼ぶ (glibc でも同じ)。古いカーネルは ENOSYS を返し、下の確かめてからの改名に戻る。
         // SAFETY: 両方とも NUL で終わる C の文字列で、呼び出しの間は生きている。AT_FDCWD は相対パスを今の
-        // フォルダから解く (渡すのは絶対パス)。
+        // フォルダから解く (渡すのは絶対パス)。引数は renameat2(2) の (olddirfd, oldpath, newdirfd, newpath,
+        // flags) の順と型 (int, const char *, int, const char *, unsigned int) に合わせる。
         let rc = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 f.as_ptr(),
                 libc::AT_FDCWD,
                 t.as_ptr(),
-                libc::RENAME_NOREPLACE as _,
+                libc::RENAME_NOREPLACE,
             )
         };
         if rc == 0 {
