@@ -1247,6 +1247,111 @@ mod tests {
         );
     }
 
+    /// 関門 3 の補いの文 (04 §6 の区切りの文字) は、文番号の文の分け方 v1 (04 §2) に寄せない (M5.2 で決めた、
+    /// 2026-11-27)。2 つの分け方の食い違う事例と、揃う事例を固定する。左が v1、右が補いの文 (空白を除いて比べる)。
+    #[test]
+    fn supplement_sentences_and_splitter_v1_diverge_on_pinned_cases() {
+        let v1 = |text: &str| -> Vec<String> {
+            crate::sentences::split_v1(text)
+                .into_iter()
+                .map(|r| text[r].to_owned())
+                .collect()
+        };
+        let supplement = |text: &str| -> Vec<String> {
+            sentences_at(text, &(0..text.len()))
+                .into_iter()
+                .map(|r| text[r].trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            // 揃う: 小数・ドメインの `.`、後ろが空白の `.`、全角の `。！？`、`\n`。
+            (
+                "It costs 3.5 dollars. See example.com now!\n東京です。本当？",
+                &[
+                    "It costs 3.5 dollars.",
+                    "See example.com now!",
+                    "東京です。",
+                    "本当？",
+                ],
+                &[
+                    "It costs 3.5 dollars.",
+                    "See example.com now!",
+                    "東京です。",
+                    "本当？",
+                ],
+            ),
+            // 略語: v1 は切らず、補いは切る。
+            (
+                "I live near Dr. Kim in Osaka.",
+                &["I live near Dr. Kim in Osaka."],
+                &["I live near Dr.", "Kim in Osaka."],
+            ),
+            // 全角の `．`・半角の `｡`: v1 は切らず、補いは切る。
+            (
+                "東京ですか．大阪です｡京都",
+                &["東京ですか．大阪です｡京都"],
+                &["東京ですか．", "大阪です｡", "京都"],
+            ),
+            // `\r` だけ・U+2028: v1 は切らず、補いは改行として切る。
+            (
+                "東京\r大阪\u{2028}京都",
+                &["東京\r大阪\u{2028}京都"],
+                &["東京", "大阪", "京都"],
+            ),
+            // 後ろが空白でない半角の `!`・`?`: v1 は切り、補いは切らない。
+            (
+                "Yahoo!で調べた。https://example.com/s?q=1 を見た",
+                &[
+                    "Yahoo!",
+                    "で調べた。",
+                    "https://example.com/s?",
+                    "q=1 を見た",
+                ],
+                &["Yahoo!で調べた。", "https://example.com/s?q=1 を見た"],
+            ),
+            // 閉じの括弧: v1 は前の文に含め、補いは次の文の頭になる。
+            (
+                "「明日は？」と聞いた",
+                &["「明日は？」", "と聞いた"],
+                &["「明日は？", "」と聞いた"],
+            ),
+            // 続く区切りの文字: v1 は 1 つの文にまとめ、補いは 1 文字ずつ切る。
+            (
+                "本当！？うん",
+                &["本当！？", "うん"],
+                &["本当！", "？", "うん"],
+            ),
+            // 区切りの直後の異体字セレクタ: v1 はスカラー値で切り、補いは書記素なので区切りの文字とみなさない。
+            ("OK?\u{fe0f}次", &["OK?", "\u{fe0f}次"], &["OK?\u{fe0f}次"]),
+        ];
+        for &(text, want_v1, want_supplement) in cases {
+            assert_eq!(v1(text), want_v1, "v1 of {text:?}");
+            assert_eq!(supplement(text), want_supplement, "supplement of {text:?}");
+        }
+    }
+
+    /// 補いの文は略語の後ろで切る (v1 に寄せないことの代償として固定する。関門を移すとき (M5.3) に見直す)。
+    /// 手がかりの語の無い側に値が来ると関門 3a で落ち (安全の側)、問いの文の略語より前に値が来ると問いの文と
+    /// みなさずに通す (安全でない側)。
+    #[test]
+    fn an_abbreviation_cuts_the_supplement_sentence() {
+        let text = "I live near Dr. Kim's clinic in Osaka.";
+        assert_eq!(
+            accept_one(text, &raw("residence", "Osaka", text, None)).map(|_| ()),
+            Err(GateReason::NoCue)
+        );
+        let text = "I live in Osaka near Dr. Kim's clinic.";
+        assert!(accept_one(text, &raw("residence", "Osaka", text, None)).is_ok());
+        let text = "Is Osaka near Kim's place?";
+        assert_eq!(
+            accept_one(text, &raw("hometown", "Osaka", text, None)).map(|_| ()),
+            Err(GateReason::Mood)
+        );
+        let text = "Is Osaka near Dr. Kim's place?";
+        assert!(accept_one(text, &raw("hometown", "Osaka", text, None)).is_ok());
+    }
+
     /// 語の境界は根拠の範囲の端ではなく、送る本文の全体で見る (LLM が根拠を語の途中で切ったとき)。
     #[test]
     fn word_boundaries_use_the_whole_text_not_the_evidence_edges() {

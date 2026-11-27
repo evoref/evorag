@@ -28,6 +28,7 @@ mod prefilter;
 mod read;
 mod rules;
 mod segment;
+mod sentences;
 mod table;
 mod unit;
 mod value_key;
@@ -133,6 +134,7 @@ pub use segment::{
     KIND_SEGMENT, LOOKUP_SEGMENT_FIRST, LOOKUP_SEGMENT_SESSION, REL_SEGMENT_SESSION,
     REL_SEGMENT_TURN, SegmentBody, SegmentError, segment_id,
 };
+pub use sentences::{SPLITTER_V1, split_v1};
 pub use table::{
     FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
     table_head, table_rows, table_version,
