@@ -56,6 +56,9 @@ pub fn run(
         MessageKey::DoctorRoot,
         &[("path", &data_root.display().to_string())],
     );
+    for line in crate::reset::leftover_lines(c, data_root) {
+        println!("{line}");
+    }
     // 種類は根の形式で選ぶ (v0.4 の根は、読むだけで点検し、取り込みを案内する、03 §12.4)。
     // 見分けは、ストアが書き込みで開く前と同じ (修復の要る DB は、データ根の外の写しを直して読む。何も書かない)。
     let v04 = evorag_store::root_probe::probe_root(data_root)
