@@ -808,6 +808,30 @@ pub fn scan_metas(root: &Path) -> io::Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// 書き換えずに、すべての削除の行の ID と種類を集める (`import-v04` が、v0.4 が開くときに消すものを取り込まない
+/// ため、03 §12.4)。チェックサムの合わない行と書きかけの末尾は飛ばす。
+pub(crate) fn scan_deleted(root: &Path) -> io::Result<BTreeMap<Id, String>> {
+    let p = read_pass(root, &|op| matches!(op, LineOp::Delete { .. }))?;
+    Ok(p.lines
+        .into_iter()
+        .filter_map(|line| match line.op {
+            LineOp::Delete { kind, id } => Some((id, kind)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// 書き直しの一時のファイル (`*.jsonl.tmp`) が残っているか (次に書き込みで開いたときに片付ける、03 §6)。
+pub(crate) fn has_rewrite_leftover(root: &Path) -> io::Result<bool> {
+    match std::fs::read_dir(root.join(JOURNAL_DIR)) {
+        Ok(rd) => Ok(rd
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().ends_with(TMP_SUFFIX))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// [`read_all`] の結果。
 #[derive(Debug, Default)]
 pub(crate) struct ReadAll {

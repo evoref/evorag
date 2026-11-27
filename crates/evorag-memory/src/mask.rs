@@ -32,18 +32,8 @@ pub fn hidden_marker(language: &str) -> &'static str {
     }
 }
 
-/// 伏せ字の印 (プロンプトの言語で選ぶ、04 §7.3)。
-#[must_use]
-pub fn redaction_marker(language: &str) -> &'static str {
-    if language == "ja" {
-        REDACTION_MARKERS[0]
-    } else {
-        REDACTION_MARKERS[1]
-    }
-}
-
-/// 伏せ字の印のすべて (`ja`・`en`)。抽出の関門 6 は、プロンプトの言語に関わらず両方を当てる (04 §5.2)。
-pub const REDACTION_MARKERS: [&str; 2] = ["[伏せ字]", "[redacted]"];
+// 伏せ字の印は、v0.5 でも残る保存の層の忘れるの核に置く (旧エンジンを外しても `import-v04` が使えるように)。
+pub use evorag_store::forget::{REDACTION_MARKERS, redaction_marker};
 
 /// 往復の中のターン 1 つ (保存した本文と、その改訂の番号)。
 #[derive(Debug, Clone, Copy)]

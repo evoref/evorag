@@ -67,8 +67,15 @@ pub enum WriteOp {
         bytes: Vec<u8>,
     },
     DeleteBlobs(Id),
-    /// 一度だけ書く `meta` の値 (`WriteTxn::set_meta_once`)。
+    /// 一度だけ書く `meta` の値 (`WriteTxn::set_meta_once`)。ジャーナルにも `meta` の行として書く (`import.report` は
+    /// 書かない、03 §3.1.1)。
     SetMetaOnce {
+        key: String,
+        value: String,
+    },
+    /// 上書きしてよい、ジャーナルにも書く `meta` の値 (`import.old_root`・`import.v04_ended`、
+    /// `WriteTxn::set_meta_latest`)。ジャーナルに `meta` の行として書く。
+    SetMetaLatest {
         key: String,
         value: String,
     },
@@ -520,10 +527,14 @@ impl Writer {
                         id: *id,
                     });
                 }
-                WriteOp::SetMetaOnce { key, value } => lines.push(LineOp::Meta {
-                    key: key.clone(),
-                    value: value.clone(),
-                }),
+                // 取り込みの照合の結果はジャーナルに書かない (`doctor` が示すだけ、03 §3.1.1)。
+                WriteOp::SetMetaOnce { key, .. } if key == crate::meta::IMPORT_REPORT => {}
+                WriteOp::SetMetaOnce { key, value } | WriteOp::SetMetaLatest { key, value } => {
+                    lines.push(LineOp::Meta {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
                 _ => {}
             }
         }
@@ -665,6 +676,7 @@ pub(crate) fn apply_op(
             tx.delete_blobs(*id)?;
         }
         WriteOp::SetMetaOnce { key, value } => tx.set_meta_once(key, value)?,
+        WriteOp::SetMetaLatest { key, value } => tx.set_meta_latest(key, value)?,
         WriteOp::ClearPendingDeletes => tx.clear_pending_deletes()?,
         WriteOp::SetCompactPending => tx.set_compact_pending()?,
         WriteOp::ClearForgetRecheck => tx.clear_forget_recheck()?,

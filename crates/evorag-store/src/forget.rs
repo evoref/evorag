@@ -20,6 +20,29 @@ pub const TURN_TEXT: &str = "text";
 /// `turn` の本体の改訂の番号の項目 (03 §3.3、04 §7.3)。無いターンは 0 として読む。
 pub const TURN_REV: &str = "rev";
 
+/// 伏せ字の印のすべて (`ja`・`en`、04 §7.3)。抽出の関門 6 は、プロンプトの言語に関わらず両方を当てる (04 §5.2)。
+pub const REDACTION_MARKERS: [&str; 2] = ["[伏せ字]", "[redacted]"];
+
+/// 伏せ字の印 (プロンプトの言語で選ぶ、04 §7.3)。`ja` でなければ `en` の印。
+#[must_use]
+pub fn redaction_marker(language: &str) -> &'static str {
+    if language == "ja" {
+        REDACTION_MARKERS[0]
+    } else {
+        REDACTION_MARKERS[1]
+    }
+}
+
+/// 伏せ字に合うかの判定に使う印 (04 §7.3): データ根のプロンプトの言語 (`ja`・`en`) の印。言語の記録が無い・知らない
+/// 値なら、どちらの印でも合うとみなすので、すべての印。
+#[must_use]
+pub fn matching_markers(prompt_language: Option<&str>) -> Vec<&'static str> {
+    match prompt_language {
+        Some(l @ ("ja" | "en")) => vec![redaction_marker(l)],
+        _ => REDACTION_MARKERS.to_vec(),
+    }
+}
+
 /// 本文の SHA-256 (伏せ字の後の本文のハッシュ、04 §7.3)。指示の本体では 64 桁の小文字の 16 進で持つ。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextHash([u8; 32]);

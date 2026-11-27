@@ -43,3 +43,19 @@ pub const JOURNAL_TAIL_UNKNOWN: &str = "journal.tail_unknown";
 /// `forget` の指示があるのに `end` が欠けたときに、`end` を計画し直す印にする (04 §7.4。計画し直しと印を消すのは
 /// M5.4)。足すだけにし、ジャーナルには書かない。
 pub const JOURNAL_PARTIAL_GROUPS: &str = "journal.partial_groups";
+/// `import-v04` で作った根の取り込み元 (03 §3.1.1・§12.4、v0.5)。取り込み元の `data_root.id`・入れ替えの後の古い根の
+/// パス・取り込んだ時刻と evorag の版・古い根の `journal.last_seq` とファイルの要約を、1 つの JSON の文字列で書く。
+/// 一度だけ書き、ジャーナルにも `meta` の行として書く。
+pub const IMPORT_SOURCE: &str = "import.source";
+/// 取り込みの照合の結果 (03 §12.4 の「照合」、v0.5)。JSON の文字列。一度だけ書き、ジャーナルには書かない。
+pub const IMPORT_REPORT: &str = "import.report";
+/// v0.4 で今の値でなかった値の表と、照らし終えたかの印 (03 §3.1.1・§12.4、v0.5)。JSON の文字列。照らし終えた印だけは
+/// 書き換えてよい。ジャーナルにも `meta` の行として書き、取り込みは連番の最も大きい行の値を採る。
+pub const IMPORT_V04_ENDED: &str = "import.v04_ended";
+/// 古い根の処分の状態 (03 §3.1.1、v0.5): [`IMPORT_OLD_ROOT_KEPT`] か `disposed:<UTC の時刻>`。上書きしてよいキーで、
+/// ジャーナルにも `meta` の行として書く。取り込みは連番の最も大きい行の値を採るが、`disposed` を `kept` に戻さない。
+pub const IMPORT_OLD_ROOT: &str = "import.old_root";
+/// [`IMPORT_OLD_ROOT`] の値: 古い根がまだ残っている。
+pub const IMPORT_OLD_ROOT_KEPT: &str = "kept";
+/// [`IMPORT_OLD_ROOT`] の値の頭: 古い根を消し終えた (`disposed:<UTC の時刻>`)。
+pub const IMPORT_OLD_ROOT_DISPOSED: &str = "disposed:";

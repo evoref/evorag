@@ -23,6 +23,7 @@ mod fact_table;
 mod forget_ops;
 mod forgets;
 pub use forgets::ForgetStatus;
+pub mod import_v04;
 pub mod localtime;
 pub mod logging;
 mod masking;

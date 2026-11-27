@@ -67,6 +67,59 @@ pub fn raw_remove_meta(data_root: &Path, key: &str) {
     tx.commit().expect("commit");
 }
 
+/// 閉じた DB に封筒を直接書く (チェックサムは正しく付ける。ジャーナルにも関係にも書かない。試験で、書き手を
+/// 通さずに記録を変えた根を作るため)。
+pub fn raw_put_envelope(data_root: &Path, env: &crate::Envelope) {
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::RECORDS).expect("records");
+        let k = crate::store::record_key(&env.kind, env.id);
+        t.insert(k.as_slice(), env.encode(&k).as_slice())
+            .expect("insert");
+    }
+    tx.commit().expect("commit");
+}
+
+/// 閉じた DB に関係 (順向きと逆向きの行) を直接書く (試験だけ)。
+pub fn raw_put_link(data_root: &Path, from: evorag_types::Id, rel: &str, to: evorag_types::Id) {
+    let key = |a, r: &str, b| {
+        let mut k = crate::key::KeyBuf::new();
+        k.id(a).str(r).id(b);
+        k.into_bytes()
+    };
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::LINKS).expect("links");
+        let reverse = format!("{}{rel}", crate::relations::REVERSE);
+        t.insert(key(from, rel, to).as_slice(), [].as_slice())
+            .expect("insert");
+        t.insert(key(to, &reverse, from).as_slice(), [].as_slice())
+            .expect("insert");
+    }
+    tx.commit().expect("commit");
+}
+
+/// 閉じた DB に副索引の項目 (文字列の値) を直接書く (試験だけ)。
+pub fn raw_put_lookup(
+    data_root: &Path,
+    kind: &str,
+    field: &str,
+    value: &str,
+    id: evorag_types::Id,
+) {
+    let mut k = crate::key::KeyBuf::new();
+    k.str(kind).str(field).str(value).id(id);
+    let db = redb::Database::create(data_root.join(crate::DB_FILE)).expect("open db");
+    let tx = db.begin_write().expect("begin");
+    {
+        let mut t = tx.open_table(crate::store::LOOKUP).expect("lookup");
+        t.insert(k.as_bytes(), [].as_slice()).expect("insert");
+    }
+    tx.commit().expect("commit");
+}
+
 /// 閉じた DB の記録 1 件の本体のバイトを書き換える (試験で「壊れた記録」を作るため)。
 pub fn raw_corrupt_record(data_root: &Path, kind: &str, id: evorag_types::Id) {
     use redb::ReadableTable;

@@ -218,6 +218,15 @@ impl Envelope {
         Ok(())
     }
 
+    /// 本体の CBOR のバイト列 (`import-v04` の照合が、(ID ‖ 本体の CBOR) のハッシュに使う、03 §12.4)。
+    #[must_use]
+    pub fn body_cbor(&self) -> Vec<u8> {
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&self.body, &mut cbor)
+            .expect("a CBOR value always encodes into memory");
+        cbor
+    }
+
     /// 本体の CBOR のバイト列の SHA-256 ([`crate::WriteOp::ExpectBody`] で、読んだときの本体と同じかを確かめる)。
     #[must_use]
     pub fn body_digest(&self) -> [u8; 32] {
