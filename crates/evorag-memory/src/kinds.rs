@@ -348,6 +348,9 @@ pub struct ModelProbeBody {
     pub rerank6_ms: Option<u32>,
     /// 点検が失敗した理由 (利用者に見せる文言ではない)。
     pub error: Option<String>,
+    /// chat・memory: 点検に渡した要求の付け足し (設定の指定) のハッシュ。違えば点検し直す (06 §3.3、v0.5)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_hash: Option<String>,
 }
 
 /// リランクのしきい値と帯の下限 (05 §3.7、v0.2)。

@@ -35,7 +35,7 @@ pub fn run(
         llm.health().await?;
         llm.server_info().await
     });
-    match llm_state {
+    match &llm_state {
         Ok(info) => say(
             c,
             MessageKey::DoctorLlmOk,
@@ -248,7 +248,7 @@ pub fn run(
         }
     }
     show_probes(c, &report);
-    show_memory(c, cfg, rt, &report);
+    show_memory(c, cfg, rt, &report, llm_state.as_ref().ok());
     match report.backups.first() {
         Some(b) => say(
             c,
@@ -309,22 +309,51 @@ fn newest_probes(
     newest.into_iter().map(|(k, (_, b))| (k, b)).collect()
 }
 
-/// 点検の結果が、型縛りの補助の呼び出し (区切りの呼び出し) に使えないか (06 §3.3。memory_role.rs と同じ判定)。
-fn probe_unusable(p: &ModelProbeBody) -> bool {
-    !(p.structured_ok == Some(true) && p.thinking_off != Some(false))
+/// 役割・model_key・`build_info` の、いちばん新しい点検の結果。
+fn probe_for(
+    report: &evorag_store::inspect::Inspection,
+    role: &str,
+    model_key: &str,
+    build_info: &str,
+) -> Option<ModelProbeBody> {
+    report
+        .collected
+        .get(evorag_memory::KIND_MODEL_PROBE)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some((e.updated_at, e.body_as::<ModelProbeBody>().ok()?)))
+        .filter(|(_, b)| b.role == role && b.model_key == model_key && b.build_info == build_info)
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, b)| b)
 }
 
-/// memory の役割と縮退 (06 §2.1)。設定した memory のサーバに繋いで、記録と点検の結果と比べる。
+/// 点検の結果が、今の要求の付け足し `extra` で点検したもので、型縛りの補助の呼び出し (区切りの呼び出し) に
+/// 使えないか (06 §3.3。memory_role.rs と同じ判定。点検し直す結果は、まだ分からないとして数えない)。
+fn probe_unusable(p: &ModelProbeBody, extra: &evorag_llm::RequestExtra) -> bool {
+    evorag_core::probe::is_current(p, extra)
+        && !(p.structured_ok == Some(true) && p.thinking_off != Some(false))
+}
+
+/// memory の役割と縮退 (06 §2.1)。設定した memory のサーバに繋いで、記録と点検の結果と比べる。chat の点検の結果は、
+/// 今繋がっている chat のモデル (`chat`) のものだけを見る。
 fn show_memory(
     c: &Catalog,
     cfg: &crate::config::Config,
     rt: &tokio::runtime::Runtime,
     report: &evorag_store::inspect::Inspection,
+    chat: Option<&evorag_llm::ServerInfo>,
 ) {
-    let probes = newest_probes(report);
-    let chat_unusable = probes
-        .get(evorag_memory::ROLE_CHAT)
-        .is_some_and(probe_unusable);
+    let chat_extra = cfg.chat_aux_request_extra();
+    let chat_unusable = chat
+        .and_then(|s| {
+            probe_for(
+                report,
+                evorag_memory::ROLE_CHAT,
+                &s.model_key,
+                &s.build_info,
+            )
+        })
+        .is_some_and(|p| probe_unusable(&p, &chat_extra));
     let Some(r) = cfg.memory_role() else {
         say(c, MessageKey::DoctorMemoryDefault, &[]);
         if chat_unusable {
@@ -383,11 +412,13 @@ fn show_memory(
                     true
                 }
                 Some(_) => {
-                    let failed = probes.get(evorag_memory::ROLE_MEMORY).is_some_and(|p| {
-                        p.model_key == now.model_key
-                            && p.build_info == now.build_info
-                            && probe_unusable(p)
-                    });
+                    let failed = probe_for(
+                        report,
+                        evorag_memory::ROLE_MEMORY,
+                        &now.model_key,
+                        &now.build_info,
+                    )
+                    .is_some_and(|p| probe_unusable(&p, &cfg.memory_request_extra()));
                     if failed {
                         say(c, MessageKey::DoctorMemoryProbeFailed, &[]);
                     } else {

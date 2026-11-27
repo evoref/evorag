@@ -819,9 +819,9 @@ fn main() -> ExitCode {
             },
         );
     }
-    // doctor は読むだけ (設定の移行もしない)。TUI は、更新の片付けの後に移行する (動いている evorag が
-    // 置いてあるものと違えば、設定に触れずに止めるため、12 §7.3)。
-    let migrate = !matches!(args.command, None | Some(Sub::Doctor));
+    // 設定を読むときに移行するのは setup だけ (07 §4.1)。TUI は、v0.5 の根を開けた後に移行する (更新の片付けで
+    // 止めたとき (12 §7.3)、取り込みを断ったとき、起動が止まったときは設定に触れない)。ほかの命令は移行しない。
+    let migrate = matches!(args.command, Some(Sub::Setup { .. }));
     let loaded = match config::load(&config_file, migrate) {
         Ok(l) => l,
         Err(e) => {
@@ -848,6 +848,15 @@ fn main() -> ExitCode {
     };
     if let Some(b) = &loaded.migrated {
         config_migrated(&catalog, &config_file, b);
+    }
+    if let Some(e) = &loaded.migrate_failed {
+        eprintln!(
+            "{}",
+            catalog.with(MessageKey::CliConfigMigrateFailed, &[("detail", e)])
+        );
+    }
+    if loaded.memory_extra_unused {
+        eprintln!("{}", catalog.key(MessageKey::CliConfigMemoryExtraUnused));
     }
     for k in &loaded.ignored {
         eprintln!(
@@ -1180,12 +1189,6 @@ fn main() -> ExitCode {
         Some(update::StartupCleanup::Continue { notices, lock }) => (notices, lock),
         None => (Vec::new(), None),
     };
-    // 設定の移行 (03 §12.3)。
-    match config::migrate(&config_file) {
-        Ok(Some(b)) => config_migrated(&catalog, &config_file, &b),
-        Ok(None) => {}
-        Err(e) => return fail(&catalog, 4, MessageKey::CliConfigError, &[("detail", &e)]),
-    }
     let mut started = rt.block_on(Core::start_locked(make_cfg(), llm.clone(), held_lock));
     // DB のファイルが壊れていたら、退避とジャーナルから戻すかを尋ねる (03 §8、FR-205)。
     if let Err(StartError::Store(OpenError::Broken { moved_to, reason })) = &started {
@@ -1357,6 +1360,27 @@ fn main() -> ExitCode {
         },
     );
     app.notices.extend(update_notices);
+    // 設定の移行 (03 §12.3、07 §4.1): v0.5 の根を開けた後 (取り込みを終えた後を含む) にだけ行う。書き換えられ
+    // なければ警告して、古い版の設定のまま続ける。
+    match config::migrate(&config_file) {
+        Ok(Some(b)) => {
+            let m = app.catalog.with(
+                MessageKey::CliConfigMigrated,
+                &[
+                    ("path", &config_file.display().to_string()),
+                    ("backup", &b.display().to_string()),
+                ],
+            );
+            app.notices.push(m);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let m = app
+                .catalog
+                .with(MessageKey::CliConfigMigrateFailed, &[("detail", &e)]);
+            app.notices.push(m);
+        }
+    }
     for w in &report.location_warnings {
         let m = app
             .catalog

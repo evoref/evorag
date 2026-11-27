@@ -1192,8 +1192,17 @@ impl App {
                 );
                 self.notice(m);
             }
-            Event::MemoryRole { state } => {
+            Event::MemoryRole { state, by_probe } => {
                 let before = self.status.memory.replace(state);
+                // 点検に通らないことは `ProbeIssues` で知らせた (状態の行は変える)。
+                if by_probe
+                    && matches!(
+                        state,
+                        MemoryState::Fallback(MemoryFallback::ProbeFailed) | MemoryState::Stopped
+                    )
+                {
+                    return;
+                }
                 let key = match state {
                     MemoryState::Fallback(r) => {
                         let reason = self.catalog.key(memory_reason_key(r));

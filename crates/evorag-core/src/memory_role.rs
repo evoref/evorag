@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use evorag_llm::{LlmClient, RequestExtra};
+use evorag_llm::{LlmClient, LlmError, RequestExtra};
 use evorag_types::api::{Event, MemoryFallback, MemoryState};
 
 use crate::Inner;
@@ -26,6 +26,10 @@ pub struct MemoryConfig {
 }
 
 /// 区切りの呼び出しを出す先 (B2 の呼ぶ側が使う)。
+///
+/// **約束**: 呼ぶ側は、区切りのまとまりを呼ぶ前ごとに [`MemoryCall::verify`] で、呼ぶ先のモデルが選んだ時と
+/// 同じかを確かめる (動いている間に llama-server のモデルが差し替わったときに、違うモデルで台帳を作らない
+/// ため、06 §2.1 の細目)。違えば呼ばずに [`crate::Core::memory_route`] で選び直す。
 #[derive(Clone)]
 pub struct MemoryCall {
     pub client: Arc<dyn LlmClient>,
@@ -48,6 +52,38 @@ impl MemoryCall {
     pub fn is_fallback(&self) -> bool {
         self.fallback.is_some()
     }
+
+    /// 呼ぶ先の `/props` の model_key が、選んだ時の model_key と同じかを確かめる (06 §2.1 の細目)。
+    ///
+    /// # Errors
+    ///
+    /// 繋がらない ([`VerifyError::Unreachable`]。memory の役割なら [`crate::Core::memory_unreachable`] を呼ぶ)、
+    /// モデルが違う ([`VerifyError::Changed`])。
+    pub async fn verify(&self) -> Result<(), VerifyError> {
+        let server = self
+            .client
+            .server_info()
+            .await
+            .map_err(VerifyError::Unreachable)?;
+        if server.model_key == self.model_key {
+            Ok(())
+        } else {
+            Err(VerifyError::Changed {
+                connected: server.model_key,
+            })
+        }
+    }
+}
+
+/// [`MemoryCall::verify`] の失敗。
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyError {
+    /// 呼ぶ先に繋がらない。
+    #[error("the segment call target is not reachable: {0}")]
+    Unreachable(LlmError),
+    /// 呼ぶ先のモデルが、選んだ時と違う。
+    #[error("the segment call target now runs another model ({connected})")]
+    Changed { connected: String },
 }
 
 impl std::fmt::Debug for MemoryCall {
@@ -91,7 +127,9 @@ fn probed(inner: &Inner, role: &str, model_key: &str, build_info: &str) -> Probe
         .and_then(|r| evorag_memory::load_probe(&r, role, model_key, build_info).ok())
         .flatten();
     match found {
+        // 点検し直す結果 (要求の付け足しを直した後など) は、点検し直すまで使わない (06 §3.3 の例外)。
         None => Probed::Pending,
+        Some((_, p)) if !crate::probe_fresh(inner, &p) => Probed::Pending,
         Some((_, p)) if p.structured_ok == Some(true) && p.thinking_off != Some(false) => {
             Probed::Usable(Box::new(p))
         }
@@ -192,6 +230,12 @@ pub(crate) fn resolve(inner: &Inner) -> (MemoryState, MemoryRoute) {
 
 /// 状態を求め直し、変わっていれば知らせる (状態の行、06 §2.1)。
 pub(crate) fn refresh(inner: &Inner) {
+    refresh_after_probe(inner, false);
+}
+
+/// [`refresh`] の、点検の後の形。`announced` は、その点検で使えない機能を既に知らせた (画面は、点検に通らない
+/// ことによる縮退と停止の知らせを重ねない)。
+pub(crate) fn refresh_after_probe(inner: &Inner, announced: bool) {
     let (state, _) = resolve(inner);
     let changed = {
         let mut shown = inner.memory_shown.lock().unwrap_or_else(|e| e.into_inner());
@@ -201,7 +245,13 @@ pub(crate) fn refresh(inner: &Inner) {
     };
     if changed {
         tracing::info!(?state, "memory role changed");
-        crate::emit(inner, Event::MemoryRole { state });
+        crate::emit(
+            inner,
+            Event::MemoryRole {
+                state,
+                by_probe: announced,
+            },
+        );
     }
 }
 

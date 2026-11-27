@@ -113,7 +113,7 @@ async fn start(
 fn memory_events(rx: &mut UnboundedReceiver<Event>) -> Vec<MemoryState> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        if let Event::MemoryRole { state } = ev {
+        if let Event::MemoryRole { state, .. } = ev {
             out.push(state);
         }
     }
@@ -338,12 +338,16 @@ async fn a_memory_model_that_fails_the_probe_falls_back_and_stops_when_chat_fail
                 thinking_not_off,
                 ..
             } if role == "memory" => issues = Some(thinking_not_off),
-            Event::MemoryRole { state } => states.push(state),
+            Event::MemoryRole { state, by_probe } => states.push((state, by_probe)),
             _ => {}
         }
     }
     assert_eq!(issues, Some(true));
-    assert_eq!(states, [MemoryState::Fallback(MemoryFallback::ProbeFailed)]);
+    // 点検の知らせを出したので、画面は縮退の知らせを重ねない。
+    assert_eq!(
+        states,
+        [(MemoryState::Fallback(MemoryFallback::ProbeFailed), true)]
+    );
     let c = call(core.memory_route());
     assert_eq!(c.fallback, Some(MemoryFallback::ProbeFailed));
     assert_eq!(c.model_key, core.server().model_key);
@@ -380,6 +384,141 @@ async fn without_llm_memory_a_chat_model_that_fails_the_probe_stops_segment_call
     let (core, mut rx, _) = start(dir.path(), 1, broken_chat, None, true).await;
     assert!(matches!(core.memory_route(), MemoryRoute::Stopped));
     assert_eq!(memory_events(&mut rx), [MemoryState::Stopped]);
+    core.shutdown().await;
+}
+
+/// 点検に通らなかった memory も、`llm.memory.request_extra` を直せば (model_key が同じでも) 点検し直し、通れば
+/// memory で呼ぶ (06 §3.3 の例外)。
+#[tokio::test(flavor = "multi_thread")]
+async fn changing_request_extra_probes_the_memory_model_again() {
+    let dir = TempDir::new("memory-reprobe-extra");
+    let memory = Arc::new(server("lfm.gguf", 9, 1, true, NEVER_OFF));
+    let (core, _, _) = start(
+        dir.path(),
+        1,
+        chat_server(GOOD),
+        Some(memory as Arc<dyn LlmClient>),
+        true,
+    )
+    .await;
+    assert_eq!(
+        core.memory_state(),
+        MemoryState::Fallback(MemoryFallback::ProbeFailed)
+    );
+    core.shutdown().await;
+
+    // 同じ設定なら点検し直さない。
+    let same = Arc::new(server("lfm.gguf", 9, 1, true, GOOD));
+    let (core, _, _) = start(
+        dir.path(),
+        2,
+        chat_server(""),
+        Some(same.clone() as Arc<dyn LlmClient>),
+        true,
+    )
+    .await;
+    assert!(same.requests().is_empty());
+    assert_eq!(
+        core.memory_state(),
+        MemoryState::Fallback(MemoryFallback::ProbeFailed)
+    );
+    core.shutdown().await;
+
+    // 要求の付け足しを直した: 点検し直して、通れば memory で呼ぶ。
+    let fixed = Arc::new(server("lfm.gguf", 9, 1, true, GOOD));
+    let mut cfg = config(
+        dir.path(),
+        3,
+        memory_config(Some(fixed.clone() as Arc<dyn LlmClient>)),
+        true,
+    );
+    cfg.memory.request_extra.insert(
+        "chat_template_kwargs".into(),
+        serde_json::json!({"enable_thinking": false}),
+    );
+    let (core, _, _) = Core::start(cfg, chat_server("") as Arc<dyn LlmClient>)
+        .await
+        .unwrap();
+    core.settle().await;
+    core.settle_probe().await;
+    assert!(!fixed.requests().is_empty(), "probed again");
+    let c = call(core.memory_route());
+    assert!(!c.is_fallback());
+    assert!(c.extra.contains_key("chat_template_kwargs"));
+    core.shutdown().await;
+}
+
+/// 接続の失敗で型縛りの確かめが終わらなかった点検は保存せず (点検に通らないに固定しない)、次の機会に点検し直す
+/// (06 §3.3 の例外)。それまで区切りの呼び出しは出さない。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_that_did_not_finish_is_not_saved_and_is_redone() {
+    let dir = TempDir::new("memory-reprobe-error");
+    let flaky = Arc::new(server(
+        "qwen3-4b.gguf",
+        9,
+        1,
+        true,
+        r#"{"connect_error": "refused"}, {"connect_error": "refused"}"#,
+    ));
+    let (core, _, _) = start(
+        dir.path(),
+        1,
+        chat_server(GOOD),
+        Some(flaky.clone() as Arc<dyn LlmClient>),
+        true,
+    )
+    .await;
+    assert!(!flaky.requests().is_empty(), "probed");
+    assert!(core.probe_result("memory").is_none(), "not saved");
+    assert!(matches!(core.memory_route(), MemoryRoute::Pending));
+    assert_eq!(core.memory_state(), MemoryState::Own);
+    core.shutdown().await;
+
+    let good = Arc::new(server("qwen3-4b.gguf", 9, 1, true, GOOD));
+    let (core, _, _) = start(
+        dir.path(),
+        2,
+        chat_server(""),
+        Some(good as Arc<dyn LlmClient>),
+        true,
+    )
+    .await;
+    assert!(core.probe_result("memory").is_some());
+    assert!(!call(core.memory_route()).is_fallback());
+    core.shutdown().await;
+}
+
+/// B2 の呼ぶ側は、呼ぶ前に呼ぶ先のモデルが選んだ時と同じかを確かめる (06 §2.1 の細目)。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_memory_call_notices_a_swapped_or_missing_model() {
+    let dir = TempDir::new("memory-verify");
+    let memory = Arc::new(Swappable(Mutex::new(Arc::new(server(
+        "qwen3-4b.gguf",
+        9,
+        1,
+        true,
+        GOOD,
+    )))));
+    let (core, _, _) = start(
+        dir.path(),
+        1,
+        chat_server(GOOD),
+        Some(memory.clone() as Arc<dyn LlmClient>),
+        true,
+    )
+    .await;
+    let c = call(core.memory_route());
+    assert!(c.verify().await.is_ok());
+    *memory.0.lock().unwrap() = Arc::new(server("other.gguf", 5, 1, true, ""));
+    assert!(matches!(
+        c.verify().await,
+        Err(evorag_core::VerifyError::Changed { .. })
+    ));
+    *memory.0.lock().unwrap() = Arc::new(server("qwen3-4b.gguf", 9, 1, false, ""));
+    assert!(matches!(
+        c.verify().await,
+        Err(evorag_core::VerifyError::Unreachable(_))
+    ));
     core.shutdown().await;
 }
 

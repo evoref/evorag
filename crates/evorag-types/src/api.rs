@@ -783,7 +783,11 @@ pub enum Event {
         recorded_now: bool,
     },
     /// memory の役割の状態が変わった (縮退に入った・戻った・区切りの呼び出しを止めた、06 §2.1)。
-    MemoryRole { state: MemoryState },
+    MemoryRole {
+        state: MemoryState,
+        /// モデルの点検の結果で変わった (使えない機能は `ProbeIssues` で知らせ済み。画面は知らせを重ねない)。
+        by_probe: bool,
+    },
     /// 事実の一覧 (`ShowFacts` の答え)。
     FactsInfo { list: FactList },
     /// 置き換えの履歴 (`ShowFactHistory` の答え)。

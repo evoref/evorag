@@ -1142,6 +1142,10 @@ message_keys! {
     CliSetupMemoryCache => "cli.setup.memory_cache",
     /// memory の接続先がループバック以外 (06 §9)。引数: `url`。
     CliSetupMemoryRemote => "cli.setup.memory_remote",
+    /// 設定の移行に失敗した・見送った (古い版のまま続ける、07 §4.1)。引数: `detail` (ファイルの名前と理由)。
+    CliConfigMigrateFailed => "cli.config_migrate_failed",
+    /// `[llm.memory]` に `url` も `model` も無いのに `request_extra` を書いた (07 §4.2)。
+    CliConfigMemoryExtraUnused => "cli.config_memory_extra_unused",
 }
 
 /// 漢字・仮名・全角の文字を含むか。`ja` 以外の文言カタログの検査 (`cargo xtask i18n`) と、英語の UI の試験で

@@ -723,6 +723,7 @@ mod tests {
         assert!(!line(&app).contains("代行"));
         app.on_event(Event::MemoryRole {
             state: MemoryState::Fallback(MemoryFallback::Waiting),
+            by_probe: false,
         });
         assert!(line(&app).contains("memory:chatで代行"), "{}", line(&app));
         let last = app.notices.last().unwrap();
@@ -732,6 +733,7 @@ mod tests {
         );
         app.on_event(Event::MemoryRole {
             state: MemoryState::Own,
+            by_probe: false,
         });
         assert!(!line(&app).contains("代行"));
         assert!(
@@ -742,6 +744,7 @@ mod tests {
         );
         app.on_event(Event::MemoryRole {
             state: MemoryState::Stopped,
+            by_probe: false,
         });
         assert!(
             line(&app).contains("区切りの呼び出し:停止"),
@@ -750,8 +753,17 @@ mod tests {
         );
         app.on_event(Event::MemoryRole {
             state: MemoryState::SameAsChat,
+            by_probe: false,
         });
         assert!(app.notices.last().unwrap().contains("再び"));
+        // 点検に通らないことで変わったときは、点検の知らせに任せて重ねない (状態の行は変える)。
+        let before = app.notices.len();
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::Fallback(MemoryFallback::ProbeFailed),
+            by_probe: true,
+        });
+        assert_eq!(app.notices.len(), before);
+        assert!(line(&app).contains("memory:chatで代行"));
         // memory の点検の知らせは、型縛りの補助の呼び出しを止めたこと (状態の行の「一部の機能を止めています」)
         // にしない。思考を切れないときは --reasoning-budget 0 を案内する。
         app.on_event(Event::ProbeIssues {

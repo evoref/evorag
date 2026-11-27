@@ -604,16 +604,8 @@ pub fn run(
         }
     };
 
-    // 3. 設定ファイルを書く。古い版の設定は、先に今の版に書き換える (元のファイルを `config.toml.bak-v<旧版>` に
-    //    写す、03 §12.3)。
-    match crate::config::migrate(config_file) {
-        Ok(Some(b)) => crate::config_migrated(c, config_file, &b),
-        Ok(None) => {}
-        Err(e) => {
-            say(MessageKey::CliConfigError, &[("detail", &e)]);
-            return ExitCode::from(4);
-        }
-    }
+    // 3. 設定ファイルを書く。古い版の設定は、読むときに今の版に書き換えた (元のファイルを
+    //    `config.toml.bak-v<旧版>` に写す、03 §12.3、07 §4.1)。
     let path = config_file.display().to_string();
     let written = match std::fs::read_to_string(config_file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_private(
@@ -779,25 +771,28 @@ pub fn run(
     }
 
     // 5. 使うモデルの性質を点検する (06 §3.3)。前回の点検と model_key・`build_info` が同じなら行わない。
-    let aux_extra: evorag_llm::RequestExtra = cfg
-        .llm
-        .chat
-        .aux_request_extra
-        .as_ref()
-        .and_then(|t| serde_json::to_value(t).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let aux_extra = cfg.chat_aux_request_extra();
     let memory_extra = cfg.memory_request_extra();
     let rerank_use = usable_roles
         .iter()
         .find(|(r, _, _)| *r == "rerank")
         .map(|(_, o, c)| (o.model_key.clone(), Arc::clone(c)));
     for (role, o, client) in usable_roles {
-        // 前回と同じモデルと版なら点検しない。ただし v0.3 までの点検で思考を切れなかった chat は、思考を切る
-        // 指定を試して確かめ直す (OQ-52)。
+        // 前回と同じモデルと版なら点検しない。ただし、v0.3 までの点検で思考を切れなかった chat は思考を切る指定を
+        // 試して確かめ直し (OQ-52)、chat と memory は、要求の付け足しを直したときと、前回の点検に通らなかったとき
+        // (llama-server の `--reasoning-budget 0` などを直したかもしれない) に点検し直す (06 §3.3 の例外)。
+        let extra = if role == "memory" {
+            &memory_extra
+        } else {
+            &aux_extra
+        };
         if models
             .probe(role, &o.model_key, &o.build_info)
-            .is_some_and(|p| !evorag_core::probe::needs_retry(&p, &aux_extra))
+            .is_some_and(|p| {
+                !evorag_core::probe::needs_retry(&p, &aux_extra)
+                    && evorag_core::probe::is_current(&p, extra)
+                    && !(matches!(role, "chat" | "memory") && evorag_core::probe::failed(&p))
+            })
         {
             continue;
         }
@@ -830,6 +825,10 @@ pub fn run(
         });
         for line in crate::doctor::probe_lines(c, role, &body) {
             eprintln!("{line}");
+        }
+        // 型縛りの確かめが終わらなかった点検は保存しない (次の機会に点検し直す、06 §3.3 の例外)。
+        if !evorag_core::probe::worth_saving(&body) {
+            continue;
         }
         if let Err(e) = models.save_probe(&body) {
             say(MessageKey::CliError, &[("detail", &e)]);

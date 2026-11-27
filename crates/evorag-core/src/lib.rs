@@ -28,7 +28,7 @@ pub mod localtime;
 pub mod logging;
 mod masking;
 mod memory_role;
-pub use memory_role::{MemoryCall, MemoryConfig, MemoryRoute};
+pub use memory_role::{MemoryCall, MemoryConfig, MemoryRoute, VerifyError};
 mod notes;
 mod orphans;
 mod precompute;
@@ -1310,7 +1310,7 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, &key, &build).ok())
             .flatten();
-        if old.is_some_and(|(_, p)| !probe::needs_retry(&p, &inner.aux_request_extra)) {
+        if old.as_ref().is_some_and(|(_, p)| probe_fresh(inner, p)) {
             continue;
         }
         let body = match role {
@@ -1335,9 +1335,35 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             failed = body.error.is_some(),
             "model probed"
         );
+        // 型縛りの確かめが接続の失敗や締切切れで終わったものは保存せず、次の機会に点検し直す (06 §3.3 の例外)。
+        if !probe::worth_saving(&body) {
+            tracing::warn!(role, "the model probe did not finish; it is retried later");
+            continue;
+        }
         // 保存と知らせは、落とされない task で行う (記録だけが残って、知らせが出ないことが無いように)。
         let worker = inner.clone();
-        let _ = tokio::spawn(async move { save_probe_result(&worker, role, body).await }).await;
+        let old = old.map(|(e, _)| e);
+        let _ =
+            tokio::spawn(async move { save_probe_result(&worker, role, old, body).await }).await;
+    }
+}
+
+/// 保存した点検の結果を、点検し直さずに使えるか (06 §3.3)。v0.3 までの思考を切れなかった chat の結果と、今と
+/// 違う要求の付け足しで点検した chat・memory の結果は、点検し直す。
+pub(crate) fn probe_fresh(inner: &Inner, p: &evorag_memory::ModelProbeBody) -> bool {
+    !probe::needs_retry(p, &inner.aux_request_extra)
+        && probe::is_current(p, inner.probe_extra(&p.role))
+}
+
+impl Inner {
+    /// 役割の点検に渡す要求の付け足し (chat は `llm.chat.aux_request_extra`、memory は `llm.memory.request_extra`)。
+    pub(crate) fn probe_extra(&self, role: &str) -> &evorag_llm::RequestExtra {
+        static NONE: std::sync::OnceLock<evorag_llm::RequestExtra> = std::sync::OnceLock::new();
+        match role {
+            evorag_memory::ROLE_CHAT => &self.aux_request_extra,
+            evorag_memory::ROLE_MEMORY => &self.memory_request_extra,
+            _ => NONE.get_or_init(evorag_llm::RequestExtra::new),
+        }
     }
 }
 
@@ -1345,10 +1371,11 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
 async fn save_probe_result(
     inner: &Arc<Inner>,
     role: &'static str,
+    old: Option<Envelope>,
     body: evorag_memory::ModelProbeBody,
 ) {
     {
-        if let Ok(ops) = writes(inner).save_probe(None, &body) {
+        if let Ok(ops) = writes(inner).save_probe(old.as_ref(), &body) {
             let _ = write_derived(inner, ops).await;
         }
         let found = probe::issues(&body);
@@ -1362,9 +1389,10 @@ async fn save_probe_result(
                 },
             );
         }
+        // 点検の結果で、区切りの呼び出しを出す先が変わりうる (縮退・止める、06 §2.1)。点検の知らせを出したときは、
+        // 状態の変化の知らせを重ねない。
+        memory_role::refresh_after_probe(inner, !found.is_empty());
     }
-    // 点検の結果で、区切りの呼び出しを出す先が変わりうる (縮退・止める、06 §2.1)。
-    memory_role::refresh(inner);
 }
 
 /// 繋がらない役割を試し直す (06 §3)。繋がったら記録と照合し、記録が無ければ記録する。
@@ -1459,16 +1487,32 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
 }
 
 /// 繋がらない役割を 30 秒ごとに試し直す task を、動いていなければ始める (06 §3 の表)。
+///
+/// task が抜けるかの判定と、ここでの起動の判定は、同じ `aux_task` の鍵の中で行う。役割を接続待ちに戻す側は、
+/// 状態を書いてからここを呼ぶ。task は、鍵を取ってから接続待ちの役割が無いことを確かめて `aux_task` を空に
+/// して抜けるので、抜けかけの task に頼って再試行の task が無いまま接続待ちになることは無い。
 fn ensure_role_retry(inner: &Arc<Inner>) {
     let mut slot = inner.aux_task.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.as_ref().is_some_and(|t| !t.is_finished()) {
+    if slot.is_some() {
         return;
     }
     let worker = inner.clone();
     *slot = Some(tokio::spawn(async move {
         loop {
             tokio::time::sleep(roles::RETRY).await;
-            if !recheck_roles(&worker).await {
+            if recheck_roles(&worker).await {
+                continue;
+            }
+            let mut slot = worker.aux_task.lock().unwrap_or_else(|e| e.into_inner());
+            let waiting = worker
+                .aux
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|a| matches!(a.state, roles::RoleState::Waiting));
+            if !waiting {
+                // 自分の取っ手を落とす (task は続けて抜ける)。
+                *slot = None;
                 break;
             }
         }
@@ -1722,7 +1766,7 @@ pub(crate) fn needs_probe(inner: &Inner) -> bool {
             .ok()
             .and_then(|r| evorag_memory::load_probe(&r, role, key, build).ok())
             .flatten()
-            .is_none_or(|(_, p)| probe::needs_retry(&p, &inner.aux_request_extra))
+            .is_none_or(|(_, p)| !probe_fresh(inner, &p))
     })
 }
 
