@@ -1,0 +1,123 @@
+{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "b2_segment",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "maxItems": 8
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "s": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2,
+                  3
+                ]
+              },
+              "l": {
+                "type": "string",
+                "enum": [
+                  "world",
+                  "episode"
+                ]
+              },
+              "e": {
+                "type": "string"
+              },
+              "a": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "v": {
+                "type": "string"
+              },
+              "m": {
+                "type": "string",
+                "enum": [
+                  "fact",
+                  "negated",
+                  "question",
+                  "hypothetical"
+                ]
+              },
+              "tn": {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "past",
+                  "planned"
+                ]
+              },
+              "old": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "s",
+              "l",
+              "e",
+              "a",
+              "v",
+              "m",
+              "tn",
+              "old",
+              "when"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 24
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "enum": [
+                  1
+                ]
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "accept",
+                  "reject",
+                  "unclear"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "verdict"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1
+        }
+      },
+      "required": [
+        "keys",
+        "units",
+        "corrections"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

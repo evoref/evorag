@@ -1,0 +1,16 @@
+[1] I have lived in Osaka since last spring.
+[2] I live with my cat [hidden] and play shogi on weekends.
+[reference only]
+How do you like life in Osaka? Weekends with [hidden] sound fun.
+[/reference only]
+[reference only]
+You're welcome. Ask me anything else you'd like to know.
+[/reference only]
+[3] Kyoto, not Osaka, sorry
+
+Correction candidates:
+(candidate 1) sentence [3], pattern "{new}, not {old}", old side "Osaka", new side "Kyoto"
+Previous answer:
+[reference only]
+You're welcome. Ask me anything else you'd like to know.
+[/reference only]
