@@ -560,13 +560,13 @@ fn the_schema_requires_every_field_and_caps_the_counts() {
 
 #[test]
 fn budgets_follow_the_request_limit() {
-    assert_eq!(user_budget(1_200, Counting::Exact), 3_072 - 1_200 - 64);
+    assert_eq!(user_budget(1_400, Counting::Exact), 3_584 - 1_400 - 64);
     assert_eq!(
-        user_budget(1_200, Counting::Estimated),
-        (3_072 - 1_200 - 64) * 4 / 5
+        user_budget(1_400, Counting::Estimated),
+        (3_584 - 1_400 - 64) * 4 / 5
     );
     assert_eq!(user_budget(5_000, Counting::Exact), 0);
-    assert!(fits(5_120) && !fits(5_119));
+    assert!(fits(5_632) && !fits(5_631));
 }
 
 /// 変種の版がプロンプト (システムのメッセージ・利用者のメッセージの形・Schema) を固定する。落ちたら、文言を戻すか、
@@ -606,9 +606,9 @@ fn the_variant_pins_the_prompt() {
     assert_eq!(
         got,
         [
-            "sr1",
-            "9439d4f3d4b8a61402d68d96dd649bcf5c3610b4e551263f31022ee2b3a93236",
-            "2b62440d5f6212c00d9c07cffb98c4433993096b92294586acb8100601895e93"
+            "sr2",
+            "4275697fd044287401aa9568db60a6242f19217175a58efacb9bbecaf1be9d9b",
+            "59d9b1253f62cee22089c6b0b99065f77cbddf42d6a3948ee56d25483f6265ef"
         ],
         "the B2 prompt changed: raise VARIANT"
     );
