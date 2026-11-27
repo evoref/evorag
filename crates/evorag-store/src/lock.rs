@@ -71,6 +71,15 @@ impl DataRootLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// ロックを持ったままデータ根のフォルダを `new_root` に改名した後の、同じロック (Unix はロックがファイルの
+    /// 取っ手に付くので、改名の後も効く、03 §10.2 の「改名の隙」)。パスだけを差し替える。
+    pub(crate) fn relocated(self, new_root: &Path) -> Self {
+        Self {
+            _file: self._file,
+            path: new_root.join(LOCK_FILE),
+        }
+    }
 }
 
 fn read_pid(data_root: &Path) -> Option<u32> {

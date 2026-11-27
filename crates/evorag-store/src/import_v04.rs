@@ -422,7 +422,18 @@ impl FileSnapshot {
     /// フォルダ・ファイルを読めないとき。
     pub fn take(root: &Path) -> io::Result<Self> {
         let mut out = Self::default();
-        walk(root, root, &mut out.files)?;
+        walk(root, root, Hashes::Take, &mut out.files)?;
+        Ok(out)
+    }
+
+    /// 中身のハッシュを取らずに、ファイルの大きさと更新時刻だけを要約する (改名の隙の確かめ、03 §10.2)。
+    /// [`FileEntry::sha256`] はすべて `None`。何も書かない。
+    ///
+    /// # Errors
+    /// フォルダを読めないとき。
+    pub fn take_listing(root: &Path) -> io::Result<Self> {
+        let mut out = Self::default();
+        walk(root, root, Hashes::Skip, &mut out.files)?;
         Ok(out)
     }
 
@@ -468,7 +479,19 @@ impl FileSnapshot {
     }
 }
 
-fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, FileEntry>) -> io::Result<()> {
+/// [`walk`] が中身のハッシュを取るか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hashes {
+    Take,
+    Skip,
+}
+
+fn walk(
+    base: &Path,
+    dir: &Path,
+    hashes: Hashes,
+    out: &mut BTreeMap<String, FileEntry>,
+) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -492,14 +515,18 @@ fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, FileEntry>) -> io::R
                 },
             );
         } else if meta.is_dir() {
-            walk(base, &path, out)?;
+            walk(base, &path, hashes, out)?;
         } else {
+            let sha256 = match hashes {
+                Hashes::Take => Some(sha256_file(&path)?),
+                Hashes::Skip => None,
+            };
             out.insert(
                 rel,
                 FileEntry {
                     size: meta.len(),
                     modified_ns,
-                    sha256: Some(sha256_file(&path)?),
+                    sha256,
                 },
             );
         }

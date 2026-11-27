@@ -123,6 +123,26 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     imp::rename_no_replace(from, to)
 }
 
+/// フォルダ `from` を、同じボリュームの `to` に改名する。`to` が既にあれば改名せずに `AlreadyExists` で失敗する
+/// (データ根を入れ替える改名で、ほかのフォルダを置き換えないため、03 §10.2・§12.4)。改名の後に、`to` の親の
+/// フォルダを書き切る。
+///
+/// - Windows: `MoveFileExW` に `MOVEFILE_WRITE_THROUGH` だけを付ける (置き換えない)。一時の共有違反
+///   (ウイルス対策・索引が中のファイルを掴んでいるとき) は [`retry_transient`] と同じ間隔で試し直す。
+/// - Unix: `to` が無いことを確かめてから `rename(2)` する (空のフォルダへの改名は置き換えになるため。確かめと
+///   改名の間に `to` を作られる隙は残る)。
+///
+/// # Errors
+///
+/// `to` がある (`AlreadyExists`)、OS の改名の失敗、書き切りの失敗。
+pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    imp::rename_dir_no_replace(from, to)?;
+    if let Some(dir) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
+        sync_dir(dir)?;
+    }
+    Ok(())
+}
+
 /// リンクか: シンボリックリンクと、Windows の名前の代理のリパースポイント (ジャンクションなど、
 /// タグに `IsReparseTagNameSurrogate` の 0x2000_0000 が立つもの)。名前の代理でないリパースポイント
 /// (OneDrive のクラウドのファイルなど) は通常のファイルとして扱う (12 §7.3)。
@@ -283,6 +303,16 @@ mod imp {
         }
     }
 
+    pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the rename target already exists",
+            ));
+        }
+        retry_transient(|| rename_no_replace(from, to))
+    }
+
     pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
         // std の is_symlink は、名前の代理のリパースポイント (タグの 0x2000_0000 が立つもの: シンボリック
         // リンク・ジャンクションなど) で真になる。OneDrive のクラウドのファイルなどほかのリパースポイントは
@@ -415,6 +445,16 @@ mod imp {
     }
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the rename target already exists",
+            ));
+        }
         std::fs::rename(from, to)
     }
 

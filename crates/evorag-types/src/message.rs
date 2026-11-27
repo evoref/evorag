@@ -859,6 +859,64 @@ message_keys! {
     BackupsPurged => "backups.purged",
     /// 消せなかった退避がある。引数: `count`・`detail`。
     BackupsPurgeFailed => "backups.purge_failed",
+    /// `import-v04` の確認 (03 §12.4、07 §5)。引数: `old`・`renamed`・`root`。
+    ImportV04Ask => "import_v04.ask",
+    /// `import-v04` の確認に足す、前の取り込みを消してやり直すこと。引数: `new`。
+    ImportV04AskRedo => "import_v04.ask_redo",
+    /// 照合を終えて止まった入れ替えを続けるかの確認。引数: `new`・`old`・`renamed`・`root`。
+    ImportV04AskContinue => "import_v04.ask_continue",
+    /// 確認で y 以外を答えた。
+    ImportV04Declined => "import_v04.declined",
+    /// 取り込みを始めた (書き始める前)。
+    ImportV04Started => "import_v04.started",
+    /// 取り込んで入れ替えた。引数: `root`・`renamed`・`copied`・`directives`・`excluded`。
+    ImportV04Done => "import_v04.done",
+    /// 止まった入れ替えを続けて終えた。引数: `root`・`renamed`。
+    ImportV04Continued => "import_v04.continued",
+    /// 取り込める根でない。引数: `reason`・`next`。
+    ImportV04Refused => "import_v04.refused",
+    /// 断った理由: データ根でない。引数: `path`。
+    ImportV04ReasonNotDataRoot => "import_v04.reason.not_data_root",
+    /// 断った理由: v0.4 で書き込みで開いていない。引数: `format`・`writer`。
+    ImportV04ReasonNotOpenedByV04 => "import_v04.reason.not_opened_by_v04",
+    /// 断った理由: もう新しい形式。引数: `format`。
+    ImportV04ReasonNewerFormat => "import_v04.reason.newer_format",
+    /// 断った理由: 忘れるの当て直しが残る。
+    ImportV04ReasonForgetPending => "import_v04.reason.forget_pending",
+    /// 断った理由: ジャーナルに取り込んでいない行・書きかけの末尾・書き直しの跡がある。引数: `lines`。
+    ImportV04ReasonJournalPending => "import_v04.reason.journal_pending",
+    /// 断った理由: 忘れるの鍵が使えない。
+    ImportV04ReasonForgetKey => "import_v04.reason.forget_key",
+    /// 断った理由: 前の v0.4 が正しく閉じていない。引数: `detail`。
+    ImportV04ReasonUnfinished => "import_v04.reason.unfinished",
+    /// 断った理由: 読めない。引数: `detail`。
+    ImportV04ReasonUnreadable => "import_v04.reason.unreadable",
+    /// 次にすること: 取り込み元のパスを確かめる。
+    ImportV04NextCheckPath => "import_v04.next.check_path",
+    /// 次にすること: v0.4 で一度起動して閉じる。
+    ImportV04NextOpenOnceWithV04 => "import_v04.next.open_once_with_v04",
+    /// 次にすること: v0.4 の doctor・repair で確かめる。
+    ImportV04NextRepairWithV04 => "import_v04.next.repair_with_v04",
+    /// 次にすること: 取り込みは要らない。
+    ImportV04NextNothing => "import_v04.next.nothing",
+    /// 照合が合わなかった (新しい根は消した)。引数: `detail`。
+    ImportV04Mismatch => "import_v04.mismatch",
+    /// 残った `.v05-import` を続けることも片付けることもできない。引数: `path`。
+    ImportV04Leftover => "import_v04.leftover",
+    /// 照合を終えた新しい根の古い根が無い。引数: `new`・`path`。
+    ImportV04OldRootMissing => "import_v04.old_root_missing",
+    /// 入れ替えの改名ができなかった。引数: `detail`。
+    ImportV04RenameFailed => "import_v04.rename_failed",
+    /// 入れ替えの改名の隙に、ほかのプロセスが根を開いた・書いた (改名は元に戻した)。引数: `detail`。
+    ImportV04RenameGap => "import_v04.rename_gap",
+    /// 作りかけの新しい根を消せなかった。引数: `path`・`detail`。
+    ImportV04NotRemoved => "import_v04.not_removed",
+    /// 起動の前に、止まった入れ替えを続けて終えた。引数: `root`・`renamed`。
+    ImportV04ResumedAtStartup => "import_v04.resumed_at_startup",
+    /// 起動の前に、作りかけの新しい根を消した。引数: `new`。
+    ImportV04RemovedUnfinishedAtStartup => "import_v04.removed_unfinished_at_startup",
+    /// 起動の前に、古い根が変わっていたので、取り込んだ新しい根を消して古い根を元の名前に戻した。引数: `root`。
+    ImportV04RemovedStaleAtStartup => "import_v04.removed_stale_at_startup",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
     /// 並べた語の区切り (`ja` は読点)。セッションの題名・点検の理由・書き出した記録の種類を並べる。
@@ -904,6 +962,8 @@ message_keys! {
     CliHelpUpdateApply => "cli.help.update_apply",
     CliHelpUpdateApplyVersion => "cli.help.update_apply_version",
     CliHelpUpdateRollback => "cli.help.update_rollback",
+    CliHelpImportV04 => "cli.help.import_v04",
+    CliHelpImportV04From => "cli.help.import_v04_from",
 }
 
 /// 漢字・仮名・全角の文字を含むか。`ja` 以外の文言カタログの検査 (`cargo xtask i18n`) と、英語の UI の試験で

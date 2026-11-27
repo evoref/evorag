@@ -474,6 +474,8 @@ update_check = "新しい版があるかを確かめる (何も書き換えな�
 update_apply = "新しい版を取得し、署名を確かめてから置き換える (今の版は evorag.prev に残す)"
 update_apply_version = "入れる版 (省くと、いちばん新しい版)"
 update_rollback = "evorag.prev に戻す (通信しない)"
+import_v04 = "v0.4 のデータ根を新しいデータ根へ取り込み、古い根を <名前>-v0.4-<日時> に改名して残す"
+import_v04_from = "取り込む v0.4 のデータ根 (省くと、今のデータ根)"
 
 [cli.update]
 up_to_date = "新しい版はありません (今の版 {current} が最新です)。"
@@ -705,6 +707,41 @@ purge_ask = "退避 {count} 個 (日次・週次・移行と作り直しの前�
 purge_declined = "消しませんでした。"
 purged = "退避 {count} 個を消しました。"
 purge_failed = "退避 {count} 個を消しましたが、消せなかったものがあります: {detail}"
+
+[import_v04]
+ask = "v0.4 のデータ根 {old} を、新しいデータ根へ取り込みます。古い根には書きません。照合が通ったら、古い根を {renamed} に改名して残し、新しい根を {root} に置きます (設定は変えません)。取り込みますか?"
+ask_redo = "前の取り込みの新しい根 {new} は使えないので、消してからやり直します。"
+ask_continue = "前の取り込みの新しい根 {new} は照合を終えています。止まっていた入れ替え (古い根 {old} を {renamed} に改名して残し、新しい根を {root} に置く) を続けますか?"
+declined = "取り込みませんでした。何も変えていません。"
+started = "取り込んでいます。古い根は読むだけです。"
+done = "取り込みました。新しいデータ根は {root} です。\n古い根は {renamed} に改名して残しました (v0.4 に戻すときは、--data-root でこのフォルダを指せば開けます)。\n写した記録 {copied} 件 (うち指示 {directives} 件)、除いた記録 {excluded} 件。"
+continued = "止まっていた入れ替えを終えました。新しいデータ根は {root}、古い根は {renamed} です。"
+refused = "取り込めません: {reason}\n{next}\n古い根には何も書いていません (ロックのファイルを除く)。"
+mismatch = "取り込んだ新しい根の照合が合わなかったので、新しい根を消しました: {detail}\n古い根はそのままです。もう一度 evorag import-v04 を実行してください。続けて合わないときは、v0.4 の evorag doctor で古い根を確かめてください。"
+leftover = "{path} が残っていますが、evorag の作ったものでないファイルがあるか、取り込み元の根と組にならないので、触れずに止めました。中身を確かめて別の場所へ移してから、もう一度実行してください。"
+old_root_missing = "照合を終えた新しい根 {new} の取り込み元 {path} が見つからないので、入れ替えを続けられません。古い根を {path} に戻してから、もう一度実行してください。"
+rename_failed = "入れ替えの改名ができませんでした: {detail}\n古い根は消していません。もう一度 evorag import-v04 を実行すると、続きから行います。"
+rename_gap = "入れ替えの改名の間に、ほかのプロセスがデータ根を開いたか書いたので、改名を元に戻しました ({detail})。\nほかの evorag を終えてから、もう一度 evorag import-v04 を実行してください。"
+not_removed = "作りかけの新しい根 {path} を消せませんでした: {detail}\n古い根はそのままです。ほかのプログラムがファイルを開いていないかを確かめてから、もう一度実行してください。"
+resumed_at_startup = "止まっていた import-v04 の入れ替えを終えました。新しいデータ根は {root}、古い根は {renamed} です。"
+removed_unfinished_at_startup = "止まっていた import-v04 の作りかけの新しい根 {new} を消しました。古い根はそのままです。取り込むときは evorag import-v04 を実行してください。"
+removed_stale_at_startup = "import-v04 の後に古い根が使われていたので、取り込んだ新しい根を消し、古い根を {root} に戻しました。取り込み直すときは evorag import-v04 を実行してください。"
+
+[import_v04.reason]
+not_data_root = "{path} は evorag のデータ根ではありません"
+not_opened_by_v04 = "v0.4 の evorag で開いた根ではありません (形式の版 {format}、最後に書いた版 {writer})"
+newer_format = "このデータ根は、もう新しい形式 ({format}) です"
+forget_pending = "忘れるの当て直しが済んでいません"
+journal_pending = "ジャーナルに、まだ DB に入っていない行か、書きかけの跡があります (行 {lines} 件)"
+forget_key = "忘れるの鍵 (memory.forget_key) が使えません"
+unfinished = "前回の v0.4 が正しく終わっていません ({detail})"
+unreadable = "データ根を読めません ({detail})"
+
+[import_v04.next]
+check_path = "取り込むデータ根のパスを確かめてください (--from で指定できます)。"
+open_once_with_v04 = "v0.4 の evorag で一度起動して終了してから、もう一度 evorag import-v04 を実行してください。"
+repair_with_v04 = "v0.4 の evorag doctor (と evorag repair) で確かめてから、もう一度 evorag import-v04 を実行してください。"
+nothing = "取り込みは要りません。"
 
 [notice]
 low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退避などの裏の処理を止めました。会話は続けられます。空きを作ってから起動し直してください。"

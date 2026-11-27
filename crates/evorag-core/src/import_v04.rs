@@ -5,8 +5,12 @@
 //! 直して照合し、照合の結果 (`import.report`) を書く。照合が合わなければ新しい根を消す (古い根はそのまま)。新しい根の
 //! ロックは、作ってから照合の後まで持ち続け、古い根のロックとともに呼び手に渡す (入れ替えの直前まで持つ、03 §9)。
 //!
-//! 何を写すか・どう変えるかはメモリの層 (`evorag_memory` の `import_v04`)、古い根を読むことと照合の道具は保存の層
-//! (`evorag_store::import_v04`) が持つ (02 §4.4)。入れ替えと、途中で止まった取り込みの片付けは、この後の段で足す。
+//! [`import_and_swap`] は、[`run`] の後に入れ替え (2 つの改名、03 §12.4 の「入れ替え」) まで行い、前の取り込みが
+//! 途中で止まっていれば、続けるか片付けてからやり直す。[`resume_on_startup`] は、通常の起動の前に、止まった入れ替えを
+//! 続け、作りかけを片付ける (`swap` のモジュール)。
+//!
+//! 何を写すか・どう変えるかはメモリの層 (`evorag_memory` の `import_v04`)、古い根を読むことと照合の道具と改名の道具は
+//! 保存の層 (`evorag_store::import_v04`・`evorag_store::root_rename`) が持つ (02 §4.4)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,11 +28,16 @@ use evorag_store::import_v04::{
 };
 use evorag_store::location::Verdict;
 use evorag_store::lock::{DataRootLock, LockError};
+use evorag_store::root_rename::RenameRootError;
 use evorag_store::{
     Durability, Envelope, OpenError, OpenOptions, Read, Store, StoreError, WriteError, WriteOp,
     WriteRequest, Writer, WriterHandle, fsutil, meta,
 };
 use evorag_types::{Clock, Id, IdGen, UuidV7Gen};
+
+mod swap;
+
+pub use swap::{Finished, Resumed, import_and_swap, resume_on_startup};
 
 /// 1 つの `Immediate` のコミットにまとめる記録の数 (03 §12.4 の「`Immediate` のコミットを区切りごとにまとめる」)。
 /// 大きくすると 1 つのトランザクションが重くなり、小さくするとコミット (約 1〜2 ms、03 §3.4) の数が増える。
@@ -75,9 +84,28 @@ pub enum ImportError {
     /// 危ない置き場所 (終了コード 2)。
     #[error("unsafe location: {0}")]
     UnsafeLocation(String),
-    /// 前の取り込みの新しい根のフォルダが残っている (片付けは入れ替えの段が行う)。
+    /// 前の取り込みの新しい根のフォルダが残っていて、続けることも片付けることもできない (evorag の作ったものでない
+    /// ファイルがある・古い根と組にならない。触れずに残す。終了コード 1)。[`run`] は、残っていれば常にこれで断る。
     #[error("{} already exists", .0.display())]
     Leftover(PathBuf),
+    /// 確認で y 以外を答えた。何も変えていない (終了コード 1)。
+    #[error("the import was not confirmed")]
+    Declined,
+    /// 照合を終えた新しい根の `import.source` にある古い根 (`path`) も、元の名前の根も無い (入れ替えを続けられない。
+    /// 終了コード 1)。
+    #[error("the old data root {} is missing", .0.display())]
+    OldRootMissing(PathBuf),
+    /// 入れ替えの改名ができなかった (03 §10.2 の「改名の隙」)。改名の隙にほかのプロセスが開いた・書いたときは
+    /// 終了コード 2、ほかは 1。次の `import-v04` か次の起動が続きを行う。
+    #[error(transparent)]
+    Rename(#[from] RenameRootError),
+    /// 作りかけの新しい根 `left` を消せなかった (終了コード 1)。
+    #[error("{} could not be removed: {error}", left.display())]
+    CannotRemove {
+        left: PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
     /// 照合が合わなかった。新しい根は消した (古い根はそのまま。終了コード 1)。
     #[error("the imported data root did not verify: {}", .0.join("; "))]
     Mismatch(Vec<String>),
@@ -103,6 +131,21 @@ pub enum ImportError {
         #[source]
         error: std::io::Error,
     },
+}
+
+impl ImportError {
+    /// `evorag import-v04` の終了コード (03 §12.4 の「終了コード」、07 §5): 1 は取り込める根でない・照合が合わない・
+    /// 確認で y 以外を答えた・ほかの失敗、2 はロックが取れない・危ない置き場所。
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Locked(_) | Self::UnsafeLocation(_) => 2,
+            Self::Open(OpenError::DatabaseInUse) => 2,
+            Self::Rename(e) if e.is_lock() => 2,
+            Self::NotRemoved { cause, .. } => cause.exit_code(),
+            _ => 1,
+        }
+    }
 }
 
 impl From<OldRootError> for ImportError {
@@ -219,30 +262,91 @@ pub struct Imported {
 /// 何も書かない。書き始めた後に失敗したとき (照合が合わないときを含む) は、新しい根のフォルダを消してから返す
 /// (消せなければ [`ImportError::NotRemoved`])。古い根は変えない。
 pub fn run(opts: &ImportOptions) -> Result<Imported, ImportError> {
+    run_inner(
+        opts,
+        &mut |_: &Plan<'_>| true,
+        None,
+        opts.clock.now().as_millis(),
+    )
+}
+
+/// 利用者に確かめること ([`import_and_swap`] の確認の問い、07 §5)。
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum Plan<'a> {
+    /// 古い根 (今は `old_root` にある) を `new_root` に取り込み、照合が通ったら、古い根を `renamed_old_root` に、
+    /// 新しい根を `root` (古い根の元の名前) に改名する。`redo` は、前の取り込みの作りかけ (か、取り込みの後に古い根を
+    /// v0.4 で使った取り込み) の `new_root` を消してからやり直すこと。
+    Import {
+        old_root: &'a Path,
+        root: &'a Path,
+        renamed_old_root: &'a Path,
+        new_root: &'a Path,
+        redo: bool,
+    },
+    /// 照合を終えて止まった入れ替えを続ける (`old_root` は今の古い根の場所、`root` は新しい根を置く元の名前)。
+    Continue {
+        old_root: &'a Path,
+        root: &'a Path,
+        renamed_old_root: &'a Path,
+        new_root: &'a Path,
+    },
+}
+
+/// 確認の問い ([`Plan`] を示して、続けてよいか)。
+pub type Confirm<'c> = dyn FnMut(&Plan<'_>) -> bool + 'c;
+
+/// 危ない置き場所の検査 (03 §2.2・§12.4 の (5))。警告だけにしたものを返す。
+fn check_locations(opts: &ImportOptions, places: [&Path; 2]) -> Result<Vec<String>, ImportError> {
+    let mut warnings = Vec::new();
+    for place in places {
+        match (opts.location)(place) {
+            Verdict::Ok => {}
+            Verdict::Warn(w) => warnings.push(w),
+            Verdict::Unsafe(u) if opts.allow_unsafe_location => warnings.push(u),
+            Verdict::Unsafe(u) => return Err(ImportError::UnsafeLocation(u)),
+        }
+    }
+    Ok(warnings)
+}
+
+/// [`run`] の本体。`confirm` を、取り込める根と確かめた後・書き始める前に呼ぶ。`leftover` は、前の取り込みの
+/// 新しい根のフォルダのロック (確かめた後に消してから作り直す。`None` なら、残っていれば断る)。`started` は取り込みを
+/// 始めた時刻 (UTC、ミリ秒。改名の後の古い根の名前と `import.source` の `imported_at`)。
+fn run_inner(
+    opts: &ImportOptions,
+    confirm: &mut Confirm<'_>,
+    leftover: Option<DataRootLock>,
+    started: i64,
+) -> Result<Imported, ImportError> {
     let old_path = std::path::absolute(&opts.old_root)?;
     let not_root = || Refusal::NotDataRoot {
         path: old_path.clone(),
     };
     let new_root = import_dir(&old_path).ok_or_else(not_root)?;
-    let started = opts.clock.now().as_millis();
     let renamed = renamed_old_root(&old_path, started).ok_or_else(not_root)?;
 
     // 危ない置き場所の検査は、古い根と新しい根の両方に、古い根に触れる前に当てる (03 §12.4 の (5))。
-    let mut location_warnings = Vec::new();
-    for place in [&old_path, &new_root] {
-        match (opts.location)(place) {
-            Verdict::Ok => {}
-            Verdict::Warn(w) => location_warnings.push(w),
-            Verdict::Unsafe(u) if opts.allow_unsafe_location => location_warnings.push(u),
-            Verdict::Unsafe(u) => return Err(ImportError::UnsafeLocation(u)),
-        }
-    }
+    let location_warnings = check_locations(opts, [&old_path, &new_root])?;
 
     let mut old = OldRoot::open(&old_path)?;
-    if new_root.exists() {
+    if leftover.is_none() && std::fs::symlink_metadata(&new_root).is_ok() {
         return Err(ImportError::Leftover(new_root));
     }
     let source = Source::read(&old)?;
+    let plan = Plan::Import {
+        old_root: &old_path,
+        root: &old_path,
+        renamed_old_root: &renamed,
+        new_root: &new_root,
+        redo: leftover.is_some(),
+    };
+    if !confirm(&plan) {
+        return Err(ImportError::Declined);
+    }
+    if let Some(lock) = leftover {
+        swap::remove_locked(lock, &new_root)?;
+    }
 
     let mut created = NewRoot::create(&new_root, opts)?;
     let outcome = (|| -> Result<ImportReport, ImportError> {
