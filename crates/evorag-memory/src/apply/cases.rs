@@ -22,12 +22,15 @@ use evorag_store::forget::Redaction;
 use evorag_types::Id;
 use toml::Value;
 
-use super::{DirectiveSet, Located, Probe, ProbeAspect, RevText, ScrubContext, ValueKeys};
+use super::{
+    DirectiveSet, Located, Probe, ProbeAspect, ResolvedEntity, ScrubContext, SubstringKeys,
+    TurnTexts, ValueKeys,
+};
 use crate::directive::{DirectiveBody, DirectiveOp, DirectiveRedaction, PrivateScope, TurnSpan};
-use crate::kinds::SrcRev;
 use crate::ledger::{
     ByteRange, CALL_SEGMENT, CorrInput, LedgerBody, LedgerCorrectionOut, LedgerLayer, LedgerMood,
-    LedgerOutput, LedgerTense, LedgerUnitOut, LedgerVerdict, SentenceSpan,
+    LedgerOutput, LedgerRef, LedgerTense, LedgerUnitOut, LedgerVerdict, SentenceSpan,
+    UnknownFields,
 };
 use crate::value_key::{ForgetKey, aspect_key, normalize_v1};
 
@@ -83,6 +86,16 @@ fn dictionary() -> BTreeSet<String> {
         .iter()
         .filter_map(|a| a["name"].as_str().map(str::to_owned))
         .collect()
+}
+
+/// 走らせる側の今の規則 (主語を明示する語を `self` に、ほかは正規化 v1 に)。
+fn resolve(raw: &str) -> String {
+    let n = normalize_v1(raw);
+    if SELF_WORDS.contains(&n.as_str()) {
+        "self".to_owned()
+    } else {
+        n
+    }
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -194,7 +207,7 @@ impl Run {
     }
 
     fn set(&self) -> DirectiveSet {
-        DirectiveSet::new(self.directives.iter().cloned(), self.marker)
+        DirectiveSet::new(self.directives.iter().cloned(), self.marker, resolve)
     }
 
     fn turn(&mut self, t: &Value) {
@@ -228,22 +241,15 @@ impl Run {
         self.order.push(name);
     }
 
-    fn texts(&self) -> Vec<RevText<'_>> {
-        self.turns
-            .values()
-            .flat_map(|t| {
-                std::iter::once(RevText {
-                    turn: t.id,
-                    rev: t.rev,
-                    text: &t.text,
-                })
-                .chain(t.before.iter().map(|(rev, text)| RevText {
-                    turn: t.id,
-                    rev: *rev,
-                    text,
-                }))
-            })
-            .collect()
+    fn texts(&self) -> TurnTexts<'_> {
+        let mut out = TurnTexts::new();
+        for t in self.turns.values() {
+            out.insert(t.id, t.rev, &t.text);
+            for (rev, text) in &t.before {
+                out.insert(t.id, *rev, text);
+            }
+        }
+        out
     }
 
     fn first_turn(&self, seg: &str) -> Id {
@@ -292,13 +298,13 @@ impl Run {
             let t = &self.turns[p];
             for r in split_sentences(&t.text) {
                 n += 1;
-                body.sentences.push(SentenceSpan {
-                    s: n,
-                    turn: t.id,
-                    rev: t.rev,
-                    start: to_u32(r.start),
-                    end: to_u32(r.end),
-                });
+                body.sentences.push(SentenceSpan::new(
+                    n,
+                    t.id,
+                    t.rev,
+                    to_u32(r.start),
+                    to_u32(r.end),
+                ));
             }
             if let Some((new, old)) = correction_candidate(&t.text) {
                 corr_id += 1;
@@ -315,14 +321,12 @@ impl Run {
                         start: to_u32(old.start),
                         end: to_u32(old.end),
                     }),
+                    extra: UnknownFields::new(),
                 });
             }
             for a in self.turns.values() {
                 if !a.user && a.reply_to.as_deref() == Some(p.as_str()) {
-                    body.inputs.refs.push(SrcRev {
-                        turn: a.id,
-                        rev: a.rev,
-                    });
+                    body.inputs.refs.push(LedgerRef::new(a.id, a.rev));
                 }
             }
         }
@@ -391,19 +395,14 @@ impl Run {
     }
 
     /// 台帳の単位の候補の鍵 (属性の決め方と主語の明示の語の近似)。
-    fn probes(&self) -> Vec<(Id, String, Result<String, String>, ValueKeys)> {
+    fn probes(&self) -> Vec<(Id, ResolvedEntity, Result<String, String>, ValueKeys)> {
         let mut out = Vec::new();
         for l in &self.ledgers {
             for u in l.body.output.units().items {
                 let Some(sent) = l.body.sentences.iter().find(|x| x.s == u.sentence) else {
                     continue;
                 };
-                let e = normalize_v1(&u.entity);
-                let entity = if SELF_WORDS.contains(&e.as_str()) {
-                    "self".to_owned()
-                } else {
-                    e
-                };
+                let entity = ResolvedEntity::new(&u.entity, resolve);
                 let a = normalize_v1(&u.aspect);
                 let aspect = if self.dict.contains(&a) {
                     Ok(a)
@@ -427,7 +426,7 @@ impl Run {
         let mut body = self.directive(DirectiveOp::Forget, t);
         body.redact = redact;
         // 忘れる単位の根拠のターン: 当て方の述語で新しい忘れるに当たる候補のターン。
-        let probe_set = DirectiveSet::new([(id, body.clone())], self.marker);
+        let probe_set = DirectiveSet::new([(id, body.clone())], self.marker, resolve);
         let mut evidence: BTreeSet<Id> = BTreeSet::new();
         for (turn, entity, aspect, keys) in self.probes() {
             let pa = match &aspect {
@@ -438,7 +437,7 @@ impl Run {
                 Err(mac) => ProbeAspect::Free { mac },
             };
             if probe_set
-                .forgotten_by(&Probe::new(&entity, pa, keys, turn))
+                .forgotten_by(&Probe::new(entity, pa, keys, turn))
                 .is_some()
             {
                 evidence.insert(turn);
@@ -581,7 +580,7 @@ impl Run {
                     .keys()
                     .items
                     .into_iter()
-                    .filter(|k| !set.screens_key(&K, k))
+                    .filter(|k| !set.screens_key(&SubstringKeys::of(&K, k), &BTreeSet::new()))
                     .collect();
                 assert_eq!(got, strings(Some(want)), "{label}: seg_keys {seg}");
                 self.checks += 1;

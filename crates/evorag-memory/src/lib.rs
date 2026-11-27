@@ -5,7 +5,7 @@
 //! 書き込みは、書き手 (`evorag_store::Writer`) に送る操作の列 (`WriteOp`) として組み立てる。
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
-mod apply;
+pub mod apply;
 mod chars;
 mod correction;
 mod derived;
@@ -35,9 +35,8 @@ mod view;
 mod write;
 
 pub use apply::{
-    AdoptHit, AdoptOp, Adoption, DirectiveSet, End, Forget, Located, Phase, Private, PrivateHit,
-    Probe, ProbeAspect, RevText, ScrubContext, Scrubbed, Slot, Timed, TurnRedactions, UnitProbe,
-    ValueKeys, hidden_in_evidence, locate_forgotten, scrub_ledger,
+    DirectiveSet, Probe, ProbeAspect, ResolvedEntity, ScrubContext, ScrubError, Scrubbed,
+    SubstringKeys, TurnTexts, UnitProbe, ValueKeys, scan_raw_ledger, scrub_ledger,
 };
 pub use correction::{
     CandidateSkip, CorrectionBody, CorrectionCandidate, DIR_MAX_CHARS, LoadedCorrections,
@@ -104,9 +103,9 @@ pub use ledger::{
     ByteRange, CALL_SEGMENT, CorrInput, KIND_PROPOSAL, LEDGER_SCHEMA, LOOKUP_LEDGER_SEGMENT,
     LOOKUP_LEDGER_SELECTION, LedgerBody, LedgerCorrection, LedgerCorrectionOut, LedgerError,
     LedgerHead, LedgerInputs, LedgerLayer, LedgerMood, LedgerOutput, LedgerOutputError, LedgerRead,
-    LedgerStatus, LedgerTense, LedgerTokens, LedgerUnit, LedgerUnitOut, LedgerVerdict,
+    LedgerRef, LedgerStatus, LedgerTense, LedgerTokens, LedgerUnit, LedgerUnitOut, LedgerVerdict,
     REL_LEDGER_SEGMENT, REL_LEDGER_TURN, Section, SegmentUpdate, SentenceSpan, Through,
-    read_ledger, selection_key,
+    UnknownFields, read_ledger, selection_key,
 };
 pub use lexical::{Signals, evidence_language, signals};
 pub use mask::{

@@ -218,15 +218,11 @@ pub fn locate_forgotten(
     key: &ForgetKey,
     keys: &BTreeSet<ValueKey>,
     text: &str,
-    within: Option<Range<usize>>,
+    within: Option<&Range<usize>>,
     values: &[&str],
 ) -> Located {
     let hay = Haystack::new(text);
-    let inside = |r: &Range<usize>| {
-        within
-            .as_ref()
-            .is_none_or(|w| w.start <= r.start && r.end <= w.end)
-    };
+    let inside = |r: &Range<usize>| within.is_none_or(|w| w.start <= r.start && r.end <= w.end);
     let checked = |r: &Range<usize>| {
         text.get(r.clone())
             .is_some_and(|s| keys.contains(&value_key(key, s)) || keys.contains(&loose_key(key, s)))
@@ -269,7 +265,7 @@ pub fn hidden_in_evidence(
     sentence: Range<usize>,
     values: &[&str],
 ) -> Located {
-    match locate_forgotten(key, keys, text, Some(sentence.clone()), values) {
+    match locate_forgotten(key, keys, text, Some(&sentence), values) {
         Located::Ranges(r) if !r.is_empty() => Located::Ranges(r),
         Located::Mismatch => Located::Mismatch,
         Located::Ranges(_) | Located::Unplaceable => {
@@ -344,7 +340,7 @@ mod tests {
         // 範囲を根拠の文に限る。
         let first = 0..text.find('、').expect("comma");
         assert_eq!(
-            locate_forgotten(&K, &k, text, Some(first), &["7月22日"]),
+            locate_forgotten(&K, &k, text, Some(&first), &["7月22日"]),
             Located::Ranges(vec![span(text, "7月22日")])
         );
         // 鍵の合わない値は食い違い。

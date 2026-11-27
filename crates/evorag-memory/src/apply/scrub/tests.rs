@@ -4,10 +4,11 @@ use super::*;
 use crate::apply::ValueKeys;
 use crate::directive::{DirectiveBody, DirectiveOp, DirectiveRedaction};
 use crate::ledger::{
-    CorrInput, LedgerCorrectionOut, LedgerLayer, LedgerMood, LedgerTense, LedgerUnitOut,
-    LedgerVerdict,
+    CALL_SEGMENT, CorrInput, LedgerCorrectionOut, LedgerLayer, LedgerMood, LedgerRef, LedgerTense,
+    LedgerUnitOut, LedgerVerdict,
 };
-use evorag_store::forget::{ForgetOutcome, Redaction, apply_forget};
+use crate::value_key::{normalize_loose, normalize_v1};
+use serde::Serialize;
 
 const K: ForgetKey = ForgetKey::from_bytes_const([9; 32]);
 const M: &str = "[伏せ字]";
@@ -35,19 +36,19 @@ fn unit(s: u32, entity: &str, aspect: &str, value: &str, old: &str, when: &str) 
 /// 1 つのターン `turn` の本文 `text` を、文ごとに (`。` で) 切って `sentences` にした台帳。
 fn ledger(turn: Id, text: &str, keys: &[&str], units: &[LedgerUnitOut]) -> LedgerBody {
     let mut b = LedgerBody {
-        call: crate::ledger::CALL_SEGMENT.to_owned(),
+        call: CALL_SEGMENT.to_owned(),
         status: "complete".to_owned(),
         ..LedgerBody::default()
     };
     let mut start = 0;
     for (i, part) in text.split_inclusive('。').enumerate() {
-        b.sentences.push(SentenceSpan {
-            s: u32::try_from(i + 1).expect("fits"),
+        b.sentences.push(SentenceSpan::new(
+            u32::try_from(i + 1).expect("fits"),
             turn,
-            rev: 0,
-            start: to_u32(start),
-            end: to_u32(start + part.len()),
-        });
+            0,
+            to_u32(start),
+            to_u32(start + part.len()),
+        ));
         start += part.len();
     }
     b.inputs.input_hash = Some("ab".repeat(32));
@@ -97,14 +98,20 @@ fn redact(
 }
 
 fn set(ds: Vec<(u64, DirectiveBody)>) -> DirectiveSet {
-    DirectiveSet::new(ds.into_iter().map(|(n, b)| (id(n), b)), M)
+    DirectiveSet::new(ds.into_iter().map(|(n, b)| (id(n), b)), M, normalize_v1)
+}
+
+fn texts<'a>(list: &[(Id, u32, &'a str)]) -> TurnTexts<'a> {
+    list.iter()
+        .map(|&(turn, rev, text)| RevText { turn, rev, text })
+        .collect()
 }
 
 fn scrub(
     l: &mut LedgerBody,
     set: &DirectiveSet,
     first: Option<Id>,
-    texts: &[RevText<'_>],
+    texts: &TurnTexts<'_>,
 ) -> Scrubbed {
     scrub_ledger(
         l,
@@ -148,76 +155,87 @@ fn substrings_of_any_field_remove_a_candidate() {
             unit(1, "妻", "hometown", "白樺台", "霧ヶ丘", ""),
         ],
     );
-    // 別のターンの忘れる (このターンは対象のターンではない)。
     let s = set(vec![(10, forget("霧ヶ丘", &[id(99)]))]);
-    let texts = [RevText {
-        turn: t,
-        rev: 0,
-        text,
-    }];
-    let r = scrub(&mut l, &s, Some(t), &texts);
+    let r = scrub(&mut l, &s, Some(t), &texts(&[(t, 0, text)]));
     assert_eq!(values(&l), ["pet=柴犬"]);
     assert!(keys(&l).is_empty(), "1〜3 で除いた台帳の keys はすべて除く");
     assert_eq!((r.units, r.keys, r.removed()), (4, 2, 6));
     assert_eq!(l.scrubbed, 6);
     assert_eq!(l.inputs.input_hash, None);
+    let mut removed: Vec<ValueKey> = ["暮らし", "ペットとの散歩"]
+        .map(|k| value_key(&K, k))
+        .into();
+    removed.sort();
+    assert_eq!(r.removed_keys, removed, "除いた鍵の値の鍵を返す");
 }
 
-/// verifies: 04 §7.2 (台帳の掃除の 1: v か old の一致が伏せ字に掛かる候補を除き、根拠の文に掛かるだけの候補は残す。位置を写し直す)
+/// verifies: 04 §7.2 (掃除の 1: 伏せ字の後の本文に写した根拠の文に v か old が無い候補を除き、ほかの値は残す。伏せ字の前の本文があってもなくても同じ結果)
 #[test]
-fn redaction_overlap_removes_only_the_values_it_covers() {
+fn rule_1_does_not_depend_on_which_text_is_at_hand() {
     let t = id(1);
-    let text = "鳴瀬台に住んで、柴犬を飼う。";
+    let text = "鳴瀬台に住んで、瀬台公園と柴犬の話をする。";
     let l = ledger(
         t,
         text,
         &[],
         &[
-            // 値が伏せ字の一部に掛かる (鍵では当たらない) 写し。
             unit(1, "self", "residence", "瀬台", "", ""),
+            unit(1, "self", "residence", "鳴瀬", "", ""),
             unit(1, "self", "pet", "柴犬", "", ""),
         ],
     );
     let (f, after) = redact(forget("鳴瀬台", &[t]), t, text, 0, "鳴瀬台");
     let s = set(vec![(10, f)]);
-    // 伏せ字の前の本文がある (伏せ字と同じトランザクション)。
-    let pre = [
-        RevText {
-            turn: t,
-            rev: 0,
-            text,
-        },
-        RevText {
-            turn: t,
-            rev: 1,
-            text: &after,
-        },
-    ];
-    let mut a = l.clone();
-    scrub(&mut a, &s, Some(t), &pre);
-    assert_eq!(values(&a), ["pet=柴犬"]);
-    let sent = a.sentences[0];
-    assert_eq!(sent.rev, 1);
-    assert_eq!(
-        &after[to_usize(sent.start)..to_usize(sent.end)],
-        after.as_str()
-    );
-    // 伏せ字の後の本文しか無い (当て直し) ときも同じ結果。
-    let post = [RevText {
-        turn: t,
-        rev: 1,
-        text: &after,
-    }];
-    let mut b = l.clone();
-    scrub(&mut b, &s, Some(t), &post);
-    assert_eq!(b, a);
-    // 本文がまったく無いときは、伏せ字に掛かる根拠の文の候補を除く (安全の側)。
-    let mut c = l;
-    scrub(&mut c, &s, Some(t), &[]);
-    assert!(values(&c).is_empty());
+    let run = |tx: &TurnTexts<'_>| {
+        let mut x = l.clone();
+        scrub(&mut x, &s, Some(t), tx);
+        x
+    };
+    // 伏せ字と同じトランザクション (前の本文だけ)、前と後の本文、当て直し (後の本文だけ)。
+    let pre = run(&texts(&[(t, 0, text)]));
+    let both = run(&texts(&[(t, 0, text), (t, 1, &after)]));
+    let post = run(&texts(&[(t, 1, &after)]));
+    assert_eq!(pre, both);
+    assert_eq!(pre, post);
+    // 「瀬台」は後の本文 (瀬台公園) にも残るので残り、「鳴瀬」は残らないので除く。
+    assert_eq!(values(&pre), ["residence=瀬台", "pet=柴犬"]);
+    assert_eq!(pre.sentences[0].rev, 1);
+    // 本文を作れないとき (渡したが読めない) は、伏せ字に掛かる根拠の文の候補を除く。
+    let mut none = TurnTexts::new();
+    none.unreadable(t);
+    assert!(values(&run(&none)).is_empty());
 }
 
-/// verifies: 04 §7.2 (台帳の掃除の 3: 候補の発話が対象のターンにあるか、old・new の範囲の文字列が vks に当たる訂正を、判定と表の同じ id の組で除く)
+/// verifies: 04 §7.2 (本文の渡し忘れは誤りにし、台帳を変えない)
+#[test]
+fn a_turn_not_given_is_an_error_and_leaves_the_ledger() {
+    let t = id(1);
+    let text = "港町に住んでいます。";
+    let mut l = ledger(
+        t,
+        text,
+        &["港町の暮らし"],
+        &[unit(1, "self", "pet", "柴犬", "", "")],
+    );
+    let (f, _) = redact(forget("港町", &[t]), t, text, 0, "港町");
+    let before = l.clone();
+    let err = scrub_ledger(
+        &mut l,
+        &ScrubContext {
+            key: &K,
+            directives: &set(vec![(10, f)]),
+            first_turn: Some(t),
+            texts: &TurnTexts::new(),
+        },
+    );
+    assert!(
+        matches!(err, Err(ScrubError::TurnNotGiven(x)) if x == t),
+        "{err:?}"
+    );
+    assert_eq!(l, before);
+}
+
+/// verifies: 04 §7.2 (台帳の掃除の 3: 候補の発話が対象のターンにあるか、old・new の範囲の文字列が vks に当たる訂正を、判定と表の同じ id の組で除く。corr だけを除いても input_hash を null にする)
 #[test]
 fn corrections_are_removed_by_turn_or_by_range_strings() {
     let (a1, a2, a3) = (id(1), id(2), id(3));
@@ -226,13 +244,8 @@ fn corrections_are_removed_by_turn_or_by_range_strings() {
     let t3 = "前は港町じゃなくて山町です。";
     let mut l = ledger(a1, t1, &[], &[]);
     for (s, turn, t) in [(2, a2, t2), (3, a3, t3)] {
-        l.sentences.push(SentenceSpan {
-            s,
-            turn,
-            rev: 0,
-            start: 0,
-            end: to_u32(t.len()),
-        });
+        l.sentences
+            .push(SentenceSpan::new(s, turn, 0, 0, to_u32(t.len())));
     }
     let range = |t: &str, n: &str| {
         let s = t.find(n).expect("in text");
@@ -248,13 +261,14 @@ fn corrections_are_removed_by_turn_or_by_range_strings() {
         pattern: "p".into(),
         new: range(t, new),
         old: Some(range(t, old)),
+        extra: UnknownFields::new(),
     };
     l.inputs.corr = vec![
         corr(1, a1, t1, "霧ヶ浦", "白浜"),
         corr(2, a2, t2, "そば", "うどん"),
         corr(3, a3, t3, "山町", "港町"),
     ];
-    let verdicts: Vec<LedgerCorrectionOut> = (1..=3)
+    let verdicts: Vec<LedgerCorrectionOut> = (1..=2)
         .map(|id| LedgerCorrectionOut {
             id,
             verdict: LedgerVerdict::Accept,
@@ -263,37 +277,27 @@ fn corrections_are_removed_by_turn_or_by_range_strings() {
     l.output
         .set_section(LedgerOutput::CORRECTIONS, &verdicts)
         .expect("corrections");
-    // 「霧ヶ浦」の根拠は a1 (対象のターン)。「港町」は a3 の old の範囲の文字列で当たる別の忘れる。
     let mut other = forget("港町", &[id(98)]);
     other.aspect = Some("hometown".into());
     let s = set(vec![(10, forget("霧ヶ浦", &[a1])), (11, other)]);
-    let texts = [
-        RevText {
-            turn: a1,
-            rev: 0,
-            text: t1,
-        },
-        RevText {
-            turn: a2,
-            rev: 0,
-            text: t2,
-        },
-        RevText {
-            turn: a3,
-            rev: 0,
-            text: t3,
-        },
-    ];
-    let r = scrub(&mut l, &s, Some(a1), &texts);
+    let tx = texts(&[(a1, 0, t1), (a2, 0, t2), (a3, 0, t3)]);
+    let r = scrub(&mut l, &s, Some(a1), &tx);
     let ids: Vec<u32> = l.output.corrections().items.iter().map(|c| c.id).collect();
-    let corr: Vec<u32> = l.inputs.corr.iter().map(|c| c.id).collect();
+    let corr_ids: Vec<u32> = l.inputs.corr.iter().map(|c| c.id).collect();
     assert_eq!(ids, [2]);
-    assert_eq!(corr, [2]);
+    assert_eq!(corr_ids, [2]);
     assert_eq!(
         (r.corrections, r.corr, r.removed()),
-        (2, 2, 2),
+        (1, 2, 1),
         "corr は scrubbed に数えない"
     );
+    // corr だけを除いた台帳 (判定の無い候補 3) も input_hash を null にする。
+    let mut only = ledger(a3, t3, &[], &[]);
+    only.inputs.corr = vec![corr(3, a3, t3, "山町", "港町")];
+    let s = set(vec![(11, forget("港町", &[id(98)]))]);
+    let r = scrub(&mut only, &s, None, &texts(&[(a3, 0, t3)]));
+    assert_eq!((r.corr, r.removed()), (1, 0));
+    assert_eq!(only.inputs.input_hash, None);
 }
 
 /// verifies: 04 §7.2 (unblock で印を解いた指示は、根拠のターンの ID が unblock より前の要素にだけ当て続ける。keys は区切りの最初のターンで比べる)
@@ -311,8 +315,7 @@ fn unblocked_forgets_apply_only_to_earlier_evidence() {
             &[unit(1, "愛犬", "name", "ハッカ", "", "")],
         );
         let before = l.clone();
-        let texts = [RevText { turn, rev: 0, text }];
-        let r = scrub(&mut l, &s, Some(turn), &texts);
+        let r = scrub(&mut l, &s, Some(turn), &texts(&[(turn, 0, text)]));
         if kept {
             assert_eq!(l, before, "unblock の後の発話の台帳は変えない");
             assert!(!r.changed());
@@ -329,28 +332,20 @@ fn unblocked_forgets_apply_only_to_earlier_evidence() {
 fn keys_are_removed_by_substrings_or_entirely_for_target_turns() {
     let t = id(1);
     let text = "週末は朝市に行く予定です。";
-    let texts = [RevText {
-        turn: t,
-        rev: 0,
-        text,
-    }];
+    let tx = texts(&[(t, 0, text)]);
     let mut l = ledger(t, text, &["霧ヶ丘の朝市", "週末の過ごし方"], &[]);
     let s = set(vec![(10, forget("霧ヶ丘", &[id(99)]))]);
-    let r = scrub(&mut l, &s, Some(t), &texts);
+    let r = scrub(&mut l, &s, Some(t), &tx);
     assert_eq!(keys(&l), ["週末の過ごし方"]);
     assert_eq!((r.keys, l.scrubbed), (1, 1));
-    // 対象のターンを含む台帳は、鍵が当たらなくてもすべて除き、input_hash を null にする。
     let mut l = ledger(t, text, &["週末の過ごし方"], &[]);
     let s = set(vec![(10, forget("霧ヶ丘", &[t]))]);
-    scrub(&mut l, &s, Some(t), &texts);
+    scrub(&mut l, &s, Some(t), &tx);
     assert!(keys(&l).is_empty());
     assert_eq!(l.inputs.input_hash, None);
-    // 要素の無い台帳でも、対象のターンを含めば input_hash を null にする。
     let mut l = ledger(t, text, &[], &[]);
-    let r = scrub(&mut l, &s, Some(t), &texts);
+    let r = scrub(&mut l, &s, Some(t), &tx);
     assert!(r.hash_cleared);
-    assert_eq!(l.inputs.input_hash, None);
-    // 当たるものが無い台帳は、バイト列まで変えない。
     let mut l = ledger(
         t,
         text,
@@ -359,16 +354,15 @@ fn keys_are_removed_by_substrings_or_entirely_for_target_turns() {
     );
     let before = l.clone();
     let s = set(vec![(10, forget("霧ヶ丘", &[id(99)]))]);
-    assert!(!scrub(&mut l, &s, Some(t), &texts).changed());
+    assert!(!scrub(&mut l, &s, Some(t), &tx).changed());
     assert_eq!(l, before);
-    // 忘れるの指示が無ければ何もしない (private は台帳を掃除しない)。
     let mut private = forget("朝市", &[]);
     private.op = "private".to_owned();
-    assert!(!scrub(&mut l, &set(vec![(10, private)]), Some(t), &texts).changed());
+    assert!(!scrub(&mut l, &set(vec![(10, private)]), Some(t), &tx).changed());
     assert_eq!(l, before);
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct Extra<'a> {
     s: u32,
     a: &'a str,
@@ -376,18 +370,38 @@ struct Extra<'a> {
     note: &'a str,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct Broken<'a> {
     v: &'a str,
 }
 
-/// verifies: 04 §7.2 (読むときの型に合わない要素・知らない項目・知らない節にも、忘れた値の写しを残さない)
+/// CBOR の tag を付けた値 (ciborium の tag の書き方)。
+struct Tagged<T>(u64, T);
+
+impl<T: Serialize> Serialize for Tagged<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTupleVariant;
+        let mut t = s.serialize_tuple_variant("@@TAG@@", 0, "@@TAGGED@@", 2)?;
+        t.serialize_field(&self.0)?;
+        t.serialize_field(&self.1)?;
+        t.end()
+    }
+}
+
+#[derive(Serialize)]
+struct WithTag<'a> {
+    s: u32,
+    a: &'a str,
+    v: &'a str,
+    note: Tagged<&'a str>,
+}
+
+/// verifies: 04 §7.2 (読むときの型に合わない要素・知らない項目・tag の付いた値・知らない節の値と項目の名前にも、忘れた値の写しを残さない)
 #[test]
-fn unknown_fields_unreadable_elements_and_unknown_sections_are_scanned() {
+fn unknown_fields_unreadable_elements_tags_and_unknown_sections_are_scanned() {
     let t = id(1);
     let text = "柴犬を飼っています。";
     let mut l = ledger(t, text, &[], &[]);
-    // 知らない項目に値の写しがある要素、`s` を欠いて読めない要素、知らない節の要素。
     let units = vec![
         RawValue::from_serialize(&unit(1, "self", "pet", "柴犬", "", "")).expect("raw"),
         RawValue::from_serialize(&Extra {
@@ -398,6 +412,21 @@ fn unknown_fields_unreadable_elements_and_unknown_sections_are_scanned() {
         })
         .expect("raw"),
         RawValue::from_serialize(&Broken { v: "鳴瀬台" }).expect("raw"),
+        // 知らない項目に tag の付いた値があっても、型の項目 `v` を見落とさない。
+        RawValue::from_serialize(&WithTag {
+            s: 1,
+            a: "pet",
+            v: "鳴瀬台の犬",
+            note: Tagged(32, "x"),
+        })
+        .expect("raw"),
+        RawValue::from_serialize(&WithTag {
+            s: 1,
+            a: "pet",
+            v: "秋田犬",
+            note: Tagged(32, "鳴瀬台"),
+        })
+        .expect("raw"),
     ];
     l.output
         .set_section(LedgerOutput::UNITS, &units)
@@ -405,13 +434,12 @@ fn unknown_fields_unreadable_elements_and_unknown_sections_are_scanned() {
     l.output
         .set_section("topics", &vec!["鳴瀬台の暮らし", "犬"])
         .expect("topics");
+    let named: BTreeMap<&str, u32> = [("鳴瀬台", 1), ("ok", 2)].into();
+    l.output
+        .set_section("named", &vec![named.clone(), [("ok", 3)].into()])
+        .expect("named");
     let s = set(vec![(10, forget("鳴瀬台", &[id(99)]))]);
-    let texts = [RevText {
-        turn: t,
-        rev: 0,
-        text,
-    }];
-    let r = scrub(&mut l, &s, Some(t), &texts);
+    let r = scrub(&mut l, &s, Some(t), &texts(&[(t, 0, text)]));
     assert_eq!(values(&l), ["pet=柴犬"]);
     assert_eq!(l.output.units().mismatched, 0);
     let topics: Vec<String> = l
@@ -421,7 +449,100 @@ fn unknown_fields_unreadable_elements_and_unknown_sections_are_scanned() {
         .to()
         .expect("strings");
     assert_eq!(topics, ["犬"]);
-    assert_eq!((r.units, r.other, r.removed()), (2, 1, 3));
+    let named: Vec<BTreeMap<String, u32>> = l
+        .output
+        .raw_section("named")
+        .expect("kept")
+        .to()
+        .expect("maps");
+    assert_eq!(named, [BTreeMap::from([("ok".to_owned(), 3)])]);
+    assert_eq!((r.units, r.other, r.removed()), (4, 2, 6));
+}
+
+/// verifies: 04 §7.2 (台帳の本体と入れ子の型の知らない項目と、invalid の理由も掃除する)、03 §4.2 の規則 7 (知らない項目は書き戻しても残る)
+#[test]
+fn unknown_fields_of_the_body_and_invalid_reasons_are_scrubbed() {
+    let t = id(1);
+    let text = "柴犬を飼っています。";
+    let mut l = ledger(t, text, &[], &[unit(1, "self", "pet", "柴犬", "", "")]);
+    let raw = |v: &str| RawValue::from_serialize(&v).expect("raw");
+    l.extra.insert("topic_hint".into(), raw("鳴瀬台の話"));
+    l.extra.insert("future".into(), raw("残る"));
+    l.inputs.extra.insert("echo".into(), raw("鳴瀬台"));
+    l.sentences[0]
+        .extra
+        .insert("鳴瀬台".into(), raw("項目の名前"));
+    l.inputs.refs.push(LedgerRef::new(t, 0));
+    l.inputs.refs[0]
+        .extra
+        .insert("quote".into(), raw("鳴瀬台です"));
+    l.output
+        .set_invalid("insights", "鳴瀬台 は型に合わない")
+        .expect("invalid");
+    l.output
+        .set_invalid("titles", "not_array")
+        .expect("invalid");
+    // 知らない項目は、書き戻しても残る (03 §4.2 の規則 7)。
+    let back: LedgerBody = RawValue::from_serialize(&l)
+        .expect("raw")
+        .to()
+        .expect("read back");
+    assert_eq!(back, l);
+    let s = set(vec![(10, forget("鳴瀬台", &[id(99)]))]);
+    let r = scrub(&mut l, &s, Some(t), &texts(&[(t, 0, text)]));
+    assert_eq!(r.unknown_fields, 5);
+    assert_eq!(l.extra.keys().collect::<Vec<_>>(), ["future"]);
+    assert!(l.inputs.extra.is_empty());
+    assert!(l.sentences[0].extra.is_empty());
+    assert!(l.inputs.refs[0].extra.is_empty());
+    let reasons = l.output.invalid();
+    assert_eq!(reasons["insights"], "scrubbed");
+    assert_eq!(reasons["titles"], "not_array");
+    assert_eq!(values(&l), ["pet=柴犬"]);
+}
+
+/// verifies: 04 §7.2 (型として読めない台帳と知らない呼び出しの台帳は、生のまま走査し、当たれば消す)
+#[test]
+fn raw_ledgers_are_scanned_whole() {
+    #[derive(Serialize)]
+    struct Other<'a> {
+        call: &'a str,
+        title: &'a str,
+        units: Vec<Tagged<&'a str>>,
+    }
+    let env = |title: &str, inner: &str| {
+        let mut e = Envelope::new(
+            id(50),
+            "proposal",
+            1,
+            evorag_types::Timestamp::from_millis(0),
+            "test",
+        );
+        e.set_body(&Other {
+            call: "topic_title",
+            title,
+            units: vec![Tagged(32, inner)],
+        })
+        .expect("body");
+        e
+    };
+    let s = set(vec![(10, forget("鳴瀬台", &[]))]);
+    assert_eq!(
+        scan_raw_ledger(&K, &s, &env("散歩の話", "柴犬")),
+        RawLedger::Keep
+    );
+    assert_eq!(
+        scan_raw_ledger(&K, &s, &env("鳴瀬台の話", "柴犬")),
+        RawLedger::Delete
+    );
+    assert_eq!(
+        scan_raw_ledger(&K, &s, &env("散歩", "鳴瀬台")),
+        RawLedger::Delete
+    );
+    assert_eq!(
+        scan_raw_ledger(&K, &set(vec![]), &env("鳴瀬台", "")),
+        RawLedger::Keep
+    );
 }
 
 /// 決まった種から作る、小さな擬似乱数 (性質を多くの入力で確かめるため)。
@@ -445,6 +566,8 @@ struct Case {
     directives: Vec<(u64, DirectiveBody)>,
     /// 改訂の番号ごとの本文 (伏せ字の前と後)。
     texts: Vec<(u32, String)>,
+    /// 印を解いていない忘れるの値 (区切りの最初のターンより前に解いた忘れるは除く)。
+    blocked: Vec<&'static str>,
 }
 
 fn random_case(rng: &mut Lcg) -> Case {
@@ -471,6 +594,7 @@ fn random_case(rng: &mut Lcg) -> Case {
     let ledger = ledger(turn, &text, &key_refs, &units);
     let mut directives = Vec::new();
     let mut texts = vec![(0, text)];
+    let mut blocked = Vec::new();
     for n in 0..rng.next(3) + 1 {
         let w = WORDS[rng.next(6)];
         let targets: &[Id] = if rng.next(2) == 0 { &[] } else { &[turn] };
@@ -481,24 +605,34 @@ fn random_case(rng: &mut Lcg) -> Case {
             f = g;
             texts.push((rev + 1, after));
         }
-        directives.push((10 + u64::try_from(n).expect("fits"), f));
+        let fid = 10 + u64::try_from(n).expect("fits");
+        directives.push((fid, f));
+        // 印を解く: 区切りのターン (5) より前の ID の unblock は不正 (相手より小さい) なので、後の ID で解く。
+        // 解いた忘れるは、ターン 5 の要素にはまだ当たる (5 < 解いた ID)。
+        if rng.next(3) == 0 {
+            let mut u = DirectiveBody::new(DirectiveOp::Unblock);
+            u.target = Some(id(fid));
+            directives.push((100 + fid, u));
+        }
+        blocked.push(w);
     }
     Case {
         turn,
         ledger,
         directives,
         texts,
+        blocked,
     }
 }
 
-/// verifies: 04 §7.2 (掃除は何度当てても同じ。指示を足しながら当てても、まとめて当てても同じ。忘れた値の写しを残さない)
+/// verifies: 04 §7.2 (掃除は何度当てても同じ。指示を足しながら当てても、まとめて当てても同じ。伏せ字の前の本文の有無に依らない。忘れた値の写しを残さない)
 #[test]
-fn scrubbing_is_idempotent_incremental_and_leaves_no_value() {
+fn scrubbing_is_idempotent_incremental_path_independent_and_leaves_no_value() {
     let mut rng = Lcg(0x5eed);
     for case in 0..80 {
         let c = random_case(&mut rng);
         let t = c.turn;
-        let texts: Vec<RevText<'_>> = c
+        let all_texts: TurnTexts<'_> = c
             .texts
             .iter()
             .map(|(rev, s)| RevText {
@@ -507,24 +641,13 @@ fn scrubbing_is_idempotent_incremental_and_leaves_no_value() {
                 text: s,
             })
             .collect();
-        // 伏せ字が本文と合うこと (試験の材料の確かめ)。
+        let last = c.texts.last().expect("text");
+        let post_only = texts(&[(t, last.0, &last.1)]);
         let all = set(c.directives.clone());
-        for w in c.texts.windows(2) {
-            let red = all.redactions().redactions(t).expect("valid");
-            let step = red.iter().find(|r| r.rev_before() == w[0].0).expect("step");
-            assert_eq!(
-                apply_forget(&w[0].1, w[0].0, step, M),
-                ForgetOutcome::Applied {
-                    text: w[1].1.clone(),
-                    rev: w[1].0
-                },
-                "case {case}"
-            );
-        }
         let mut once = c.ledger.clone();
-        scrub(&mut once, &all, Some(t), &texts);
+        scrub(&mut once, &all, Some(t), &all_texts);
         let mut twice = once.clone();
-        let again = scrub(&mut twice, &all, Some(t), &texts);
+        let again = scrub(&mut twice, &all, Some(t), &all_texts);
         assert_eq!(twice, once, "case {case}: idempotent");
         assert!(
             !again.changed(),
@@ -533,35 +656,39 @@ fn scrubbing_is_idempotent_incremental_and_leaves_no_value() {
         // 指示を 1 つずつ足しながら当てる (書く前の掃除と、後の忘れるの掃除)。
         let mut step = c.ledger.clone();
         for k in 1..=c.directives.len() {
-            scrub(&mut step, &set(c.directives[..k].to_vec()), Some(t), &texts);
-        }
-        assert_eq!(step, once, "case {case}: incremental == batch");
-        // 指示を読む順に依らない。
-        let mut reversed = c.directives.clone();
-        reversed.reverse();
-        let mut other_order = c.ledger.clone();
-        scrub(&mut other_order, &set(reversed), Some(t), &texts);
-        assert_eq!(other_order, once, "case {case}: order of reading");
-        // どの忘れた値も、残った要素の文字列に部分文字列として残らない。
-        for (_, b) in &c.directives {
-            let f_keys: BTreeSet<ValueKey> =
-                b.vks.iter().filter_map(|h| ValueKey::from_hex(h)).collect();
-            let left: Vec<String> = once
-                .output
-                .units()
-                .items
-                .into_iter()
-                .flat_map(|u| [u.value, u.old, u.aspect, u.entity, u.when])
-                .chain(once.output.keys().items)
-                .collect();
-            let k = substring_keys_of(&K, left.iter().map(String::as_str));
-            assert!(
-                f_keys.iter().all(|x| !k.contains(x)),
-                "case {case}: no forgotten value is kept"
+            scrub(
+                &mut step,
+                &set(c.directives[..k].to_vec()),
+                Some(t),
+                &all_texts,
             );
         }
-        // 位置は最後の改訂の番号にそろう。
-        let last = c.texts.last().expect("text").0;
-        assert!(once.sentences.iter().all(|s| s.rev == last), "case {case}");
+        assert_eq!(step, once, "case {case}: incremental == batch");
+        // 当て直し (伏せ字の後の本文しか無い) でも同じ台帳になる。
+        let mut replay = c.ledger.clone();
+        scrub(&mut replay, &all, Some(t), &post_only);
+        assert_eq!(replay, once, "case {case}: path independence");
+        // 忘れた値が、残った要素の文字列に (正規化 v1 か照合の形で) 含まれない。
+        let left: Vec<String> = once
+            .output
+            .units()
+            .items
+            .into_iter()
+            .flat_map(|u| [u.value, u.old, u.aspect, u.entity, u.when])
+            .chain(once.output.keys().items)
+            .collect();
+        for w in &c.blocked {
+            for s in &left {
+                assert!(
+                    !normalize_v1(s).contains(&normalize_v1(w))
+                        && !normalize_loose(s).contains(&normalize_loose(w)),
+                    "case {case}: {w} is kept in {s}"
+                );
+            }
+        }
+        assert!(
+            once.sentences.iter().all(|s| s.rev == last.0),
+            "case {case}"
+        );
     }
 }

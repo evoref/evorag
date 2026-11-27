@@ -1,13 +1,15 @@
-//! 指示の集合と、指示ごとの当て方 (04 §7.4・§7.5・§7.6、§5.2 の関門 8、§5.3 の入力の順)。
+//! 指示の集合と、指示ごとの当て方 (04 §7.4・§7.5・§7.6、§5.2 の関門 8、§5.3 の入力の順、§6 の `forgotten`)。
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use evorag_types::Id;
 
-use super::keys::substring_keys;
+use super::keys::SubstringKeys;
 use super::marks::TurnRedactions;
 use crate::directive::{DirectiveBody, DirectiveOp, DirectiveOrigin, PrivateScope, TurnSpan};
-use crate::value_key::{ForgetKey, ValueKey, loose_key, normalize_loose, normalize_v1, value_key};
+use crate::value_key::{
+    ForgetKey, NORM_V1, ValueKey, loose_key, normalize_loose, normalize_v1, value_key,
+};
 
 /// 値の鍵と照合の鍵の組 (04 §5.6)。指示の当て方は、相手の値のこの 2 つで引く (§7.6)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,55 +45,93 @@ impl ValueKeys {
     }
 }
 
+/// 今の規則で解いた entity (04 §5.1 の主語・§7.6 の同値類)。
+///
+/// 主語を明示する語 (`subject_self`) を `self` に直し、正規化 v1 を当てたもの。指示を当てる相手の entity は、この型で
+/// だけ渡せる (解き忘れた呼び名で、`self` の忘れるを抜けないため)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEntity {
+    v1: String,
+    loose: String,
+}
+
+impl ResolvedEntity {
+    /// 呼び名 `raw` を今の規則 `resolve` (主語を明示する語なら `self` を返し、ほかは呼び名を返す関数) で解く。
+    #[must_use]
+    pub fn new(raw: &str, resolve: impl Fn(&str) -> String) -> Self {
+        let r = resolve(raw);
+        Self {
+            v1: normalize_v1(&r),
+            loose: normalize_loose(&r),
+        }
+    }
+
+    /// 解いた entity (正規化 v1 の後)。
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.v1
+    }
+}
+
 /// 指示を当てる相手の属性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeAspect<'a> {
-    /// 辞書の属性 (名前)。`was_free` は、属性の決め方 (04 §5.2) で辞書の属性に写す前の、自由記述の属性の鍵
-    /// (`aspect_mac` と同じ 16 進。写していなければ `None`)。`end` は写す前の鍵とも比べる (04 §7.5 の「当て方の補い」)。
+    /// 辞書の属性。
     Dict {
+        /// 辞書の属性の名前。
         name: &'a str,
+        /// 属性の決め方 (04 §5.2) で辞書の属性に写す前の、自由記述の属性の鍵 (`aspect_mac` と同じ 16 進。写して
+        /// いなければ `None`)。`end` と採る・戻すは、写す前の鍵とも比べる (04 §7.5 の「当て方の補い」)。
         was_free: Option<&'a str>,
     },
-    /// 自由記述の属性 (属性の鍵の 16 進、04 §5.6)。
-    Free { mac: &'a str },
+    /// 自由記述の属性。
+    Free {
+        /// 属性の鍵の 16 進 (04 §5.6)。
+        mac: &'a str,
+    },
 }
 
-/// 指示を当てる相手 (候補・訂正の新しい値・戻す値・単位)。
-///
-/// `entity` は記録する主語 (04 §5.2 の関門 5): `self` か、呼び名に正規化 v1 を当てた文字列。主語を明示する語
-/// (`subject_self`) は、呼び手が `self` に直してから渡す (04 §5.1。主語を「私」と書いて忘れるを抜けないため)。
+/// 指示を当てる相手 (候補・戻す値・単位)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe<'a> {
-    entity_v1: String,
-    entity_loose: String,
+    entity: ResolvedEntity,
     aspect: ProbeAspect<'a>,
     keys: ValueKeys,
     turn: Id,
 }
 
 impl<'a> Probe<'a> {
-    /// `turn` は根拠のターン (印を解いた指示の比べ、04 §7.5 の `unblock`)。単位なら根拠の最も新しいターン。
+    /// `entity` は記録する主語を今の規則で解いたもの、`keys` は記録する値の鍵、`turn` は根拠のターン (印を解いた
+    /// 指示の比べ、04 §7.5 の `unblock`。単位なら根拠の最も新しいターンで、後継の比べにも使う)。
     #[must_use]
-    pub fn new(entity: &str, aspect: ProbeAspect<'a>, keys: ValueKeys, turn: Id) -> Self {
+    pub fn new(entity: ResolvedEntity, aspect: ProbeAspect<'a>, keys: ValueKeys, turn: Id) -> Self {
         Self {
-            entity_v1: normalize_v1(entity),
-            entity_loose: normalize_loose(entity),
+            entity,
             aspect,
             keys,
             turn,
         }
     }
 
+    /// 解いた entity。
+    #[must_use]
+    pub fn entity(&self) -> &ResolvedEntity {
+        &self.entity
+    }
+
+    /// 属性。
     #[must_use]
     pub fn aspect(&self) -> ProbeAspect<'a> {
         self.aspect
     }
 
+    /// 値の鍵と照合の鍵。
     #[must_use]
     pub fn keys(&self) -> ValueKeys {
         self.keys
     }
 
+    /// 根拠のターン。
     #[must_use]
     pub fn turn(&self) -> Id {
         self.turn
@@ -107,80 +147,88 @@ pub struct UnitProbe<'p, 'a> {
     pub anchors: &'p [TurnSpan],
 }
 
-/// entity の同値類 (04 §7.6): 正規化 v1 か照合の形で同じ呼び名と、指示が持つその時点の別名 (`aliases`)。
+/// entity の同値類 (04 §7.6): 正規化 v1 か照合の形で同じ呼び名と、主語を明示する語を `self` とみなしたもの、指示が
+/// 持つその時点の別名 (`aliases`)。指示の entity と別名は、書いたときの形と今の規則で解き直した形の両方を入れる
+/// (規則の版を上げても、当たる相手の集合が縮まないため)。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EntityClass {
     v1: BTreeSet<String>,
     loose: BTreeSet<String>,
-    /// entity を持たない (壊れた) 指示。安全の側に倒して、どの entity にも当てる。
+    /// entity を持たない (壊れた) 忘れる・private の指示。止めすぎる側に倒して、どの entity にも当てる。
     any: bool,
 }
 
 impl EntityClass {
-    fn of(entity: Option<&str>, aliases: &[String]) -> Self {
-        let Some(entity) = entity else {
-            return Self {
-                any: true,
-                ..Self::default()
-            };
-        };
-        let names = std::iter::once(entity).chain(aliases.iter().map(String::as_str));
+    fn of(entity: &str, aliases: &[String], resolve: &dyn Fn(&str) -> String) -> Self {
         let mut out = Self::default();
-        for n in names {
-            out.v1.insert(normalize_v1(n));
-            out.loose.insert(normalize_loose(n));
+        for n in std::iter::once(entity).chain(aliases.iter().map(String::as_str)) {
+            for form in [n.to_owned(), resolve(n)] {
+                out.v1.insert(normalize_v1(&form));
+                out.loose.insert(normalize_loose(&form));
+            }
         }
         out
     }
 
+    fn any() -> Self {
+        Self {
+            any: true,
+            ..Self::default()
+        }
+    }
+
     fn contains(&self, p: &Probe<'_>) -> bool {
-        self.any || self.v1.contains(&p.entity_v1) || self.loose.contains(&p.entity_loose)
+        self.any || self.v1.contains(&p.entity.v1) || self.loose.contains(&p.entity.loose)
     }
 }
 
 /// 指示の属性 (04 §7.5 の `aspect`・`aspect_mac`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Aspect {
+pub enum DirectiveAspect {
+    /// 辞書の属性の名前。
     Dict(String),
+    /// 自由記述の属性の鍵 (16 進)。
     Free(String),
-    /// どちらも無い (壊れた) 指示。属性を見ない側に倒す。
-    Unknown,
+    /// どちらも無い (壊れた) 指示。
+    Missing,
 }
 
-impl Aspect {
+impl DirectiveAspect {
     fn of(b: &DirectiveBody) -> Self {
         match (&b.aspect, &b.aspect_mac) {
-            (Some(a), _) => Aspect::Dict(a.clone()),
-            (None, Some(m)) => Aspect::Free(m.clone()),
-            (None, None) => Aspect::Unknown,
+            (Some(a), _) => Self::Dict(a.clone()),
+            (None, Some(m)) => Self::Free(m.clone()),
+            (None, None) => Self::Missing,
         }
     }
 
     /// 忘れるの当て方の述語の属性の比べ (04 §7.5): 辞書の属性の指示と辞書の属性の相手のときだけ名前を比べる。
-    /// 自由記述の属性の指示はどの相手にも、どの指示も自由記述の属性の相手に、属性を見ずに当てる。
+    /// 自由記述の属性の指示はどの相手にも、どの指示も自由記述の属性の相手に、属性を見ずに当てる。属性の無い指示も
+    /// 属性を見ない (止めすぎる側)。
     fn admits(&self, p: &Probe<'_>) -> bool {
         match (self, p.aspect) {
-            (Aspect::Dict(a), ProbeAspect::Dict { name, .. }) => a == name,
+            (Self::Dict(a), ProbeAspect::Dict { name, .. }) => a == name,
             _ => true,
         }
     }
 
     /// 同じ (entity, 属性) の組か (`end`・採る・戻す)。辞書の属性は名前、自由記述の属性は鍵で比べ、辞書の写しの
-    /// 前の自由記述の属性の鍵とも比べる (04 §7.5 の「当て方の補い」)。
+    /// 前の自由記述の属性の鍵とも比べる (04 §7.5 の「当て方の補い」)。属性の無い指示は当てない (作るときに除く)。
     fn same_group(&self, p: &Probe<'_>) -> bool {
         match (self, p.aspect) {
-            (Aspect::Dict(a), ProbeAspect::Dict { name, .. }) => a == name,
-            (Aspect::Free(m), ProbeAspect::Free { mac }) => m == mac,
-            (Aspect::Free(m), ProbeAspect::Dict { was_free, .. }) => was_free == Some(m.as_str()),
-            (Aspect::Dict(_), ProbeAspect::Free { .. }) => false,
-            (Aspect::Unknown, _) => true,
+            (Self::Dict(a), ProbeAspect::Dict { name, .. }) => a == name,
+            (Self::Free(m), ProbeAspect::Free { mac }) => m == mac,
+            (Self::Free(m), ProbeAspect::Dict { was_free, .. }) => was_free == Some(m.as_str()),
+            (Self::Dict(_), ProbeAspect::Free { .. }) | (Self::Missing, _) => false,
         }
     }
 }
 
-/// 記録の `vks` (16 進の並び) を読む。読めない要素は捨てる (当たらない)。
-fn parse_vks(vks: &[String]) -> BTreeSet<ValueKey> {
-    vks.iter().filter_map(|h| ValueKey::from_hex(h)).collect()
+/// 記録の `vks` (16 進の並び) を読む。読めない要素があれば `false` も返す (数える、`doctor` 用)。
+fn parse_vks(vks: &[String]) -> (BTreeSet<ValueKey>, bool) {
+    let keys: BTreeSet<ValueKey> = vks.iter().filter_map(|h| ValueKey::from_hex(h)).collect();
+    let all = vks.iter().all(|h| ValueKey::from_hex(h).is_some());
+    (keys, all)
 }
 
 /// 根拠の位置 `at` が、根拠の値の範囲 `anchor` に当たるか (04 §7.5)。`at` は指示を書いたときの改訂の番号の位置
@@ -216,13 +264,18 @@ pub struct Forget {
     id: Id,
     vks: BTreeSet<ValueKey>,
     entity: EntityClass,
-    aspect: Aspect,
+    aspect: DirectiveAspect,
     unblocked: Option<Id>,
     targets: BTreeSet<Id>,
 }
 
 impl Forget {
-    fn new(id: Id, b: &DirectiveBody) -> Self {
+    fn new(
+        id: Id,
+        b: &DirectiveBody,
+        vks: BTreeSet<ValueKey>,
+        resolve: &dyn Fn(&str) -> String,
+    ) -> Self {
         let targets = b
             .turns
             .iter()
@@ -232,21 +285,24 @@ impl Forget {
             .collect();
         Self {
             id,
-            vks: parse_vks(&b.vks),
-            entity: EntityClass::of(b.entity.as_deref(), &b.aliases),
-            aspect: Aspect::of(b),
+            vks,
+            entity: b.entity.as_deref().map_or_else(EntityClass::any, |e| {
+                EntityClass::of(e, &b.aliases, resolve)
+            }),
+            aspect: DirectiveAspect::of(b),
             unblocked: None,
             targets,
         }
     }
 
+    /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
         self.id
     }
 
     /// 印を解いた `unblock` の指示の ID (無ければ `None`)。同じ忘れるを解く `unblock` が 2 つ以上あれば、最も早い
-    /// もの (04 §7.5)。
+    /// もの (04 §7.5 の「当て方の補い」)。
     #[must_use]
     pub fn unblocked(&self) -> Option<Id> {
         self.unblocked
@@ -265,7 +321,9 @@ impl Forget {
         self.vks.contains(k)
     }
 
-    pub(crate) fn vks(&self) -> &BTreeSet<ValueKey> {
+    /// 読めた `vks`。
+    #[must_use]
+    pub fn vks(&self) -> &BTreeSet<ValueKey> {
         &self.vks
     }
 
@@ -293,8 +351,9 @@ impl Forget {
 pub struct Private {
     id: Id,
     vks: BTreeSet<ValueKey>,
+    entity_raw: Option<String>,
     entity: EntityClass,
-    aspect: Aspect,
+    aspect: DirectiveAspect,
     at: Option<TurnSpan>,
     imported: bool,
     scope: PrivateScope,
@@ -313,12 +372,20 @@ pub enum PrivateHit {
 }
 
 impl Private {
-    fn new(id: Id, b: &DirectiveBody) -> Self {
+    fn new(
+        id: Id,
+        b: &DirectiveBody,
+        vks: BTreeSet<ValueKey>,
+        resolve: &dyn Fn(&str) -> String,
+    ) -> Self {
         Self {
             id,
-            vks: parse_vks(&b.vks),
-            entity: EntityClass::of(b.entity.as_deref(), &b.aliases),
-            aspect: Aspect::of(b),
+            vks,
+            entity_raw: b.entity.clone(),
+            entity: b.entity.as_deref().map_or_else(EntityClass::any, |e| {
+                EntityClass::of(e, &b.aliases, resolve)
+            }),
+            aspect: DirectiveAspect::of(b),
             at: b.at,
             imported: b.imported,
             scope: b.scope().unwrap_or(PrivateScope::Successors),
@@ -326,24 +393,52 @@ impl Private {
         }
     }
 
+    /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
         self.id
     }
 
+    /// 効く範囲。
     #[must_use]
     pub fn scope(&self) -> PrivateScope {
         self.scope
     }
 
+    /// 指示を足した経路。
     #[must_use]
     pub fn origin(&self) -> DirectiveOrigin {
         self.origin
     }
 
+    /// `import-v04` で写した指示か (どの単位にも当たらない取り込みの private を示すため、04 §7.5)。
+    #[must_use]
+    pub fn imported(&self) -> bool {
+        self.imported
+    }
+
+    /// 指示に書いた entity (書いたときの形)。
+    #[must_use]
+    pub fn entity(&self) -> Option<&str> {
+        self.entity_raw.as_deref()
+    }
+
+    /// 指示の属性。
+    #[must_use]
+    pub fn aspect(&self) -> &DirectiveAspect {
+        &self.aspect
+    }
+
+    /// 根拠の位置 (書いたときの改訂の番号の位置)。
+    #[must_use]
+    pub fn at(&self) -> Option<&TurnSpan> {
+        self.at.as_ref()
+    }
+
     /// 単位に当たるか (04 §7.5): 値の鍵か照合の鍵 (`vks`。entity の同値類と属性は忘れるの当て方の述語と同じ形で
-    /// 比べる)、根拠の位置、後継のどれか。後継は「後継まで」の辞書の属性の指示だけで、同じ (entity, 辞書の属性)
-    /// の単位のうち根拠の最も新しいターンが指示の ID より後のもの。
+    /// 比べる)、根拠の位置、後継のどれか。後継は「後継まで」の指示だけで、同じ (entity, 辞書の属性) の単位のうち
+    /// 根拠の最も新しいターンが指示の ID より後のもの。属性の無い (壊れた) 指示は、どの辞書の属性の後継にも当てる
+    /// (止めすぎる側)。
     #[must_use]
     pub fn hits(&self, u: &UnitProbe<'_, '_>, red: &TurnRedactions) -> Option<PrivateHit> {
         let p = u.probe;
@@ -355,23 +450,25 @@ impl Private {
         {
             return Some(PrivateHit::Position);
         }
+        let same_attribute = match (&self.aspect, p.aspect) {
+            (DirectiveAspect::Dict(a), ProbeAspect::Dict { name, .. }) => a == name,
+            (DirectiveAspect::Missing, ProbeAspect::Dict { .. }) => true,
+            _ => false,
+        };
         let successor = self.scope == PrivateScope::Successors
-            && matches!((&self.aspect, p.aspect), (Aspect::Dict(a), ProbeAspect::Dict { name, .. }) if a == name)
+            && same_attribute
             && self.entity.contains(p)
             && p.turn > self.id;
         successor.then_some(PrivateHit::Successor)
-    }
-
-    /// 区切りの鍵 `text` の語句か部分文字列の値の鍵か照合の鍵が、この指示の `vks` に当たるか (04 §5.5)。
-    fn screens(&self, keys: &BTreeSet<ValueKey>) -> bool {
-        self.vks.iter().any(|k| keys.contains(k))
     }
 }
 
 /// 採る・戻す (04 §7.5 の `accept`・`revert`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AdoptOp {
+    /// `Contested` の値を今の値にする (`/memory accept`)。
     Accept,
+    /// 履歴の値を今の値に戻す (`/memory revert`)。
     Revert,
 }
 
@@ -382,7 +479,7 @@ pub struct Adoption {
     op: AdoptOp,
     vks: BTreeSet<ValueKey>,
     entity: EntityClass,
-    aspect: Aspect,
+    aspect: DirectiveAspect,
     at: Option<TurnSpan>,
     imported: bool,
 }
@@ -390,28 +487,20 @@ pub struct Adoption {
 /// 採る・戻すが単位に当たった理由。根拠の位置で当たった単位を、値の鍵で当たった単位より先に採る (04 §7.5)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AdoptHit {
+    /// 根拠の位置 (`at`) で当たった。
     Position,
+    /// 値の鍵で、同じ (entity, 属性) の組に当たった。
     Value,
 }
 
 impl Adoption {
-    fn new(id: Id, op: AdoptOp, b: &DirectiveBody) -> Self {
-        Self {
-            id,
-            op,
-            vks: parse_vks(&b.vks),
-            entity: EntityClass::of(b.entity.as_deref(), &b.aliases),
-            aspect: Aspect::of(b),
-            at: b.at,
-            imported: b.imported,
-        }
-    }
-
+    /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
         self.id
     }
 
+    /// 採るか戻すか。
     #[must_use]
     pub fn op(&self) -> AdoptOp {
         self.op
@@ -438,28 +527,15 @@ impl Adoption {
 pub struct End {
     id: Id,
     vks: BTreeSet<ValueKey>,
-    entity_raw: Option<String>,
-    aliases: Vec<String>,
-    aspect: Aspect,
+    entity: EntityClass,
+    aspect: DirectiveAspect,
     turn: Option<Id>,
     cause: Option<Id>,
     origin: DirectiveOrigin,
 }
 
 impl End {
-    fn new(id: Id, b: &DirectiveBody) -> Self {
-        Self {
-            id,
-            vks: parse_vks(&b.vks),
-            entity_raw: b.entity_raw.clone().or_else(|| b.entity.clone()),
-            aliases: b.aliases.clone(),
-            aspect: Aspect::of(b),
-            turn: b.turn,
-            cause: b.cause,
-            origin: b.origin(),
-        }
-    }
-
+    /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
         self.id
@@ -477,34 +553,46 @@ impl End {
         self.cause
     }
 
+    /// 指示を足した経路。
     #[must_use]
     pub fn origin(&self) -> DirectiveOrigin {
         self.origin
     }
 
     /// 単位 (その時点の `Live`) に当たるか (04 §7.4 の「`end` の当て方」): 値の鍵か照合の鍵が `vks` にあり、
-    /// 同じ (entity, 属性) の組のとき。entity は、指示が持つ生の文字列を今の規則で解き直して比べる (`resolve`:
-    /// 正規化 v1 と主語を明示する語。呼び手が今の規則を渡す)。状態が `Live` かは畳みの側で確かめる。
+    /// 同じ (entity, 属性) の組のとき。entity は、指示の生の文字列を今の規則で解き直したものと比べる
+    /// ([`DirectiveSet::new`] の `resolve`)。状態が `Live` かは畳みの側で確かめる。
     #[must_use]
-    pub fn hits(&self, p: &Probe<'_>, resolve: impl Fn(&str) -> String) -> bool {
-        let entity = EntityClass::of(
-            self.entity_raw.as_deref().map(&resolve).as_deref(),
-            &self.aliases,
-        );
-        p.keys.any_in(&self.vks) && entity.contains(p) && self.aspect.same_group(p)
+    pub fn hits(&self, p: &Probe<'_>) -> bool {
+        p.keys.any_in(&self.vks) && self.entity.contains(p) && self.aspect.same_group(p)
     }
 }
 
 /// 畳みの列の中の位置 (04 §5.3 の「入力の順」)。指示もターンも UUID v7 なので、1 本の列に並ぶ。
 ///
-/// 候補は (根拠のターンの ID, 値の始まり …) の順に並び、そのターンの候補は `Slot { at: ターン, phase:
-/// Candidates }` の位置にある。`end` は終えた位置のターンの候補の後 (`AfterCandidates`)、採る・戻すは指示の ID の
-/// 位置に置く。同じ位置の指示は指示の ID の順。
+/// 候補は、根拠のターンの [`Slot::candidates`] の位置にあり、その中は (値の始まり …) の順に並ぶ。`end` は終えた
+/// 位置のターンの候補の後 ([`Phase::AfterCandidates`])、採る・戻すは指示の ID の位置に置く。同じ位置の指示は
+/// 指示の ID の順。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Slot {
+    /// 位置のターンの ID (採る・戻すは指示の ID)。
     pub at: Id,
+    /// 同じ位置の中の前後。
     pub phase: Phase,
-    pub directive: Id,
+    /// 置いた指示 (候補の位置は `None`。同じ位置の指示より前に並ぶ)。
+    pub directive: Option<Id>,
+}
+
+impl Slot {
+    /// ターン `turn` の候補の位置。
+    #[must_use]
+    pub fn candidates(turn: Id) -> Self {
+        Self {
+            at: turn,
+            phase: Phase::Candidates,
+            directive: None,
+        }
+    }
 }
 
 /// [`Slot`] の中の前後。
@@ -519,16 +607,33 @@ pub enum Phase {
 /// 畳みの列に混ぜる指示 ([`DirectiveSet::timeline`])。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Timed<'s> {
+    /// 採る・戻す。
     Adopt(&'s Adoption),
+    /// `end`。
     End(&'s End),
 }
 
+/// 当てずに数えた指示の数 (`doctor` が報告する)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirectiveCounts {
+    /// 知らない `op` の指示 (当てずに残す、04 §7.5)。
+    pub unknown: usize,
+    /// 相手を見つけられない解く指示 (`private_off`・`unblock`。相手が無い・種類が違う・相手より ID が小さい)。
+    pub unmatched_cancels: usize,
+    /// entity か属性を欠いて当てない `end`・採る・戻す (04 §7.5 の「当て方の補い」)。
+    pub incomplete: usize,
+    /// `vks` に読めない要素 (64 桁の小文字の 16 進でないもの) を持つ指示 (読めた要素だけで当てる)。
+    pub unreadable_keys: usize,
+    /// 値の鍵の正規化の版 (`norm`) が 1 でない指示 (v0.5 の版の鍵とは当たらない)。
+    pub other_norm: usize,
+}
+
 /// 効いている指示の集合 (04 §7.5)。指示の ID の順に並べ、解く指示 (`private_off`・`unblock`) を解く相手に当てた
-/// 後のもの。入力の順に依らず、同じ指示の集合から同じものを作る。
+/// 後のもの。
 ///
-/// - `private_off` は private の指示だけを、`unblock` は忘れるの指示だけを解く (種類の違う相手・無い相手を指す
-///   解く指示は当てない、04 §7.5 の「解く指示の相手」)。どちらも時点に依らず常に効く。
-/// - 知らない `op` の指示は当てずに数える ([`DirectiveSet::unknown`])。
+/// - `private_off` は private の指示だけを、`unblock` は忘れるの指示だけを解く (種類の違う相手・無い相手・相手より
+///   ID の小さい解く指示は当てない、04 §7.5 の「解く指示の相手」)。どちらも時点に依らず常に効く。
+/// - 知らない `op` の指示と、項目を欠いて当てない指示は数える ([`DirectiveSet::counts`])。
 #[derive(Debug, Clone)]
 pub struct DirectiveSet {
     forgets: Vec<Forget>,
@@ -536,38 +641,42 @@ pub struct DirectiveSet {
     adoptions: Vec<Adoption>,
     ends: Vec<End>,
     redactions: TurnRedactions,
-    unknown: usize,
-    unmatched_cancels: usize,
+    counts: DirectiveCounts,
 }
 
 impl DirectiveSet {
-    /// 指示の (ID, 本体) から作る。`redaction_marker` は伏せ字の印 (位置の写し直しに使う。データ根のプロンプトの
-    /// 言語の印、04 §7.3)。
+    /// 指示の (ID, 本体) から作る。
+    ///
+    /// `redaction_marker` は伏せ字の印 (位置の写し直しに使う。データ根のプロンプトの言語の印、04 §7.3)。`resolve` は
+    /// 今の規則で呼び名を解く関数 (主語を明示する語なら `self`、04 §5.1)。指示の entity と別名は、書いたときの形と
+    /// `resolve` で解き直した形の両方で比べる (§7.6)。
     #[must_use]
     pub fn new(
         directives: impl IntoIterator<Item = (Id, DirectiveBody)>,
         redaction_marker: &str,
+        resolve: impl Fn(&str) -> String,
     ) -> Self {
+        let resolve: &dyn Fn(&str) -> String = &resolve;
         let all: BTreeMap<Id, DirectiveBody> = directives.into_iter().collect();
+        let mut counts = DirectiveCounts::default();
         let mut unblocks: BTreeMap<Id, Id> = BTreeMap::new();
         let mut cancelled: BTreeSet<Id> = BTreeSet::new();
-        let mut unknown = 0;
-        let mut unmatched_cancels = 0;
         for (&id, b) in &all {
             let wanted = match b.op() {
                 DirectiveOp::Unblock => DirectiveOp::Forget,
                 DirectiveOp::PrivateOff => DirectiveOp::Private,
                 DirectiveOp::Unknown => {
-                    unknown += 1;
+                    counts.unknown += 1;
                     continue;
                 }
                 _ => continue,
             };
+            // 解く指示は、相手より後に足したものだけ (時計が戻ったとき、忘れる自身の根拠まで解けないため)。
             let Some(target) = b
                 .target
-                .filter(|t| all.get(t).is_some_and(|t| t.op() == wanted))
+                .filter(|t| *t < id && all.get(t).is_some_and(|t| t.op() == wanted))
             else {
-                unmatched_cancels += 1;
+                counts.unmatched_cancels += 1;
                 continue;
             };
             if wanted == DirectiveOp::Forget {
@@ -590,26 +699,93 @@ impl DirectiveSet {
                     .map(|(id, b)| (*id, b)),
                 redaction_marker,
             ),
-            unknown,
-            unmatched_cancels,
+            counts,
         };
         for (&id, b) in &all {
-            match b.op() {
+            let op = b.op();
+            if matches!(
+                op,
+                DirectiveOp::Unknown | DirectiveOp::Unblock | DirectiveOp::PrivateOff
+            ) {
+                continue;
+            }
+            let (vks, readable) = parse_vks(&b.vks);
+            if !readable {
+                out.counts.unreadable_keys += 1;
+            }
+            if b.norm.is_some_and(|n| n != NORM_V1) {
+                out.counts.other_norm += 1;
+            }
+            match op {
                 DirectiveOp::Forget => {
-                    let mut f = Forget::new(id, b);
+                    let mut f = Forget::new(id, b, vks, resolve);
                     f.unblocked = unblocks.get(&id).copied();
                     out.forgets.push(f);
                 }
-                DirectiveOp::Private if !cancelled.contains(&id) => {
-                    out.privates.push(Private::new(id, b));
+                DirectiveOp::Private => {
+                    if !cancelled.contains(&id) {
+                        out.privates.push(Private::new(id, b, vks, resolve));
+                    }
                 }
-                DirectiveOp::Accept => out.adoptions.push(Adoption::new(id, AdoptOp::Accept, b)),
-                DirectiveOp::Revert => out.adoptions.push(Adoption::new(id, AdoptOp::Revert, b)),
-                DirectiveOp::End => out.ends.push(End::new(id, b)),
+                DirectiveOp::Accept | DirectiveOp::Revert | DirectiveOp::End => {
+                    out.push_event(id, op, b, vks, resolve);
+                }
                 _ => {}
             }
         }
         out
+    }
+
+    /// `end`・採る・戻すを足す。entity か属性を欠くものは当てずに数える (採りすぎ・終えすぎにしないため)。
+    fn push_event(
+        &mut self,
+        id: Id,
+        op: DirectiveOp,
+        b: &DirectiveBody,
+        vks: BTreeSet<ValueKey>,
+        resolve: &dyn Fn(&str) -> String,
+    ) {
+        let aspect = DirectiveAspect::of(b);
+        // `end` は生の文字列を今の規則で解き直す (04 §7.4)。書いたときの正規化した entity も同値類に入れる。
+        let raw = if op == DirectiveOp::End {
+            b.entity_raw.as_deref().or(b.entity.as_deref())
+        } else {
+            b.entity.as_deref()
+        };
+        let (Some(raw), false) = (raw, aspect == DirectiveAspect::Missing) else {
+            self.counts.incomplete += 1;
+            return;
+        };
+        let mut entity = EntityClass::of(raw, &b.aliases, resolve);
+        if let Some(e) = b.entity.as_deref() {
+            let more = EntityClass::of(e, &[], resolve);
+            entity.v1.extend(more.v1);
+            entity.loose.extend(more.loose);
+        }
+        match op {
+            DirectiveOp::End => self.ends.push(End {
+                id,
+                vks,
+                entity,
+                aspect,
+                turn: b.turn,
+                cause: b.cause,
+                origin: b.origin(),
+            }),
+            _ => self.adoptions.push(Adoption {
+                id,
+                op: if op == DirectiveOp::Accept {
+                    AdoptOp::Accept
+                } else {
+                    AdoptOp::Revert
+                },
+                vks,
+                entity,
+                aspect,
+                at: b.at,
+                imported: b.imported,
+            }),
+        }
     }
 
     /// 忘れるの指示 (印を解いたものを含む。指示の ID の順)。台帳の掃除は、印を解いた指示も根拠のターンで当て続ける。
@@ -642,24 +818,30 @@ impl DirectiveSet {
         &self.redactions
     }
 
-    /// 知らない `op` の指示の数 (当てずに残す。`doctor` が報告する、04 §7.5)。
+    /// 当てずに数えた指示の数。
     #[must_use]
-    pub fn unknown(&self) -> usize {
-        self.unknown
-    }
-
-    /// 相手を見つけられなかった解く指示 (`private_off`・`unblock`) の数。
-    #[must_use]
-    pub fn unmatched_cancels(&self) -> usize {
-        self.unmatched_cancels
+    pub fn counts(&self) -> DirectiveCounts {
+        self.counts
     }
 
     /// 関門 8 (`forgotten`、04 §5.2) と当て方の述語 (§7.5): 相手に当たる忘れるの指示のうち、ID の最も小さいもの。
-    /// 当たれば相手を黙って捨てて数える (§7.6)。訂正の新しい値と戻す値にも、同じ関数で当てる (§7.5 の「忘れるの
-    /// 指示と訂正・戻す」)。
+    /// 当たれば相手を黙って捨てて数える (§7.6)。戻す値 (採る・戻すで今の値にする単位) にも同じ関数を使う。訂正の
+    /// 新しい値と古い値は [`DirectiveSet::forgotten_correction`] で当てる。
     #[must_use]
     pub fn forgotten_by(&self, p: &Probe<'_>) -> Option<Id> {
         self.forgets.iter().find(|f| f.hits(p)).map(Forget::id)
+    }
+
+    /// 訂正の関門の `forgotten` (04 §6 の「判定の入力」): 検証済みになる結果の `old`・`new` の値の鍵と照合の鍵の
+    /// どれかが、どれかの忘れるの指示の `vks` にあれば、その指示 (ID の最も小さいもの)。entity と属性は問わない
+    /// (忘れた値を訂正で戻さないため。関門 8 より広い側)。印を解いた指示は、候補の発話のターン `turn` が `unblock`
+    /// の指示の ID より前のときだけ当てる。
+    #[must_use]
+    pub fn forgotten_correction(&self, values: &[ValueKeys], turn: Id) -> Option<Id> {
+        self.forgets
+            .iter()
+            .find(|f| f.applies_at(turn) && values.iter().any(|v| v.any_in(&f.vks)))
+            .map(Forget::id)
     }
 
     /// 単位に当たる private の指示のうち、ID の最も小さいものと理由 (04 §7.5)。当たれば単位に private の印を付ける。
@@ -670,15 +852,17 @@ impl DirectiveSet {
             .find_map(|p| p.hits(u, &self.redactions).map(|h| (p.id, h)))
     }
 
-    /// 区切りの鍵 `text` を、private の値で導出の時点で除くか (04 §5.5): 語句か部分文字列の値の鍵か照合の鍵が、
-    /// 効いている private の指示の `vks` に当たるとき。
+    /// 区切りの鍵を、private の値で導出の時点で除くか (04 §5.5): 鍵の語句か部分文字列の値の鍵か照合の鍵
+    /// (`key_substrings`、[`SubstringKeys`]) が、効いている private の指示の `vks` か、導出で private の印を付けた
+    /// 単位の値の鍵と照合の鍵 (`private_units`。後継・根拠の位置で private になった値を含む) に当たるとき。
     #[must_use]
-    pub fn screens_key(&self, key: &ForgetKey, text: &str) -> bool {
-        if self.privates.is_empty() {
-            return false;
-        }
-        let keys = substring_keys(key, text);
-        self.privates.iter().any(|p| p.screens(&keys))
+    pub fn screens_key(
+        &self,
+        key_substrings: &SubstringKeys,
+        private_units: &BTreeSet<ValueKey>,
+    ) -> bool {
+        key_substrings.hits(private_units)
+            || self.privates.iter().any(|p| key_substrings.hits(&p.vks))
     }
 
     /// 畳みの列に混ぜる指示 (採る・戻す・`end`) を、列の位置の順に並べたもの (04 §5.3 の「入力の順」)。
@@ -692,7 +876,7 @@ impl DirectiveSet {
                     Slot {
                         at: a.id,
                         phase: Phase::Candidates,
-                        directive: a.id,
+                        directive: Some(a.id),
                     },
                     Timed::Adopt(a),
                 )
@@ -702,7 +886,7 @@ impl DirectiveSet {
                     Slot {
                         at: e.position(),
                         phase: Phase::AfterCandidates,
-                        directive: e.id,
+                        directive: Some(e.id),
                     },
                     Timed::End(e),
                 )
@@ -714,414 +898,4 @@ impl DirectiveSet {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::directive::DirectiveRedaction;
-    use crate::value_key::aspect_key;
-
-    const K: ForgetKey = ForgetKey::from_bytes_const([3; 32]);
-    const M: &str = "[伏せ字]";
-
-    /// 時刻の順に並ぶ ID (UUID v7 の形でなくても、バイト列の順で比べられればよい)。
-    fn id(n: u64) -> Id {
-        let mut b = [0u8; 16];
-        b[8..].copy_from_slice(&n.to_be_bytes());
-        Id::from_bytes(b)
-    }
-
-    fn mac(aspect: &str) -> String {
-        aspect_key(&K, aspect).to_hex()
-    }
-
-    fn forget(entity: &str, aspect: ProbeAspect<'_>, value: &str) -> DirectiveBody {
-        let mut b = DirectiveBody::new(DirectiveOp::Forget);
-        b.entity = Some(entity.to_owned());
-        match aspect {
-            ProbeAspect::Dict { name, .. } => b.aspect = Some(name.to_owned()),
-            ProbeAspect::Free { mac } => b.aspect_mac = Some(mac.to_owned()),
-        }
-        b.vks = ValueKeys::of(&K, value).to_hex();
-        b
-    }
-
-    fn cancel(op: DirectiveOp, target: Id) -> DirectiveBody {
-        let mut b = DirectiveBody::new(op);
-        b.target = Some(target);
-        b
-    }
-
-    fn dict(name: &str) -> ProbeAspect<'_> {
-        ProbeAspect::Dict {
-            name,
-            was_free: None,
-        }
-    }
-
-    fn probe<'a>(entity: &str, aspect: ProbeAspect<'a>, value: &str, turn: u64) -> Probe<'a> {
-        Probe::new(entity, aspect, ValueKeys::of(&K, value), id(turn))
-    }
-
-    fn set(ds: Vec<(u64, DirectiveBody)>) -> DirectiveSet {
-        DirectiveSet::new(ds.into_iter().map(|(n, b)| (id(n), b)), M)
-    }
-
-    /// verifies: 04 §7.5 (当て方の述語。値の鍵か照合の鍵・entity の同値類・辞書の属性どうしは属性も比べる)、§5.2 の関門 8
-    #[test]
-    fn the_forget_predicate_compares_keys_entity_and_dictionary_attribute() {
-        let s = set(vec![(10, forget("self", dict("residence"), "7月22日"))]);
-        let hit = |p: &Probe<'_>| s.forgotten_by(p);
-        // 同じ値・照合の形だけが違う値 (漢字に接する空白)・全角。
-        assert_eq!(
-            hit(&probe("self", dict("residence"), "7月22日", 1)),
-            Some(id(10))
-        );
-        assert_eq!(
-            hit(&probe("self", dict("residence"), "7 月 22 日", 1)),
-            Some(id(10))
-        );
-        assert_eq!(
-            hit(&probe("self", dict("residence"), "７月２２日", 20)),
-            Some(id(10))
-        );
-        // 別の辞書の属性の同じ値には当たらない。
-        assert_eq!(hit(&probe("self", dict("birthday"), "7月22日", 1)), None);
-        // 自由記述の属性の相手には、辞書の属性の指示も属性を見ずに当てる。
-        let m = mac("記念日");
-        assert_eq!(
-            hit(&probe("self", ProbeAspect::Free { mac: &m }, "7月22日", 1)),
-            Some(id(10))
-        );
-        // 別の entity には当たらない。
-        assert_eq!(hit(&probe("妻", dict("residence"), "7月22日", 1)), None);
-        // 違う値には当たらない (英数字の間の空白の違いは同じ値とみなさない、§7.8)。
-        assert_eq!(hit(&probe("self", dict("residence"), "7月23日", 1)), None);
-    }
-
-    /// verifies: 04 §7.5 (自由記述の属性の指示は属性を見ない)、§7.6
-    #[test]
-    fn a_free_attribute_forget_ignores_the_attribute() {
-        let m = mac("よく行く店");
-        let s = set(vec![(
-            10,
-            forget("self", ProbeAspect::Free { mac: &m }, "喫茶ミモザ"),
-        )]);
-        let other = mac("行きつけの喫茶店");
-        assert!(
-            s.forgotten_by(&probe(
-                "self",
-                ProbeAspect::Free { mac: &other },
-                "喫茶ミモザ",
-                1
-            ))
-            .is_some()
-        );
-        assert!(
-            s.forgotten_by(&probe("self", dict("likes"), "喫茶ミモザ", 1))
-                .is_some()
-        );
-        assert!(
-            s.forgotten_by(&probe("self", dict("likes"), "喫茶ミモザのナポリタン", 1))
-                .is_none()
-        );
-    }
-
-    /// verifies: 04 §7.6 (entity の同値類: 正規化 v1 か照合の形で同じ呼び名と別名)
-    #[test]
-    fn the_entity_class_covers_normalized_names_and_aliases() {
-        let mut b = forget("田中 さん", dict("hobby"), "将棋");
-        b.aliases = vec!["課長".to_owned()];
-        let s = set(vec![(10, b)]);
-        assert!(
-            s.forgotten_by(&probe("田中さん", dict("hobby"), "将棋", 1))
-                .is_some()
-        );
-        assert!(
-            s.forgotten_by(&probe("ＴＡＮＡＫＡ", dict("hobby"), "将棋", 1))
-                .is_none()
-        );
-        assert!(
-            s.forgotten_by(&probe("課長", dict("hobby"), "将棋", 1))
-                .is_some()
-        );
-        // entity の無い (壊れた) 指示は、安全の側に倒してどの entity にも当てる。
-        let mut broken = forget("self", dict("hobby"), "囲碁");
-        broken.entity = None;
-        let s = set(vec![(10, broken)]);
-        assert!(
-            s.forgotten_by(&probe("妻", dict("hobby"), "囲碁", 1))
-                .is_some()
-        );
-    }
-
-    /// verifies: 04 §7.5 (unblock は根拠のターンの ID で決める。解く相手の種類が違えば当てない)
-    #[test]
-    fn unblock_releases_only_later_evidence() {
-        let s = set(vec![
-            (10, forget("self", dict("name"), "ハッカ")),
-            (20, cancel(DirectiveOp::Unblock, id(10))),
-        ]);
-        assert_eq!(s.forgets()[0].unblocked(), Some(id(20)));
-        assert!(
-            s.forgotten_by(&probe("self", dict("name"), "ハッカ", 15))
-                .is_some()
-        );
-        assert!(
-            s.forgotten_by(&probe("self", dict("name"), "ハッカ", 25))
-                .is_none()
-        );
-        // 2 つ目の unblock があっても、最も早い unblock で決める。
-        let s = set(vec![
-            (10, forget("self", dict("name"), "ハッカ")),
-            (30, cancel(DirectiveOp::Unblock, id(10))),
-            (20, cancel(DirectiveOp::Unblock, id(10))),
-        ]);
-        assert_eq!(s.forgets()[0].unblocked(), Some(id(20)));
-        // private_off は忘れるを解かない。unblock は private を解かない。無い相手も数えるだけ。
-        let mut p = forget("self", dict("name"), "ハッカ");
-        p.op = "private".to_owned();
-        let s = set(vec![
-            (10, forget("self", dict("name"), "ハッカ")),
-            (11, p),
-            (20, cancel(DirectiveOp::PrivateOff, id(10))),
-            (21, cancel(DirectiveOp::Unblock, id(11))),
-            (22, cancel(DirectiveOp::Unblock, id(99))),
-        ]);
-        assert_eq!(s.forgets()[0].unblocked(), None);
-        assert_eq!(s.privates().len(), 1);
-        assert_eq!(s.unmatched_cancels(), 3);
-    }
-
-    fn private(value: &str, scope: PrivateScope, at: Option<TurnSpan>) -> DirectiveBody {
-        let mut b = forget("self", dict("dietary"), value);
-        b.op = "private".to_owned();
-        b.scope = Some(scope.name().to_owned());
-        b.at = at;
-        b
-    }
-
-    fn span(turn: u64, rev: u32, start: u32, end: u32) -> TurnSpan {
-        TurnSpan {
-            turn: id(turn),
-            rev,
-            start,
-            end,
-        }
-    }
-
-    /// verifies: 04 §7.5 (private は vks か根拠の位置で当たり、「後継まで」は後に言われた同じ (entity, 辞書の属性) の値にも当たる。private_off で解く)
-    #[test]
-    fn private_hits_by_value_position_and_successor() {
-        let s = set(vec![(
-            10,
-            private("くるみ", PrivateScope::Successors, Some(span(1, 0, 0, 9))),
-        )]);
-        let unit = |value: &str, turn: u64, anchors: &[TurnSpan]| {
-            let p = probe("self", dict("dietary"), value, turn);
-            s.private_hit(&UnitProbe { probe: &p, anchors })
-        };
-        assert_eq!(
-            unit("くるみ", 1, &[span(1, 0, 0, 9)]),
-            Some((id(10), PrivateHit::Value))
-        );
-        // 値の鍵が違っても根拠の位置で当たる。
-        assert_eq!(
-            unit("胡桃", 1, &[span(1, 0, 0, 9)]),
-            Some((id(10), PrivateHit::Position))
-        );
-        // 範囲が違えば位置では当たらない (取り込んでいない指示はちょうど同じ範囲だけ)。
-        assert_eq!(unit("胡桃", 1, &[span(1, 0, 0, 6)]), None);
-        // 指示の後に言われた同じ属性の値は後継。前に言われた値は当たらない。
-        assert_eq!(
-            unit("えび", 30, &[span(30, 0, 0, 6)]),
-            Some((id(10), PrivateHit::Successor))
-        );
-        assert_eq!(unit("えび", 5, &[span(5, 0, 0, 6)]), None);
-        // 「この値だけ」は後継に当たらない。
-        let only = set(vec![(10, private("くるみ", PrivateScope::ValueOnly, None))]);
-        let p = probe("self", dict("dietary"), "えび", 30);
-        assert_eq!(
-            only.private_hit(&UnitProbe {
-                probe: &p,
-                anchors: &[]
-            }),
-            None
-        );
-        // private_off で解く。
-        let off = set(vec![
-            (10, private("くるみ", PrivateScope::Successors, None)),
-            (20, cancel(DirectiveOp::PrivateOff, id(10))),
-        ]);
-        assert!(off.privates().is_empty());
-    }
-
-    /// verifies: 04 §7.5 (取り込んだ指示の位置は範囲が重なれば当たる)、§7.3 (根拠の位置は後の伏せ字で写して比べる)
-    #[test]
-    fn positions_follow_later_redactions_and_imported_positions_overlap() {
-        // ターン 1 の本文 "abc secret def くるみ" の "secret" (4..10) を後の忘れるで伏せ字にした。
-        let text = "abc secret def くるみ";
-        let (r, _) = evorag_store::forget::Redaction::plan(text, 0, std::iter::once(4..10), M)
-            .expect("plan");
-        let mut f = forget("self", dict("hobby"), "secret");
-        f.redactions = vec![DirectiveRedaction {
-            turn: id(1),
-            rev_before: 0,
-            rev_after: 1,
-            start: 4,
-            end: 10,
-            hash: r.hash().to_string(),
-        }];
-        let kurumi = u32::try_from(text.find("くるみ").expect("in text")).expect("fits");
-        let at = span(1, 0, kurumi, kurumi + 9);
-        let s = set(vec![
-            (5, private("胡桃", PrivateScope::ValueOnly, Some(at))),
-            (10, f),
-        ]);
-        // 伏せ字の後の本文での位置 ("secret" の 6 バイトが印に替わった分だけずれる)。
-        let shift = u32::try_from(M.len()).expect("fits") - 6;
-        let after = span(1, 1, kurumi + shift, kurumi + shift + 9);
-        let p = probe("self", dict("dietary"), "くるみ", 1);
-        assert_eq!(
-            s.private_hit(&UnitProbe {
-                probe: &p,
-                anchors: &[after]
-            }),
-            Some((id(5), PrivateHit::Position))
-        );
-        // 取り込んだ指示は、写した後の範囲が重なれば当たる。
-        let mut imported = private(
-            "胡桃",
-            PrivateScope::ValueOnly,
-            Some(span(1, 0, kurumi - 2, kurumi + 3)),
-        );
-        imported.imported = true;
-        let s = set(vec![(5, imported)]);
-        assert_eq!(
-            s.private_hit(&UnitProbe {
-                probe: &p,
-                anchors: &[span(1, 0, kurumi, kurumi + 9)]
-            }),
-            Some((id(5), PrivateHit::Position))
-        );
-    }
-
-    /// verifies: 04 §7.4 (end は entity を解き直し、同じ組の vks に当たる値だけを終える。辞書の写しの前の鍵とも比べる)
-    #[test]
-    fn end_hits_its_group_and_the_value_keys_only() {
-        let free = mac("住まい");
-        let mut e = forget("self", ProbeAspect::Free { mac: &free }, "港町");
-        e.op = "end".to_owned();
-        e.entity_raw = Some("私".to_owned());
-        e.turn = Some(id(7));
-        let s = set(vec![(10, e)]);
-        let end = &s.ends()[0];
-        assert_eq!(end.position(), id(7));
-        let resolve = |raw: &str| {
-            if raw == "私" {
-                "self".to_owned()
-            } else {
-                normalize_v1(raw)
-            }
-        };
-        let written = probe("self", ProbeAspect::Free { mac: &free }, "港町", 1);
-        assert!(end.hits(&written, resolve));
-        // 辞書の版を上げて写った後も、写す前の鍵で当たる。
-        let mapped = probe(
-            "self",
-            ProbeAspect::Dict {
-                name: "residence",
-                was_free: Some(&free),
-            },
-            "港町",
-            1,
-        );
-        assert!(end.hits(&mapped, resolve));
-        // 兄弟の値と、別の組には当たらない。
-        assert!(!end.hits(
-            &probe("self", ProbeAspect::Free { mac: &free }, "山町", 1),
-            resolve
-        ));
-        assert!(!end.hits(&probe("self", dict("residence"), "港町", 1), resolve));
-        // 生の文字列を解き直さない規則では当たらない (解き直すことが効いている)。
-        assert!(!end.hits(&written, |raw: &str| normalize_v1(raw)));
-    }
-
-    /// verifies: 04 §5.3 (採る・戻すは指示の ID の位置に、end は終えた位置のターンの候補の後に混ぜる)、§7.5
-    #[test]
-    fn the_timeline_orders_adoptions_and_ends() {
-        let mut accept = forget("self", dict("residence"), "東京");
-        accept.op = "accept".to_owned();
-        let mut end_at_turn = forget("self", dict("residence"), "大阪");
-        end_at_turn.op = "end".to_owned();
-        end_at_turn.turn = Some(id(5));
-        let mut end_self = end_at_turn.clone();
-        end_self.turn = None;
-        let s = set(vec![(30, end_self), (20, accept), (40, end_at_turn)]);
-        let order: Vec<(Id, Phase)> = s
-            .timeline()
-            .iter()
-            .map(|(sl, _)| (sl.at, sl.phase))
-            .collect();
-        assert_eq!(
-            order,
-            [
-                (id(5), Phase::AfterCandidates),
-                (id(20), Phase::Candidates),
-                (id(30), Phase::AfterCandidates),
-            ]
-        );
-        // 採る・戻すは根拠の位置を先に、無ければ値の鍵で同じ組に当てる。
-        let a = &s.adoptions()[0];
-        let p = probe("self", dict("residence"), "東京", 1);
-        assert_eq!(
-            a.hits(
-                &UnitProbe {
-                    probe: &p,
-                    anchors: &[]
-                },
-                s.redactions()
-            ),
-            Some(AdoptHit::Value)
-        );
-        let other = probe("self", dict("hometown"), "東京", 1);
-        assert_eq!(
-            a.hits(
-                &UnitProbe {
-                    probe: &other,
-                    anchors: &[]
-                },
-                s.redactions()
-            ),
-            None
-        );
-    }
-
-    /// verifies: 04 §5.5 (private の vks に語句か部分文字列が当たる区切りの鍵を導出の時点で除く)
-    #[test]
-    fn private_screens_keys_by_substrings() {
-        let s = set(vec![(
-            10,
-            private("くるみ", PrivateScope::Successors, None),
-        )]);
-        assert!(s.screens_key(&K, "くるみの代わり"));
-        assert!(!s.screens_key(&K, "食べられないもの"));
-        assert!(!set(vec![]).screens_key(&K, "くるみの代わり"));
-    }
-
-    /// verifies: 04 §7.5 (知らない op は当てずに数える。入力の順に依らない)
-    #[test]
-    fn the_set_is_order_independent_and_counts_unknown_ops() {
-        let mut unknown = forget("self", dict("hobby"), "将棋");
-        unknown.op = "pin".to_owned();
-        let ds = vec![
-            (10, forget("self", dict("hobby"), "将棋")),
-            (20, cancel(DirectiveOp::Unblock, id(10))),
-            (30, unknown),
-        ];
-        let mut rev = ds.clone();
-        rev.reverse();
-        let (a, b) = (set(ds), set(rev));
-        assert_eq!(a.forgets(), b.forgets());
-        assert_eq!(a.unknown(), 1);
-        assert_eq!(b.unknown(), 1);
-    }
-}
+mod tests;

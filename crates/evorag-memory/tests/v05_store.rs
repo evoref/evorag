@@ -167,6 +167,7 @@ fn ledger_for(segment: Id, u1: Id, u2: Id, status: LedgerStatus) -> LedgerBody {
                 rev: 0,
                 start: 0,
                 end: 42,
+                extra: Default::default(),
             },
             SentenceSpan {
                 s: 2,
@@ -174,6 +175,7 @@ fn ledger_for(segment: Id, u1: Id, u2: Id, status: LedgerStatus) -> LedgerBody {
                 rev: 0,
                 start: 0,
                 end: 39,
+                extra: Default::default(),
             },
         ],
         inputs: LedgerInputs {
@@ -187,12 +189,14 @@ fn ledger_for(segment: Id, u1: Id, u2: Id, status: LedgerStatus) -> LedgerBody {
             through: Some(Through { turn: u2, pairs: 2 }),
             corr: Vec::new(),
             refs: Vec::new(),
+            extra: Default::default(),
         },
         output,
         status: status.name().unwrap().into(),
         attempts: 0,
         tokens: LedgerTokens::default(),
         scrubbed: 0,
+        extra: Default::default(),
     }
 }
 
