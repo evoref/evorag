@@ -8,7 +8,7 @@ use evorag_llm::{HttpClient, LlmClient};
 use evorag_memory::ModelProbeBody;
 use evorag_store::OpenError;
 use evorag_store::inspect::{DbState, inspect_collect};
-use evorag_store::restore::{BackupKind, list_backups as backups_of};
+use evorag_store::restore::BackupKind;
 use evorag_tui::catalog::Catalog;
 use evorag_types::MessageKey;
 
@@ -325,7 +325,9 @@ pub fn probe_lines(c: &Catalog, role: &str, p: &ModelProbeBody) -> Vec<String> {
 }
 
 pub fn list_backups(c: &Catalog, data_root: &Path, backup_dir: Option<&Path>) -> ExitCode {
-    let list = backups_of(data_root, backup_dir);
+    // この根の退避と、ID の分からない退避 (`storage.backup_dir` を共有するほかの根の退避は出さない、03 §7.1)。
+    let owner = evorag_store::restore::BackupOwner::of(data_root, None);
+    let list = evorag_store::restore::restore_candidates(data_root, backup_dir, &owner);
     if list.is_empty() {
         say(c, MessageKey::BackupsNone, &[]);
     }
@@ -338,9 +340,14 @@ pub fn list_backups(c: &Catalog, data_root: &Path, backup_dir: Option<&Path>) ->
         let seq = b
             .journal_seq
             .map_or_else(|| "-".to_owned(), |s| s.to_string());
+        let key = if b.data_root_id.is_some() {
+            MessageKey::BackupsItem
+        } else {
+            MessageKey::BackupsItemUnknownRoot
+        };
         say(
             c,
-            MessageKey::BackupsItem,
+            key,
             &[
                 ("kind", kind),
                 ("dir", &b.dir.display().to_string()),

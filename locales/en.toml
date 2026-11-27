@@ -304,6 +304,7 @@ dot = ", "
 sentence = "; "
 
 [cli]
+import_pending = "The data root is missing and an import-v04 swap is unfinished ({new}). No new root was created. Start evorag or run evorag import-v04 to finish the swap."
 model_mismatch = """The reply model differs from the model recorded for this data root.
   Recorded model:  {recorded}
   Connected model: {connected}
@@ -474,6 +475,8 @@ update_check = "Check whether a new version is available (changes nothing)"
 update_apply = "Download a new version, verify its signature, then replace this one (the current version is kept as evorag.prev)"
 update_apply_version = "The version to install (if omitted, the newest version)"
 update_rollback = "Go back to evorag.prev (no network access)"
+import_v04 = "Import a v0.4 data root into a new data root, and keep the old root renamed to <name>-v0.4-<time>"
+import_v04_from = "The v0.4 data root to import (default: the current data root)"
 
 [cli.update]
 up_to_date = "No new version is available (the current version {current} is the newest)."
@@ -699,12 +702,61 @@ index_rebuild = "Lexical index: cannot be read ({detail}). It is rebuilt from th
 probe_issues = "Problems: {issues}."
 
 [backups]
+item_unknown_root = "{kind}  {dir}  (journal sequence {seq}, unknown data root)"
 item = "{kind}  {dir}  (journal sequence {seq})"
 none = "There are no backups."
 purge_ask = "All backups ({count}: daily, weekly, and those taken before migrations and rebuilds) will be deleted. You will no longer be able to restore from them. Delete them?"
 purge_declined = "Nothing was deleted."
 purged = "Backups deleted: {count}."
 purge_failed = "Backups deleted: {count}, but some could not be deleted: {detail}"
+
+[import_v04]
+rename_not_undone = "The swap could not undo a rename ({detail}). The data root is at {left}. Close the other evorag, then run evorag import-v04 again (it continues where it stopped). The old root was not deleted."
+original_missing = "The data root {root} is missing, so the new root {new} was left alone. Put the old root back at {root}, then run the command again."
+both_roots = "Both {root} and {renamed} exist, so it is unclear which one is the old root to import. Nothing was changed. Check which root v0.4 used, move the other one elsewhere, then run the command again."
+other_root = "{root} is a different data root from the source of the new root {new}, so nothing was changed. Check what {root} is, then put the old root back at {root} or move {new} elsewhere, and run the command again."
+original_unreadable = "The database of {root} cannot be read, so it is unclear whether it is the old root to import. Nothing was changed. Open {root} once with evorag v0.4 and quit, then run the command again."
+damaged_leftover = "{path} is left over, but its database cannot be read or its journal is missing, so it was left alone. The old root is unchanged. Check what is in {path} and move it elsewhere, then run the command again."
+new_root_used = "The imported new root {new} was written after it was verified, and the old root changed too, so neither was deleted. Decide which conversations to keep, move the other root elsewhere, then run the command again."
+foreign_source = "The import source recorded in {new} does not belong to this data root, so nothing was changed. Move {new} elsewhere, then run the command again."
+ask = "The v0.4 data root {old} will be imported into a new data root. Nothing is written to the old root. If the import verifies, the old root is renamed to {renamed} and kept, and the new root is put at {root} (the configuration is not changed). Import it?"
+ask_redo = "The new root {new} from an earlier import cannot be used, so it is deleted and the import is redone."
+ask_continue = "The new root {new} from an earlier import has been verified. Continue the interrupted swap (rename the old root {old} to {renamed} and keep it, and put the new root at {root})?"
+declined = "Nothing was imported. Nothing was changed."
+started = "Importing. The old root is only read."
+done = "Imported. The new data root is {root}.\nThe old root was renamed to {renamed} and kept (to go back to v0.4, point --data-root at that folder).\nRecords copied: {copied} (directives: {directives}), records left out: {excluded}."
+continued = "The interrupted swap is finished. The new data root is {root}, and the old root is {renamed}."
+refused = "The data root cannot be imported: {reason}\n{next}\nNothing was written to the old root (except the lock files)."
+mismatch = "The new root did not verify, so it was deleted: {detail}\nThe old root is unchanged. Run evorag import-v04 again. If it keeps failing, check the old root with evorag doctor of v0.4."
+leftover = "{path} is left over, but it holds files evorag did not make, or it does not belong to the root being imported, so it was left alone. Check what is in it and move it elsewhere, then run the command again."
+old_root_missing = "The source {path} of the verified new root {new} cannot be found, so the swap cannot continue. Put the old root back at {path}, then run the command again."
+rename_failed = "The swap could not rename a data root: {detail}\nThe old root was not deleted. The next start of evorag, or running evorag import-v04 again, continues where it stopped."
+rename_gap = "Another process opened or wrote a data root while it was being renamed, so the rename was undone ({detail}).\nClose the other evorag, then run evorag import-v04 again."
+not_removed = "The unfinished new root {path} could not be deleted: {detail}\nThe old root is unchanged. Check that no other program has its files open, then run the command again."
+resumed_at_startup = "The interrupted import-v04 swap is finished. The new data root is {root}, and the old root is {renamed}."
+removed_unfinished_at_startup = "The unfinished new root {new} of an interrupted import-v04 was deleted. The old root is unchanged. Run evorag import-v04 to import it."
+removed_stale_at_startup = "The old root was used after import-v04, so the imported new root was deleted and the old root was put back at {root}. Run evorag import-v04 to import it again."
+
+[import_v04.reason]
+link = "{path} is a link (a symbolic link or a junction)"
+mount_point = "{path} is a mount point (it cannot be renamed)"
+non_unicode = "the path {path} has characters that are not valid Unicode"
+not_data_root = "{path} is not an evorag data root"
+not_opened_by_v04 = "the root was not opened by evorag v0.4 (format {format}, last written by {writer})"
+newer_format = "the data root is already in the new format ({format})"
+forget_pending = "a forget has not been applied to the root yet"
+journal_pending = "the journal has lines not yet in the database, or an unfinished write ({lines} lines)"
+forget_key = "the forget key (memory.forget_key) cannot be used"
+unfinished = "the last v0.4 run did not close the root cleanly ({detail})"
+unreadable = "the data root cannot be read ({detail})"
+
+[import_v04.next]
+real_folder = "Set --from (and --data-root or storage.data_root) to the real folder the link points to, then run evorag import-v04 again."
+move_into_folder = "Move the data root into an ordinary folder under the mount point, point --data-root (or storage.data_root) at it, then run evorag import-v04 again."
+check_path = "Check the path of the data root to import (--from sets it)."
+open_once_with_v04 = "Start evorag v0.4 once and quit it, then run evorag import-v04 again."
+repair_with_v04 = "Check the root with evorag doctor (and evorag repair) of v0.4, then run evorag import-v04 again."
+nothing = "No import is needed."
 
 [notice]
 low_space = "Background work such as backups has stopped because there is not enough free space ({free} MiB free, {need} MiB needed). You can keep chatting. Free up space, then restart evorag."

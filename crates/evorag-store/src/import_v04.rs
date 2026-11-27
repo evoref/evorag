@@ -115,6 +115,15 @@ pub enum Refusal {
     /// DB・`meta`・記録を読めない。
     #[error("the data root cannot be read ({what})")]
     Unreadable { what: String },
+    /// 古い根のパスがシンボリックリンク・ジャンクション (新しい根がリンクの親の側に作られ、置き場所が黙って移るため)。
+    #[error("{} is a link", path.display())]
+    Link { path: PathBuf },
+    /// 古い根がマウントポイント (改名できないため。Unix で、親のフォルダとファイルシステムが違う)。
+    #[error("{} is a mount point", path.display())]
+    MountPoint { path: PathBuf },
+    /// 古い根のパスが Unicode として読めない (`import.source` に改名の後のパスをそのまま書けないため)。
+    #[error("the path {} is not valid Unicode", path.display())]
+    NonUnicodePath { path: PathBuf },
 }
 
 fn journal_why(lines: usize, partial_tail: bool, rewrite_leftover: bool) -> String {
@@ -143,6 +152,10 @@ pub enum NextStep {
     RepairWithV04,
     /// 取り込みは要らない (もう新しい形式の根)。
     NothingToImport,
+    /// リンクの先の実際のフォルダを、`--from` (と `--data-root`・`storage.data_root`) に指す。
+    PointAtRealFolder,
+    /// データ根を、マウントポイントの下のふつうのフォルダへ移してから取り込む。
+    MoveIntoFolder,
 }
 
 impl Refusal {
@@ -157,8 +170,46 @@ impl Refusal {
             | Refusal::Unfinished { .. } => NextStep::OpenOnceWithV04,
             Refusal::ForgetKeyUnusable | Refusal::Unreadable { .. } => NextStep::RepairWithV04,
             Refusal::NewerFormat { .. } => NextStep::NothingToImport,
+            Refusal::Link { .. } => NextStep::PointAtRealFolder,
+            Refusal::MountPoint { .. } => NextStep::MoveIntoFolder,
+            Refusal::NonUnicodePath { .. } => NextStep::CheckPath,
         }
     }
+}
+
+/// 古い根の置き場所を、触れる前に確かめる (03 §12.4 の「取り込める根」の (8)): リンクでない、マウントポイントでない
+/// (Unix で親のフォルダと同じファイルシステム)、パス全体が Unicode として読める。古い根が無ければ何もしない
+/// (データ根でないことは [`OldRoot::open`] が断る)。何も書かない。
+///
+/// # Errors
+/// どれかに当たれば、その [`Refusal`]。
+pub fn check_root_place(root: &Path) -> Result<(), Refusal> {
+    if root.to_str().is_none() {
+        return Err(Refusal::NonUnicodePath {
+            path: root.to_path_buf(),
+        });
+    }
+    let Ok(meta) = std::fs::symlink_metadata(root) else {
+        return Ok(());
+    };
+    if fsutil::is_link_or_reparse_point(&meta) {
+        return Err(Refusal::Link {
+            path: root.to_path_buf(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Some(parent) = root.parent()
+            && let Ok(p) = std::fs::metadata(parent)
+            && p.dev() != meta.dev()
+        {
+            return Err(Refusal::MountPoint {
+                path: root.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 古い根を開けない理由。
@@ -415,6 +466,17 @@ pub struct FileSnapshot {
 /// [`FileSnapshot`] から除く、データ根の直下のファイル。
 const SNAPSHOT_SKIP: [&str; 3] = [LOCK_FILE, PID_FILE, "lock.pid.tmp"];
 
+/// OS とファイルの管理の道具が、利用者の操作と関わりなく作るファイル (macOS の `.DS_Store`・`._*`、Windows の
+/// `Thumbs.db`・`desktop.ini`)。どの深さでも [`FileSnapshot`] から除き (古い根の比べに含めない)、`import-v04` の
+/// 作りかけのフォルダにあっても、evorag の作ったものと同じく消してよい (03 §12.4 の「止まった後の扱い」の (c))。
+#[must_use]
+pub fn is_os_file(name: &str) -> bool {
+    name == ".DS_Store"
+        || name.starts_with("._")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case("desktop.ini")
+}
+
 impl FileSnapshot {
     /// `root` の下のファイルを読んで要約する。何も書かない。
     ///
@@ -422,7 +484,18 @@ impl FileSnapshot {
     /// フォルダ・ファイルを読めないとき。
     pub fn take(root: &Path) -> io::Result<Self> {
         let mut out = Self::default();
-        walk(root, root, &mut out.files)?;
+        walk(root, root, Hashes::Take, &mut out.files)?;
+        Ok(out)
+    }
+
+    /// 中身のハッシュを取らずに、ファイルの大きさと更新時刻だけを要約する (改名の隙の確かめ、03 §10.2)。
+    /// [`FileEntry::sha256`] はすべて `None`。何も書かない。
+    ///
+    /// # Errors
+    /// フォルダを読めないとき。
+    pub fn take_listing(root: &Path) -> io::Result<Self> {
+        let mut out = Self::default();
+        walk(root, root, Hashes::Skip, &mut out.files)?;
         Ok(out)
     }
 
@@ -468,13 +541,28 @@ impl FileSnapshot {
     }
 }
 
-fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, FileEntry>) -> io::Result<()> {
+/// [`walk`] が中身のハッシュを取るか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hashes {
+    Take,
+    Skip,
+}
+
+fn walk(
+    base: &Path,
+    dir: &Path,
+    hashes: Hashes,
+    out: &mut BTreeMap<String, FileEntry>,
+) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         let rel = rel_path(base, &path);
         if dir == base && SNAPSHOT_SKIP.contains(&rel.as_str()) {
+            continue;
+        }
+        if is_os_file(&entry.file_name().to_string_lossy()) {
             continue;
         }
         let modified_ns = meta
@@ -492,14 +580,18 @@ fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, FileEntry>) -> io::R
                 },
             );
         } else if meta.is_dir() {
-            walk(base, &path, out)?;
+            walk(base, &path, hashes, out)?;
         } else {
+            let sha256 = match hashes {
+                Hashes::Take => Some(sha256_file(&path)?),
+                Hashes::Skip => None,
+            };
             out.insert(
                 rel,
                 FileEntry {
                     size: meta.len(),
                     modified_ns,
-                    sha256: Some(sha256_file(&path)?),
+                    sha256,
                 },
             );
         }

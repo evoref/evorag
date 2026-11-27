@@ -123,6 +123,40 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     imp::rename_no_replace(from, to)
 }
 
+/// フォルダ `from` を、同じボリュームの `to` に改名する。`to` が既にあれば改名せずに `AlreadyExists` で失敗する
+/// (データ根を入れ替える改名で、ほかのフォルダを置き換えないため、03 §10.2・§12.4)。1 回だけ試し、親のフォルダは
+/// 書き切らない (呼び手が [`sync_dir`] を別に呼び、改名の成否と書き切りの成否を分けて扱うため)。
+///
+/// - Windows: `MoveFileExW` に `MOVEFILE_WRITE_THROUGH` だけを付ける (置き換えない)。
+/// - Linux: `renameat2(RENAME_NOREPLACE)`。ファイルシステムが対応しない (`EINVAL`・`ENOSYS`) ときだけ、下の
+///   確かめてからの改名に戻す。
+/// - macOS: `renamex_np(RENAME_EXCL)`。対応しない (`ENOTSUP`) ときだけ、確かめてからの改名に戻す。
+/// - ほかの Unix: `to` が無いことを確かめてから `rename(2)` する (確かめと改名の間に `to` を作られる隙は残る)。
+///
+/// # Errors
+///
+/// `to` がある (`AlreadyExists`)、OS の改名の失敗。
+pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the rename target already exists",
+        ));
+    }
+    imp::rename_dir_no_replace(from, to)
+}
+
+/// 所有者だけが読み書きできるフォルダを、新しく 1 段だけ作る (親は作らない)。既にあれば `AlreadyExists` で失敗する
+/// (同じ名前のフォルダをほかが先に作った隙を、作った後に気付かずに使わないため、03 §12.4 の「書き方」)。権限は
+/// [`create_private_dir`] と同じ。
+///
+/// # Errors
+///
+/// 既にある (`AlreadyExists`)・親が無い・作れない・権限を付けられないとき。
+pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+    imp::create_private_dir_new(p)
+}
+
 /// リンクか: シンボリックリンクと、Windows の名前の代理のリパースポイント (ジャンクションなど、
 /// タグに `IsReparseTagNameSurrogate` の 0x2000_0000 が立つもの)。名前の代理でないリパースポイント
 /// (OneDrive のクラウドのファイルなど) は通常のファイルとして扱う (12 §7.3)。
@@ -283,6 +317,15 @@ mod imp {
         }
     }
 
+    pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+        rename_no_replace(from, to)
+    }
+
+    pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+        std::fs::create_dir(p)?;
+        crate::winacl::restrict(&wide(&std::path::absolute(p)?)?, true)
+    }
+
     pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
         // std の is_symlink は、名前の代理のリパースポイント (タグの 0x2000_0000 が立つもの: シンボリック
         // リンク・ジャンクションなど) で真になる。OneDrive のクラウドのファイルなどほかのリパースポイントは
@@ -416,6 +459,92 @@ mod imp {
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+        match rename_exclusive(from, to) {
+            Some(r) => r,
+            // 置き換えない改名に対応しないファイルシステム: 確かめてから改名する。
+            None => {
+                if std::fs::symlink_metadata(to).is_ok() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "the rename target already exists",
+                    ));
+                }
+                std::fs::rename(from, to)
+            }
+        }
+    }
+
+    fn c_path(p: &Path) -> io::Result<std::ffi::CString> {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a NUL in the path"))
+    }
+
+    /// 置き換えない改名。対応しない (呼び手が確かめてからの改名に戻す) ときは `None`。
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn rename_exclusive(from: &Path, to: &Path) -> Option<io::Result<()>> {
+        let (f, t) = match (c_path(from), c_path(to)) {
+            (Ok(f), Ok(t)) => (f, t),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+        };
+        // musl の C ライブラリは renameat2 の包みを持たない (配布物は musl で作る、12 §5) ので、システムコールを
+        // 番号で直接呼ぶ (glibc でも同じ)。古いカーネルは ENOSYS を返し、下の確かめてからの改名に戻る。
+        // SAFETY: 両方とも NUL で終わる C の文字列で、呼び出しの間は生きている。AT_FDCWD は相対パスを今の
+        // フォルダから解く (渡すのは絶対パス)。引数は renameat2(2) の (olddirfd, oldpath, newdirfd, newpath,
+        // flags) の順と型 (int, const char *, int, const char *, unsigned int) に合わせる。
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Some(Ok(()));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EINVAL | libc::ENOSYS) => None,
+            Some(libc::EEXIST) => Some(Err(io::Error::new(io::ErrorKind::AlreadyExists, e))),
+            _ => Some(Err(e)),
+        }
+    }
+
+    /// 置き換えない改名。対応しない (呼び手が確かめてからの改名に戻す) ときは `None`。
+    #[cfg(target_os = "macos")]
+    fn rename_exclusive(from: &Path, to: &Path) -> Option<io::Result<()>> {
+        let (f, t) = match (c_path(from), c_path(to)) {
+            (Ok(f), Ok(t)) => (f, t),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+        };
+        // SAFETY: 両方とも NUL で終わる C の文字列で、呼び出しの間は生きている。
+        let rc = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            return Some(Ok(()));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOTSUP) => None,
+            Some(libc::EEXIST) => Some(Err(io::Error::new(io::ErrorKind::AlreadyExists, e))),
+            _ => Some(Err(e)),
+        }
+    }
+
+    /// 置き換えない改名を持たない Unix: 常に確かめてからの改名に戻す。
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    fn rename_exclusive(_from: &Path, _to: &Path) -> Option<io::Result<()>> {
+        None
+    }
+
+    pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+        std::fs::DirBuilder::new().mode(0o700).create(p)?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
     }
 
     pub fn is_lock_error(e: &io::Error) -> bool {

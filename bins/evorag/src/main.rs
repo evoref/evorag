@@ -1,4 +1,4 @@
-//! サブコマンドの入口 (07 §5)。v0.1 の M1.4 は、TUI を開く `evorag` だけ。
+//! サブコマンドの入口 (07 §5)。
 //!
 //! 終了コード: 0 正常、1 一般のエラー、2 データ根が使えない (ロック・新しい形式)、
 //! 3 llama-server に繋がらない、4 設定の誤り (07 §5)。
@@ -6,6 +6,7 @@
 mod config;
 mod doctor;
 mod export;
+mod import;
 mod setup;
 mod update;
 
@@ -105,6 +106,13 @@ enum Sub {
         #[command(subcommand)]
         action: UpdateAction,
     },
+    // v0.4 のデータ根を新しいデータ根へ取り込み、古い根を改名して残す
+    #[command(name = "import-v04")]
+    ImportV04 {
+        // 取り込む v0.4 のデータ根 (省くと、今のデータ根)
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -184,6 +192,10 @@ fn localized_command(c: &Catalog) -> clap::Command {
                 .mut_subcommand("rollback", |s| {
                     s.about(h(MessageKey::CliHelpUpdateRollback))
                 })
+        })
+        .mut_subcommand("import-v04", |s| {
+            s.about(h(MessageKey::CliHelpImportV04))
+                .mut_arg("from", |a| a.help(h(MessageKey::CliHelpImportV04From)))
         })
 }
 
@@ -934,6 +946,14 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Some(Sub::ImportV04 { from }) = &args.command {
+        return import::run(
+            &catalog,
+            from.as_deref().unwrap_or(&data_root),
+            cfg.storage.allow_unsafe_location.unwrap_or(false),
+            clock.clone(),
+        );
+    }
     if let Some(Sub::Export { out }) = &args.command {
         return export::run(
             &catalog,
@@ -1085,6 +1105,11 @@ fn main() -> ExitCode {
     if let Some(p) = &places {
         let _ = evorag_core::logging::init(&p.state_dir.join("logs"), clock.now().as_millis());
     }
+    // 止まった import-v04 の入れ替えを続け、作りかけを片付ける (03 §12.4)。ストアを開く前に行う (2 つの改名の間で
+    // 止まると元の名前のフォルダが無く、開くと空の新しい根を作ってしまうため)。
+    if let Err(code) = import::resume_before_start(&catalog, &data_root) {
+        return code;
+    }
     // 更新の続きと片付け (12 §7.3)。データ根のロックを取って持ったまま、設定の移行とストアを開く前に行う。
     // 動いている evorag が置いてあるものと違えば、設定にもデータにも触れずに止める。片付けに失敗しても起動
     // する。取ったロックは放さずにストアを開くのに渡す。
@@ -1121,7 +1146,11 @@ fn main() -> ExitCode {
         if !ask_yes(&catalog.key(MessageKey::CliAskRestore)) {
             return ExitCode::from(2);
         }
-        let latest = evorag_store::restore::list_backups(&data_root, backup_dir.as_deref());
+        // 戻す候補は、この根の退避 (と ID の分からない退避) だけ。`storage.backup_dir` を import-v04 の古い根と
+        // 共有していても、古い根の退避を戻さない (03 §7.1 の「退避と根の ID」)。
+        let owner = evorag_store::restore::BackupOwner::of(&data_root, Some(moved_to));
+        let latest =
+            evorag_store::restore::restore_candidates(&data_root, backup_dir.as_deref(), &owner);
         if let Some(b) = latest.first() {
             if let Err(e) = evorag_store::restore::restore(
                 &data_root,
@@ -1196,6 +1225,14 @@ fn main() -> ExitCode {
         }
         Err(StartError::Store(OpenError::Lock(LockError::InUse { pid }))) => {
             return data_root_in_use(&catalog, &data_root, pid);
+        }
+        Err(StartError::Store(OpenError::ImportPending { new_root })) => {
+            return fail(
+                &catalog,
+                2,
+                MessageKey::CliImportPending,
+                &[("new", &new_root.display().to_string())],
+            );
         }
         Err(
             e @ (StartError::Store(OpenError::DatabaseInUse)
