@@ -22,9 +22,9 @@ use crate::value_key::normalize_v1;
 /// (04 §5.3) に入る)。
 pub const GATES_VERSION: u32 = 1;
 
-/// 前のふるいの規則の版 (台帳の `inputs` の `prefilter`、04 §5.2.1)。B2 の側で足す前のふるいの版の定数と同じ値に
-/// する (M5.3 で、その定数につなぎ替える)。関門は今の規則の前のふるいで本文を見るので、関門の結果の覚えの鍵に入れる。
-pub const PREFILTER_VERSION: u32 = 1;
+/// 前のふるいの規則の版 (台帳の `inputs` の `prefilter`、04 §5.2.1)。B2 と同じ定数 ([`crate::prefilter::PREFILTER_V1`])
+/// を使う。関門は今の規則の前のふるいで本文を見るので、関門の結果の覚えの鍵に入れる。
+pub const PREFILTER_VERSION: u32 = crate::prefilter::PREFILTER_V1;
 
 /// `rules/b3.toml` の言語ごとの部分。
 #[derive(Debug, Clone, Deserialize)]
