@@ -132,7 +132,7 @@ ledger = { name = "L1", seg = "S1", keys = ["呼び名"], units = [
 [[case.step]]
 op = { kind = "derive" }
 [[case.step]]
-expect = { units = [], profile = [], counts = { subject_not_allowed = 3 } }
+expect = { units = [], profile = [], counts = { subject = 3 } }
 
 [[case]]
 id = "AT05"
@@ -198,7 +198,7 @@ ledger = { name = "L1", seg = "S1", keys = ["家族の話"], units = [
 [[case.step]]
 op = { kind = "derive" }
 [[case.step]]
-expect = { units = [], profile = [], counts = { quoted = 2, subject_not_allowed = 1 } }
+expect = { units = [], profile = [], counts = { quoted = 2, subject = 1 } }
 
 [[case]]
 id = "AT08"

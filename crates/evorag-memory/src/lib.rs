@@ -7,6 +7,7 @@
 
 pub mod apply;
 pub mod b2;
+pub mod b3;
 mod chars;
 mod correction;
 mod derived;

@@ -1,0 +1,103 @@
+# v0.5 の関門 (B3) で足した規則と、辞書の v0.5 の宣言 (04 §5.1・§5.2)。
+#
+# 旧エンジンと共有する規則の型 (`rules.rs` の `LanguageRules`・`Attributes`。知らない項目を拒む) を変えずに足す
+# ため、旧エンジンを外す (08 §2.6 の M5.5) までは、このファイルに置く (04 §5.2 の「規則の TOML」)。
+#
+# 規則:
+# - 照合は NFKC と casefold の後に行う。ここに書く語は、NFKC と casefold で変わらない形で書く。
+# - 規則を変えたら `version` を上げる (導出の指紋に入る、04 §5.3)。
+# - 安全の規則 ([sensitive]) と、関門 3b の否定の印は、同梱のすべての言語のものを合わせて当てる。
+# - 日本語の語は部分一致、英語の語は ASCII の英数字で決めた語の境界で当てる ([reading] の否定の印)。
+#   [sensitive] の語は、言語に関わらず部分一致で当てる (安全の規則、04 §5.2)。
+
+version = 1
+
+[dictionary]
+# 辞書の属性の v0.5 の宣言 (04 §5.1 の「辞書」)。attributes.toml の属性の名前で書く。
+# 層: v0.5 の辞書の属性はすべて world (書かない属性は world)。
+# 別名: 初版は空 (自由記述の属性を辞書の属性に写す語。足したら attributes.toml の version も上げる)。
+# 値の意味が否定を含む属性 (`negative`): 関門 3b (極性) を当てない。「えびは食べられません」を fact とする属性
+# (attributes.toml の describe のとおり)。否定の印があっても、値の意味が「食べないもの」なので捨てない。
+negative = ["dietary"]
+
+[dictionary.aliases]
+
+[subject]
+# 関門 5: 応答する側を表す語 (04 §5.2)。正規化 v1 か照合の形で同じ呼び名を捨てる (部分一致ではない)。
+assistant = ["assistant", "ai", "アシスタント", "システム"]
+
+[ja]
+# 関門 3b の否定の印 (`negation_mark`)。値の位置が掛かる節にどれかがあるのに叙法が fact なら捨て、どれも無いのに
+# negated なら捨てる。
+negation_mark = ["ない", "ません", "無い"]
+# negation_mark の一致が、この語の一致 1 つにすっかり収まるときは、否定とみなさない (照合の前に伏せる)。
+negation_mark_exclude = [
+  "間違いない", "違いない", "少なくない", "少ない", "すくない", "仕方ない", "仕方がない", "しょうがない",
+  "危ない", "あぶない", "もったいない", "つまらない", "くだらない", "情けない", "切ない", "せつない",
+  "頼りない", "物足りない", "たまらない", "堪らない", "半端ない", "はんぱない", "欠かせない", "手放せない",
+  "止まらない", "やめられない", "忘れられない", "外せない", "見逃せない", "かもしれない", "かも知れない",
+  "しかない", "ほかならない", "他ならない", "なければならない", "なくてはならない", "ないといけない",
+  "なきゃいけない", "おさない", "きたない", "ないしょ",
+]
+
+[ja.sensitive]
+# 関門 6a の機微な情報のカテゴリ (04 §5.2)。値・old・自由記述の属性が、どれかの語を含めば捨てる。
+health = [
+  "持病", "病気", "病名", "疾患", "高血圧", "低血圧", "糖尿病", "癌", "腫瘍", "喘息", "ぜんそく",
+  "うつ病", "鬱", "精神科", "心療内科", "統合失調症", "双極性", "パニック障害", "発達障害", "適応障害",
+  "認知症", "障害者", "通院", "入院", "服薬", "投薬", "と診断", "治療中", "闘病", "hiv", "エイズ", "妊娠", "不妊",
+]
+religion = [
+  "宗教", "信仰", "信者", "宗派", "教会", "礼拝", "洗礼", "仏教", "キリスト教", "クリスチャン", "カトリック",
+  "プロテスタント", "イスラム", "ムスリム", "モスク", "ユダヤ教", "ヒンドゥー", "神道", "檀家", "創価", "無神論",
+]
+politics = [
+  "政党", "政治", "党員", "自民党", "立憲", "共産党", "公明党", "維新の会", "社民党", "保守派", "革新派",
+  "右翼", "左翼", "投票した", "選挙で",
+]
+orientation = [
+  "性的指向", "同性愛", "異性愛", "両性愛", "ゲイ", "レズビアン", "バイセクシュアル", "トランスジェンダー",
+  "アセクシュアル", "クィア", "lgbt",
+]
+address = ["住所", "番地", "号室", "郵便番号", "〒"]
+# 番地・号室の形の型 (`{n}` は数字の並び。算用数字と漢数字)。
+address_shapes = ["{n}丁目", "{n}番{n}号", "{n}番地", "{n}号室"]
+
+[en]
+negation_mark = [
+  "not", "never", "no", "no longer", "nor", "neither", "cannot", "don't", "doesn't", "didn't", "isn't",
+  "aren't", "wasn't", "weren't", "won't", "can't", "couldn't", "haven't", "hasn't", "hadn't", "wouldn't",
+  "shouldn't", "don’t", "doesn’t", "didn’t", "isn’t", "aren’t", "wasn’t", "weren’t", "won’t", "can’t",
+  "couldn’t", "haven’t", "hasn’t", "hadn’t", "wouldn’t", "shouldn’t",
+]
+negation_mark_exclude = [
+  "not only", "no doubt", "no matter", "can't wait", "can’t wait", "cannot wait", "can't live without",
+  "can’t live without", "can't get enough", "can’t get enough", "couldn't be happier", "couldn’t be happier",
+  "never miss",
+]
+
+[en.sensitive]
+health = [
+  "diabetes", "diabetic", "cancer", "tumor", "hypertension", "high blood pressure", "asthma", "depression",
+  "anxiety disorder", "bipolar", "schizophrenia", "adhd", "autism", "autistic", "dementia", "illness",
+  "disease", "disorder", "diagnosed", "chronic", "medication", "hiv", "pregnant", "infertility",
+]
+religion = [
+  "religion", "religious", "church service", "churchgoer", "mosque", "synagogue", "christian", "catholic", "protestant", "muslim",
+  "islam", "buddhist", "buddhism", "hindu", "jewish", "judaism", "atheist", "baptized", "bible", "quran",
+  "koran",
+]
+politics = [
+  "political", "politics", "democrat", "republican", "labour party", "conservative party", "voted for",
+  "party member",
+]
+orientation = [
+  "sexual orientation", "gay", "lesbian", "bisexual", "homosexual", "heterosexual", "transgender",
+  "asexual", "queer",
+]
+address = ["home address", "street address", "zip code", "postal code", "postcode"]
+address_shapes = [
+  "{n} {w} street", "{n} {w} st", "{n} {w} avenue", "{n} {w} ave", "{n} {w} road", "{n} {w} rd",
+  "{n} {w} boulevard", "{n} {w} blvd", "{n} {w} lane", "{n} {w} drive", "apt {n}", "apt. {n}",
+  "apartment {n}", "suite {n}",
+]
