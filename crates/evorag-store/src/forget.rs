@@ -508,11 +508,11 @@ pub struct TurnDirective<'a> {
 /// ([`Redaction::remap_range`])。`[非表示]` の範囲が後の伏せ字に重なるときは、写した範囲 (印を含む) を
 /// `[非表示]` にする。`[非表示]` の範囲に含まれる伏せ字の印は除く (表示では `[非表示]` が覆う)。
 ///
-/// 求めた範囲は今の本文 `text` で確かめ、本文の外・文字の境界でない範囲と、本文がその範囲で印の文字列になって
-/// いない伏せ字は除く (DB から読んだ位置が壊れていても、本文の外を指す範囲を返さない)。
+/// 求めた範囲は今の本文 `text` で確かめる。本文の外・文字の境界でない・空の範囲と、本文がその範囲で印の文字列に
+/// なっていない伏せ字があれば `None` (DB から読んだ位置が壊れていても、範囲を黙って落として値を表示しない)。
 ///
 /// 指示を順に当てて `rev_now` に届かない・追い越す (指示が欠けている・ターンがまだ伏せ字になっていない)、または
-/// 範囲の改訂の番号が合わないときは `None` (呼び手は、そのターンを「合わないターン」として扱う、04 §7.2)。
+/// 範囲の改訂の番号が合わないときも `None` (呼び手は、そのターンを「合わないターン」として扱う、04 §7.2)。
 #[must_use]
 pub fn display_marks(
     text: &str,
@@ -555,13 +555,13 @@ pub fn display_marks(
     if rev != rev_now {
         return None;
     }
-    marks.retain(|m| {
-        let Some(shown) = text.get(m.range.clone()) else {
-            return false;
-        };
-        !shown.is_empty() && (m.kind == MarkKind::Hidden || shown == marker)
+    // 壊れた範囲を黙って落とすと、伏せるはずの値をそのまま表示するので、ターンの全体を合わないものにする。
+    let valid = marks.iter().all(|m| {
+        text.get(m.range.clone()).is_some_and(|shown| {
+            !shown.is_empty() && (m.kind == MarkKind::Hidden || shown == marker)
+        })
     });
-    Some(normalize_marks(marks))
+    valid.then(|| normalize_marks(marks))
 }
 
 /// 重なる `[非表示]` をまとめ、`[非表示]` に含まれる印と同じ伏せ字の重複を除き、始まりの順に並べる。
@@ -1010,11 +1010,12 @@ mod tests {
                 hidden: &far,
             },
         ];
-        let marks = display_marks(&t1, 1, &dirs, M).expect("marks");
+        // 本文の外を指す [非表示] の範囲は、落として表示せずに、ターンの全体を合わないものにする。
+        assert_eq!(display_marks(&t1, 1, &dirs, M), None);
+        let marks = display_marks(&t1, 1, &dirs[..1], M).expect("marks");
         assert_eq!(marks.len(), 1, "{marks:?}");
         assert_eq!(&t1[marks[0].range.clone()], M);
-        // 本文がその位置で印になっていない (伏せ字が当たっていない本文) なら、伏せ字の印を返さない。
-        let marks = display_marks(&"x".repeat(t1.len()), 1, &dirs, M).expect("marks");
-        assert!(marks.is_empty(), "{marks:?}");
+        // 本文がその位置で印になっていない (伏せ字が当たっていない本文) ときも合わない。
+        assert_eq!(display_marks(&"x".repeat(t1.len()), 1, &dirs[..1], M), None);
     }
 }

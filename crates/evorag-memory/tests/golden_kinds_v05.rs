@@ -180,6 +180,7 @@ fn sample_ledger() -> LedgerBody {
                 rev: 0,
                 start: 0,
                 end: 30,
+                extra: Default::default(),
             },
             SentenceSpan {
                 s: 2,
@@ -187,6 +188,7 @@ fn sample_ledger() -> LedgerBody {
                 rev: 1,
                 start: 0,
                 end: 27,
+                extra: Default::default(),
             },
         ],
         inputs: LedgerInputs {
@@ -208,8 +210,10 @@ fn sample_ledger() -> LedgerBody {
                 pattern: "{old}じゃなくて{new}".into(),
                 new: ByteRange { start: 18, end: 27 },
                 old: Some(ByteRange { start: 0, end: 9 }),
+                extra: Default::default(),
             }],
-            refs: vec![SrcRev { turn: t(3), rev: 0 }],
+            refs: vec![LedgerRef::new(t(3), 0)],
+            extra: Default::default(),
         },
         output,
         status: "complete".into(),
@@ -220,6 +224,7 @@ fn sample_ledger() -> LedgerBody {
             ms: 4_250,
         },
         scrubbed: 0,
+        extra: Default::default(),
     }
 }
 

@@ -51,8 +51,37 @@ pub fn selection_key(model_key: &str, variant: &str) -> String {
     format!("{model_key}\u{0}{variant}")
 }
 
+/// 台帳の本体と入れ子の型の、この版が知らない項目 (名前 → 保存した値)。書き戻すと元の値のまま残る (03 §4.2 の
+/// 規則 7、03 §3.3 の「台帳の本体の互換」)。台帳の掃除は、この中の文字列にも当てる (04 §7.2)。
+pub type UnknownFields = BTreeMap<String, RawValue>;
+
+/// 知らない項目 (`extra`) を持つ型の `Serialize`。知っている項目を宣言の順に書き、知らない項目をその後に足す。
+/// 長さの決まった map として書く (derive の `Serialize` と同じバイト列になる。`#[serde(flatten)]` の書き方は長さの
+/// 決まらない map になり、見本 (`tests/fixtures/proposal/`) のバイト列が変わるため)。
+macro_rules! serialize_with_extra {
+    ($t:ty { $($field:ident),* $(,)? }) => {
+        impl Serialize for $t {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                const KNOWN: &[&str] = &[$(stringify!($field)),*];
+                let extra: Vec<(&String, &RawValue)> = self
+                    .extra
+                    .iter()
+                    .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
+                    .collect();
+                let mut m = s.serialize_map(Some(KNOWN.len() + extra.len()))?;
+                $(m.serialize_entry(stringify!($field), &self.$field)?;)*
+                for (k, v) in extra {
+                    m.serialize_entry(k, v)?;
+                }
+                m.end()
+            }
+        }
+    };
+}
+
 /// 文番号の根拠の文の位置 (04 §5.2.1 の `sentences`)。範囲は改訂の番号 `rev` のときの本文の UTF-8 のバイト位置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SentenceSpan {
     /// 文番号 (区切りの中で 1 から通し)。
     pub s: u32,
@@ -60,6 +89,56 @@ pub struct SentenceSpan {
     pub rev: u32,
     pub start: u32,
     pub end: u32,
+    /// 知らない項目。
+    #[serde(flatten)]
+    pub extra: UnknownFields,
+}
+
+serialize_with_extra!(SentenceSpan {
+    s,
+    turn,
+    rev,
+    start,
+    end
+});
+
+impl SentenceSpan {
+    /// 知らない項目の無い文の位置。
+    #[must_use]
+    pub fn new(s: u32, turn: Id, rev: u32, start: u32, end: u32) -> Self {
+        Self {
+            s,
+            turn,
+            rev,
+            start,
+            end,
+            extra: UnknownFields::new(),
+        }
+    }
+}
+
+/// 入れた応答 1 つ (04 §5.2.1 の `inputs` の `refs`。`[参照のみ]` の枠のターンと改訂の番号)。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LedgerRef {
+    pub turn: Id,
+    pub rev: u32,
+    /// 知らない項目。
+    #[serde(flatten)]
+    pub extra: UnknownFields,
+}
+
+serialize_with_extra!(LedgerRef { turn, rev });
+
+impl LedgerRef {
+    /// 知らない項目の無い応答の参照。
+    #[must_use]
+    pub fn new(turn: Id, rev: u32) -> Self {
+        Self {
+            turn,
+            rev,
+            extra: UnknownFields::new(),
+        }
+    }
 }
 
 /// 最後に入れた往復 (04 §5.2.1 の `inputs` の `through`)。
@@ -79,7 +158,7 @@ pub struct ByteRange {
 }
 
 /// 送った訂正の候補 1 つ (04 §5.2.1 の `inputs` の `corr`、§6)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CorrInput {
     /// 候補の番号 (出力の `corrections` の `id`)。
     pub id: u32,
@@ -91,11 +170,23 @@ pub struct CorrInput {
     pub new: ByteRange,
     /// 古い値の範囲 (無ければ null)。
     pub old: Option<ByteRange>,
+    /// 知らない項目。
+    #[serde(flatten)]
+    pub extra: UnknownFields,
 }
+
+serialize_with_extra!(CorrInput {
+    id,
+    turn,
+    rev,
+    pattern,
+    new,
+    old
+});
 
 /// 呼び出しの入力の対応表と版 (04 §5.2.1 の `inputs`)。無い項目は既定値 (版は 0) で読み、規則の版の合わない台帳
 /// (有効でない側) に倒す。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct LedgerInputs {
     /// 前のふるいの規則の版。
@@ -119,8 +210,24 @@ pub struct LedgerInputs {
     pub corr: Vec<CorrInput>,
     /// 入れた応答 (`[参照のみ]` の枠) のターンと改訂の番号。
     #[serde(default)]
-    pub refs: Vec<SrcRev>,
+    pub refs: Vec<LedgerRef>,
+    /// 知らない項目。
+    #[serde(flatten)]
+    pub extra: UnknownFields,
 }
+
+serialize_with_extra!(LedgerInputs {
+    prefilter,
+    splitter,
+    correction,
+    forgets_seen,
+    input_hash,
+    role_fallback,
+    role_model_key,
+    through,
+    corr,
+    refs,
+});
 
 /// 呼び出しのトークン数と時間 (04 §5.2.1 の `tokens`)。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +283,7 @@ impl LedgerStatus {
 ///
 /// 無い項目は既定値で読む (`status` は空で [`LedgerStatus::Unknown`]、`schema` と規則の版は 0、`sentences` は空)。
 /// 項目を欠く台帳を、台帳の全体を読めない記録にせず、有効でない台帳の側に倒すため。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct LedgerBody {
     /// 呼び出しの種類 ([`CALL_SEGMENT`])。`segment` 以外の台帳は、v0.5 の選び方と導出で読み飛ばす (残す)。
@@ -203,7 +310,25 @@ pub struct LedgerBody {
     pub tokens: LedgerTokens,
     /// 忘れるの掃除で取り除いた要素の数 (04 §7.2)。
     pub scrubbed: u32,
+    /// 知らない項目 (後の版が最上位に足した項目、04 §5.2.1 の「項目の足し方」)。
+    #[serde(flatten)]
+    pub extra: UnknownFields,
 }
+
+serialize_with_extra!(LedgerBody {
+    call,
+    segment,
+    schema,
+    variant,
+    model_key,
+    sentences,
+    inputs,
+    output,
+    status,
+    attempts,
+    tokens,
+    scrubbed,
+});
 
 impl LedgerBody {
     /// 台帳の `status`。知らない値は [`LedgerStatus::Unknown`]。
@@ -227,7 +352,10 @@ impl LedgerBody {
                 turn: s.turn,
                 rev: s.rev,
             })
-            .chain(self.inputs.refs.iter().copied())
+            .chain(self.inputs.refs.iter().map(|r| SrcRev {
+                turn: r.turn,
+                rev: r.rev,
+            }))
             .collect()
     }
 }
@@ -408,6 +536,38 @@ impl LedgerOutput {
             .keys()
             .map(String::as_str)
             .filter(|n| *n != Self::INVALID)
+    }
+
+    /// 節の保存した値 (wire の形のまま。台帳の掃除が要素ごとに除くために読む、04 §7.2)。
+    pub(crate) fn raw_section(&self, name: &str) -> Option<&RawValue> {
+        (name != Self::INVALID).then(|| self.0.get(name)).flatten()
+    }
+
+    /// 節の値を、保存した値のまま置き換える (台帳の掃除が残した要素で書き戻す)。予約の名前には書かない。
+    pub(crate) fn put_raw_section(&mut self, name: &str, value: RawValue) {
+        if name != Self::INVALID {
+            self.0.insert(name.to_owned(), value);
+        }
+    }
+
+    /// 合わなかった節の理由 (読めない形なら `None`。台帳の掃除が理由の文字列にも当てるため、04 §7.2)。
+    pub(crate) fn invalid_reasons(&self) -> Option<BTreeMap<String, String>> {
+        self.read_invalid().ok()
+    }
+
+    /// 合わなかった節の理由を置き換える (空なら理由の項目を除く)。
+    pub(crate) fn replace_invalid_reasons(
+        &mut self,
+        reasons: &BTreeMap<String, String>,
+    ) -> Result<(), BodyError> {
+        self.put_invalid(reasons)
+    }
+
+    /// 節を除く (台帳の掃除で、並びでない節の全体を除くとき)。
+    pub(crate) fn remove_raw_section(&mut self, name: &str) {
+        if name != Self::INVALID {
+            self.0.remove(name);
+        }
     }
 
     /// 節を要素ごとに型 `T` で読む。節が無ければ空。並びでない節は、要素が 1 つの型の合わない節として数える。

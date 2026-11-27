@@ -23,6 +23,8 @@ pub const NORM_V1: u32 = 1;
 const VK_TAG: &[u8] = b"evorag.vk.1\0";
 /// 再び覚えない印の入力の用途の印 (04 §5.6)。
 const MARK_TAG: &[u8] = b"evorag.mark.1\0";
+/// 自由記述の属性の鍵の入力の用途の印 (04 §5.6、v0.5)。
+const ASP_TAG: &[u8] = b"evorag.asp.1\0";
 
 /// 値の鍵の正規化 v1 (04 §5.6)。主語の呼び名にも同じものを当てる (04 §5.1)。
 pub fn normalize_v1(s: &str) -> String {
@@ -51,7 +53,7 @@ pub fn normalize_v1(s: &str) -> String {
 ///   落とさない (行の区切りをまたいで値をつながない)。
 /// - 連なりのすぐ前か後ろの書記素の最初の文字が、語を空白で区切らない文字 (`is_unspaced_letter`。関門 4 と同じ)。
 ///   英数字・ハングル・記号どうしの間の空白は残す ("Ann a" を "Anna" に、"5 kg" を "5kg" に当てない)。
-fn dropped_spaces(s: &str, clusters: &[Range<usize>]) -> Vec<bool> {
+pub(crate) fn dropped_spaces(s: &str, clusters: &[Range<usize>]) -> Vec<bool> {
     let mut out = vec![false; clusters.len()];
     let blank = |k: usize| s[clusters[k].clone()].chars().all(char::is_whitespace);
     let first = |k: usize| s[clusters[k].clone()].chars().next();
@@ -96,6 +98,13 @@ pub fn normalize_loose(s: &str) -> String {
         .map(|(r, _)| &s[r.clone()])
         .collect();
     normalize_v1(&kept)
+}
+
+/// 書記素 1 つを正規化 v1 の手順 (NFKC → case folding → NFKC) で直したもの (空白の連なりはまとめない)。
+pub(crate) fn fold_cluster(cluster: &str) -> String {
+    let nfkc: String = cluster.nfkc().collect();
+    let folded = unicase::UniCase::unicode(nfkc.as_str()).to_folded_case();
+    folded.nfkc().collect()
 }
 
 /// 正規化 v1 (か照合の形) の結果と、元の本文の位置との対応表 (04 §5.6)。
@@ -167,9 +176,7 @@ impl Mapped {
             if dropped.is_some_and(|d| d[ci]) {
                 continue;
             }
-            let nfkc: String = s[r.clone()].nfkc().collect();
-            let folded = unicase::UniCase::unicode(nfkc.as_str()).to_folded_case();
-            for c in folded.nfkc() {
+            for c in fold_cluster(&s[r.clone()]).chars() {
                 if c.is_whitespace() {
                     if !text.is_empty() && pending_space.is_none() {
                         pending_space = Some(ci);
@@ -531,6 +538,17 @@ fn key_of(key: &ForgetKey, n: &str) -> ValueKey {
     ValueKey(hmac_sha256(&key.0, &msg))
 }
 
+/// 自由記述の属性の鍵 (v0.5): HMAC-SHA256(K, "evorag.asp.1" ‖ 0x00 ‖ UTF-8 (正規化 v1 (属性)))。指示の `aspect_mac`
+/// に、自由記述の属性の文字列の代わりに 16 進で書く (属性の名前が値に近い内容を含みうるため、04 §5.6)。
+#[must_use]
+pub fn aspect_key(key: &ForgetKey, aspect: &str) -> ValueKey {
+    let n = normalize_v1(aspect);
+    let mut msg = Vec::with_capacity(ASP_TAG.len() + n.len());
+    msg.extend_from_slice(ASP_TAG);
+    msg.extend_from_slice(n.as_bytes());
+    ValueKey(hmac_sha256(&key.0, &msg))
+}
+
 /// 再び覚えない印: HMAC-SHA256(K, "evorag.mark.1" ‖ 0x00 ‖ u32be(len S) ‖ S ‖ u32be(len A) ‖ A ‖ vk)。
 /// S は正規化 v1 の後の主語、A は属性の名前。
 pub fn block_mark(key: &ForgetKey, subject: &str, attribute: &str, vk: &ValueKey) -> BlockMark {
@@ -549,15 +567,60 @@ fn push_with_len(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-/// HMAC-SHA256 (RFC 2104)。
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut k0 = [0u8; BLOCK];
-    if key.len() > BLOCK {
+/// 値の鍵 ([`value_key`] と同じ値) を、正規化した後の文字列を少しずつ足しながら作る口 (部分文字列の鍵、
+/// `apply::keys`)。鍵の内と外の詰め物と用途の印を 1 回だけ吸わせておき、[`KeyStream::start`] の写しに正規化した
+/// 文字列のバイト列を足して [`KeyStream::finish`] で値の鍵にする (前に足した分を吸わせ直さない)。
+#[derive(Clone)]
+pub(crate) struct KeyStream {
+    inner: Sha256,
+    outer: Sha256,
+}
+
+impl KeyStream {
+    pub(crate) fn new(key: &ForgetKey) -> Self {
+        let k0 = hmac_block(&key.0);
+        let mut inner = Sha256::new();
+        inner.update(k0.map(|b| b ^ 0x36));
+        inner.update(VK_TAG);
+        let mut outer = Sha256::new();
+        outer.update(k0.map(|b| b ^ 0x5c));
+        Self { inner, outer }
+    }
+
+    /// 正規化した文字列を足していく状態 (まだ何も足していない)。
+    pub(crate) fn start(&self) -> Sha256 {
+        self.inner.clone()
+    }
+
+    /// 足し終えた状態 `msg` から値の鍵を作る (`msg` は写しを使う)。
+    pub(crate) fn finish(&self, msg: &Sha256) -> ValueKey {
+        let inner = msg.clone().finalize();
+        let mut outer = self.outer.clone();
+        outer.update(inner);
+        ValueKey(outer.finalize().into())
+    }
+}
+
+impl fmt::Debug for KeyStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyStream(..)")
+    }
+}
+
+/// HMAC の鍵を 1 ブロックにしたもの (RFC 2104)。
+fn hmac_block(key: &[u8]) -> [u8; 64] {
+    let mut k0 = [0u8; 64];
+    if key.len() > 64 {
         k0[..32].copy_from_slice(&Sha256::digest(key));
     } else {
         k0[..key.len()].copy_from_slice(key);
     }
+    k0
+}
+
+/// HMAC-SHA256 (RFC 2104)。
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let k0 = hmac_block(key);
     let mut inner = Sha256::new();
     inner.update(k0.map(|b| b ^ 0x36));
     inner.update(msg);
@@ -601,6 +664,40 @@ mod tests {
 
     fn hex(b: &[u8]) -> String {
         encode_hex(b)
+    }
+
+    #[test]
+    fn the_key_stream_matches_value_keys() {
+        let key = ForgetKey::from_bytes([2; 32]);
+        let ks = KeyStream::new(&key);
+        let mut h = ks.start();
+        let mut text = String::new();
+        for part in ["霧", "ヶ丘", " の", "朝市"] {
+            h.update(part.as_bytes());
+            text.push_str(part);
+            assert_eq!(ks.finish(&h), value_key(&key, &text), "{text}");
+        }
+        assert_eq!(ks.finish(&ks.start()), value_key(&key, ""));
+    }
+
+    /// verifies: 04 §5.6 (自由記述の属性の鍵: "evorag.asp.1" ‖ 0x00 ‖ 正規化 v1 (属性) の HMAC)
+    #[test]
+    fn aspect_keys_are_normalized_and_separated_from_value_keys() {
+        let key = ForgetKey::from_bytes([1; 32]);
+        let mut msg = b"evorag.asp.1\0".to_vec();
+        msg.extend_from_slice("よく行く店".as_bytes());
+        assert_eq!(
+            aspect_key(&key, "よく行く店").0,
+            hmac_sha256(&[1; 32], &msg)
+        );
+        assert_eq!(
+            aspect_key(&key, " よく行く店 "),
+            aspect_key(&key, "よく行く店")
+        );
+        assert_ne!(
+            aspect_key(&key, "よく行く店"),
+            value_key(&key, "よく行く店")
+        );
     }
 
     #[test]
