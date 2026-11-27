@@ -38,8 +38,7 @@
                 "type": "string"
               },
               "a": {
-                "type": "string",
-                "maxLength": 40
+                "type": "string"
               },
               "v": {
                 "type": "string"

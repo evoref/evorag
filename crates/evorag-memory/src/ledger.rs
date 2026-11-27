@@ -310,6 +310,10 @@ pub struct LedgerBody {
     pub tokens: LedgerTokens,
     /// 忘れるの掃除で取り除いた要素の数 (04 §7.2)。
     pub scrubbed: u32,
+    /// 区切りを分けた呼び出しのうち、やり直しの後も失敗して出力に入らなかった数 (無ければ 0)。0 より大きい
+    /// `complete` の台帳は、`failed` と同じく model_key か `build_info` が変わったら呼び直す (04 §5.2.1 の
+    /// `needs_call`)。
+    pub failed_parts: u32,
     /// 知らない項目 (後の版が最上位に足した項目、04 §5.2.1 の「項目の足し方」)。
     #[serde(flatten)]
     pub extra: UnknownFields,
@@ -328,6 +332,7 @@ serialize_with_extra!(LedgerBody {
     attempts,
     tokens,
     scrubbed,
+    failed_parts,
 });
 
 impl LedgerBody {

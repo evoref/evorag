@@ -113,9 +113,9 @@ const NAMES: [&str; 3] = [
     LedgerOutput::CORRECTIONS,
 ];
 
-/// 読み取った出力 (台帳の `output` と `status` の元)。区切りを分けて呼んだときは [`Read::merge`] でまとめる。
+/// 読み取った出力 (台帳の `output` と `status` の元)。区切りを分けて呼んだときは [`Parsed::merge`] でまとめる。
 #[derive(Debug, Clone, PartialEq)]
-pub struct Read {
+pub struct Parsed {
     /// [`NAMES`] の順。`None` は節が無い (止められて届かなかった)。
     sections: [Option<Section>; 3],
     partial: bool,
@@ -126,20 +126,20 @@ pub struct Read {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reading {
     /// 型の合った節が 1 つ以上ある (台帳の `status` は `complete`。合わない節は理由だけを書く)。
-    Complete(Read),
+    Complete(Parsed),
     /// 止められた。完結した要素を採った (`status` は `partial`)。
-    Partial(Read),
-    /// 全体が JSON として読めないか、どの節も型が合わない。1 回だけやり直し、それでも合わなければ、この `Read`
+    Partial(Parsed),
+    /// 全体が JSON として読めないか、どの節も型が合わない。1 回だけやり直し、それでも合わなければ、この `Parsed`
     /// (`status` は `failed`。節ごとの理由つき) で台帳を書く (04 §5.2.1 の「型が合わないとき」)。
-    Invalid(Read),
+    Invalid(Parsed),
     /// 出力が上限で切れた。区切りを往復の境で半分に分けて送り直す ([`super::Plan::halve`])。往復が 1 つなら
-    /// [`Reading::Invalid`] と同じに扱い、やり直しても切れたら [`Read::failed`] (`truncated`) で書く。
+    /// [`Reading::Invalid`] と同じに扱い、やり直しても切れたら [`Parsed::failed`] (`truncated`) で書く。
     Truncated,
     /// 止められたが、完結した要素が 1 つも無い (台帳を書かない)。
     Nothing,
 }
 
-impl Read {
+impl Parsed {
     /// 番号を振った文の無い区切りの、出力が空の台帳 (3 つの節が空の並び。`status` は `complete`、04 §5.2.1)。
     #[must_use]
     pub fn empty() -> Self {
@@ -191,12 +191,13 @@ impl Read {
         &self.tally
     }
 
-    /// 区切りを分けた呼び出しの読み取りを、呼び出しの順にまとめる (04 §5.2.1 の「収まらない区切り」)。
+    /// 区切りを分けた呼び出しの読み取りを、呼び出しの順にまとめる (04 §5.2.1 の「分けた呼び出しのまとめ方」)。
     ///
-    /// - どちらにも合った節は、要素を順につなぐ。`keys` は重複を除いて先の呼び出しのものから 8 個まで。
-    /// - どちらかで合わなかった節は、先に合わなかった理由で合わない節にする (区切りの一部の要素だけを、節の全体の
-    ///   ように見せないため)。
+    /// - 合った節は、合った呼び出しの要素を順につなぐ。`keys` は重複を除いて先の呼び出しのものから 8 個まで。
+    /// - どの呼び出しでも合わなかった節だけを、先に合わなかった理由で合わない節にする。
     /// - 片方に無い節 (止められて届かなかった) は、もう片方のものを使う。
+    ///
+    /// やり直しの後も失敗した呼び出しは、まとめに入れない ([`super::ledger_body`] が数える)。
     #[must_use]
     pub fn merge(self, next: Self) -> Self {
         let mut tally = self.tally;
@@ -207,14 +208,14 @@ impl Read {
         let mut sections: [Option<Section>; 3] = [None, None, None];
         for (k, (a, b)) in self.sections.into_iter().zip(next.sections).enumerate() {
             sections[k] = match (a, b) {
-                (Some(Section::Invalid(r)), _) | (_, Some(Section::Invalid(r))) => {
-                    Some(Section::Invalid(r))
-                }
                 (Some(Section::Items(mut x)), Some(Section::Items(y))) => {
                     x.extend(y);
                     Some(Section::Items(x))
                 }
-                (x, None) => x,
+                (Some(Section::Items(x)), _) | (_, Some(Section::Items(x))) => {
+                    Some(Section::Items(x))
+                }
+                (x @ Some(Section::Invalid(_)), _) | (x, None) => x,
                 (None, y) => y,
             };
         }
@@ -263,14 +264,17 @@ impl Read {
 ///   [`Reading::Invalid`]。
 /// - 読めないとき: 止められたなら完結した部分を採り ([`Reading::Partial`] か [`Reading::Nothing`])、上限で
 ///   切れたなら [`Reading::Truncated`]、ほかは [`Reading::Invalid`] (`not_json`)。
+///
+/// ストリームが途中で切れた (5xx・接続の切断、06 §7) ときは呼ばない。その呼び出しは締切切れ・5xx として送り直し
+/// (04 §5.2.1 の「失敗の扱い」)、途中の出力で台帳を書かない。
 #[must_use]
 pub fn read_output(request: &Request, text: &str, end: StreamEnd) -> Reading {
     let limits = Limits {
-        corrections: request.candidate_ids().len(),
+        corrections: request.corr().len(),
     };
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(mut map)) => {
-            let mut read = Read {
+            let mut read = Parsed {
                 sections: [None, None, None],
                 partial: false,
                 tally: Tally::default(),
@@ -289,11 +293,11 @@ pub fn read_output(request: &Request, text: &str, end: StreamEnd) -> Reading {
                 Reading::Complete(read)
             }
         }
-        Ok(_) => Reading::Invalid(Read::failed(InvalidReason::NotObject)),
+        Ok(_) => Reading::Invalid(Parsed::failed(InvalidReason::NotObject)),
         Err(_) => match end {
             StreamEnd::Stopped => salvage(text, limits),
             StreamEnd::Length => Reading::Truncated,
-            StreamEnd::Finished => Reading::Invalid(Read::failed(InvalidReason::NotJson)),
+            StreamEnd::Finished => Reading::Invalid(Parsed::failed(InvalidReason::NotJson)),
         },
     }
 }
@@ -336,7 +340,7 @@ impl Limits {
 /// 止められた出力の、型の上で完結した部分 (OQ-53 の 10)。`keys` は閉じた節だけ、`units`・`corrections` は完結した
 /// 要素ごとに採る。
 fn salvage(text: &str, limits: Limits) -> Reading {
-    let mut read = Read {
+    let mut read = Parsed {
         sections: [None, None, None],
         partial: true,
         tally: Tally::default(),

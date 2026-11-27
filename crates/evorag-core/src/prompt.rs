@@ -20,29 +20,8 @@ pub fn setting_name(item: StyleItem) -> &'static str {
     }
 }
 
-/// プロンプトの言語。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptLanguage {
-    Ja,
-    En,
-}
-
-impl PromptLanguage {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "ja" => Some(Self::Ja),
-            "en" => Some(Self::En),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ja => "ja",
-            Self::En => "en",
-        }
-    }
-}
+/// プロンプトの言語 (B2 の呼び出しと同じ型、`evorag-types`)。
+pub use evorag_types::PromptLanguage;
 
 /// 答える言語の既定。`Auto` は「発話の言語で答える」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

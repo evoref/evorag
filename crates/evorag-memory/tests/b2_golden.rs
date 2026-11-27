@@ -8,8 +8,8 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use evorag_memory::b2::{Call, Candidate, Input, Language, Layout, Pair, Text, VARIANT};
-use evorag_types::Id;
+use evorag_memory::b2::{Call, Candidate, Input, Layout, Pair, Text, VARIANT};
+use evorag_types::{Id, PromptLanguage};
 
 fn fixtures() -> PathBuf {
     let dir = std::env::var_os("CARGO_MANIFEST_DIR")
@@ -50,7 +50,7 @@ fn range_of(hay: &str, needle: &str) -> Range<usize> {
 
 /// 例の区切り (3 往復: 言い切り・相槌・訂正) を 1 回の呼び出しにする。
 fn call(
-    language: Language,
+    language: PromptLanguage,
     texts: [&str; 5],
     hide: &str,
     old: &str,
@@ -125,7 +125,7 @@ fn call(
 
 fn ja() -> Call {
     call(
-        Language::Ja,
+        PromptLanguage::Ja,
         [
             "去年の春から大阪に住んでいます。猫のミナトと暮らしていて、週末は将棋を指します。",
             "大阪での暮らしはいかがですか？ミナトちゃんとの週末も楽しそうですね。",
@@ -142,7 +142,7 @@ fn ja() -> Call {
 
 fn en() -> Call {
     call(
-        Language::En,
+        PromptLanguage::En,
         [
             "I have lived in Osaka since last spring. I live with my cat Minato and play shogi on weekends.",
             "How do you like life in Osaka? Weekends with Minato sound fun.",
@@ -174,5 +174,5 @@ fn the_schema_is_frozen() {
     let schema = serde_json::to_string_pretty(&c.requests[0].response_format()).unwrap() + "\n";
     check("response_format.json", &schema);
     // 文番号と候補の番号の列挙だけが区切りで変わる。英語の区切りも同じ数なら同じ型になる。
-    assert_eq!(en().requests[0].schema, c.requests[0].schema);
+    assert_eq!(en().requests[0].schema(), c.requests[0].schema());
 }
