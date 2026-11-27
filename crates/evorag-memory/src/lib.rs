@@ -24,6 +24,7 @@ mod gates;
 mod import_v04;
 mod kinds;
 mod ledger;
+mod ledger_select;
 mod lexical;
 mod mask;
 mod note;
@@ -32,6 +33,7 @@ mod read;
 mod rules;
 mod segment;
 mod segment_plan;
+mod segment_restore;
 mod sentences;
 mod table;
 mod unit;
@@ -113,6 +115,10 @@ pub use ledger::{
     REL_LEDGER_SEGMENT, REL_LEDGER_TURN, Section, SegmentUpdate, SentenceSpan, Through,
     UnknownFields, read_ledger, selection_key,
 };
+pub use ledger_select::{
+    CallDecision, CallReason, Current, Invalid, KeepReason, Rule, RuleVersions, SelectEnv,
+    Selected, Selection, Stage, StoredLedger, Validity, ledger_valid, needs_call, select_ledger,
+};
 pub use lexical::{Signals, evidence_language, signals};
 pub use mask::{
     Masker, REDACTION_MARKERS, TurnText, apply_ranges, hidden_marker, redaction_marker,
@@ -143,6 +149,7 @@ pub use segment_plan::{
     PlanError, PlannedPair, PlannedSegment, SEGMENT_CLOSE_AFTER_MS, SEGMENT_MAX_CHARS,
     SEGMENT_MAX_PAIRS, SegmentChange, SegmentPlan, TAIL_CALL_PAIRS, plan_segments, tail_call_due,
 };
+pub use segment_restore::{RestoreError, restore_segment};
 pub use sentences::{SPLITTER_V1, split_v1};
 pub use table::{
     FactKey, FactTable, SELF_LABELS, TABLE_BUDGET, TableRow, fact_key, fact_keys, fact_table,
