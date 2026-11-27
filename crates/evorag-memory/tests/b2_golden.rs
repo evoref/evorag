@@ -159,7 +159,7 @@ fn en() -> Call {
 
 #[test]
 fn the_prompts_are_frozen() {
-    assert_eq!(VARIANT, "sr1");
+    assert_eq!(VARIANT, "sr2");
     for (lang, c) in [("ja", ja()), ("en", en())] {
         assert_eq!(c.requests.len(), 1, "{lang}");
         let r = &c.requests[0];

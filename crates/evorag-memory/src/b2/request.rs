@@ -995,7 +995,7 @@ impl Call {
     /// バイト列のハッシュ。`used` が空なら `None`。
     ///
     /// # Panics
-    /// メッセージが 4 GiB 以上のとき (要求は 3,072 トークンまでなので起きない)。
+    /// メッセージが 4 GiB 以上のとき (要求は 3,584 トークンまでなので起きない)。
     #[must_use]
     pub fn input_hash(&self, used: &[usize]) -> Option<String> {
         if used.is_empty() {
@@ -1005,7 +1005,7 @@ impl Call {
         for r in used.iter().filter_map(|&i| self.requests.get(i)) {
             for m in [r.system, r.user.as_str()] {
                 let len = u32::try_from(m.len()).expect(
-                    "a B2 message is far below 4 GiB (the request is at most 3,072 tokens)",
+                    "a B2 message is far below 4 GiB (the request is at most 3,584 tokens)",
                 );
                 h.update(len.to_be_bytes());
                 h.update(m.as_bytes());
