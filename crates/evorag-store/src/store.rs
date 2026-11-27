@@ -266,6 +266,11 @@ pub enum OpenError {
     /// `import-v04` で新しい根へ取り込む (03 §12.4)。何も書いていない。
     #[error("the database is in format {format}; import it into a new data root (import-v04)")]
     NeedsImport { format: String },
+    /// v0.5 の形式で開こうとした根が、前回正しく閉じていない v0.4 以前の根 (DB の修復が要る)、か、DB が無い・空・
+    /// 読めずにジャーナルが v0.4 以前の根のもの (`format` は分からなければ `None`)。在り場所で修復も作り直しもせず、
+    /// v0.4 で一度開いて閉じてから `import-v04` で取り込む (03 §8・§12.4)。何も書いていない (ロックのファイルを除く)。
+    #[error("the data root looks like a v0.4 root that was not closed cleanly (format {}); open and close it once with evorag v0.4, then run evorag import-v04", format.as_deref().unwrap_or("unknown"))]
+    NeedsV04Open { format: Option<String> },
     /// `import-v04` が照合を終えていない作りかけの新しい根 (`import.source` があって `import.report` が無い)。
     /// 開かない (次の `import-v04` が片付けてやり直す、03 §12.4)。何も書いていない。
     #[error("the data root is an unfinished import (import-v04 will remove and redo it)")]
@@ -616,12 +621,9 @@ fn is_unfinished_import(m: &BTreeMap<String, String>) -> bool {
     m.contains_key(meta::IMPORT_SOURCE) && !m.contains_key(meta::IMPORT_REPORT)
 }
 
-/// v0.5 の形式 (`plan`) で開こうとした根の `meta` が、v0.5 より古い形式の版 (v0.4 以前の根) なら、その版。在り場所
-/// で移行せず、`import-v04` で取り込む (03 §4.1・§12.1・§12.4)。
-fn needs_import(m: &BTreeMap<String, String>, plan: &FormatPlan) -> Option<String> {
-    let ours: Version = plan.version.parse().ok()?;
-    let format: Version = m.get(meta::FORMAT_VERSION)?.parse().ok()?;
-    (ours >= v05() && format < v05()).then(|| format.to_string())
+/// 書く形式 `plan` が v0.5 以上か (v0.4 以前の根を在り場所で移行しない、03 §4.1・§12.1・§12.4)。
+fn is_v05_plan(plan: &FormatPlan) -> bool {
+    plan.version.parse::<Version>().is_ok_and(|v| v >= v05())
 }
 
 /// v0.5 の形式の版 ([`FORMAT_V05`])。
@@ -734,18 +736,30 @@ impl Store {
                 DataRootLock::acquire(&opts.data_root)?
             }
         };
-        // 作りかけの取り込みの根と、v0.5 の形式で開こうとした v0.4 以前の根は、書き込みで開く前に、読むだけで開いて
-        // 見分ける (何も書かずに断る。redb を書き込みで開くと DB のファイルを書き換えうるため、03 §12.4)。読むだけで
-        // 開けない (修復が要る) ときは、開いた後の `meta` で見分ける。
-        if let Ok(ro) = redb::ReadOnlyDatabase::open(opts.data_root.join(DB_FILE))
-            && let Ok(m) = read_meta_db_any(&ro)
-        {
-            if unfinished == Unfinished::Refuse && is_unfinished_import(&m) {
+        // v0.5 の形式で開くときは、書き込みで開く前に、何も書かずに根の形式を見分ける (redb を書き込みで開くと、
+        // 修復で DB のファイルを書き換えうるため。DB が無い・壊れた v0.4 の根に、v0.4 のジャーナルから v0.5 の DB を
+        // 作らないため、03 §8・§12.4)。移行と compact の跡の片付けもこの後。
+        if is_v05_plan(&plan) {
+            let probe = crate::root_probe::probe_root(&opts.data_root)?;
+            if let crate::root_probe::RootProbe::Readable { meta: m, .. } = &probe
+                && unfinished == Unfinished::Refuse
+                && is_unfinished_import(m)
+            {
                 return Err(OpenError::UnfinishedImport);
             }
-            if let Some(format) = needs_import(&m, &plan) {
-                return Err(OpenError::NeedsImport { format });
+            if let Some(v04) = probe.v04() {
+                return Err(match (v04.format, v04.clean) {
+                    (Some(format), true) => OpenError::NeedsImport { format },
+                    (format, _) => OpenError::NeedsV04Open { format },
+                });
             }
+        } else if unfinished == Unfinished::Refuse
+            && let Ok(ro) = redb::ReadOnlyDatabase::open(opts.data_root.join(DB_FILE))
+            && read_meta_db_any(&ro).is_ok_and(|m| is_unfinished_import(&m))
+        {
+            // 作りかけの取り込みの根は、書き込みで開く前に、読むだけで開いて見分ける (読むだけで開けないときは、
+            // 開いた後の `meta` で見分ける)。
+            return Err(OpenError::UnfinishedImport);
         }
         migrate::recover(&opts.data_root)?;
         crate::compact::recover(&opts.data_root, opts.clock.now().as_millis())?;
@@ -1023,7 +1037,15 @@ impl Store {
             report.journal_replayed = scan.lines.len();
         }
         self.check_forget_key(&scan.metas, true, report)?;
+        let marked = scan.metas.iter().any(|(k, v)| {
+            k == meta::FORMAT_VERSION && v.parse::<Version>().is_ok_and(|v| v >= v05())
+        });
         *self.journal.lock().unwrap_or_else(|e| e.into_inner()) = Some(journal);
+        // v0.5 の根の印 (`format.version` の `meta` の行、03 §6)。作るとき (と、印の無い v0.5 の根を書き込みで開いた
+        // とき) に一度だけ書く。DB を失った根を、ジャーナルから v0.5 の根と見分けるため (03 §8)。
+        if self.is_v05_root() && !marked {
+            self.mark_journal_v05().map_err(unreadable)?;
+        }
         // ジャーナルの取り込みの後に、記録した ID の最大を ID の下限にする (03 §3.3)。
         if let Some(max) = self
             .max_record_id()
@@ -1036,6 +1058,26 @@ impl Store {
             self.ids.raise_floor(*max);
         }
         Ok(())
+    }
+
+    /// ジャーナルに v0.5 の根の印 (`format.version` の `meta` の行) を書き、DB の `journal.last_seq` を進める (03 §6)。
+    fn mark_journal_v05(&self) -> Result<(), StoreError> {
+        let line = LineOp::Meta {
+            key: meta::FORMAT_VERSION.to_owned(),
+            value: self.plan.version.clone(),
+        };
+        let seq = {
+            let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(journal) = guard.as_mut() else {
+                return Ok(());
+            };
+            journal
+                .append(self.clock.now(), std::slice::from_ref(&line))
+                .map_err(|e| StoreError::Journal(e.to_string()))?
+        };
+        let mut tx = self.write_internal(Durability::Immediate)?;
+        tx.set_journal_seq(seq)?;
+        tx.commit()
     }
 
     /// 開くときにジャーナルの削除の行から消した記録の ID のうち、まだ整理の job にしていないもの (03 §7.3)。
@@ -1695,6 +1737,24 @@ pub struct ReadTxn<'s> {
 
 impl ReadTxn<'_> {
     record_reads!();
+
+    /// 同じ読み取りの写しの、`meta` の 1 つの値。
+    pub fn meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let table = match self.tx.open_table(META) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(db(e)),
+        };
+        Ok(table
+            .get(key.as_bytes())
+            .map_err(db)?
+            .map(|v| String::from_utf8_lossy(v.value()).into_owned()))
+    }
+
+    /// v0.5 の新しいデータ根として開いているか ([`Store::is_v05_root`])。
+    pub fn is_v05_root(&self) -> bool {
+        self.store.is_v05_root()
+    }
 }
 
 pub struct WriteTxn<'s> {

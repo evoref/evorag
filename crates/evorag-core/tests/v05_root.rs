@@ -5,7 +5,8 @@
 //!   ロックを持ったまま新しい根で続ける (TUI の起動の「y」の経路)。
 //! - v0.5 の根では、旧エンジンの裏の処理 (ノート・抽出・訂正の検証・事実の表) を動かさず、`fact`・`note`・
 //!   `correction`・`fact_directive` を書かない。事実への操作は断る。会話と想起の索引 (チャンク) は v0.4 のまま動く。
-//! - 取り込んだ伏せ字にしない忘れるの `[非表示]` の範囲は、v0.5 の根でも想起に当て続ける。
+//! - 取り込んだ伏せ字にしない忘れるの `[非表示]` の範囲と private の値は、v0.5 の根でも想起で伏せ続ける。
+//! - 正しく閉じていない・DB の無い・壊れた v0.4 の根は、修復も作り直しもせずに断る。v0.5 の根はジャーナルに印を書く。
 //!
 //! 見本 `tests/fixtures/db/0.4.0/root` を一時のフォルダに写して使う。
 
@@ -370,4 +371,229 @@ async fn the_old_engine_does_not_run_on_a_v05_root() {
         "the deleted session's turns are gone"
     );
     assert!(count(&store, KIND_CHUNK) > 0, "recall chunks are made");
+}
+
+/// 見本を写して取り込み、新しい根のロックを返す。
+fn imported_fixture(label: &str) -> (TempDir, PathBuf, evorag_store::lock::DataRootLock) {
+    let (tmp, old) = copied_fixture(label);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(NOW)));
+    let opts = ImportOptions {
+        old_root: old.clone(),
+        evorag_version: "0.5.0".into(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::with_seed(clock, 7)),
+        location: |_| Verdict::Ok,
+        allow_unsafe_location: false,
+        before_verify: None,
+        swap_hooks: Default::default(),
+    };
+    let done = import_and_swap(&opts, &mut |_| true).expect("import");
+    (tmp, done.root, done.new_root_lock)
+}
+
+/// LLM への要求の、今の発話の側 (想起の引用の枠を含む、05 §4.1)。
+fn user_side(messages: &[evorag_llm::ChatMessage]) -> String {
+    messages
+        .iter()
+        .filter(|m| m.role == evorag_llm::Role::User)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 正しく閉じていない・DB の無い・空の・壊れた v0.4 の根は、v0.5 の形式で開くときに、修復も作り直しも `broken/` へ
+/// 移すこともせずに断る。ロックのファイルを除くすべてのファイルのバイト列が変わらない。
+///
+/// verifies: 03 §8 (v0.4 のデータ根を v0.5 で開いた)
+#[tokio::test(flavor = "multi_thread")]
+async fn unclean_or_damaged_v04_roots_are_refused_without_writing_anything() {
+    type Damage = fn(&Path);
+    let cases: [(&str, Damage, Option<&str>); 4] = [
+        (
+            "unclean",
+            |r| {
+                // redb の修復が要る印 (ファイルの頭の god byte、redb 4 の header.rs)。
+                let p = r.join("evorag.redb");
+                let mut b = std::fs::read(&p).expect("read");
+                b[9] |= 2;
+                std::fs::write(&p, b).expect("write");
+            },
+            Some("0.3"),
+        ),
+        (
+            "no-db",
+            |r| std::fs::remove_file(r.join("evorag.redb")).expect("remove"),
+            None,
+        ),
+        (
+            "empty-db",
+            |r| std::fs::write(r.join("evorag.redb"), b"").expect("write"),
+            None,
+        ),
+        (
+            "broken-db",
+            |r| std::fs::write(r.join("evorag.redb"), b"garbage").expect("write"),
+            None,
+        ),
+    ];
+    for (label, damage, want) in cases {
+        let (_tmp, root) = copied_fixture(&format!("v05-refuse-{label}"));
+        damage(&root);
+        let before = files(&root);
+        let started = Core::start(config(&root, RootFormat::V05), Arc::new(cassette(0))).await;
+        match started {
+            Err(StartError::Store(OpenError::NeedsV04Open { format })) => {
+                assert_eq!(format.as_deref(), want, "{label}");
+            }
+            Err(e) => panic!("{label}: unexpected error: {e}"),
+            Ok(_) => panic!("{label}: a damaged v0.4 root must not be opened"),
+        }
+        assert_eq!(before, files(&root), "{label}: the v0.4 root is unchanged");
+        assert!(!root.join("broken").exists(), "{label}");
+    }
+}
+
+/// v0.5 の根は、作るときにジャーナルへ v0.5 の根の印 (`format.version` の `meta` の行) を書く。DB を失っても、
+/// ジャーナルから v0.5 の根として作り直せる。
+///
+/// verifies: 03 §6 (`format.version` の `meta` の行)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v05_root_marks_its_journal_and_rebuilds_a_lost_database() {
+    let dir = TempDir::new("v05-journal-mark");
+    let root = dir.path().join("data");
+    let (core, mut rx, _) = Core::start(config(&root, RootFormat::V05), Arc::new(cassette(1)))
+        .await
+        .expect("start");
+    core.settle().await;
+    new_session(&core, &mut rx, "印の確かめ").await;
+    say(&core, &mut rx, "こんにちは").await;
+    core.shutdown().await;
+    let journal: String = std::fs::read_dir(root.join("journal"))
+        .expect("the journal")
+        .map(|e| std::fs::read_to_string(e.expect("an entry").path()).expect("read"))
+        .collect();
+    let first = journal.lines().next().expect("a line");
+    assert!(
+        first.contains("\"format.version\"") && first.contains("\"0.5\""),
+        "the first line marks the root: {first}"
+    );
+    assert_eq!(journal.matches("\"format.version\"").count(), 1);
+
+    std::fs::remove_file(root.join("evorag.redb")).expect("lose the database");
+    let (core, _rx, report) = Core::start(config(&root, RootFormat::V05), Arc::new(cassette(0)))
+        .await
+        .expect("rebuild from the journal");
+    core.settle().await;
+    assert!(report.store.created, "{report:?}");
+    let titles: Vec<String> = core.sessions(10).into_iter().map(|s| s.title).collect();
+    assert_eq!(titles, ["印の確かめ"]);
+    core.shutdown().await;
+    assert!(open_v05(&root).is_v05_root());
+}
+
+/// 取り込んだ private (dietary の「えび」、`value_only`) と、伏せ字にしない忘れる (hobby の「将棋」) の値は、v0.5 の根の
+/// 想起で添える本文 (LLM への要求) に出ない。忘れるの `[非表示]` は、セッションの画面の印にも出る。
+///
+/// verifies: 04 §7.9 (private と伏せ字にしない忘れるは想起で `[非表示]`、08 §2.6 の M5.1〜M5.3 の扱い)
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_private_and_forgotten_values_stay_hidden_in_recall_and_on_screen() {
+    let (_tmp, root, lock) = imported_fixture("v05-hidden");
+    let llm = cassette(2);
+    let (core, mut rx, _) = Core::start_locked(
+        config(&root, RootFormat::V05),
+        Arc::new(llm.clone()),
+        Some(lock),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+
+    // 画面: 暮らしの話のセッションの「趣味は将棋です」は、`[非表示]` の印の範囲を持つ。
+    core.command(Command::OpenSession {
+        id: "01a1dc8a-17c0-7000-a698-4080bab12a02"
+            .parse()
+            .expect("an id"),
+    });
+    let Event::SessionOpened { turns, .. } =
+        until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await
+    else {
+        unreachable!()
+    };
+    let hidden_turn: Id = HIDDEN_TURN.parse().expect("an id");
+    let t = turns
+        .iter()
+        .find(|t| t.id == hidden_turn)
+        .expect("the turn is shown");
+    let marked: Vec<&str> = t
+        .marks
+        .iter()
+        .filter(|m| m.kind == evorag_types::api::TurnMarkKind::Hidden)
+        .map(|m| &t.text[m.range.clone()])
+        .collect();
+    assert_eq!(marked, ["将棋"], "{t:?}");
+
+    // 想起: 別のセッションから問うと、以前の往復を添えるが、値は `[非表示]` になる。
+    new_session(&core, &mut rx, "別の話").await;
+    say(
+        &core,
+        &mut rx,
+        "実は食べられないんです、と前に言ったのを覚えていますか",
+    )
+    .await;
+    say(
+        &core,
+        &mut rx,
+        "趣味は何です、と前に言ったのを覚えていますか",
+    )
+    .await;
+    core.shutdown().await;
+
+    // 伏せる材料: 取り込んだ private の指示は値の文字列を持たないが、`vks` と根拠の位置で伏せる。
+    {
+        let store = open_v05(&root);
+        let r = store.read().expect("read");
+        let masker = evorag_memory::Masker::load(&r, redaction_marker("ja")).expect("a masker");
+        let turn: Id = "01a1dc91-6ac0-7000-81df-da7a5eb236f8"
+            .parse()
+            .expect("an id");
+        let Some(Read::Ok(env)) = r.get(KIND_TURN, turn).expect("get") else {
+            panic!("the turn is imported");
+        };
+        let body: TurnBody = env.body_as().expect("a turn");
+        assert!(body.text.contains("えび"), "{}", body.text);
+        let masked = masker.mask(
+            &[evorag_memory::TurnText {
+                id: turn,
+                rev: turn_rev(&env),
+                text: &body.text,
+            }],
+            "[非表示]",
+        );
+        assert!(!masked[0].contains("えび"), "{masked:?}");
+        assert!(masked[0].contains("[非表示]"), "{masked:?}");
+    }
+    let sent: Vec<String> = llm
+        .requests()
+        .iter()
+        .map(|r| user_side(&r.messages))
+        .collect();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    // 添えた往復は、伏せた後の本文で入る (private は根拠の位置 (取り込んだ v0.4 の出典の範囲) ごと伏せる)。
+    assert!(sent[0].contains("実は、[非表示]んです"), "{}", sent[0]);
+    assert!(sent[1].contains("趣味は[非表示]です"), "{}", sent[1]);
+    for (i, s) in sent.iter().enumerate() {
+        assert!(
+            s.contains("<<引用-"),
+            "request {i} recalls earlier turns: {s}"
+        );
+        assert!(s.contains("[非表示]"), "request {i}: {s}");
+        assert!(
+            !s.contains("えび"),
+            "request {i} leaks the private value: {s}"
+        );
+        assert!(
+            !s.contains("将棋"),
+            "request {i} leaks the forgotten value: {s}"
+        );
+    }
 }

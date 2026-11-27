@@ -16,10 +16,11 @@ use evorag_store::{KindSpec, OpenError, OpenOptions, OpenReport, Store};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RootFormat {
     /// v0.5 の根 (形式の版 `0.5`、[`evorag_memory::kinds_v05`])。製品の経路はこれだけを使う。v0.4 の根は
-    /// [`OpenError::NeedsImport`] で断る (何も書かない)。
+    /// [`OpenError::NeedsImport`] で、正しく閉じていない・DB の無い・読めない v0.4 の根は
+    /// [`OpenError::NeedsV04Open`] で断る (どちらも何も書かない、03 §8)。
     #[default]
     V05,
-    /// 比較の台 (試験とベンチ) だけ: v0.4 の根 (形式の版 `0.3`、[`evorag_memory::kinds`]) を開いて作り、旧エンジンの
+    /// 比較の台と試験 (ベンチを含む) だけ: v0.4 の根 (形式の版 `0.3`、[`evorag_memory::kinds`]) を開いて作り、旧エンジンの
     /// 裏の処理を動かす (08 §2.6)。製品の経路では使わない。旧エンジンを外すとき (M5.5) に、この変種も外す。
     V04Bench,
 }

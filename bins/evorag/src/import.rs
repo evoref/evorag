@@ -74,25 +74,70 @@ pub(crate) fn needs_import(catalog: &Catalog, data_root: &Path, format: &str) ->
     ExitCode::from(2)
 }
 
-/// 形式の版 `format` が v0.5 より古い (v0.4 以前の根か退避)。読めない版は古いとみなさない (開く側が断る)。
-pub(crate) fn older_than_v05(format: &str) -> bool {
-    use evorag_store::version::Version;
-    let v05: Version = evorag_store::FORMAT_V05
-        .parse()
-        .expect("FORMAT_V05 is a version");
-    format.parse::<Version>().is_ok_and(|v| v < v05)
+/// 前回正しく閉じていない v0.4 の根か、DB が無い・読めずにジャーナルが v0.4 の根のもの (形式の版 `format`。分からなけれ
+/// ば `None`) なので、在り場所で修復も作り直しもせずに、v0.4 で一度開いて閉じてから取り込むよう案内する (03 §8)。
+/// 何も書いていない。終了コード 2。
+pub(crate) fn needs_v04_open(
+    catalog: &Catalog,
+    data_root: &Path,
+    format: Option<&str>,
+) -> ExitCode {
+    let unknown = catalog.key(MessageKey::CliFormatUnknown);
+    eprintln!(
+        "{}",
+        catalog.with(
+            MessageKey::CliNeedsV04Open,
+            &[
+                ("path", &data_root.display().to_string()),
+                ("format", format.unwrap_or(&unknown))
+            ]
+        )
+    );
+    ExitCode::from(2)
 }
 
-/// データ根の DB が v0.4 以前の形式なら、何も書かずに `import-v04` を案内した終了コード 2 を返す (データ根に書く
-/// コマンドのうち、ストアを開かずに書くもの: `restore`・`backups purge`)。DB が無い・読むだけでは開けないときは
-/// `None` (各コマンドの扱いに任せる)。
+/// データ根が v0.4 以前の根 (か、そうとみなす根) なら、何も書かずに案内した終了コード 2 を返す (データ根に書く
+/// コマンドのうち、ストアを開かずに書くもの: `restore`・`backups purge`)。見分けはストアが書き込みで開く前と同じ
+/// ([`evorag_store::root_probe::probe_root`]。修復の要る DB は、データ根の外の写しを直して読む)。見分けられない
+/// (ジャーナルを読めない) ときも断る。
 pub(crate) fn refuse_v04_root(catalog: &Catalog, data_root: &Path) -> Option<ExitCode> {
-    let format = evorag_store::inspect::format_version(&data_root.join(evorag_store::DB_FILE))?;
-    older_than_v05(&format).then(|| needs_import(catalog, data_root, &format))
+    let probe = match evorag_store::root_probe::probe_root(data_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                catalog.with(
+                    MessageKey::CliDataRootUnusable,
+                    &[("detail", &e.to_string())]
+                )
+            );
+            return Some(ExitCode::from(2));
+        }
+    };
+    let v04 = probe.v04()?;
+    Some(match (v04.format, v04.clean) {
+        (Some(format), true) => needs_import(catalog, data_root, &format),
+        (format, _) => needs_v04_open(catalog, data_root, format.as_deref()),
+    })
 }
 
-/// `evorag restore <退避>` の前の確かめ (03 §8)。今の根が v0.4 の根なら [`refuse_v04_root`]。今の根が v0.5 の根で、
-/// 退避が v0.4 以前の形式なら、何も変えずに終了コード 1 (v0.5 の根を v0.4 の DB で置き換えないため)。
+/// 退避 (フォルダか、その中の `evorag.redb`) の DB の形式の版 (読めなければ `None`)。
+fn backup_format(backup: &Path) -> Option<String> {
+    let file = if backup.is_dir() {
+        backup.join(evorag_store::DB_FILE)
+    } else {
+        backup.to_path_buf()
+    };
+    evorag_store::inspect::format_version(&file)
+}
+
+/// 退避が v0.5 より古い形式か (v0.5 では戻さない、03 §8)。
+pub(crate) fn backup_older_than_v05(backup: &Path) -> bool {
+    backup_format(backup).is_some_and(|f| evorag_store::root_probe::older_than_v05(&f))
+}
+
+/// `evorag restore <退避>` の前の確かめ (03 §8)。今の根が v0.4 の根なら [`refuse_v04_root`]。退避が v0.5 より古い
+/// 形式なら、今の根に関わらず、何も変えずに終了コード 1 (v0.4 の退避は v0.4 で戻してから取り込む)。
 pub(crate) fn check_restore(
     catalog: &Catalog,
     data_root: &Path,
@@ -101,15 +146,8 @@ pub(crate) fn check_restore(
     if let Some(code) = refuse_v04_root(catalog, data_root) {
         return Some(code);
     }
-    let file = if backup.is_dir() {
-        backup.join(evorag_store::DB_FILE)
-    } else {
-        backup.to_path_buf()
-    };
-    let root_has_db =
-        evorag_store::inspect::format_version(&data_root.join(evorag_store::DB_FILE)).is_some();
-    let format = evorag_store::inspect::format_version(&file)?;
-    (root_has_db && older_than_v05(&format)).then(|| {
+    let format = backup_format(backup)?;
+    evorag_store::root_probe::older_than_v05(&format).then(|| {
         eprintln!(
             "{}",
             catalog.with(

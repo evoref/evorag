@@ -944,6 +944,11 @@ message_keys! {
     CliImportPending => "cli.import_pending",
     /// v0.4 の根なので、在り場所では開かずに断った (何も書いていない、03 §12.4)。引数: `path`・`format`。
     CliNeedsImport => "cli.needs_import",
+    /// 前回正しく閉じていない v0.4 の根か、DB が無い・読めない v0.4 の根なので、修復も作り直しもせずに断った (何も
+    /// 書いていない、03 §8)。引数: `path`・`format`。
+    CliNeedsV04Open => "cli.needs_v04_open",
+    /// 形式の版が分からないときの `format` の引数。
+    CliFormatUnknown => "cli.format_unknown",
     /// v0.5 の根へ、v0.4 以前の形式の退避を戻そうとした (何も変えていない)。引数: `backup`・`format`。
     CliRestoreBackupV04 => "cli.restore_backup_v04",
     /// `rebuild --facts` は v0.5 では受け付けない (03 §10、OQ-55 の 5)。
@@ -954,6 +959,8 @@ message_keys! {
     ImportV04DeclinedAtStartup => "import_v04.declined_at_startup",
     /// `doctor`: v0.4 の根 (v0.5 では取り込みが要る)。引数: `format`。
     DoctorNeedsImport => "doctor.needs_import",
+    /// `doctor`: 前回正しく閉じていない (か DB が無い・読めない) v0.4 の根。引数: `format`。
+    DoctorNeedsV04Open => "doctor.needs_v04_open",
     /// `backups list` の、ID の分からない退避の行。引数: `kind`, `dir`, `seq`。
     BackupsItemUnknownRoot => "backups.item_unknown_root",
     /// 起動の前に、止まった入れ替えを続けて終えた。引数: `root`・`renamed`。

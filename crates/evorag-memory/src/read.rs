@@ -17,6 +17,10 @@ pub enum MemoryError {
     /// 書き込みの入口から足せない指示 (忘れるは、伏せ字とともに `apply_forget` で足す。知らない指示は書かない)。
     #[error("this fact directive cannot be added here: {0}")]
     UnsupportedDirective(&'static str),
+    /// 忘れるの鍵 (`memory.forget_key`) が使えないので、`vks` だけを持つ指示の値を本文の中で探せない (伏せる値を
+    /// 確かめられない。呼び手は本文を添えない・出さない、04 §7.5)。
+    #[error("memory.forget_key is unusable, so values of the directives cannot be located")]
+    KeyUnavailable,
 }
 
 /// 読んだセッション。

@@ -624,6 +624,9 @@ pub fn run(
         Err(evorag_store::OpenError::NeedsImport { format }) => {
             return crate::import::needs_import(c, data_root, &format);
         }
+        Err(evorag_store::OpenError::NeedsV04Open { format }) => {
+            return crate::import::needs_v04_open(c, data_root, format.as_deref());
+        }
         Err(e) => {
             say(
                 MessageKey::CliDataRootUnusable,

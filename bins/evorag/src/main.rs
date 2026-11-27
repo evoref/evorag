@@ -406,6 +406,9 @@ fn rebuild(
         Err(RebuildError::Open(OpenError::NeedsImport { format })) => {
             import::needs_import(catalog, data_root, &format)
         }
+        Err(RebuildError::Open(OpenError::NeedsV04Open { format })) => {
+            import::needs_v04_open(catalog, data_root, format.as_deref())
+        }
         Err(RebuildError::FactsNotInV05) => fail(catalog, 1, MessageKey::CliRebuildFactsV05, &[]),
         // 事実の作り直しを、何も書かずに止めた (07 §5 の終了コード: 3 は llama-server、4 はルーターの設定、6 は
         // モデルの違い)。
@@ -531,6 +534,9 @@ fn repair(
         }
         Err(RepairError::Open(OpenError::NeedsImport { format })) => {
             import::needs_import(catalog, data_root, &format)
+        }
+        Err(RepairError::Open(OpenError::NeedsV04Open { format })) => {
+            import::needs_v04_open(catalog, data_root, format.as_deref())
         }
         Err(RepairError::NoDataRoot(path)) => fail(
             catalog,
@@ -1166,8 +1172,12 @@ fn main() -> ExitCode {
         // 戻す候補は、この根の退避 (と ID の分からない退避) だけ。`storage.backup_dir` を import-v04 の古い根と
         // 共有していても、古い根の退避を戻さない (03 §7.1 の「退避と根の ID」)。
         let owner = evorag_store::restore::BackupOwner::of(&data_root, Some(moved_to));
-        let latest =
-            evorag_store::restore::restore_candidates(&data_root, backup_dir.as_deref(), &owner);
+        // v0.5 より古い形式の退避は戻さない (03 §8。v0.4 の退避は v0.4 で戻してから取り込む)。
+        let latest: Vec<_> =
+            evorag_store::restore::restore_candidates(&data_root, backup_dir.as_deref(), &owner)
+                .into_iter()
+                .filter(|b| !import::backup_older_than_v05(&b.dir))
+                .collect();
         if let Some(b) = latest.first() {
             if let Err(e) = evorag_store::restore::restore(
                 &data_root,
@@ -1257,6 +1267,9 @@ fn main() -> ExitCode {
         }
         Err(StartError::Store(OpenError::Lock(LockError::InUse { pid }))) => {
             return data_root_in_use(&catalog, &data_root, pid);
+        }
+        Err(StartError::Store(OpenError::NeedsV04Open { format })) => {
+            return import::needs_v04_open(&catalog, &data_root, format.as_deref());
         }
         Err(StartError::Store(OpenError::ImportPending { new_root })) => {
             return fail(

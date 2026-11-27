@@ -94,18 +94,38 @@ fn journal_file(root: &Path) -> PathBuf {
     files.remove(0)
 }
 
+/// v0.5 の根の印 (作るときに最初に書く `format.version` の `meta` の行、03 §6) か。
+fn is_root_mark(line: &str) -> bool {
+    line.contains("\"op\":\"meta\"") && line.contains("\"key\":\"format.version\"")
+}
+
+/// ジャーナルの行。v0.5 の根の印の行は除く (試験が書いた行だけを見る)。
 fn journal_lines(root: &Path) -> Vec<String> {
     std::fs::read_to_string(journal_file(root))
         .unwrap()
         .lines()
+        .filter(|l| !is_root_mark(l))
         .map(str::to_owned)
         .collect()
 }
 
+/// ジャーナルを `lines` で書き直す。今のファイルにある v0.5 の根の印の行は、先頭に残す。
 fn write_journal_lines(root: &Path, lines: &[String]) {
-    let mut text = lines.join("\n");
+    let file = journal_file(root);
+    let marks: Vec<String> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter(|l| is_root_mark(l))
+        .map(str::to_owned)
+        .collect();
+    let mut text = marks
+        .iter()
+        .chain(lines)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     text.push('\n');
-    std::fs::write(journal_file(root), text).unwrap();
+    std::fs::write(file, text).unwrap();
 }
 
 fn has(store: &Store, kind: &str, id: Id) -> bool {
@@ -200,10 +220,11 @@ fn the_lines_of_one_operation_carry_the_same_group() {
     let lines = journal_lines(dir.path());
     assert_eq!(lines.len(), 4);
     assert!(!lines[0].contains("\"grp\""), "{}", lines[0]);
-    // `ids` は組の最初の行だけが持つ (ジャーナルを組の行の数の 2 乗で太らせない)。
+    // `ids` は組の最初の行だけが持つ (ジャーナルを組の行の数の 2 乗で太らせない)。組の ID は最初の行の連番 (連番 1
+    // は、v0.5 の根を作るときに書く印の行、03 §6)。
     assert!(
         lines[1].contains(&format!(
-            ",\"grp\":{{\"id\":2,\"n\":3,\"ids\":[\"{}\",\"{}\",\"{}\"]}},\"sum\":\"",
+            ",\"grp\":{{\"id\":3,\"n\":3,\"ids\":[\"{}\",\"{}\",\"{}\"]}},\"sum\":\"",
             ids[1], ids[2], ids[3]
         )),
         "{}",
@@ -211,7 +232,7 @@ fn the_lines_of_one_operation_carry_the_same_group() {
     );
     for line in &lines[2..] {
         assert!(
-            line.contains(",\"grp\":{\"id\":2,\"n\":3},\"sum\":\""),
+            line.contains(",\"grp\":{\"id\":3,\"n\":3},\"sum\":\""),
             "{line}"
         );
     }

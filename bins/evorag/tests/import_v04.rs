@@ -388,3 +388,97 @@ fn commands_that_write_refuse_a_v04_root_and_point_to_import() {
     assert_eq!(out.status.code(), Some(0), "export: {}", text(&out));
     assert_eq!(before, files(&data), "export: the v0.4 root is unchanged");
 }
+
+/// 正しく閉じていない・DB の無い・壊れた v0.4 の根は、TUI の起動 (尋ねない) と、データ根に書くコマンドのどれでも、
+/// 修復も作り直しも `broken/` へ移すこともせずに、v0.4 で一度起動して閉じてから取り込むよう案内して 2 で終わる。
+/// `doctor` は「次の起動で修復します」とは示さない。ロックのファイルを除くすべてのファイルが変わらない。
+///
+/// verifies: 03 §8 (v0.4 のデータ根を v0.5 で開いた)
+#[test]
+fn damaged_v04_roots_are_never_repaired_or_rebuilt_in_place() {
+    type Damage = fn(&Path);
+    let cases: [(&str, Damage); 3] = [
+        ("unclean", |r| {
+            // redb の修復が要る印 (ファイルの頭の god byte、redb 4 の header.rs)。
+            let p = r.join("evorag.redb");
+            let mut b = std::fs::read(&p).expect("read");
+            b[9] |= 2;
+            std::fs::write(&p, b).expect("write");
+        }),
+        ("no-db", |r| {
+            std::fs::remove_file(r.join("evorag.redb")).expect("remove");
+        }),
+        ("broken-db", |r| {
+            std::fs::write(r.join("evorag.redb"), b"garbage").expect("write");
+        }),
+    ];
+    let url = fake_llama_server();
+    for (label, damage) in cases {
+        let (tmp, data) = fixture(&format!("cli-damaged-{label}"));
+        damage(&data);
+        let before = files(&data);
+        let tui = format!("[llm.chat]\nurl = \"{url}\"\n");
+        let closed = format!("[llm.chat]\nurl = \"{}\"\n", closed_port());
+        let other = tmp.path().join("other-backup").display().to_string();
+        let runs: [(&str, &[&str]); 6] = [
+            (tui.as_str(), &[]),
+            (closed.as_str(), &["repair"]),
+            (closed.as_str(), &["rebuild"]),
+            (closed.as_str(), &["rebuild", "--index"]),
+            (closed.as_str(), &["restore", &other]),
+            (closed.as_str(), &["backups", "purge", "--yes"]),
+        ];
+        for (config, args) in runs {
+            let out = evorag(tmp.path(), config, args, "y\n");
+            let t = text(&out);
+            assert_eq!(out.status.code(), Some(2), "{label} {args:?}: {t}");
+            assert!(
+                t.contains("v0.4 の evorag で一度起動して終了してから"),
+                "{label} {args:?}: {t}"
+            );
+            assert!(!t.contains("取り込みますか"), "{label} {args:?}: {t}");
+            assert_eq!(before, files(&data), "{label} {args:?}: unchanged");
+            assert!(!data.join("broken").exists(), "{label} {args:?}");
+            assert!(!import_dir(&data).expect("named").exists());
+        }
+        let out = evorag(tmp.path(), &closed, &["doctor"], "");
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{label} doctor: {t}");
+        assert!(
+            t.contains("v0.4 の evorag で一度起動して終了してから"),
+            "{label}: {t}"
+        );
+        assert!(!t.contains("次の起動で修復します"), "{label}: {t}");
+        assert!(!t.contains("初回の起動で作ります"), "{label}: {t}");
+        assert_eq!(before, files(&data), "{label} doctor: unchanged");
+    }
+}
+
+/// v0.5 より古い形式の退避は、今の根が空でも `restore` で戻さない (1、何も作らない)。
+///
+/// verifies: 03 §8 (v0.4 の退避は v0.4 で戻してから取り込む)
+#[test]
+fn restore_refuses_a_backup_older_than_v05() {
+    let (tmp, data) = fixture("cli-restore-v04");
+    let backup = tmp.path().join("v04-backup");
+    std::fs::create_dir_all(&backup).expect("mkdir");
+    std::fs::copy(data.join("evorag.redb"), backup.join("evorag.redb")).expect("copy");
+    let empty = tmp.path().join("fresh");
+    let cfg = tmp.path().join("config.toml");
+    std::fs::write(&cfg, "").expect("write the config");
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let out = Command::new(exe)
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--data-root")
+        .arg(&empty)
+        .arg("restore")
+        .arg(&backup)
+        .output()
+        .expect("run");
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{t}");
+    assert!(t.contains("v0.5 のデータ根へは戻せません"), "{t}");
+    assert!(!empty.join("evorag.redb").exists(), "{t}");
+}

@@ -766,6 +766,55 @@ fn read_pass(root: &Path, keep: &dyn Fn(&LineOp) -> bool) -> io::Result<Pass> {
     Ok(p)
 }
 
+/// ジャーナルから見た、データ根の形式 (03 §6 の `format.version` の `meta` の行、03 §8)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalMark {
+    /// 行が 1 つも無い (ジャーナルのフォルダが無いときを含む)。
+    Empty,
+    /// v0.5 の根の印 (値が v0.5 以上の `format.version` の `meta` の行) があり、v0.4 の指示 (`fact_directive`) の行が
+    /// 無い。
+    V05,
+    /// 行があるのに v0.5 の根の印が無いか、v0.4 の指示の行がある (v0.4 以前の根とみなす)。
+    Older,
+}
+
+/// v0.4 の根の指示の種類 (v0.5 の根では書かない、03 §3.3)。
+const V04_DIRECTIVE_KIND: &str = "fact_directive";
+
+/// ジャーナルを書き換えずに読み、根の形式を見分ける (DB が無い・空・読めないときに、v0.4 の根のジャーナルから
+/// v0.5 の DB を作らないため、03 §8)。読めない行も「行がある」と数える (安全の側)。
+pub(crate) fn format_mark(root: &Path) -> io::Result<JournalMark> {
+    let keep = |op: &LineOp| match op {
+        LineOp::Meta { key, .. } => key == crate::meta::FORMAT_VERSION,
+        LineOp::Put(e) => e.kind == V04_DIRECTIVE_KIND,
+        LineOp::Delete { .. } => false,
+    };
+    let p = read_pass(root, &keep)?;
+    if p.rows.is_empty() && p.partial_bytes == 0 {
+        return Ok(JournalMark::Empty);
+    }
+    let v05: crate::version::Version = crate::store::FORMAT_V05
+        .parse()
+        .expect("FORMAT_V05 is a version");
+    let mut marked = false;
+    for line in &p.lines {
+        match &line.op {
+            LineOp::Put(_) => return Ok(JournalMark::Older),
+            LineOp::Meta { value, .. } => {
+                marked |= value
+                    .parse::<crate::version::Version>()
+                    .is_ok_and(|v| v >= v05);
+            }
+            LineOp::Delete { .. } => {}
+        }
+    }
+    Ok(if marked {
+        JournalMark::V05
+    } else {
+        JournalMark::Older
+    })
+}
+
 /// ジャーナルを、何も書かずに数える (`doctor`、AC-FR-207-1)。`tail` は、DB が末尾の書きかけの組をコミットして
 /// いないと分かるか (03 §6)。
 pub(crate) fn summarize(root: &Path, last_seq: u64, tail: Tail) -> io::Result<Summary> {
