@@ -35,7 +35,11 @@ fn same(mode: &str, text: &str) -> bool {
 /// v0.3 の訂正の事例 (`tests/memory-cases/corrections.toml`) と、v0.5 の事例の訂正の発話。
 #[test]
 fn the_bundled_cases_find_the_same_holes() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/memory-cases");
+    // 実行時の値を先に見る (no-network の CI は、試験を別の場所に写した作業ツリーで走らせる)。
+    let dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .join("../../tests/memory-cases");
     let read = |p: &str| -> toml::Value {
         let t = std::fs::read_to_string(dir.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
         toml::from_str(&t).unwrap_or_else(|e| panic!("{p}: {e}"))
