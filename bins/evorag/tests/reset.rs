@@ -9,7 +9,7 @@ use std::process::{Command, Output, Stdio};
 use evorag_store::lock::DataRootLock;
 use evorag_store::meta;
 use evorag_store::root_rename::read_meta;
-use evorag_store::testutil::{TempDir, raw_set_meta};
+use evorag_store::testutil::{TempDir, raw_remove_meta, raw_set_meta};
 use evorag_store::{DB_FILE, JOURNAL_DIR};
 
 fn fixture_root() -> PathBuf {
@@ -102,7 +102,7 @@ fn names(dir: &Path) -> Vec<String> {
 }
 
 /// 消す範囲を示して尋ね、y のときだけ消す。y 以外 (入力の終わりを含む) は何も変えずに 1。消した後も設定は残る。
-/// `--yes` は尋ねない。
+/// `--yes` は尋ねないが、消す範囲と元に戻せないことは示す。
 ///
 /// verifies: AC-FR-218-1 (確認の後にだけ消し、設定は残る)
 #[test]
@@ -140,6 +140,10 @@ fn reset_asks_first_then_deletes_the_data_root_and_keeps_the_config() {
     let t = text(&out);
     assert_eq!(out.status.code(), Some(0), "{t}");
     assert!(!t.contains("消しますか"), "{t}");
+    assert!(
+        t.contains("丸ごと消します") && t.contains("元に戻せません"),
+        "{t}"
+    );
     assert_eq!(names(tmp.path()), ["config.toml"]);
 }
 
@@ -233,26 +237,92 @@ fn reset_old_refuses_an_old_root_used_after_the_import() {
 }
 
 /// 古い根が残っているときに今の根を消そうとすると、古い根のパスを示し、先に `--old` で消すことを勧める。
-/// `doctor` は、止まった reset の消しかけのフォルダを示す。
+/// 消しかけの続きを消すときも今の根を消すことを明示し、古い根の消しかけはこの操作では消えず `--old` で消すと
+/// 示す。`doctor` は、今の根の消しかけ (今の根も一緒に消えると添える) と古い根の消しかけ (`--old` を案内する) を
+/// 分けて示す。`--old` は古い根の消しかけも消す。
 #[test]
-fn reset_recommends_disposing_the_old_root_first() {
+fn reset_guides_to_the_command_that_deletes_each_leftover() {
     let (tmp, data) = fixture("cli-reset-kept");
     let old = import(tmp.path());
+    let current_left = tmp.path().join("data.deleting-20261127T000000000Z");
+    std::fs::create_dir_all(current_left.join(JOURNAL_DIR)).expect("a leftover");
+    let old_name = old
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    let old_left = tmp
+        .path()
+        .join(format!("{old_name}.deleting-20261127T000000000Z"));
+    std::fs::create_dir_all(old_left.join(JOURNAL_DIR)).expect("a leftover");
+
     let out = evorag(tmp.path(), &["reset"], "n\n");
     let t = text(&out);
     assert_eq!(out.status.code(), Some(1), "{t}");
+    let shown = |p: &Path| t.contains(&p.display().to_string());
     assert!(
-        t.contains("evorag reset --old") && t.contains(&old.display().to_string()),
+        t.contains("evorag reset --old で消すことを勧めます") && shown(&old),
+        "{t}"
+    );
+    assert!(
+        t.contains("消しかけの続きだけでなく、今のデータ根") && shown(&data),
+        "{t}"
+    );
+    assert!(
+        t.contains("この操作では消えません (evorag reset --old で消します)") && shown(&old_left),
         "{t}"
     );
     assert!(data.join(DB_FILE).is_file());
 
-    let leftover = tmp.path().join("data.deleting-20261127T000000000Z");
-    std::fs::create_dir_all(leftover.join(JOURNAL_DIR)).expect("a leftover");
     let out = evorag(tmp.path(), &["doctor"], "");
     let t = text(&out);
+    let line = |needle: &str| {
+        t.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let current_line = line(&current_left.display().to_string());
     assert!(
-        t.contains("消しかけたフォルダ") && t.contains(&leftover.display().to_string()),
+        current_line.contains("evorag reset で続きを消せます")
+            && current_line.contains("も一緒に消えます"),
         "{t}"
     );
+    let old_line = line(&old_left.display().to_string());
+    assert!(
+        old_line.contains("evorag reset --old で続きを消せます"),
+        "{t}"
+    );
+
+    let out = evorag(tmp.path(), &["reset", "--old", "--yes"], "");
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{t}");
+    assert!(!old.exists() && !old_left.exists(), "{t}");
+    assert!(current_left.exists() && data.join(DB_FILE).is_file(), "{t}");
+}
+
+/// 取り込みの途中 (`<名前>.v05-import` がある) の `reset` と、照合を終えていない取り込みの根の `--old` は、何も
+/// 消さずに 1 で断り、`import-v04` を案内する。
+#[test]
+fn reset_refuses_while_an_import_is_unfinished() {
+    let (tmp, data) = fixture("cli-reset-import-pending");
+    let old = import(tmp.path());
+    let pending = tmp.path().join("data.v05-import");
+    std::fs::create_dir_all(&pending).expect("a leftover import");
+    let out = evorag(tmp.path(), &["reset", "--yes"], "");
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{t}");
+    assert!(
+        t.contains("途中です") && t.contains("evorag import-v04"),
+        "{t}"
+    );
+    assert!(data.join(DB_FILE).is_file());
+    std::fs::remove_dir(&pending).expect("remove");
+
+    raw_remove_meta(&data, meta::IMPORT_REPORT);
+    let out = evorag(tmp.path(), &["reset", "--old", "--yes"], "");
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{t}");
+    assert!(t.contains("照合を終えていない"), "{t}");
+    assert!(old.join(DB_FILE).is_file());
 }

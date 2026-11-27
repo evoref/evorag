@@ -8,7 +8,8 @@ use std::sync::Arc;
 use evorag_store::import_v04::FileSnapshot;
 use evorag_store::lock::{DataRootLock, LOCK_FILE};
 use evorag_store::reset::{
-    Done, ImportSource, Prepared, ResetError, ResetOptions, Target, deleting_leftovers, prepare,
+    Done, ImportSource, LeftoverOf, Prepared, ResetError, ResetOptions, RunHooks, Target,
+    deleting_leftovers, prepare,
 };
 use evorag_store::root_rename::read_meta;
 use evorag_store::testutil::{TempDir, raw_set_meta};
@@ -260,7 +261,17 @@ fn an_interrupted_reset_is_finished_by_the_next_one() {
     std::fs::write(half.join(JOURNAL_DIR).join("0001.jsonl"), b"{}\n").unwrap();
     std::fs::create_dir_all(half.join("index")).unwrap();
     std::fs::write(half.join(LOCK_FILE), b"").unwrap();
-    assert_eq!(deleting_leftovers(&root), [half.clone(), renamed.clone()]);
+    // 日時の形でない名前は、消しかけとして扱わない。
+    let mine = tmp.path().join("data.deleting-mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("memo.txt"), b"mine").unwrap();
+    assert_eq!(
+        deleting_leftovers(&root),
+        [
+            (half.clone(), LeftoverOf::Current),
+            (renamed.clone(), LeftoverOf::Current)
+        ]
+    );
 
     let p = prepare(&current(&root, Some(&shared), &[])).expect("prepare");
     assert!(!p.target_exists());
@@ -273,19 +284,23 @@ fn an_interrupted_reset_is_finished_by_the_next_one() {
     assert!(done.left.is_empty(), "{done:?}");
     assert_eq!(done.removed, [half.clone(), renamed.clone()]);
     assert_eq!(ids_of(&daily(&shared)), [Some(other_id)]);
-    assert_eq!(siblings(tmp.path()), ["other", "shared"]);
+    assert_eq!(
+        siblings(tmp.path()),
+        ["data.deleting-mine", "other", "shared"]
+    );
 
-    // 2 回目: もう何も無い。
+    // 2 回目: もう何も無い (日時の形でない名前のフォルダは数えない)。
     let err = prepare(&current(&root, Some(&shared), &[])).expect_err("nothing left");
     assert!(matches!(err, ResetError::NotDataRoot { .. }), "{err}");
 
     // evorag の作らないものを持つ消しかけのフォルダには触れない。
-    let foreign = tmp.path().join("data.deleting-mine");
+    let foreign = tmp.path().join("data.deleting-20261125T000000000Z-1");
     std::fs::create_dir_all(&foreign).unwrap();
     std::fs::write(foreign.join("memo.txt"), b"mine").unwrap();
     let err = prepare(&current(&root, None, &[])).expect_err("foreign");
     assert!(matches!(err, ResetError::UnknownLeftover { .. }), "{err}");
     assert!(foreign.join("memo.txt").is_file());
+    assert!(mine.join("memo.txt").is_file());
 }
 
 /// 古い根の試験の場所: `<一時>/data` (今の根) と、`<一時>/data-v0.4-<日時>` (取り込み元の古い根)。外の退避は
@@ -484,13 +499,13 @@ fn reset_old_finishes_an_interrupted_disposal() {
     let foreign = t
         .tmp
         .path()
-        .join("data-v0.4-20261126T000000000Z.deleting-x");
+        .join("data-v0.4-20261126T000000000Z.deleting-20261127T000000001Z");
     make_root(&foreign, 7, None);
     let err = prepare(&t.opts()).expect_err("foreign leftover");
     assert!(matches!(err, ResetError::UnknownLeftover { .. }), "{err}");
     assert!(foreign.join(DB_FILE).is_file());
     // doctor は今の根の隣の消しかけを示す (古い根の名前のものも)。
-    assert_eq!(deleting_leftovers(&t.current), [foreign]);
+    assert_eq!(deleting_leftovers(&t.current), [(foreign, LeftoverOf::Old)]);
 }
 
 #[cfg(unix)]
@@ -509,4 +524,146 @@ fn make_dir_link(target: &Path, link: &Path) -> bool {
         .arg(target)
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+/// (2) で外の退避を消せなければ、(3) を行わずに、改名したフォルダを DB ごと残す。次の `reset` は、その DB から
+/// 根の ID を読んで、外の退避とフォルダを消し終える。
+///
+/// verifies: AC-FR-218-1 (途中で止まっても、次の reset で続きが終わる)
+#[test]
+fn a_backup_that_cannot_be_deleted_keeps_the_database_for_the_next_reset() {
+    let tmp = TempDir::new("reset-backup-left");
+    let shared = tmp.path().join("shared");
+    let root = tmp.path().join("data");
+    make_root(&root, 1, Some(&shared));
+    let p = prepare(&current(&root, Some(&shared), &[])).expect("prepare");
+    let fail = |_: &Path| -> std::io::Result<()> { Err(std::io::Error::other("held")) };
+    let done = p
+        .run_with(
+            &mut |v| panic!("no mark, got {v}"),
+            RunHooks {
+                remove_backup: Some(&fail),
+                ..RunHooks::default()
+            },
+        )
+        .expect("run");
+    assert_eq!(done.left.len(), 2, "{done:?}");
+    assert!(done.removed.is_empty(), "{done:?}");
+    let left = deleting_leftovers(&root);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].0.join(DB_FILE).is_file(), "the database is kept");
+    assert_eq!(daily(&shared).len(), 1);
+
+    let p = prepare(&current(&root, Some(&shared), &[])).expect("prepare again");
+    assert_eq!(
+        p.outside_backups(),
+        2,
+        "the id is read from the kept database"
+    );
+    let done = run_current(p);
+    assert!(done.left.is_empty(), "{done:?}");
+    assert!(daily(&shared).is_empty());
+    assert_eq!(siblings(tmp.path()), ["shared"]);
+}
+
+/// 今の根の `import-v04` が途中 (`<名前>.v05-import` がある) なら、何もせずに 1 で断る。
+#[test]
+fn reset_refuses_while_an_import_is_unfinished() {
+    let tmp = TempDir::new("reset-import-pending");
+    let root = tmp.path().join("data");
+    make_root(&root, 1, None);
+    let pending = tmp.path().join("data.v05-import");
+    std::fs::create_dir_all(&pending).unwrap();
+    let err = prepare(&current(&root, None, &[])).expect_err("import pending");
+    assert!(matches!(err, ResetError::ImportPending { .. }), "{err}");
+    assert_eq!(err.exit_code(), 1);
+    assert!(root.join(DB_FILE).is_file());
+    assert!(pending.is_dir());
+}
+
+/// `journal/` の無いフォルダ (退避のフォルダなど) は、DB があっても今のデータ根として消さない。
+#[test]
+fn a_folder_without_a_journal_is_not_the_current_data_root() {
+    let tmp = TempDir::new("reset-no-journal");
+    let root = tmp.path().join("data");
+    make_root(&root, 1, None);
+    let backup = daily(&root.join("backups")).remove(0);
+    let err = prepare(&current(&backup, None, &[])).expect_err("a backup");
+    assert!(matches!(err, ResetError::NotDataRoot { .. }), "{err}");
+    assert!(backup.join(DB_FILE).is_file());
+}
+
+/// 対象の中の退避の置き場所に、ほかの根の退避があれば断る。この根の退避だけなら消してよい。
+#[test]
+fn a_backup_dir_inside_the_root_with_other_backups_is_refused() {
+    let tmp = TempDir::new("reset-backup-inside");
+    let root = tmp.path().join("data");
+    let inside = root.join("shared-backups");
+    make_root(&root, 1, Some(&inside));
+    let p = prepare(&current(&root, Some(&inside), &[])).expect("only its own backups");
+    drop(p);
+    make_root(&tmp.path().join("other"), 2, Some(&inside));
+    let err = prepare(&current(&root, Some(&inside), &[])).expect_err("other backups inside");
+    assert!(matches!(err, ResetError::BackupDirInside { .. }), "{err}");
+    assert_eq!(daily(&inside).len(), 2);
+}
+
+/// `--old`: 古い根の親のフォルダが無い (ドライブが外れているなど) ときは、古い根が無いとみなさずに断る。
+#[test]
+fn reset_old_refuses_when_the_folder_of_the_old_root_is_missing() {
+    let t = imported("reset-old-parent");
+    let mut source = t.source.clone();
+    // 名前が `data-v0.4-` で始まらないので、記録したパスをそのまま使う。
+    source.path = t.tmp.path().join("unplugged").join("old");
+    let err = prepare(&ResetOptions {
+        target: Target::Old {
+            current_root: &t.current,
+            source: &source,
+        },
+        backup_dir: Some(&t.shared),
+        keep: &[],
+        now_ms: NOW,
+    })
+    .expect_err("the folder is missing");
+    assert!(
+        matches!(err, ResetError::OldRootParentMissing { .. }),
+        "{err}"
+    );
+    assert_eq!(daily(&t.shared).len(), 2);
+}
+
+/// 確かめた後に、消すフォルダがリンクに差し替えられたら、消さずに残す (リンクの先にも触れない)。
+#[test]
+fn a_folder_replaced_by_a_link_is_not_deleted() {
+    let tmp = TempDir::new("reset-replaced");
+    let root = tmp.path().join("data");
+    let leftover = tmp.path().join("data.deleting-20261127T000000000Z");
+    std::fs::create_dir_all(leftover.join(JOURNAL_DIR)).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), b"keep").unwrap();
+    let moved = tmp.path().join("moved");
+    let p = prepare(&current(&root, None, &[])).expect("prepare");
+    let mut linked = false;
+    let mut swap = |dir: &Path| {
+        std::fs::rename(dir, &moved).unwrap();
+        linked = make_dir_link(&outside, dir);
+    };
+    let done = p
+        .run_with(
+            &mut |v| panic!("no mark, got {v}"),
+            RunHooks {
+                before_remove: Some(&mut swap),
+                ..RunHooks::default()
+            },
+        )
+        .expect("run");
+    if !linked {
+        eprintln!("skipped: this system cannot make a directory link here");
+        return;
+    }
+    assert_eq!(done.left.len(), 1, "{done:?}");
+    assert!(done.removed.is_empty(), "{done:?}");
+    assert!(outside.join("keep.txt").is_file());
+    assert!(moved.join(JOURNAL_DIR).is_dir());
 }

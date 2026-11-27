@@ -14,8 +14,8 @@ use evorag_memory::{DirectiveBody, DirectiveOp, KIND_DIRECTIVE};
 use evorag_store::lock::{DataRootLock, LockError};
 use evorag_store::migrate::FormatPlan;
 use evorag_store::reset::{
-    Done, ImportSource, MarkError, Prepared, ResetError, ResetOptions, Target, deleting_leftovers,
-    prepare, read_records,
+    Done, ImportSource, LeftoverOf, MarkError, Prepared, ResetError, ResetOptions, Target,
+    deleting_leftovers, prepare, read_records,
 };
 use evorag_store::root_rename::{RenameRootError, read_meta};
 use evorag_store::{DB_FILE, OpenOptions, Store, WriteOp, WriteRequest, Writer, meta};
@@ -66,9 +66,26 @@ fn run_current(
     };
     let prepared = match prepare(&opts) {
         Ok(p) => p,
-        Err(e) => return failed(catalog, &e),
+        Err(e) => return failed(catalog, &e, CURRENT),
     };
     let mut lines = plan_lines(catalog, &prepared, false);
+    // 消しかけの続きを消すときも、今の根を消すことを明示する (03 §10.2 の「案内のコマンド」)。
+    if prepared.target_exists() && prepared.leftovers().next().is_some() {
+        lines.push(catalog.with(
+            MessageKey::ResetAskAlsoRoot,
+            &[("path", &path(prepared.target()))],
+        ));
+    }
+    // 古い根の消しかけは、この操作では消えない (`--old` で消す)。
+    for (p, _) in deleting_leftovers(places.data_root)
+        .iter()
+        .filter(|(_, of)| *of == LeftoverOf::Old)
+    {
+        lines.push(catalog.with(
+            MessageKey::ResetAskOldLeftoverNotHere,
+            &[("path", &path(p))],
+        ));
+    }
     // 取り込みの前の古い根が残っていれば、そのパスを示し、先に消すことを勧める (03 §10.2 の「確認」)。
     if prepared.target_exists()
         && let Some(kept) = kept_old_root(prepared.target())
@@ -80,7 +97,7 @@ fn run_current(
     }
     let target = prepared.target().to_path_buf();
     match prepared.run(&mut |_| Ok(())) {
-        Ok(done) => finished(catalog, &done, "evorag reset", || {
+        Ok(done) => finished(catalog, &done, CURRENT, || {
             catalog.with(
                 MessageKey::ResetDone,
                 &[
@@ -89,9 +106,13 @@ fn run_current(
                 ],
             )
         }),
-        Err(e) => failed(catalog, &e),
+        Err(e) => failed(catalog, &e, CURRENT),
     }
 }
+
+/// 案内に示すコマンド (03 §10.2 の「案内のコマンド」。古い根の残りに `--old` なしを打つと、今の根を消すため)。
+const CURRENT: &str = "evorag reset";
+const OLD: &str = "evorag reset --old";
 
 /// 今の根の `import.old_root` が `kept` なら、残っている古い根のパス (あるときだけ)。
 fn kept_old_root(root: &Path) -> Option<std::path::PathBuf> {
@@ -145,6 +166,15 @@ fn run_old(catalog: &Catalog, places: &Places<'_>, yes: bool, clock: Arc<dyn Clo
     {
         return crate::fail(catalog, 1, MessageKey::ResetAlreadyDisposed, &[]);
     }
+    // 照合を終えていない取り込みの根 (`import.source` があって `import.report` が無い) を正として、古い根を消さない。
+    if !m.contains_key(meta::IMPORT_REPORT) {
+        return crate::fail(
+            catalog,
+            1,
+            MessageKey::ResetImportUnfinished,
+            &[("root", &path(root))],
+        );
+    }
     let excluded = m.get(meta::IMPORT_REPORT).map_or(0, |r| excluded_turns(r));
     let forgets = forgets_after_import(root);
     let now_ms = clock.now().as_millis();
@@ -159,7 +189,7 @@ fn run_old(catalog: &Catalog, places: &Places<'_>, yes: bool, clock: Arc<dyn Clo
     };
     let prepared = match prepare(&opts) {
         Ok(p) => p,
-        Err(e) => return failed(catalog, &e),
+        Err(e) => return failed(catalog, &e, OLD),
     };
     let mut lines = plan_lines(catalog, &prepared, true);
     lines.push(catalog.with(
@@ -179,7 +209,7 @@ fn run_old(catalog: &Catalog, places: &Places<'_>, yes: bool, clock: Arc<dyn Clo
         mark_disposed(root, lock, value, clock.clone())
     };
     match prepared.run(&mut mark) {
-        Ok(done) => finished(catalog, &done, "evorag reset --old", || {
+        Ok(done) => finished(catalog, &done, OLD, || {
             catalog.with(
                 MessageKey::ResetDoneOld,
                 &[
@@ -188,7 +218,7 @@ fn run_old(catalog: &Catalog, places: &Places<'_>, yes: bool, clock: Arc<dyn Clo
                 ],
             )
         }),
-        Err(e) => failed(catalog, &e),
+        Err(e) => failed(catalog, &e, OLD),
     }
 }
 
@@ -279,15 +309,18 @@ fn plan_lines(catalog: &Catalog, p: &Prepared, old: bool) -> Vec<String> {
     lines
 }
 
-/// 消す範囲を示して確かめる (`yes` なら尋ねずに示すだけ)。
+/// 消す範囲と、元に戻せないことを示して確かめる (`yes` なら尋ねずに示すだけ、03 §10.2 の細目)。
 fn confirm(catalog: &Catalog, mut lines: Vec<String>, yes: bool) -> bool {
-    lines.push(catalog.key(MessageKey::ResetAskConfirm));
+    lines.push(catalog.key(MessageKey::ResetIrreversible));
     let text = lines.join("\n");
     if yes {
-        eprintln!("{}", lines[..lines.len() - 1].join("\n"));
+        eprintln!("{text}");
         return true;
     }
-    crate::ask_yes(&text)
+    crate::ask_yes(&format!(
+        "{text}\n{}",
+        catalog.key(MessageKey::ResetAskConfirm)
+    ))
 }
 
 fn declined(catalog: &Catalog) -> ExitCode {
@@ -314,8 +347,9 @@ fn finished(
     )
 }
 
-/// 断った・止まった理由の文言 (何が起きたか・データは無事か・次に何をするか、NFR-604)。
-fn failed(catalog: &Catalog, e: &ResetError) -> ExitCode {
+/// 断った・止まった理由の文言 (何が起きたか・データは無事か・次に何をするか、NFR-604)。`command` は、続きを
+/// 行うときに打つコマンド。
+fn failed(catalog: &Catalog, e: &ResetError, command: &str) -> ExitCode {
     let code = e.exit_code();
     let say = |key: MessageKey, args: &[(&str, &str)]| crate::fail(catalog, code, key, args);
     match e {
@@ -347,7 +381,30 @@ fn failed(catalog: &Catalog, e: &ResetError) -> ExitCode {
         ),
         ResetError::Rename(RenameRootError::NotUndone { left, .. }) => say(
             MessageKey::ResetRenameNotUndone,
-            &[("left", &path(left)), ("detail", &e.to_string())],
+            &[
+                ("left", &path(left)),
+                ("detail", &e.to_string()),
+                ("command", command),
+            ],
+        ),
+        ResetError::ImportPending { path: p, new_root } => say(
+            MessageKey::ResetImportPending,
+            &[("root", &path(p)), ("new", &path(new_root))],
+        ),
+        ResetError::OldRootParentMissing { path: p } => {
+            say(MessageKey::ResetOldParentMissing, &[("path", &path(p))])
+        }
+        ResetError::BackupDirInside {
+            path: p,
+            dir,
+            backup,
+        } => say(
+            MessageKey::ResetBackupDirInside,
+            &[
+                ("path", &path(p)),
+                ("dir", &path(dir)),
+                ("backup", &path(backup)),
+            ],
         ),
         ResetError::Rename(r) if r.is_lock() => {
             say(MessageKey::ResetRenameGap, &[("detail", &r.to_string())])
@@ -358,10 +415,19 @@ fn failed(catalog: &Catalog, e: &ResetError) -> ExitCode {
     }
 }
 
-/// `evorag doctor` に示す、データ根の隣に残っている reset の消しかけのフォルダ (03 §10.2)。
+/// `evorag doctor` に示す、データ根の隣に残っている reset の消しかけのフォルダ。今の根のものと古い根のものを分け、
+/// 続きを消すコマンドを示す (今の根のものには、今の根も一緒に消えることを添える、03 §10.2)。
 pub(crate) fn leftover_lines(catalog: &Catalog, data_root: &Path) -> Vec<String> {
     deleting_leftovers(data_root)
         .iter()
-        .map(|p| catalog.with(MessageKey::ResetLeftoverFound, &[("path", &path(p))]))
+        .map(|(p, of)| match of {
+            LeftoverOf::Current => catalog.with(
+                MessageKey::ResetLeftoverFound,
+                &[("path", &path(p)), ("root", &path(data_root))],
+            ),
+            LeftoverOf::Old => {
+                catalog.with(MessageKey::ResetLeftoverFoundOld, &[("path", &path(p))])
+            }
+        })
         .collect()
 }

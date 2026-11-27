@@ -983,7 +983,13 @@ message_keys! {
     ResetAskOldForgets => "reset.ask_old_forgets",
     /// `reset` の確認: 取り込みの前の古い根が残っている (一緒に消すことを勧める)。引数: `path`。
     ResetAskKeptOld => "reset.ask_kept_old",
-    /// `reset` の確認の結び (元に戻せない・OS のバックアップと書き出しには残りうる・設定は残す)。
+    /// `reset` の確認: 消しかけの続きだけでなく、今のデータ根も消すこと。引数: `path`。
+    ResetAskAlsoRoot => "reset.ask_also_root",
+    /// `reset` (`--old` なし) の確認: 古い根の消しかけは、この操作では消えない (`--old` で消す)。引数: `path`。
+    ResetAskOldLeftoverNotHere => "reset.ask_old_leftover_not_here",
+    /// `reset` の注意 (元に戻せない・OS のバックアップと書き出しには残りうる・設定は残す)。`--yes` でも出す。
+    ResetIrreversible => "reset.irreversible",
+    /// `reset` の問い。
     ResetAskConfirm => "reset.ask_confirm",
     /// 確認で y 以外を答えた。
     ResetDeclined => "reset.declined",
@@ -1015,12 +1021,22 @@ message_keys! {
     ResetRenameGap => "reset.rename_gap",
     /// 改名できなかった。引数: `detail`。
     ResetRenameFailed => "reset.rename_failed",
-    /// 改名を元に戻せなかった。引数: `left`・`detail`。
+    /// 改名を元に戻せなかった。引数: `left`・`detail`・`command`。
     ResetRenameNotUndone => "reset.rename_not_undone",
+    /// 今の根の取り込みが途中 (`.v05-import` がある)。引数: `root`・`new`。
+    ResetImportPending => "reset.import_pending",
+    /// 今の根が作りかけの取り込みの根 (照合の前)。引数: `root`。
+    ResetImportUnfinished => "reset.import_unfinished",
+    /// 古い根の親のフォルダが無い。引数: `path`。
+    ResetOldParentMissing => "reset.old_parent_missing",
+    /// 対象の中の退避の置き場所に、ほかの根の退避がある。引数: `path`・`dir`・`backup`。
+    ResetBackupDirInside => "reset.backup_dir_inside",
     /// 古い根を消したが、処分を記録できなかった。引数: `detail`。
     ResetMarkFailed => "reset.mark_failed",
-    /// `doctor`: reset の消しかけのフォルダが残っている。引数: `path`。
+    /// `doctor`: 今の根の reset の消しかけのフォルダが残っている。引数: `path`・`root`。
     ResetLeftoverFound => "reset.leftover_found",
+    /// `doctor`: 古い根の reset --old の消しかけのフォルダが残っている。引数: `path`。
+    ResetLeftoverFoundOld => "reset.leftover_found_old",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
     /// 並べた語の区切り (`ja` は読点)。セッションの題名・点検の理由・書き出した記録の種類を並べる。

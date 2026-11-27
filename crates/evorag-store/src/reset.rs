@@ -149,6 +149,21 @@ pub enum ResetError {
     /// ジャーナルの行の数。何も変えていない。
     #[error("{} changed after the import ({lines} new journal line(s))", path.display())]
     OldRootChanged { path: PathBuf, lines: u64 },
+    /// 今の根の取り込みが途中 (同じ親に `<名前>.v05-import` がある)。`import-v04` で続けるか片付けるまで消さない
+    /// (03 §12.4 の (h))。何も変えていない。
+    #[error("an import-v04 of {} is unfinished ({} exists)", path.display(), new_root.display())]
+    ImportPending { path: PathBuf, new_root: PathBuf },
+    /// 古い根の親のフォルダが無い (ドライブが外れているなど)。古い根が無いとはみなさない。何も変えていない。
+    #[error("the folder of the old data root {} is not there", path.display())]
+    OldRootParentMissing { path: PathBuf },
+    /// 対象の中に `storage.backup_dir` があり、ほかの根の退避か ID の分からない退避 (`backup`) を含む。何も変えて
+    /// いない。
+    #[error("{} holds the backup folder {} with backups of other roots ({})", path.display(), dir.display(), backup.display())]
+    BackupDirInside {
+        path: PathBuf,
+        dir: PathBuf,
+        backup: PathBuf,
+    },
     /// `*.deleting-*` のフォルダがあるが、消しかけの根に見えない (evorag の作らないものがある・別の根のもの・
     /// DB を読めない)。触れていない。
     #[error("{} does not look like a data root left by a reset", path.display())]
@@ -199,6 +214,65 @@ struct Leftover {
     lock: Option<DataRootLock>,
     /// DB が残っていれば、その `data_root.id` (その根の外の退避を消すため)。
     id: Option<String>,
+    /// 確かめたときのフォルダ ([`Ident`])。
+    ident: Ident,
+}
+
+/// 確かめたときのフォルダの見分け (Unix はデバイスと i-node)。消す直前に、リンクに差し替えられていないことを
+/// 確かめ直す (03 §10.2 の細目)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ident(Option<(u64, u64)>);
+
+impl Ident {
+    fn of(m: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self(Some((m.dev(), m.ino())))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = m;
+            Self(None)
+        }
+    }
+
+    /// `path` が、リンクでないフォルダで、確かめたときと同じもの (Unix) か。
+    fn still(self, path: &Path) -> io::Result<()> {
+        let m = std::fs::symlink_metadata(path)?;
+        if fsutil::is_link_or_reparse_point(&m)
+            || !m.is_dir()
+            || (self.0.is_some() && Ident::of(&m) != self)
+        {
+            return Err(io::Error::other(
+                "the folder was replaced after it was checked; it was not deleted",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 消しかけのフォルダがどの根のものか ([`deleting_leftovers`])。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LeftoverOf {
+    /// 今の根の消しかけ (`<名前>.deleting-<日時>`)。続きは `evorag reset` (今の根も一緒に消える)。
+    Current,
+    /// 古い根の消しかけ (`<名前>-v0.4-<日時>.deleting-<日時>`)。続きは `evorag reset --old`。
+    Old,
+}
+
+/// 試験だけ: (2) で外の退避を消す代わりの関数 ([`RunHooks::remove_backup`])。
+#[doc(hidden)]
+pub type RemoveFn<'a> = dyn Fn(&Path) -> io::Result<()> + 'a;
+
+/// 試験だけ: [`Prepared::run_with`] の途中の動きを作る関数。
+#[doc(hidden)]
+#[derive(Default)]
+pub struct RunHooks<'a> {
+    /// (2) で外の退避を消す代わりに呼ぶ。
+    pub remove_backup: Option<&'a RemoveFn<'a>>,
+    /// (3) でフォルダを確かめ直す直前に、そのフォルダを渡して呼ぶ。
+    pub before_remove: Option<&'a mut dyn FnMut(&Path)>,
 }
 
 /// 確かめ終えた、消すもの ([`prepare`])。対象と消しかけのフォルダのロックを持つ。落とすと何も消さずに放す。
@@ -207,7 +281,7 @@ pub struct Prepared {
     old: Option<String>,
     target: PathBuf,
     /// 対象があれば、そのロックと `data_root.id`。
-    found: Option<(DataRootLock, String)>,
+    found: Option<Found>,
     leftovers: Vec<Leftover>,
     backup_dir: Option<PathBuf>,
     /// 外の退避を消さない場所 (今の根・設定・状態のフォルダ)。
@@ -258,8 +332,19 @@ impl Prepared {
     ///
     /// # Errors
     /// (1) の改名ができない ([`ResetError::Rename`]。ロックの理由なら終了コード 2)、`mark` が失敗した
-    /// ([`ResetError::Mark`])。消せないファイルが残ったときは失敗にせず、[`Done::left`] に示す。
+    /// ([`ResetError::Mark`])。消せないファイルが残ったときは失敗にせず、[`Done::left`] に示す。(2) で外の退避が
+    /// 残ったときは (3) を行わず、改名したフォルダを DB ごと残す (次の `reset` が根の ID を読んで続ける)。
     pub fn run(self, mark: &mut MarkFn<'_>) -> Result<Done, ResetError> {
+        self.run_with(mark, RunHooks::default())
+    }
+
+    /// [`Prepared::run`] の本体。試験が [`RunHooks`] で途中の動きを作る。
+    #[doc(hidden)]
+    pub fn run_with(
+        self,
+        mark: &mut MarkFn<'_>,
+        mut hooks: RunHooks<'_>,
+    ) -> Result<Done, ResetError> {
         let Self {
             old,
             target,
@@ -271,8 +356,8 @@ impl Prepared {
             ..
         } = self;
         let mut ids = BTreeSet::new();
-        let mut folders: Vec<(PathBuf, Option<DataRootLock>)> = Vec::new();
-        if let Some((lock, id)) = found {
+        let mut folders: Vec<(PathBuf, Option<DataRootLock>, Ident)> = Vec::new();
+        if let Some(Found { lock, id, ident }) = found {
             ids.insert(id);
             let to = deleting_path(&target, now_ms)?;
             let done = rename_locked_root(lock, &target, &to)?;
@@ -282,7 +367,7 @@ impl Prepared {
                     "a data root was renamed, but its parent folder could not be flushed"
                 );
             }
-            folders.push((to, Some(done.lock)));
+            folders.push((to, Some(done.lock), ident));
         }
         if let Some(id) = &old {
             // 古い根がもう無くても (消し終えた後に (4) を書けなかったときなど)、外の退避は消す。
@@ -290,19 +375,30 @@ impl Prepared {
         }
         for l in leftovers {
             ids.extend(l.id);
-            folders.push((l.path, l.lock));
+            folders.push((l.path, l.lock, l.ident));
         }
         let mut out = Done::default();
         if let Some(dir) = &backup_dir {
             for b in own_backups(dir, &ids, &protect) {
-                match remove_dir_retry(&b) {
+                let removed = match hooks.remove_backup {
+                    Some(f) => f(&b),
+                    None => remove_dir_retry(&b),
+                };
+                match removed {
                     Ok(()) => out.backups_removed += 1,
                     Err(e) => out.left.push(format!("{}: {e}", b.display())),
                 }
             }
         }
-        for (dir, lock) in folders {
-            match remove_folder(lock, &dir) {
+        if !out.left.is_empty() {
+            // 外の退避が残った: フォルダを DB ごと残す (次の `reset` が根の ID を読んで、(2) からやり直す)。
+            return Ok(out);
+        }
+        for (dir, lock, ident) in folders {
+            if let Some(f) = hooks.before_remove.as_mut() {
+                f(&dir);
+            }
+            match ident.still(&dir).and_then(|()| remove_folder(lock, &dir)) {
                 Ok(()) => out.removed.push(dir),
                 Err(e) => out.left.push(format!("{}: {e}", dir.display())),
             }
@@ -351,17 +447,33 @@ pub fn prepare(opts: &ResetOptions<'_>) -> Result<Prepared, ResetError> {
             Some(real(current_root)),
         ),
     };
+    // 今の根の取り込みが途中なら消さない (今の根を消すと起動が止まり、会話の写しが `.v05-import` に残る)。
+    if old.is_none()
+        && let Some(new_root) = crate::import_v04::import_dir(&target)
+        && presence(&new_root)?
+    {
+        return Err(ResetError::ImportPending {
+            path: target,
+            new_root,
+        });
+    }
     let keep: Vec<PathBuf> = opts.keep.iter().map(|p| real(p)).collect();
     let mut protect = keep.clone();
     protect.extend(current.clone());
-    let found = if exists(&target) {
-        Some(check_target(
-            &target,
-            old.as_deref(),
-            current.as_deref(),
-            &keep,
-        )?)
+    let found = if presence(&target)? {
+        let found = check_target(&target, old.as_deref(), current.as_deref(), &keep)?;
+        if let Some(dir) = opts.backup_dir {
+            refuse_foreign_backups_inside(&target, dir, &found.id)?;
+        }
+        Some(found)
     } else {
+        // 古い根が無いとみなすのは、親のフォルダがあって、その中に無いと分かったときだけ。
+        if old.is_some()
+            && let Some(parent) = target.parent()
+            && !presence(parent)?
+        {
+            return Err(ResetError::OldRootParentMissing { path: target });
+        }
         None
     };
     // 古い根: 取り込んだときから変わっていないか (手順の (0))。ロックを持ったまま比べる。
@@ -376,7 +488,7 @@ pub fn prepare(opts: &ResetOptions<'_>) -> Result<Prepared, ResetError> {
         return Err(ResetError::NotDataRoot { path: target });
     }
     let mut ids: BTreeSet<String> = leftovers.iter().filter_map(|l| l.id.clone()).collect();
-    ids.extend(found.as_ref().map(|(_, id)| id.clone()));
+    ids.extend(found.as_ref().map(|f| f.id.clone()));
     ids.extend(old.clone());
     let real_target = real(&target);
     let outside = opts.backup_dir.map_or(0, |dir| {
@@ -403,10 +515,11 @@ pub fn prepare(opts: &ResetOptions<'_>) -> Result<Prepared, ResetError> {
     })
 }
 
-/// データ根 `root` の隣に残っている、`reset` の消しかけのフォルダ (`<名前>.deleting-*` と、古い根の
-/// `<名前>-v0.4-*.deleting-*`)。`evorag doctor` が示す (03 §10.2)。読むだけ。
+/// データ根 `root` の隣に残っている、`reset` の消しかけのフォルダ (今の根の `<名前>.deleting-<日時>` と、古い根の
+/// `<名前>-v0.4-<日時>.deleting-<日時>`)。`evorag doctor` が、どちらの根のものかを分けて示す (続きを消すコマンドが
+/// 違うため、03 §10.2)。読むだけ。
 #[must_use]
-pub fn deleting_leftovers(root: &Path) -> Vec<PathBuf> {
+pub fn deleting_leftovers(root: &Path) -> Vec<(PathBuf, LeftoverOf)> {
     let Some((parent, name)) = split(root) else {
         return Vec::new();
     };
@@ -415,17 +528,37 @@ pub fn deleting_leftovers(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(parent) else {
         return Vec::new();
     };
-    let mut out: Vec<PathBuf> = rd
+    let mut out: Vec<(PathBuf, LeftoverOf)> = rd
         .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_name().to_str().is_some_and(|n| {
-                n.starts_with(&own) || (n.starts_with(&old) && n.contains(DELETING_INFIX))
-            })
+        .filter_map(|e| {
+            let n = e.file_name().to_str()?.to_owned();
+            let of = if n.strip_prefix(&own).is_some_and(is_stamp_suffix) {
+                LeftoverOf::Current
+            } else if n.starts_with(&old)
+                && n.rsplit_once(DELETING_INFIX)
+                    .is_some_and(|(_, s)| is_stamp_suffix(s))
+            {
+                LeftoverOf::Old
+            } else {
+                return None;
+            };
+            Some((e.path(), of))
         })
-        .map(|e| e.path())
         .collect();
     out.sort();
     out
+}
+
+/// 消しかけのフォルダの名前の後ろ (`<日時>` か `<日時>-<番号>`、日時は [`backup::stamp`] の形) か。
+fn is_stamp_suffix(s: &str) -> bool {
+    let (stamp, n) = s.split_once('-').map_or((s, None), |(a, b)| (a, Some(b)));
+    let b = stamp.as_bytes();
+    b.len() == 19
+        && b[..8].iter().all(u8::is_ascii_digit)
+        && b[8] == b'T'
+        && b[9..18].iter().all(u8::is_ascii_digit)
+        && b[18] == b'Z'
+        && n.is_none_or(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
 }
 
 /// 根 `root` の種類 `kind` の、読める記録 (読むだけで開く。読めない記録は飛ばす)。呼び手は `root` のロックを持って
@@ -455,6 +588,15 @@ pub fn read_records(root: &Path, kind: &str) -> io::Result<Vec<Envelope>> {
 
 fn exists(p: &Path) -> bool {
     std::fs::symlink_metadata(p).is_ok()
+}
+
+/// `p` があるか。無いとみなすのは、調べて「無い」(NotFound) と分かったときだけ (調べられないときは誤り)。
+fn presence(p: &Path) -> io::Result<bool> {
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// (親のフォルダ, 名前)。名前を持たないパス (ドライブの根など) なら `None`。
@@ -489,13 +631,22 @@ fn overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// 対象のフォルダの置き場所・重なり・データ根であること・ロックを確かめ、ロックと `data_root.id` を返す。
+/// 確かめ終えた対象のフォルダ。
+#[derive(Debug)]
+struct Found {
+    lock: DataRootLock,
+    id: String,
+    ident: Ident,
+}
+
+/// 対象のフォルダの置き場所・重なり・データ根であること・ロックを確かめる。今の根 (`expected_id` が `None`) では
+/// `journal/` があることも求める (退避のフォルダを `--data-root` で指したときに、データ根として消さないため)。
 fn check_target(
     target: &Path,
     expected_id: Option<&str>,
     current: Option<&Path>,
     keep: &[PathBuf],
-) -> Result<(DataRootLock, String), ResetError> {
+) -> Result<Found, ResetError> {
     let m = std::fs::symlink_metadata(target)?;
     if fsutil::is_link_or_reparse_point(&m) {
         return Err(ResetError::Link {
@@ -531,7 +682,11 @@ fn check_target(
         path: target.to_path_buf(),
     };
     // DB の無いフォルダには、ロックのファイルも作らない。
-    if !m.is_dir() || !std::fs::symlink_metadata(target.join(DB_FILE)).is_ok_and(|d| d.is_file()) {
+    if !m.is_dir()
+        || !std::fs::symlink_metadata(target.join(DB_FILE)).is_ok_and(|d| d.is_file())
+        || (expected_id.is_none()
+            && !std::fs::symlink_metadata(target.join(JOURNAL_DIR)).is_ok_and(|d| d.is_dir()))
+    {
         return Err(not_root());
     }
     let lock = lock(target)?;
@@ -545,7 +700,37 @@ fn check_target(
             path: target.to_path_buf(),
         });
     }
-    Ok((lock, id))
+    Ok(Found {
+        lock,
+        id,
+        ident: Ident::of(&m),
+    })
+}
+
+/// 対象 `target` の中に退避の置き場所 `dir` があり、根 `id` のほかの退避 (ほかの根のもの・ID の分からないもの) を
+/// 含むなら断る (対象を消すと、ほかの根の退避まで消えるため)。
+fn refuse_foreign_backups_inside(target: &Path, dir: &Path, id: &str) -> Result<(), ResetError> {
+    if !real(dir).starts_with(real(target)) {
+        return Ok(());
+    }
+    for base in [DAILY_DIR, WEEKLY_DIR, PRE_OP_DIR] {
+        let Ok(rd) = std::fs::read_dir(dir.join(base)) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let path = e.path();
+            if std::fs::symlink_metadata(path.join(DB_FILE)).is_ok_and(|m| m.is_file())
+                && backup::backup_root_id(&path).as_deref() != Some(id)
+            {
+                return Err(ResetError::BackupDirInside {
+                    path: target.to_path_buf(),
+                    dir: dir.to_path_buf(),
+                    backup: path,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn lock(root: &Path) -> Result<DataRootLock, ResetError> {
@@ -588,7 +773,7 @@ fn unchanged(old: &Path, source: &ImportSource) -> Result<(), ResetError> {
     })
 }
 
-/// 対象 `target` の隣の、`<名前>.deleting-*` (名前の順)。
+/// 対象 `target` の隣の、`<名前>.deleting-<日時>` (名前の順。日時の形でない名前は、消しかけとして扱わない)。
 fn deleting_leftovers_of(target: &Path) -> io::Result<Vec<PathBuf>> {
     let Some((parent, name)) = split(target) else {
         return Ok(Vec::new());
@@ -604,7 +789,8 @@ fn deleting_leftovers_of(target: &Path) -> io::Result<Vec<PathBuf>> {
         let e = e?;
         if e.file_name()
             .to_str()
-            .is_some_and(|n| n.starts_with(&prefix))
+            .and_then(|n| n.strip_prefix(&prefix))
+            .is_some_and(is_stamp_suffix)
         {
             out.push(e.path());
         }
@@ -657,7 +843,12 @@ fn check_leftover(
         }
         None
     };
-    Ok(Leftover { path, lock, id })
+    Ok(Leftover {
+        path,
+        lock,
+        id,
+        ident: Ident::of(&m),
+    })
 }
 
 /// 改名の先 `<名前>.deleting-<UTC の日時>` (同じ名前があれば番号を足す)。
