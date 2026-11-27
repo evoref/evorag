@@ -969,6 +969,74 @@ message_keys! {
     ImportV04RemovedUnfinishedAtStartup => "import_v04.removed_unfinished_at_startup",
     /// 起動の前に、古い根が変わっていたので、取り込んだ新しい根を消して古い根を元の名前に戻した。引数: `root`。
     ImportV04RemovedStaleAtStartup => "import_v04.removed_stale_at_startup",
+    /// `reset` の確認: 今のデータ根を消す (03 §10.2)。引数: `path`・`backups` (中の退避の数)。
+    ResetAskRoot => "reset.ask_root",
+    /// `reset --old` の確認: 古い根を消す。引数: `path`・`backups`。
+    ResetAskOldRoot => "reset.ask_old_root",
+    /// `reset --old` の確認: 古い根がもう無い (外の退避を消して処分を記録するだけ)。引数: `path`。
+    ResetAskOldMissing => "reset.ask_old_missing",
+    /// `reset` の確認: 前の reset の消しかけのフォルダの続きも消す。引数: `path`。
+    ResetAskLeftover => "reset.ask_leftover",
+    /// `reset` の確認: `storage.backup_dir` の中の、対象の根の退避も消す。引数: `dir`・`count`。
+    ResetAskBackups => "reset.ask_backups",
+    /// `reset --old` の確認: 取り込みの後に忘れた値が古い根に残っていること。引数: `forgets`・`excluded`。
+    ResetAskOldForgets => "reset.ask_old_forgets",
+    /// `reset` の確認: 取り込みの前の古い根が残っている (一緒に消すことを勧める)。引数: `path`。
+    ResetAskKeptOld => "reset.ask_kept_old",
+    /// `reset` の確認: 消しかけの続きだけでなく、今のデータ根も消すこと。引数: `path`。
+    ResetAskAlsoRoot => "reset.ask_also_root",
+    /// `reset` (`--old` なし) の確認: 古い根の消しかけは、この操作では消えない (`--old` で消す)。引数: `path`。
+    ResetAskOldLeftoverNotHere => "reset.ask_old_leftover_not_here",
+    /// `reset` の注意 (元に戻せない・OS のバックアップと書き出しには残りうる・設定は残す)。`--yes` でも出す。
+    ResetIrreversible => "reset.irreversible",
+    /// `reset` の問い。
+    ResetAskConfirm => "reset.ask_confirm",
+    /// 確認で y 以外を答えた。
+    ResetDeclined => "reset.declined",
+    /// 今のデータ根を消した。引数: `path`・`backups` (消した外の退避の数)。
+    ResetDone => "reset.done",
+    /// 古い根を消して処分を記録した。引数: `path`・`backups`。
+    ResetDoneOld => "reset.done_old",
+    /// 消せないものが残った。引数: `paths`・`command`。
+    ResetLeft => "reset.left",
+    /// データ根でない。引数: `path`。
+    ResetNotDataRoot => "reset.not_data_root",
+    /// 今の根が import-v04 で作った根でない。引数: `root`。
+    ResetNotImported => "reset.not_imported",
+    /// 古い根はもう処分してある。
+    ResetAlreadyDisposed => "reset.already_disposed",
+    /// 古い根の ID が import.source と違う。引数: `path`。
+    ResetIdMismatch => "reset.id_mismatch",
+    /// 対象が今の根・設定・状態のフォルダと重なる。引数: `path`・`other`。
+    ResetOverlaps => "reset.overlaps",
+    /// 対象がリンク。引数: `path`。
+    ResetLink => "reset.link",
+    /// 対象がマウントポイント。引数: `path`。
+    ResetMountPoint => "reset.mount_point",
+    /// 古い根が取り込みの後に使われた (手順の (0))。引数: `path`・`lines`。
+    ResetOldChanged => "reset.old_changed",
+    /// 消しかけに見えないフォルダがある。引数: `path`。
+    ResetUnknownLeftover => "reset.unknown_leftover",
+    /// 改名の隙にほかのプロセスが開いた (2)。引数: `detail`。
+    ResetRenameGap => "reset.rename_gap",
+    /// 改名できなかった。引数: `detail`。
+    ResetRenameFailed => "reset.rename_failed",
+    /// 改名を元に戻せなかった。引数: `left`・`detail`・`command`。
+    ResetRenameNotUndone => "reset.rename_not_undone",
+    /// 今の根の取り込みが途中 (`.v05-import` がある)。引数: `root`・`new`。
+    ResetImportPending => "reset.import_pending",
+    /// 今の根が作りかけの取り込みの根 (照合の前)。引数: `root`。
+    ResetImportUnfinished => "reset.import_unfinished",
+    /// 古い根の親のフォルダが無い。引数: `path`。
+    ResetOldParentMissing => "reset.old_parent_missing",
+    /// 対象の中の退避の置き場所に、ほかの根の退避がある。引数: `path`・`dir`・`backup`。
+    ResetBackupDirInside => "reset.backup_dir_inside",
+    /// 古い根を消したが、処分を記録できなかった。引数: `detail`。
+    ResetMarkFailed => "reset.mark_failed",
+    /// `doctor`: 今の根の reset の消しかけのフォルダが残っている。引数: `path`・`root`。
+    ResetLeftoverFound => "reset.leftover_found",
+    /// `doctor`: 古い根の reset --old の消しかけのフォルダが残っている。引数: `path`。
+    ResetLeftoverFoundOld => "reset.leftover_found_old",
     /// 終了のために中断した。
     InterruptedByShutdown => "response.interrupted_by_shutdown",
     /// 並べた語の区切り (`ja` は読点)。セッションの題名・点検の理由・書き出した記録の種類を並べる。
@@ -1016,6 +1084,9 @@ message_keys! {
     CliHelpUpdateRollback => "cli.help.update_rollback",
     CliHelpImportV04 => "cli.help.import_v04",
     CliHelpImportV04From => "cli.help.import_v04_from",
+    CliHelpReset => "cli.help.reset",
+    CliHelpResetOld => "cli.help.reset_old",
+    CliHelpResetYes => "cli.help.reset_yes",
 }
 
 /// 漢字・仮名・全角の文字を含むか。`ja` 以外の文言カタログの検査 (`cargo xtask i18n`) と、英語の UI の試験で

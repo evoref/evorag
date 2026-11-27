@@ -7,6 +7,7 @@ mod config;
 mod doctor;
 mod export;
 mod import;
+mod reset;
 mod setup;
 mod update;
 
@@ -113,6 +114,15 @@ enum Sub {
         #[arg(long, value_name = "PATH")]
         from: Option<PathBuf>,
     },
+    // データ根を丸ごと消す (確認あり。設定は残す)
+    Reset {
+        // import-v04 で取り込んだ後の古い根と、その退避を消す
+        #[arg(long)]
+        old: bool,
+        // 尋ねずに消す
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -196,6 +206,11 @@ fn localized_command(c: &Catalog) -> clap::Command {
         .mut_subcommand("import-v04", |s| {
             s.about(h(MessageKey::CliHelpImportV04))
                 .mut_arg("from", |a| a.help(h(MessageKey::CliHelpImportV04From)))
+        })
+        .mut_subcommand("reset", |s| {
+            s.about(h(MessageKey::CliHelpReset))
+                .mut_arg("old", |a| a.help(h(MessageKey::CliHelpResetOld)))
+                .mut_arg("yes", |a| a.help(h(MessageKey::CliHelpResetYes)))
         })
 }
 
@@ -970,6 +985,23 @@ fn main() -> ExitCode {
             &catalog,
             from.as_deref().unwrap_or(&data_root),
             cfg.storage.allow_unsafe_location.unwrap_or(false),
+            clock.clone(),
+        );
+    }
+    if let Some(Sub::Reset { old, yes }) = &args.command {
+        let state_dir = places.as_ref().map(|p| p.state_dir.as_path());
+        let keep: Vec<&std::path::Path> = std::iter::once(config_file.as_path())
+            .chain(state_dir)
+            .collect();
+        return reset::run(
+            &catalog,
+            &reset::Places {
+                data_root: &data_root,
+                backup_dir: backup_dir.as_deref(),
+                keep: &keep,
+            },
+            *old,
+            *yes,
             clock.clone(),
         );
     }

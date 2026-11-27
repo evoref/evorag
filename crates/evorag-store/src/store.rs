@@ -660,7 +660,8 @@ impl Store {
     }
 
     /// [`Store::open_locked`] の、書く形式 `plan` を指定する形 (v0.5 の根を、起動の更新の片付けや `import-v04` から
-    /// 受け取ったロックを持ったまま開く、03 §12.4)。
+    /// 受け取ったロックを持ったまま開く、03 §12.4。`evorag reset --old` が今の根のロックを持ったまま
+    /// `import.old_root` を書くときも使う、03 §10.2)。
     ///
     /// # Panics
     /// [`Store::open_locked`] と同じ (`lock` が `opts.data_root` のロックでないとき、debug のビルド)。
