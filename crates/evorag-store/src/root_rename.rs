@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use redb::ReadOnlyDatabase;
 
@@ -68,16 +69,33 @@ impl RootSummary {
     }
 }
 
+/// フォルダの改名を、ほかのプログラム (ウイルス対策・索引) が中のファイルを一時的に掴んでいる間、試し直す時間の
+/// 合計 (Windows。書いた直後の DB をウイルス対策が数秒掴むことがあるため)。Unix の `EBUSY` も同じく試し直す。
+pub const FOLDER_RENAME_PATIENCE: Duration = Duration::from_secs(12);
+
+/// 改名を終えた結果。
+#[derive(Debug)]
+pub struct Renamed {
+    /// 改名した先のロック。
+    pub lock: DataRootLock,
+    /// 改名の後に親のフォルダを書き切れなかった (改名はした。電源断で改名の前に戻ることがあるが、どちらの名前でも
+    /// 次の手順が見分けられる)。
+    pub sync_error: Option<io::Error>,
+}
+
 /// [`rename_locked_root`] が改名できなかった理由。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RenameRootError {
-    /// 改名の先が既にある。何も変えていない (ロックは持ったまま放した)。
+    /// 改名の先が既にある。何も変えていない (ロックは放した)。
     #[error("{} already exists", .0.display())]
     Exists(PathBuf),
     /// 改名の前の要約を取れない。何も変えていない。
     #[error("the data root cannot be summarized before the rename: {0}")]
     Summary(#[source] io::Error),
+    /// ロックを放した隙に、ほかのプロセスが根を開いたので改名できなかった (Windows)。根は元の名前のまま。
+    #[error("another process opened the data root before it was renamed: {0}")]
+    InUse(#[source] io::Error),
     /// 改名できなかった。根は元の名前のまま。
     #[error("the data root could not be renamed: {0}")]
     Rename(#[source] io::Error),
@@ -102,7 +120,7 @@ impl RenameRootError {
     #[must_use]
     pub fn is_lock(&self) -> bool {
         match self {
-            Self::Relock(_) | Self::Changed => true,
+            Self::InUse(_) | Self::Relock(_) | Self::Changed => true,
             Self::NotUndone { cause, .. } => cause.is_lock(),
             Self::Exists(_) | Self::Summary(_) | Self::Rename(_) => false,
         }
@@ -128,6 +146,29 @@ impl Gap {
     };
 }
 
+/// 試験だけ: 改名の閉じ方と、隙にほかのプロセスの動きを作る関数。
+#[doc(hidden)]
+pub struct RenameHooks<'a> {
+    pub gap: Gap,
+    /// 改名の直前 (Windows の閉じ方ではロックを放した後) に、元の場所を渡して呼ぶ。
+    pub before: Option<&'a mut dyn FnMut(&Path)>,
+    /// 改名の直後 (Windows の閉じ方ではロックを取り直す前) に、改名した先を渡して呼ぶ。
+    pub between: Option<&'a mut dyn FnMut(&Path)>,
+    /// フォルダの改名を試し直す時間の合計 ([`FOLDER_RENAME_PATIENCE`])。
+    pub patience: Duration,
+}
+
+impl Default for RenameHooks<'_> {
+    fn default() -> Self {
+        Self {
+            gap: Gap::NATIVE,
+            before: None,
+            between: None,
+            patience: FOLDER_RENAME_PATIENCE,
+        }
+    }
+}
+
 /// ロック `lock` を持っているデータ根 `from` を、同じ親のフォルダの `to` に改名し、改名した先のロックを返す
 /// (03 §10.2 の「改名の隙」)。`to` があれば改名しない (置き換えない)。
 ///
@@ -138,66 +179,132 @@ pub fn rename_locked_root(
     lock: DataRootLock,
     from: &Path,
     to: &Path,
-) -> Result<DataRootLock, RenameRootError> {
-    rename_locked_root_with(lock, from, to, Gap::NATIVE, &mut |_| {})
+) -> Result<Renamed, RenameRootError> {
+    rename_locked_root_with(lock, from, to, RenameHooks::default())
 }
 
-/// [`rename_locked_root`] の本体。`gap` で閉じ方を選び、`between` を改名の直後 (Windows の閉じ方ではロックを
-/// 取り直す前) に呼ぶ。試験が改名の隙にほかのプロセスの動きを作るためだけに使う。
+fn call(hook: &mut Option<&mut dyn FnMut(&Path)>, p: &Path) {
+    if let Some(f) = hook.as_mut() {
+        f(p);
+    }
+}
+
+/// [`rename_locked_root`] の本体。試験が [`RenameHooks`] で閉じ方を選び、隙にほかのプロセスの動きを作る。
 #[doc(hidden)]
 pub fn rename_locked_root_with(
     lock: DataRootLock,
     from: &Path,
     to: &Path,
-    gap: Gap,
-    between: &mut dyn FnMut(&Path),
-) -> Result<DataRootLock, RenameRootError> {
+    mut hooks: RenameHooks<'_>,
+) -> Result<Renamed, RenameRootError> {
     if std::fs::symlink_metadata(to).is_ok() {
         return Err(RenameRootError::Exists(to.to_path_buf()));
     }
-    match gap {
+    let patience = hooks.patience;
+    let lock = match hooks.gap {
         Gap::KeepLock => {
-            fsutil::rename_dir_no_replace(from, to).map_err(rename_error(to))?;
-            between(to);
-            Ok(lock.relocated(to))
+            call(&mut hooks.before, from);
+            rename_patiently(from, to, patience).map_err(|e| rename_error(e, to))?;
+            call(&mut hooks.between, to);
+            lock.relocated(to)
         }
         Gap::Relock => {
             let before = RootSummary::take(from).map_err(RenameRootError::Summary)?;
             drop(lock);
-            fsutil::rename_dir_no_replace(from, to).map_err(rename_error(to))?;
-            between(to);
-            let lock = match DataRootLock::acquire(to) {
+            call(&mut hooks.before, from);
+            if let Err(e) = rename_patiently(from, to, patience) {
+                return Err(match rename_error(e, to) {
+                    RenameRootError::Rename(e) if in_use(from) => RenameRootError::InUse(e),
+                    other => other,
+                });
+            }
+            call(&mut hooks.between, to);
+            let lock = match acquire_patiently(to) {
                 Ok(l) => l,
-                Err(e) => return Err(undo(RenameRootError::Relock(e), from, to)),
+                Err(e) => return Err(undo(RenameRootError::Relock(e), from, to, patience)),
             };
             match RootSummary::take(to) {
-                Ok(after) if after == before => Ok(lock),
+                Ok(after) if after == before => lock,
                 Ok(_) => {
                     drop(lock);
-                    Err(undo(RenameRootError::Changed, from, to))
+                    return Err(undo(RenameRootError::Changed, from, to, patience));
                 }
                 Err(e) => {
                     drop(lock);
-                    Err(undo(RenameRootError::Summary(e), from, to))
+                    return Err(undo(RenameRootError::Summary(e), from, to, patience));
                 }
             }
+        }
+    };
+    Ok(Renamed {
+        lock,
+        sync_error: sync_parents(from, to).err(),
+    })
+}
+
+/// 改名の後に、`from` と `to` の親のフォルダを書き切る。
+fn sync_parents(from: &Path, to: &Path) -> io::Result<()> {
+    let parent = |p: &Path| {
+        p.parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    };
+    let (a, b) = (parent(to), parent(from));
+    if let Some(a) = &a {
+        fsutil::sync_dir(a)?;
+    }
+    if let Some(b) = b.filter(|b| Some(b) != a.as_ref()) {
+        fsutil::sync_dir(&b)?;
+    }
+    Ok(())
+}
+
+/// フォルダの改名を、一時の掴み ([`fsutil::is_lock_error`]) の間は `patience` まで試し直す。
+fn rename_patiently(from: &Path, to: &Path, patience: Duration) -> io::Result<()> {
+    let started = Instant::now();
+    let mut wait = Duration::from_millis(50);
+    loop {
+        match fsutil::rename_dir_no_replace(from, to) {
+            Err(e) if fsutil::is_lock_error(&e) && started.elapsed() < patience => {
+                std::thread::sleep(wait.min(patience.saturating_sub(started.elapsed())));
+                wait = (wait * 2).min(Duration::from_secs(1));
+            }
+            r => return r,
         }
     }
 }
 
-fn rename_error(to: &Path) -> impl FnOnce(io::Error) -> RenameRootError + '_ {
-    move |e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            RenameRootError::Exists(to.to_path_buf())
-        } else {
-            RenameRootError::Rename(e)
+/// ロックを取る。ほかのプログラムが一時的にロックのファイルを掴んでいるための失敗だけを、
+/// [`fsutil::LOCK_RETRY_WAITS`] の間隔で試し直す (ほかの evorag が持つロックは試し直さない)。
+fn acquire_patiently(root: &Path) -> Result<DataRootLock, LockError> {
+    for wait in fsutil::LOCK_RETRY_WAITS {
+        match DataRootLock::acquire(root) {
+            Err(LockError::Io(e)) if fsutil::is_lock_error(&e) => std::thread::sleep(wait),
+            r => return r,
         }
+    }
+    DataRootLock::acquire(root)
+}
+
+/// ほかのプロセスが根 `root` のロックを持っているか (何も書かずに確かめる)。
+fn in_use(root: &Path) -> bool {
+    matches!(
+        DataRootLock::acquire_quiet(root),
+        Err(LockError::InUse { .. })
+    )
+}
+
+fn rename_error(e: io::Error, to: &Path) -> RenameRootError {
+    if e.kind() == io::ErrorKind::AlreadyExists {
+        RenameRootError::Exists(to.to_path_buf())
+    } else {
+        RenameRootError::Rename(e)
     }
 }
 
 /// 改名を元に戻す (`to` → `from`)。戻せなければ、`cause` に残った場所を添える。
-fn undo(cause: RenameRootError, from: &Path, to: &Path) -> RenameRootError {
-    match fsutil::rename_dir_no_replace(to, from) {
+fn undo(cause: RenameRootError, from: &Path, to: &Path, patience: Duration) -> RenameRootError {
+    match rename_patiently(to, from, patience) {
         Ok(()) => cause,
         Err(error) => RenameRootError::NotUndone {
             cause: Box::new(cause),
@@ -233,6 +340,20 @@ mod tests {
         root
     }
 
+    /// 試験の閉じ方。改名の試し直しは短くする。
+    fn hooks<'a>(
+        gap: Gap,
+        before: Option<&'a mut dyn FnMut(&Path)>,
+        between: Option<&'a mut dyn FnMut(&Path)>,
+    ) -> RenameHooks<'a> {
+        RenameHooks {
+            gap,
+            before,
+            between,
+            patience: Duration::from_millis(300),
+        }
+    }
+
     #[test]
     fn the_summary_reads_the_meta_and_skips_the_lock_files() {
         let tmp = TempDir::new("rename-summary");
@@ -244,6 +365,10 @@ mod tests {
         let again = DataRootLock::acquire(&root).expect("lock again");
         assert_eq!(RootSummary::take(&root).expect("summary"), s);
         drop(again);
+        // OS の作るファイルは比べに含めない (03 §12.4 の (c))。
+        std::fs::write(root.join(".DS_Store"), b"x").expect("write");
+        std::fs::write(root.join("journal").join("._x.jsonl"), b"x").expect("write");
+        assert_eq!(RootSummary::take(&root).expect("summary"), s);
         std::fs::write(root.join("extra"), b"x").expect("write");
         assert_ne!(RootSummary::take(&root).expect("summary"), s);
     }
@@ -255,9 +380,10 @@ mod tests {
         let from = make_root(&tmp, "a");
         let to = tmp.path().join("b");
         let lock = DataRootLock::acquire(&from).expect("lock");
-        let lock =
-            rename_locked_root_with(lock, &from, &to, Gap::Relock, &mut |_| {}).expect("rename");
-        assert_eq!(lock.path(), to.join(crate::lock::LOCK_FILE));
+        let done = rename_locked_root_with(lock, &from, &to, hooks(Gap::Relock, None, None))
+            .expect("rename");
+        assert!(done.sync_error.is_none());
+        assert_eq!(done.lock.path(), to.join(crate::lock::LOCK_FILE));
         assert!(!from.exists());
         assert!(matches!(
             DataRootLock::acquire(&to),
@@ -273,10 +399,12 @@ mod tests {
         let to = tmp.path().join("b");
 
         let lock = DataRootLock::acquire(&from).expect("lock");
-        let err = rename_locked_root_with(lock, &from, &to, Gap::Relock, &mut |at| {
+        let mut write = |at: &Path| {
             std::fs::write(at.join("journal").join("x.jsonl"), b"{}\n").expect("write");
-        })
-        .expect_err("changed in the gap");
+        };
+        let err =
+            rename_locked_root_with(lock, &from, &to, hooks(Gap::Relock, None, Some(&mut write)))
+                .expect_err("changed in the gap");
         assert!(matches!(err, RenameRootError::Changed), "{err}");
         assert!(err.is_lock());
         assert!(from.join(DB_FILE).is_file(), "the rename is undone");
@@ -286,10 +414,12 @@ mod tests {
         // Unix のロックは開いた取っ手ごとなので、同じプロセスの中でもう 1 つ取ると断られる (Windows も同じ)。
         let mut held = None;
         let lock = DataRootLock::acquire(&from).expect("lock");
-        let err = rename_locked_root_with(lock, &from, &to, Gap::Relock, &mut |at| {
+        let mut take = |at: &Path| {
             held = Some(DataRootLock::acquire(at).expect("another process locks it"));
-        })
-        .expect_err("locked in the gap");
+        };
+        let err =
+            rename_locked_root_with(lock, &from, &to, hooks(Gap::Relock, None, Some(&mut take)))
+                .expect_err("locked in the gap");
         if cfg!(windows) {
             // ロックのファイルを開いた取っ手があるので、元に戻す改名もできない。
             assert!(
@@ -305,6 +435,34 @@ mod tests {
         }
     }
 
+    /// ロックを放してから改名するまでの隙に、ほかのプロセスが元の側を開いたら、ロックの理由 (2) で断る。
+    #[test]
+    fn a_root_opened_before_the_rename_is_reported_as_in_use() {
+        let tmp = TempDir::new("rename-before");
+        let from = make_root(&tmp, "a");
+        let to = tmp.path().join("b");
+        let mut held = None;
+        let lock = DataRootLock::acquire(&from).expect("lock");
+        let mut take = |at: &Path| {
+            held = Some(DataRootLock::acquire(at).expect("another process locks it"));
+        };
+        let r =
+            rename_locked_root_with(lock, &from, &to, hooks(Gap::Relock, Some(&mut take), None));
+        if cfg!(windows) {
+            // 開いたロックのファイルがあるのでフォルダを改名できない。
+            let err = r.expect_err("in use");
+            assert!(matches!(err, RenameRootError::InUse(_)), "{err}");
+            assert!(err.is_lock());
+            assert!(from.join(DB_FILE).is_file());
+            assert!(!to.exists());
+        } else {
+            // Unix では改名はできるが、改名した先のロックを取り直せないので元に戻す。
+            let err = r.expect_err("relock fails");
+            assert!(matches!(err, RenameRootError::Relock(_)), "{err}");
+            assert!(from.join(DB_FILE).is_file());
+        }
+    }
+
     #[test]
     fn a_rename_never_replaces_an_existing_folder() {
         let tmp = TempDir::new("rename-exists");
@@ -313,11 +471,20 @@ mod tests {
         std::fs::create_dir(&to).expect("an empty folder");
         for gap in [Gap::Relock, Gap::KeepLock] {
             let lock = DataRootLock::acquire(&from).expect("lock");
-            let err = rename_locked_root_with(lock, &from, &to, gap, &mut |_| {})
+            let err = rename_locked_root_with(lock, &from, &to, hooks(gap, None, None))
                 .expect_err("the target exists");
             assert!(matches!(err, RenameRootError::Exists(_)), "{err}");
             assert!(from.join(DB_FILE).is_file());
         }
+        // 確かめた後に作られた先も置き換えない (OS の置き換えない改名)。
+        std::fs::remove_dir(&to).expect("remove");
+        let lock = DataRootLock::acquire(&from).expect("lock");
+        let mut make = |_: &Path| std::fs::create_dir(&to).expect("made in the gap");
+        let err =
+            rename_locked_root_with(lock, &from, &to, hooks(Gap::Relock, Some(&mut make), None))
+                .expect_err("the target appeared");
+        assert!(matches!(err, RenameRootError::Exists(_)), "{err}");
+        assert!(from.join(DB_FILE).is_file());
     }
 
     /// ロックを持ったままの改名 (Unix の規則)。Windows ではロックのファイルを開いたままフォルダを改名できない。
@@ -328,13 +495,19 @@ mod tests {
         let from = make_root(&tmp, "a");
         let to = tmp.path().join("b");
         let lock = DataRootLock::acquire(&from).expect("lock");
-        let lock = rename_locked_root_with(lock, &from, &to, Gap::KeepLock, &mut |at| {
+        let mut check = |at: &Path| {
             assert!(matches!(
                 DataRootLock::acquire(at),
                 Err(LockError::InUse { .. })
             ));
-        })
+        };
+        let done = rename_locked_root_with(
+            lock,
+            &from,
+            &to,
+            hooks(Gap::KeepLock, None, Some(&mut check)),
+        )
         .expect("rename");
-        assert_eq!(lock.path(), to.join(crate::lock::LOCK_FILE));
+        assert_eq!(done.lock.path(), to.join(crate::lock::LOCK_FILE));
     }
 }

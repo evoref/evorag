@@ -1146,7 +1146,11 @@ fn main() -> ExitCode {
         if !ask_yes(&catalog.key(MessageKey::CliAskRestore)) {
             return ExitCode::from(2);
         }
-        let latest = evorag_store::restore::list_backups(&data_root, backup_dir.as_deref());
+        // 戻す候補は、この根の退避 (と ID の分からない退避) だけ。`storage.backup_dir` を import-v04 の古い根と
+        // 共有していても、古い根の退避を戻さない (03 §7.1 の「退避と根の ID」)。
+        let owner = evorag_store::restore::BackupOwner::of(&data_root, Some(moved_to));
+        let latest =
+            evorag_store::restore::restore_candidates(&data_root, backup_dir.as_deref(), &owner);
         if let Some(b) = latest.first() {
             if let Err(e) = evorag_store::restore::restore(
                 &data_root,
@@ -1221,6 +1225,14 @@ fn main() -> ExitCode {
         }
         Err(StartError::Store(OpenError::Lock(LockError::InUse { pid }))) => {
             return data_root_in_use(&catalog, &data_root, pid);
+        }
+        Err(StartError::Store(OpenError::ImportPending { new_root })) => {
+            return fail(
+                &catalog,
+                2,
+                MessageKey::CliImportPending,
+                &[("new", &new_root.display().to_string())],
+            );
         }
         Err(
             e @ (StartError::Store(OpenError::DatabaseInUse)

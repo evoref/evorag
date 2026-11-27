@@ -911,6 +911,36 @@ message_keys! {
     ImportV04RenameGap => "import_v04.rename_gap",
     /// 作りかけの新しい根を消せなかった。引数: `path`・`detail`。
     ImportV04NotRemoved => "import_v04.not_removed",
+    /// 断った理由: 古い根のパスがリンク。引数: `path`。
+    ImportV04ReasonLink => "import_v04.reason.link",
+    /// 断った理由: 古い根がマウントポイント。引数: `path`。
+    ImportV04ReasonMountPoint => "import_v04.reason.mount_point",
+    /// 断った理由: パスが Unicode として読めない。引数: `path`。
+    ImportV04ReasonNonUnicode => "import_v04.reason.non_unicode",
+    /// 次にすること: リンクの先の実際のフォルダを指す。
+    ImportV04NextRealFolder => "import_v04.next.real_folder",
+    /// 次にすること: マウントポイントの下のフォルダへ移す。
+    ImportV04NextMoveIntoFolder => "import_v04.next.move_into_folder",
+    /// 改名を元に戻せなかった (根の残った場所を示す)。引数: `left`・`detail`。
+    ImportV04RenameNotUndone => "import_v04.rename_not_undone",
+    /// 元の名前の根が無いので、`.v05-import` に触れずに止めた。引数: `root`・`new`。
+    ImportV04OriginalMissing => "import_v04.original_missing",
+    /// 元の名前の根と改名の後の古い根の両方がある。引数: `root`・`renamed`。
+    ImportV04BothRoots => "import_v04.both_roots",
+    /// 元の名前の根が、取り込み元とは別の根。引数: `root`・`new`。
+    ImportV04OtherRoot => "import_v04.other_root",
+    /// 元の名前の根を読めない。引数: `root`。
+    ImportV04OriginalUnreadable => "import_v04.original_unreadable",
+    /// `.v05-import` が壊れている (DB を読めない・ジャーナルが無い)。引数: `path`。
+    ImportV04DamagedLeftover => "import_v04.damaged_leftover",
+    /// 照合の後に新しい根へ書いたのに、古い根も変わっている。引数: `new`。
+    ImportV04NewRootUsed => "import_v04.new_root_used",
+    /// `.v05-import` の取り込み元の記録が、この根のものでない。引数: `new`。
+    ImportV04ForeignSource => "import_v04.foreign_source",
+    /// データ根が無く、入れ替えが途中 (根を作らずに断った)。引数: `new`。
+    CliImportPending => "cli.import_pending",
+    /// `backups list` の、ID の分からない退避の行。引数: `kind`, `dir`, `seq`。
+    BackupsItemUnknownRoot => "backups.item_unknown_root",
     /// 起動の前に、止まった入れ替えを続けて終えた。引数: `root`・`renamed`。
     ImportV04ResumedAtStartup => "import_v04.resumed_at_startup",
     /// 起動の前に、作りかけの新しい根を消した。引数: `new`。

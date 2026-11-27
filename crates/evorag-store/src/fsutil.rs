@@ -124,23 +124,37 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// フォルダ `from` を、同じボリュームの `to` に改名する。`to` が既にあれば改名せずに `AlreadyExists` で失敗する
-/// (データ根を入れ替える改名で、ほかのフォルダを置き換えないため、03 §10.2・§12.4)。改名の後に、`to` の親の
-/// フォルダを書き切る。
+/// (データ根を入れ替える改名で、ほかのフォルダを置き換えないため、03 §10.2・§12.4)。1 回だけ試し、親のフォルダは
+/// 書き切らない (呼び手が [`sync_dir`] を別に呼び、改名の成否と書き切りの成否を分けて扱うため)。
 ///
-/// - Windows: `MoveFileExW` に `MOVEFILE_WRITE_THROUGH` だけを付ける (置き換えない)。一時の共有違反
-///   (ウイルス対策・索引が中のファイルを掴んでいるとき) は [`retry_transient`] と同じ間隔で試し直す。
-/// - Unix: `to` が無いことを確かめてから `rename(2)` する (空のフォルダへの改名は置き換えになるため。確かめと
-///   改名の間に `to` を作られる隙は残る)。
+/// - Windows: `MoveFileExW` に `MOVEFILE_WRITE_THROUGH` だけを付ける (置き換えない)。
+/// - Linux: `renameat2(RENAME_NOREPLACE)`。ファイルシステムが対応しない (`EINVAL`・`ENOSYS`) ときだけ、下の
+///   確かめてからの改名に戻す。
+/// - macOS: `renamex_np(RENAME_EXCL)`。対応しない (`ENOTSUP`) ときだけ、確かめてからの改名に戻す。
+/// - ほかの Unix: `to` が無いことを確かめてから `rename(2)` する (確かめと改名の間に `to` を作られる隙は残る)。
 ///
 /// # Errors
 ///
-/// `to` がある (`AlreadyExists`)、OS の改名の失敗、書き切りの失敗。
+/// `to` がある (`AlreadyExists`)、OS の改名の失敗。
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-    imp::rename_dir_no_replace(from, to)?;
-    if let Some(dir) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
-        sync_dir(dir)?;
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the rename target already exists",
+        ));
     }
-    Ok(())
+    imp::rename_dir_no_replace(from, to)
+}
+
+/// 所有者だけが読み書きできるフォルダを、新しく 1 段だけ作る (親は作らない)。既にあれば `AlreadyExists` で失敗する
+/// (同じ名前のフォルダをほかが先に作った隙を、作った後に気付かずに使わないため、03 §12.4 の「書き方」)。権限は
+/// [`create_private_dir`] と同じ。
+///
+/// # Errors
+///
+/// 既にある (`AlreadyExists`)・親が無い・作れない・権限を付けられないとき。
+pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+    imp::create_private_dir_new(p)
 }
 
 /// リンクか: シンボリックリンクと、Windows の名前の代理のリパースポイント (ジャンクションなど、
@@ -304,13 +318,12 @@ mod imp {
     }
 
     pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the rename target already exists",
-            ));
-        }
-        retry_transient(|| rename_no_replace(from, to))
+        rename_no_replace(from, to)
+    }
+
+    pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+        std::fs::create_dir(p)?;
+        crate::winacl::restrict(&wide(&std::path::absolute(p)?)?, true)
     }
 
     pub fn is_link_or_reparse_point(meta: &std::fs::Metadata) -> bool {
@@ -449,13 +462,85 @@ mod imp {
     }
 
     pub fn rename_dir_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the rename target already exists",
-            ));
+        match rename_exclusive(from, to) {
+            Some(r) => r,
+            // 置き換えない改名に対応しないファイルシステム: 確かめてから改名する。
+            None => {
+                if std::fs::symlink_metadata(to).is_ok() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "the rename target already exists",
+                    ));
+                }
+                std::fs::rename(from, to)
+            }
         }
-        std::fs::rename(from, to)
+    }
+
+    fn c_path(p: &Path) -> io::Result<std::ffi::CString> {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a NUL in the path"))
+    }
+
+    /// 置き換えない改名。対応しない (呼び手が確かめてからの改名に戻す) ときは `None`。
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn rename_exclusive(from: &Path, to: &Path) -> Option<io::Result<()>> {
+        let (f, t) = match (c_path(from), c_path(to)) {
+            (Ok(f), Ok(t)) => (f, t),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+        };
+        // SAFETY: 両方とも NUL で終わる C の文字列で、呼び出しの間は生きている。AT_FDCWD は相対パスを今の
+        // フォルダから解く (渡すのは絶対パス)。
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE as _,
+            )
+        };
+        if rc == 0 {
+            return Some(Ok(()));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EINVAL | libc::ENOSYS) => None,
+            Some(libc::EEXIST) => Some(Err(io::Error::new(io::ErrorKind::AlreadyExists, e))),
+            _ => Some(Err(e)),
+        }
+    }
+
+    /// 置き換えない改名。対応しない (呼び手が確かめてからの改名に戻す) ときは `None`。
+    #[cfg(target_os = "macos")]
+    fn rename_exclusive(from: &Path, to: &Path) -> Option<io::Result<()>> {
+        let (f, t) = match (c_path(from), c_path(to)) {
+            (Ok(f), Ok(t)) => (f, t),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+        };
+        // SAFETY: 両方とも NUL で終わる C の文字列で、呼び出しの間は生きている。
+        let rc = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            return Some(Ok(()));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOTSUP) => None,
+            Some(libc::EEXIST) => Some(Err(io::Error::new(io::ErrorKind::AlreadyExists, e))),
+            _ => Some(Err(e)),
+        }
+    }
+
+    /// 置き換えない改名を持たない Unix: 常に確かめてからの改名に戻す。
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    fn rename_exclusive(_from: &Path, _to: &Path) -> Option<io::Result<()>> {
+        None
+    }
+
+    pub fn create_private_dir_new(p: &Path) -> io::Result<()> {
+        std::fs::DirBuilder::new().mode(0o700).create(p)?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
     }
 
     pub fn is_lock_error(e: &io::Error) -> bool {

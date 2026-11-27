@@ -304,6 +304,7 @@ dot = "・"
 sentence = "。"
 
 [cli]
+import_pending = "データ根が無く、import-v04 の入れ替えが途中です ({new})。新しい根は作っていません。evorag を起動するか evorag import-v04 を実行すると、入れ替えを続けます。"
 model_mismatch = """応答のモデルが、このデータ根に記録したモデルと違います。
   記録したモデル: {recorded}
   繋がっているモデル: {connected}
@@ -701,6 +702,7 @@ index_rebuild = "語彙の索引: 読めません ({detail})。次の起動で�
 probe_issues = "{issues}。"
 
 [backups]
+item_unknown_root = "{kind}  {dir}  (ジャーナルの連番 {seq}、どの根の退避か分かりません)"
 item = "{kind}  {dir}  (ジャーナルの連番 {seq})"
 none = "退避はありません。"
 purge_ask = "退避 {count} 個 (日次・週次・移行と作り直しの前の退避) をすべて消します。消した退避からは戻せません。消しますか?"
@@ -709,6 +711,14 @@ purged = "退避 {count} 個を消しました。"
 purge_failed = "退避 {count} 個を消しましたが、消せなかったものがあります: {detail}"
 
 [import_v04]
+rename_not_undone = "入れ替えの改名を元に戻せませんでした ({detail})。データ根は {left} にあります。ほかの evorag を終えてから、もう一度 evorag import-v04 を実行してください (続きから行います)。古い根は消していません。"
+original_missing = "元の名前のデータ根 {root} が無いので、新しい根 {new} には触れずに止めました。古い根を {root} に戻してから、もう一度実行してください。"
+both_roots = "{root} と {renamed} の両方があるので、どちらが取り込み元の古い根かを決められず、何も変えずに止めました。v0.4 で使っていた根がどちらかを確かめ、使わない方を別の場所へ移してから、もう一度実行してください。"
+other_root = "{root} は、新しい根 {new} の取り込み元とは別のデータ根なので、何も変えずに止めました。{root} が何かを確かめ、取り込み元の古い根を {root} に戻すか、{new} を別の場所へ移してから、もう一度実行してください。"
+original_unreadable = "{root} の DB を読めないので、取り込み元の古い根かを確かめられず、何も変えずに止めました。v0.4 の evorag で {root} を一度開いて終了してから、もう一度実行してください。"
+damaged_leftover = "{path} が残っていますが、DB を読めないか、ジャーナルが無いので、触れずに止めました。古い根はそのままです。{path} の中身を確かめて別の場所へ移してから、もう一度実行してください。"
+new_root_used = "取り込んだ新しい根 {new} に照合の後で書き込みがあり、古い根も変わっているので、どちらも消さずに止めました。どちらの会話を残すかを決め、使わない方を別の場所へ移してから、もう一度実行してください。"
+foreign_source = "{new} の取り込み元の記録が、このデータ根のものと合わないので、何も変えずに止めました。{new} を別の場所へ移してから、もう一度実行してください。"
 ask = "v0.4 のデータ根 {old} を、新しいデータ根へ取り込みます。古い根には書きません。照合が通ったら、古い根を {renamed} に改名して残し、新しい根を {root} に置きます (設定は変えません)。取り込みますか?"
 ask_redo = "前の取り込みの新しい根 {new} は使えないので、消してからやり直します。"
 ask_continue = "前の取り込みの新しい根 {new} は照合を終えています。止まっていた入れ替え (古い根 {old} を {renamed} に改名して残し、新しい根を {root} に置く) を続けますか?"
@@ -720,7 +730,7 @@ refused = "取り込めません: {reason}\n{next}\n古い根には何も書い�
 mismatch = "取り込んだ新しい根の照合が合わなかったので、新しい根を消しました: {detail}\n古い根はそのままです。もう一度 evorag import-v04 を実行してください。続けて合わないときは、v0.4 の evorag doctor で古い根を確かめてください。"
 leftover = "{path} が残っていますが、evorag の作ったものでないファイルがあるか、取り込み元の根と組にならないので、触れずに止めました。中身を確かめて別の場所へ移してから、もう一度実行してください。"
 old_root_missing = "照合を終えた新しい根 {new} の取り込み元 {path} が見つからないので、入れ替えを続けられません。古い根を {path} に戻してから、もう一度実行してください。"
-rename_failed = "入れ替えの改名ができませんでした: {detail}\n古い根は消していません。もう一度 evorag import-v04 を実行すると、続きから行います。"
+rename_failed = "入れ替えの改名ができませんでした: {detail}\n古い根は消していません。次に evorag を起動するか、もう一度 evorag import-v04 を実行すると、続きから行います。"
 rename_gap = "入れ替えの改名の間に、ほかのプロセスがデータ根を開いたか書いたので、改名を元に戻しました ({detail})。\nほかの evorag を終えてから、もう一度 evorag import-v04 を実行してください。"
 not_removed = "作りかけの新しい根 {path} を消せませんでした: {detail}\n古い根はそのままです。ほかのプログラムがファイルを開いていないかを確かめてから、もう一度実行してください。"
 resumed_at_startup = "止まっていた import-v04 の入れ替えを終えました。新しいデータ根は {root}、古い根は {renamed} です。"
@@ -728,6 +738,9 @@ removed_unfinished_at_startup = "止まっていた import-v04 の作りかけ�
 removed_stale_at_startup = "import-v04 の後に古い根が使われていたので、取り込んだ新しい根を消し、古い根を {root} に戻しました。取り込み直すときは evorag import-v04 を実行してください。"
 
 [import_v04.reason]
+link = "{path} はリンク (シンボリックリンクかジャンクション) です"
+mount_point = "{path} はマウントポイントです (改名できません)"
+non_unicode = "{path} のパスに、Unicode として読めない文字があります"
 not_data_root = "{path} は evorag のデータ根ではありません"
 not_opened_by_v04 = "v0.4 の evorag で開いた根ではありません (形式の版 {format}、最後に書いた版 {writer})"
 newer_format = "このデータ根は、もう新しい形式 ({format}) です"
@@ -738,6 +751,8 @@ unfinished = "前回の v0.4 が正しく終わっていません ({detail})"
 unreadable = "データ根を読めません ({detail})"
 
 [import_v04.next]
+real_folder = "リンクの先の実際のフォルダを --from (と --data-root・設定の storage.data_root) に指定してから、もう一度 evorag import-v04 を実行してください。"
+move_into_folder = "データ根を、マウントポイントの下のふつうのフォルダへ移し、--data-root (か設定の storage.data_root) をそこに合わせてから、もう一度 evorag import-v04 を実行してください。"
 check_path = "取り込むデータ根のパスを確かめてください (--from で指定できます)。"
 open_once_with_v04 = "v0.4 の evorag で一度起動して終了してから、もう一度 evorag import-v04 を実行してください。"
 repair_with_v04 = "v0.4 の evorag doctor (と evorag repair) で確かめてから、もう一度 evorag import-v04 を実行してください。"

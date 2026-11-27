@@ -37,6 +37,8 @@ pub struct BackupInfo {
     pub modified: SystemTime,
     /// 退避に含まれる最後のジャーナルの連番。
     pub journal_seq: Option<u64>,
+    /// 退避の `meta` の `data_root.id` (どの根の退避か)。読めなければ `None` (ID の分からない退避)。
+    pub data_root_id: Option<String>,
 }
 
 fn io(e: std::io::Error) -> StoreError {
@@ -53,12 +55,102 @@ pub fn move_broken(root: &Path, now_ms: i64) -> std::io::Result<PathBuf> {
     Ok(to)
 }
 
-fn journal_seq_of(file: &Path) -> Option<u64> {
-    let db = Database::open(file).ok()?;
-    let rtx = db.begin_read().ok()?;
-    let t = rtx.open_table(META).ok()?;
-    let v = t.get(crate::meta::JOURNAL_LAST_SEQ.as_bytes()).ok()??;
-    String::from_utf8_lossy(v.value()).parse().ok()
+/// 退避の DB の (`journal.last_seq`, `data_root.id`)。読めない値は `None`。
+fn backup_meta_of(file: &Path) -> (Option<u64>, Option<String>) {
+    let Ok(db) = Database::open(file) else {
+        return (None, None);
+    };
+    let Ok(rtx) = db.begin_read() else {
+        return (None, None);
+    };
+    let Ok(t) = rtx.open_table(META) else {
+        return (None, None);
+    };
+    let get = |k: &str| {
+        t.get(k.as_bytes())
+            .ok()
+            .flatten()
+            .map(|v| String::from_utf8_lossy(v.value()).into_owned())
+    };
+    (
+        get(crate::meta::JOURNAL_LAST_SEQ).and_then(|s| s.parse().ok()),
+        get(crate::meta::DATA_ROOT_ID),
+    )
+}
+
+/// 戻す候補を見分ける、今の根の ID (03 §7.1 の「退避と根の ID」)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupOwner {
+    /// 今の根の `data_root.id`。
+    Id(String),
+    /// 今の根の ID が分からない (DB を開けない)。`not` は、ほかの根と分かっている ID (ジャーナルの `import.source`
+    /// にある取り込み元の古い根の ID)。
+    Unknown { not: Vec<String> },
+}
+
+impl BackupOwner {
+    /// 根 `root` の ID を、DB (読めなければ、移した壊れた DB `broken_db`) から読む。どちらも読めなければ、ジャーナルの
+    /// `meta` の行の `import.source` から、ほかの根の ID を集める。
+    #[must_use]
+    pub fn of(root: &Path, broken_db: Option<&Path>) -> Self {
+        let id_in = |file: &Path| {
+            let db = redb::ReadOnlyDatabase::open(file).ok()?;
+            let id = crate::store::read_meta_db_any(&db)
+                .ok()?
+                .get(crate::meta::DATA_ROOT_ID)
+                .cloned();
+            let _ = db.close();
+            id
+        };
+        let found = id_in(&root.join(DB_FILE)).or_else(|| broken_db.and_then(id_in));
+        if let Some(id) = found {
+            return Self::Id(id);
+        }
+        let not = crate::journal::scan_metas(root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k == crate::meta::IMPORT_SOURCE)
+            .filter_map(|(_, v)| {
+                serde_json::from_str::<serde_json::Value>(&v)
+                    .ok()?
+                    .get("data_root_id")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        Self::Unknown { not }
+    }
+
+    /// 退避 `b` を戻す候補にするか: 今の根の退避と、ID の分からない退避。ほかの根の退避は除く。
+    fn admits(&self, b: &BackupInfo) -> bool {
+        match (self, &b.data_root_id) {
+            (_, None) => true,
+            (Self::Id(id), Some(x)) => id == x,
+            (Self::Unknown { not }, Some(x)) => !not.contains(x),
+        }
+    }
+
+    /// 退避 `b` が今の根のものと分かっているか。
+    fn owns(&self, b: &BackupInfo) -> bool {
+        matches!((self, &b.data_root_id), (Self::Id(id), Some(x)) if id == x)
+    }
+}
+
+/// 戻す候補の退避 (03 §7.1 の「退避と根の ID」・§8): 今の根の退避を新しい順に先に、続けて ID の分からない退避
+/// (と、今の根の ID が分からないときの、ほかの根と分からない退避) を新しい順に。ほかの根の退避は出さない
+/// (`storage.backup_dir` を `import-v04` の古い根と共有しているときに、古い根の退避を戻さないため)。
+#[must_use]
+pub fn restore_candidates(
+    root: &Path,
+    backups: Option<&Path>,
+    owner: &BackupOwner,
+) -> Vec<BackupInfo> {
+    let (mut own, rest): (Vec<_>, Vec<_>) = list_backups(root, backups)
+        .into_iter()
+        .filter(|b| owner.admits(b))
+        .partition(|b| owner.owns(b));
+    own.extend(rest);
+    own
 }
 
 /// 退避を置くフォルダ (種類ごと)。日次と週次は `backups` (省くとデータ根の `backups/`) の下。移行と作り直しの
@@ -106,11 +198,13 @@ pub fn list_backups(root: &Path, backups: Option<&Path>) -> Vec<BackupInfo> {
             let Ok(meta) = std::fs::metadata(&file) else {
                 continue;
             };
+            let (journal_seq, data_root_id) = backup_meta_of(&file);
             out.push(BackupInfo {
                 dir: path,
                 kind,
                 modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                journal_seq: journal_seq_of(&file),
+                journal_seq,
+                data_root_id,
             });
         }
     }

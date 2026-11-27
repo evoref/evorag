@@ -314,8 +314,73 @@ pub fn pre_op(
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
-    prune(&base, PRE_OP_KEEP, &dir);
+    prune(&base, PRE_OP_KEEP, &dir, root_id_of_db(src).as_deref());
     Ok(dir)
+}
+
+/// DB の `meta` の `data_root.id`。読めなければ `None`。
+fn root_id_of_db(db: &Database) -> Option<String> {
+    crate::store::read_meta_db_any(db)
+        .ok()?
+        .get(crate::meta::DATA_ROOT_ID)
+        .cloned()
+}
+
+/// 退避 `dir` (中に `evorag.redb`) の `meta` の `data_root.id`。読むだけで開く。開けない・無いときは `None`
+/// (ID の分からない退避、03 §7.1 の「退避と根の ID」)。
+#[must_use]
+pub fn backup_root_id(dir: &Path) -> Option<String> {
+    let db = redb::ReadOnlyDatabase::open(dir.join(crate::store::DB_FILE)).ok()?;
+    let id = crate::store::read_meta_db_any(&db)
+        .ok()?
+        .get(crate::meta::DATA_ROOT_ID)
+        .cloned();
+    let _ = db.close();
+    id
+}
+
+/// 退避 `dir` が根 `id` のものか。`id` が `None` (根の ID が分からない) なら、どの退避も数える (前の振る舞い)。
+fn owned_by(dir: &Path, id: Option<&str>) -> bool {
+    id.is_none_or(|id| backup_root_id(dir).as_deref() == Some(id))
+}
+
+/// `base` の下に作る退避のフォルダの名前。`name` が空いていればそれ、ほかの根の退避が使っていれば、根の ID の
+/// 先頭 8 文字を足した名前 (それも使われていれば番号を足す、03 §7.1 の「退避と根の ID」)。
+fn free_name(base: &Path, name: &str, id: Option<&str>) -> PathBuf {
+    let plain = base.join(name);
+    // 無いか、DB の写しを持たない (作りかけの) フォルダなら、その名前を使う (前の振る舞い)。
+    if std::fs::symlink_metadata(&plain).is_err() || !plain.join(crate::store::DB_FILE).is_file() {
+        return plain;
+    }
+    let short: String = id
+        .unwrap_or("unknown")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    let tagged = format!("{name}-{short}");
+    let mut dir = base.join(&tagged);
+    let mut n = 1;
+    while std::fs::symlink_metadata(&dir).is_ok() {
+        dir = base.join(format!("{tagged}-{n}"));
+        n += 1;
+    }
+    dir
+}
+
+/// `base` の下で、名前が `name` か `name-` で始まる、根 `id` の退避 (DB の写しを持つもの)。
+fn own_backup(base: &Path, name: &str, id: Option<&str>) -> Option<PathBuf> {
+    let tagged = format!("{name}-");
+    std::fs::read_dir(base)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == name || n.starts_with(&tagged))
+        })
+        .find(|p| p.join(crate::store::DB_FILE).is_file() && owned_by(p, id))
 }
 
 /// 自動の退避のフォルダ (03 §7.1)。
@@ -329,31 +394,30 @@ pub const WEEKLY_KEEP: usize = 4;
 ///
 /// `backups/daily/<YYYYMMDD>/` に一貫した写しを作り、その週の最初の退避なら `backups/weekly/` にも
 /// 残す。新しいものから日次 7 世代・週次 4 世代を残す。日付は UTC。
-/// その日の日次の退避がまだ無いか (裏の処理が作るかを決める、03 §7.1)。
-pub fn daily_due(backups: &Path, now_ms: i64) -> bool {
+/// その日の、根 `root_id` の日次の退避がまだ無いか (裏の処理が作るかを決める、03 §7.1)。`storage.backup_dir` を
+/// ほかの根 (`import-v04` の古い根など) と共有していても、ほかの根の退避は数えない。
+pub fn daily_due(backups: &Path, now_ms: i64, root_id: Option<&str>) -> bool {
     let day = stamp(now_ms)[..8].to_owned();
-    !backups
-        .join(DAILY_DIR)
-        .join(day)
-        .join(crate::store::DB_FILE)
-        .is_file()
+    own_backup(&backups.join(DAILY_DIR), &day, root_id).is_none()
 }
 
 pub fn daily(src: &Database, backups: &Path, now_ms: i64) -> Result<Option<PathBuf>, StoreError> {
     let io = |e: std::io::Error| StoreError::Io(e.to_string());
+    let id = root_id_of_db(src);
+    let id = id.as_deref();
     let day = stamp(now_ms)[..8].to_owned();
     let daily_base = backups.join(DAILY_DIR);
-    let dir = daily_base.join(&day);
-    if dir.join(crate::store::DB_FILE).is_file() {
+    if own_backup(&daily_base, &day, id).is_some() {
         return Ok(None);
     }
+    let dir = free_name(&daily_base, &day, id);
     fsutil::create_private_dir(&dir).map_err(io)?;
     if let Err(e) = logical_copy(src, &dir.join(crate::store::DB_FILE)) {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
     fsutil::sync_dir(&daily_base).map_err(io)?;
-    prune(&daily_base, DAILY_KEEP, &dir);
+    prune(&daily_base, DAILY_KEEP, &dir, id);
 
     // 週は月曜から (1970-01-01 は木曜)。名前は週の番号と、その週の最初の退避の日付。
     let week = (now_ms.div_euclid(86_400_000) + 3).div_euclid(7);
@@ -363,9 +427,13 @@ pub fn daily(src: &Database, backups: &Path, now_ms: i64) -> Result<Option<PathB
     let has_week = std::fs::read_dir(&weekly_base)
         .map_err(io)?
         .filter_map(Result::ok)
-        .any(|e| e.file_name().to_string_lossy().starts_with(&prefix));
+        .any(|e| {
+            e.file_name().to_string_lossy().starts_with(&prefix)
+                && e.path().join(crate::store::DB_FILE).is_file()
+                && owned_by(&e.path(), id)
+        });
     if !has_week {
-        let wdir = weekly_base.join(format!("{prefix}{day}"));
+        let wdir = free_name(&weekly_base, &format!("{prefix}{day}"), id);
         fsutil::create_private_dir(&wdir).map_err(io)?;
         let to = wdir.join(crate::store::DB_FILE);
         let tmp = to.with_extension("partial");
@@ -376,15 +444,16 @@ pub fn daily(src: &Database, backups: &Path, now_ms: i64) -> Result<Option<PathB
             let _ = std::fs::remove_dir_all(&wdir);
             return Err(io(e));
         }
-        prune(&weekly_base, WEEKLY_KEEP, &wdir);
+        prune(&weekly_base, WEEKLY_KEEP, &wdir, id);
     }
     Ok(Some(dir))
 }
 
-/// `base` の下の退避 (DB の写しを持つフォルダ) を、名前の新しい順に `keep` 個だけ残す。
+/// `base` の下の、根 `owner` の退避 (DB の写しを持つフォルダ) を、名前の新しい順に `keep` 個だけ残す。
 /// 今作った `keep_always` は、時計が戻されて名前が古く並んでも消さない。消せないものは残す
-/// (次の機会に消す)。DB の写しを持たないフォルダは、世代に数えず、消さない。
-fn prune(base: &Path, keep: usize, keep_always: &Path) {
+/// (次の機会に消す)。DB の写しを持たないフォルダと、ほかの根の退避・ID の分からない退避は、世代に数えず、消さない
+/// (03 §7.1 の「退避と根の ID」)。`owner` が `None` なら、根を見分けずにすべてを数える。
+fn prune(base: &Path, keep: usize, keep_always: &Path, owner: Option<&str>) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
@@ -392,6 +461,7 @@ fn prune(base: &Path, keep: usize, keep_always: &Path) {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_dir() && p.join(crate::store::DB_FILE).is_file() && p != keep_always)
+        .filter(|p| owned_by(p, owner))
         .collect();
     dirs.sort();
     let excess = dirs.len().saturating_sub(keep.saturating_sub(1));
@@ -422,7 +492,7 @@ mod tests {
         // 写しを持たないフォルダは数えない。
         std::fs::create_dir(dir.path().join("z-empty")).unwrap();
         // 今作った退避 (時計が戻って名前が最も古い) は残す。
-        prune(dir.path(), 3, &dir.path().join("a"));
+        prune(dir.path(), 3, &dir.path().join("a"), None);
         let mut left: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())

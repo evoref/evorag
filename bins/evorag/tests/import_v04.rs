@@ -203,6 +203,7 @@ fn the_next_start_finishes_an_interrupted_swap() {
         location: |_| Verdict::Ok,
         allow_unsafe_location: false,
         before_verify: None,
+        swap_hooks: Default::default(),
     })
     .expect("import");
     drop((old_root_lock, new_root_lock));
@@ -215,4 +216,34 @@ fn the_next_start_finishes_an_interrupted_swap() {
     assert_eq!(format_of(&data).as_deref(), Some("0.5"), "{t}");
     assert_eq!(format_of(&renamed_old_root).as_deref(), Some("0.3"));
     assert!(!import_dir(&data).expect("named").exists());
+}
+
+/// 2 つの改名の間で止まっている間は、`rebuild` もデータ根を作らずに断る (03 §12.4 の (h))。
+#[test]
+fn rebuild_never_creates_the_original_while_the_swap_is_unfinished() {
+    let (tmp, data) = fixture("cli-import-no-create");
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_795_000_000_000)));
+    let Imported {
+        renamed_old_root,
+        old_root_lock,
+        new_root_lock,
+        ..
+    } = run(&ImportOptions {
+        old_root: data.clone(),
+        evorag_version: "0.5.0".into(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        location: |_| Verdict::Ok,
+        allow_unsafe_location: false,
+        before_verify: None,
+        swap_hooks: Default::default(),
+    })
+    .expect("import");
+    drop((old_root_lock, new_root_lock));
+    std::fs::rename(&data, &renamed_old_root).expect("the first rename");
+    let out = evorag(tmp.path(), "", &["rebuild", "--index"], "");
+    let t = text(&out);
+    assert_ne!(out.status.code(), Some(0), "{t}");
+    assert!(t.contains("import-v04"), "{t}");
+    assert!(!data.exists(), "no empty root is created: {t}");
 }

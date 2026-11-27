@@ -77,6 +77,7 @@ fn options(root: &Path) -> ImportOptions {
         location: |_| Verdict::Ok,
         allow_unsafe_location: false,
         before_verify: None,
+        swap_hooks: Default::default(),
     }
 }
 

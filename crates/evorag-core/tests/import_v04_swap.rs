@@ -19,7 +19,7 @@ use evorag_store::import_v04::{Refusal, import_dir};
 use evorag_store::inspect::inspect_collect;
 use evorag_store::location::Verdict;
 use evorag_store::lock::DataRootLock;
-use evorag_store::testutil::{TempDir, raw_remove_meta};
+use evorag_store::testutil::{TempDir, raw_remove_meta, raw_set_meta};
 use evorag_store::{DB_FILE, meta};
 use evorag_types::{ManualClock, Timestamp, UuidV7Gen};
 
@@ -62,6 +62,7 @@ fn options_at(root: &Path, now: i64) -> ImportOptions {
         location: |_| Verdict::Ok,
         allow_unsafe_location: false,
         before_verify: None,
+        swap_hooks: Default::default(),
     }
 }
 
@@ -291,7 +292,10 @@ fn a_swap_stopped_between_the_renames_is_continued() {
 fn an_unfinished_new_root_is_removed_and_the_import_is_redone() {
     let unfinished = [
         |new: &Path| raw_remove_meta(new, meta::IMPORT_REPORT),
-        |new: &Path| std::fs::create_dir(new.join("import-check")).expect("a leftover check"),
+        |new: &Path| {
+            raw_remove_meta(new, meta::IMPORT_REPORT);
+            std::fs::create_dir(new.join("import-check")).expect("a leftover check");
+        },
         |new: &Path| std::fs::remove_file(new.join(DB_FILE)).expect("no database yet"),
     ];
     for make in unfinished {
@@ -444,4 +448,306 @@ fn a_missing_old_root_stops_the_swap() {
         Err(ImportError::OldRootMissing(_))
     ));
     assert!(import_dir(&old).expect("named").exists());
+}
+
+/// 2 つの改名の間の状態 (元の名前が無く、改名した古い根と照合を終えた `.v05-import` がある) を作る。
+fn stop_between_renames(old: &Path) -> PathBuf {
+    let renamed = stop_after_verification(old);
+    std::fs::rename(old, &renamed).expect("the first rename");
+    renamed
+}
+
+/// 元の名前の根が無いときは、`.v05-import` を作りかけでも消さずに止める (起動は 2)。
+///
+/// verifies: AC-FR-219-3
+#[test]
+fn a_new_root_is_never_removed_while_the_original_is_missing() {
+    let (_tmp, old) = copied_fixture("swap-no-original");
+    let new = import_dir(&old).expect("named");
+    let renamed = stop_between_renames(&old);
+    // DB を壊す (読めない作りかけに見える)。
+    std::fs::write(new.join(DB_FILE), b"not a database").expect("corrupt");
+    let left = files(&new);
+    let err = resume_on_startup(&old).expect_err("stop");
+    assert!(matches!(err, ImportError::DamagedLeftover(_)), "{err}");
+    assert_eq!(files(&new), left, "the new root is kept");
+    assert!(renamed.join(DB_FILE).is_file());
+    assert!(!old.exists(), "no empty root is created");
+
+    // 照合の前の作りかけでも、元の名前が無ければ消さない (2)。
+    let (_tmp, old) = copied_fixture("swap-no-original-unfinished");
+    let new = import_dir(&old).expect("named");
+    stop_after_verification(&old);
+    raw_remove_meta(&new, meta::IMPORT_REPORT);
+    std::fs::rename(&old, old.with_file_name("moved")).expect("move the old root away");
+    let err = resume_on_startup(&old).expect_err("stop");
+    assert!(matches!(err, ImportError::OriginalMissing { .. }), "{err}");
+    assert_eq!(err.exit_code(), 2);
+    assert!(new.join(DB_FILE).is_file());
+}
+
+/// 元の名前が無く `.v05-import` がある間は、どの入口もデータ根を作らない (03 §12.4 の (h))。
+#[test]
+fn no_entry_point_creates_the_original_while_the_swap_is_unfinished() {
+    let (_tmp, old) = copied_fixture("swap-no-create");
+    stop_between_renames(&old);
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(NOW)));
+    let r = evorag_store::Store::open(evorag_store::OpenOptions {
+        data_root: old.clone(),
+        evorag_version: "0.5.0".into(),
+        kinds: kinds_v05(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        config_file: None,
+    });
+    assert!(
+        matches!(r, Err(evorag_store::OpenError::ImportPending { .. })),
+        "{:?}",
+        r.err()
+    );
+    assert!(!old.exists());
+}
+
+/// 改名の間に止まった後、`<P>` に別のフォルダができた・別の根がある・読めない根があるときは、それぞれの理由で
+/// 何も変えずに止める (03 §12.4 の (g))。
+#[test]
+fn an_ambiguous_original_stops_with_its_own_reason() {
+    // P と R の両方がある。
+    let (_tmp, old) = copied_fixture("swap-both");
+    let renamed = stop_between_renames(&old);
+    std::fs::create_dir(&old).expect("a folder at the original name");
+    let err = import_and_swap(&options(&old), &mut |_: &Plan<'_>| true).expect_err("both");
+    assert!(matches!(err, ImportError::BothRoots { .. }), "{err}");
+    assert_eq!(err.exit_code(), 1);
+    assert!(renamed.join(DB_FILE).is_file());
+    assert!(import_dir(&old).expect("named").exists());
+
+    // P が別の根。
+    let (tmp, old) = copied_fixture("swap-other");
+    let new = import_dir(&old).expect("named");
+    let renamed = stop_between_renames(&old);
+    let other = tmp.path().join("other");
+    copy_dir(&renamed, &other);
+    raw_set_meta(
+        &other,
+        meta::DATA_ROOT_ID,
+        "01a1dd30-0000-7000-8000-00000000abcd",
+    );
+    std::fs::rename(&renamed, tmp.path().join("aside")).expect("move the old root aside");
+    std::fs::rename(&other, &old).expect("another root at the original name");
+    let err = import_and_swap(&options(&old), &mut |_: &Plan<'_>| true).expect_err("other");
+    assert!(
+        matches!(err, ImportError::OtherRootAtOriginal { .. }),
+        "{err}"
+    );
+    assert!(new.exists());
+
+    // P が読めない (1 つ目の改名の前)。
+    let (_tmp, old) = copied_fixture("swap-unreadable");
+    stop_after_verification(&old);
+    let db = old.join(DB_FILE);
+    let mut bytes = std::fs::read(&db).expect("read");
+    bytes.truncate(64);
+    std::fs::write(&db, bytes).expect("break the old database");
+    let err = resume_on_startup(&old).expect_err("unreadable");
+    assert!(
+        matches!(err, ImportError::OriginalUnreadable { .. }),
+        "{err}"
+    );
+    assert!(import_dir(&old).expect("named").exists());
+}
+
+/// 照合の後に新しい根へ書いていれば、古い根が変わっていても新しい根を消さない。
+#[test]
+fn a_new_root_written_after_verification_is_never_removed() {
+    let (_tmp, old) = copied_fixture("swap-used");
+    let new = import_dir(&old).expect("named");
+    stop_after_verification(&old);
+    let f = old.join("index/memory/chunk-lex/CURRENT");
+    let mut bytes = std::fs::read(&f).expect("read");
+    bytes.push(b'\n');
+    std::fs::write(&f, bytes).expect("v0.4 wrote to the old root");
+    let seq: u64 = meta_of(&new)[meta::JOURNAL_LAST_SEQ]
+        .parse()
+        .expect("a number");
+    raw_set_meta(&new, meta::JOURNAL_LAST_SEQ, &(seq + 1).to_string());
+    for err in [
+        resume_on_startup(&old).expect_err("used"),
+        import_and_swap(&options(&old), &mut |_: &Plan<'_>| true).expect_err("used"),
+    ] {
+        assert!(matches!(err, ImportError::NewRootUsed { .. }), "{err}");
+    }
+    assert!(new.join(DB_FILE).is_file());
+}
+
+/// 消している途中で止まった `.v05-import` (DB だけ消えた) は作りかけとして消す。照合の結果があるのにジャーナルが
+/// 無い (DB だけ残った) ものは、入れ替えずに止める。
+#[test]
+fn a_half_removed_new_root_is_never_swapped_in() {
+    let (_tmp, old) = copied_fixture("swap-half-removed");
+    let new = import_dir(&old).expect("named");
+    stop_after_verification(&old);
+    std::fs::remove_dir_all(new.join("journal")).expect("only the database is left");
+    let err = resume_on_startup(&old).expect_err("damaged");
+    assert!(matches!(err, ImportError::DamagedLeftover(_)), "{err}");
+    assert_eq!(
+        meta_of(&old).get(meta::FORMAT_VERSION).map(String::as_str),
+        Some("0.3")
+    );
+
+    let (_tmp, old) = copied_fixture("swap-half-removed-db");
+    let new = import_dir(&old).expect("named");
+    let before = files(&old);
+    stop_after_verification(&old);
+    std::fs::remove_file(new.join(DB_FILE)).expect("the database was removed first");
+    std::fs::write(new.join(".DS_Store"), b"x").expect("an OS file");
+    assert!(matches!(
+        resume_on_startup(&old).expect("clean up"),
+        Resumed::RemovedUnfinished
+    ));
+    assert!(!new.exists());
+    assert_eq!(files(&old), before);
+}
+
+/// OS の作るファイルは、古い根の比べに含めない (取り込みの後に増えても、入れ替えを続ける)。
+#[test]
+fn os_files_do_not_block_the_swap() {
+    let (_tmp, old) = copied_fixture("swap-os-files");
+    let renamed = stop_after_verification(&old);
+    std::fs::write(old.join("Thumbs.db"), b"x").expect("an OS file");
+    std::fs::write(old.join("journal").join("._2026-11.jsonl"), b"x").expect("an OS file");
+    let mut asked = Vec::new();
+    import_and_swap(&options(&old), &mut yes(&mut asked)).expect("continue");
+    assert_eq!(asked, vec!["continue"]);
+    assert!(renamed.join("Thumbs.db").is_file());
+}
+
+/// `import.source` の改名の後の名前が、この根のものでなければ止める。
+#[test]
+fn a_foreign_import_source_stops_the_swap() {
+    let (_tmp, old) = copied_fixture("swap-foreign-source");
+    let new = import_dir(&old).expect("named");
+    stop_after_verification(&old);
+    let mut source: serde_json::Value =
+        serde_json::from_str(&meta_of(&new)[meta::IMPORT_SOURCE]).expect("json");
+    source["path"] = serde_json::Value::from(
+        old.with_file_name("someone-else-v0.4-20261127T000000000Z")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    raw_set_meta(&new, meta::IMPORT_SOURCE, &source.to_string());
+    let err = resume_on_startup(&old).expect_err("foreign");
+    assert!(matches!(err, ImportError::ForeignSource(_)), "{err}");
+    assert!(new.exists());
+}
+
+/// 2 つ目の改名の先 (元の名前) が改名の間に作られたら、置き換えずに止める。次の実行は両方があると示す。
+#[test]
+fn the_second_rename_never_replaces_a_new_original() {
+    let (_tmp, old) = copied_fixture("swap-second-exists");
+    let mut opts = options(&old);
+    opts.swap_hooks.between_renames = Some(|renamed, new| {
+        let original = new.with_file_name(
+            renamed
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.split("-v0.4-").next())
+                .expect("a name"),
+        );
+        std::fs::create_dir(original).expect("someone made the original");
+    });
+    let err = import_and_swap(&opts, &mut |_: &Plan<'_>| true).expect_err("exists");
+    assert!(
+        matches!(
+            err,
+            ImportError::Rename(evorag_store::root_rename::RenameRootError::Exists(_))
+        ),
+        "{err}"
+    );
+    assert_eq!(err.exit_code(), 1);
+    let err = import_and_swap(&options(&old), &mut |_: &Plan<'_>| true).expect_err("both");
+    assert!(matches!(err, ImportError::BothRoots { .. }), "{err}");
+}
+
+/// 改名の隙にほかのプロセスがロックを取ったら、ロックの理由 (2) で止め、次の実行が続ける。
+#[test]
+fn a_process_in_the_rename_gap_stops_the_swap_with_exit_code_2() {
+    static HELD: std::sync::Mutex<Vec<DataRootLock>> = std::sync::Mutex::new(Vec::new());
+    let (_tmp, old) = copied_fixture("swap-gap");
+    let before = files(&old);
+    let renamed = stop_after_verification(&old);
+    let mut opts = options(&old);
+    opts.swap_hooks.patience = Some(std::time::Duration::from_millis(300));
+    // 2 つ目の改名 (新しい根を元の名前へ) の直前に、新しい根をほかのプロセスが開く。
+    opts.swap_hooks.before_rename = Some(|from| {
+        if from.to_string_lossy().ends_with(".v05-import")
+            && let Ok(l) = DataRootLock::acquire(from)
+        {
+            HELD.lock().expect("lock").push(l);
+        }
+    });
+    let r = import_and_swap(&opts, &mut |_: &Plan<'_>| true);
+    let held = std::mem::take(&mut *HELD.lock().expect("lock"));
+    if cfg!(windows) {
+        let err = r.expect_err("in use");
+        assert!(matches!(err, ImportError::Rename(_)), "{err}");
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(!old.exists() && renamed.exists());
+        drop(held);
+        // 次の起動が続ける。
+        assert!(matches!(
+            resume_on_startup(&old).expect("resume"),
+            Resumed::Swapped { .. }
+        ));
+    } else {
+        // Unix はロックを持ったまま改名するので、隙は無い (ほかのプロセスはロックを取れない)。
+        assert!(held.is_empty());
+        drop(r.expect("swapped"));
+    }
+    assert_swapped(&old, &renamed, &before);
+}
+
+/// 改名した先でロックを取り直す前に、ほかのプロセスがロックを取ったら (Windows)、元に戻せず残った場所を示す。
+#[cfg(windows)]
+#[test]
+fn a_rename_that_cannot_be_undone_reports_where_the_root_is() {
+    static HELD: std::sync::Mutex<Vec<DataRootLock>> = std::sync::Mutex::new(Vec::new());
+    let (_tmp, old) = copied_fixture("swap-not-undone");
+    let before = files(&old);
+    let renamed = stop_between_renames(&old);
+    let mut opts = options(&old);
+    opts.swap_hooks.patience = Some(std::time::Duration::from_millis(300));
+    opts.swap_hooks.after_rename = Some(|to| {
+        HELD.lock()
+            .expect("lock")
+            .push(DataRootLock::acquire(to).expect("another process"));
+    });
+    let err = import_and_swap(&opts, &mut |_: &Plan<'_>| true).expect_err("not undone");
+    assert!(
+        matches!(
+            &err,
+            ImportError::Rename(evorag_store::root_rename::RenameRootError::NotUndone { .. })
+        ),
+        "{err}"
+    );
+    assert_eq!(err.exit_code(), 2);
+    drop(std::mem::take(&mut *HELD.lock().expect("lock")));
+    // 新しい根は元の名前にある (元に戻せなかった)。次の起動は入れ替えを終えたものとして何もしない。
+    assert!(matches!(resume_on_startup(&old), Ok(Resumed::Nothing)));
+    assert_swapped(&old, &renamed, &before);
+}
+
+/// リンクの古い根は、触れる前に断る (03 §12.4 の (8))。
+#[cfg(unix)]
+#[test]
+fn a_linked_old_root_is_refused() {
+    let (tmp, old) = copied_fixture("swap-link");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&old, &link).expect("a symlink");
+    let err = import_and_swap(&options(&link), &mut |_: &Plan<'_>| true).expect_err("link");
+    assert!(
+        matches!(err, ImportError::Refused(Refusal::Link { .. })),
+        "{err}"
+    );
+    assert!(!old.join("lock").exists());
 }

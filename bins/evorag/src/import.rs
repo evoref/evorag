@@ -12,6 +12,7 @@ use evorag_core::import_v04::{
 };
 use evorag_store::import_v04::{NextStep, Refusal, import_dir};
 use evorag_store::lock::LockError;
+use evorag_store::root_rename::RenameRootError;
 use evorag_tui::catalog::Catalog;
 use evorag_types::{Clock, MessageKey, UuidV7Gen};
 
@@ -30,6 +31,7 @@ pub(crate) fn run(
         location: evorag_store::location::check,
         allow_unsafe_location,
         before_verify: None,
+        swap_hooks: Default::default(),
     };
     let mut confirm = |plan: &Plan<'_>| {
         let yes = crate::ask_yes(&question(catalog, plan));
@@ -189,6 +191,8 @@ fn describe(catalog: &Catalog, root: &Path, e: &ImportError) -> Vec<String> {
                 NextStep::CheckPath => MessageKey::ImportV04NextCheckPath,
                 NextStep::OpenOnceWithV04 => MessageKey::ImportV04NextOpenOnceWithV04,
                 NextStep::RepairWithV04 => MessageKey::ImportV04NextRepairWithV04,
+                NextStep::PointAtRealFolder => MessageKey::ImportV04NextRealFolder,
+                NextStep::MoveIntoFolder => MessageKey::ImportV04NextMoveIntoFolder,
                 _ => MessageKey::ImportV04NextNothing,
             });
             one(
@@ -220,10 +224,40 @@ fn describe(catalog: &Catalog, root: &Path, e: &ImportError) -> Vec<String> {
                 &[("new", &path(&new)), ("path", &path(p))],
             )
         }
+        ImportError::Rename(RenameRootError::NotUndone { left, .. }) => one(
+            MessageKey::ImportV04RenameNotUndone,
+            &[("left", &path(left)), ("detail", &e.to_string())],
+        ),
         ImportError::Rename(r) if r.is_lock() => one(
             MessageKey::ImportV04RenameGap,
             &[("detail", &r.to_string())],
         ),
+        ImportError::OriginalMissing { root, new_root } => one(
+            MessageKey::ImportV04OriginalMissing,
+            &[("root", &path(root)), ("new", &path(new_root))],
+        ),
+        ImportError::BothRoots { root, renamed } => one(
+            MessageKey::ImportV04BothRoots,
+            &[("root", &path(root)), ("renamed", &path(renamed))],
+        ),
+        ImportError::OtherRootAtOriginal { root, new_root } => one(
+            MessageKey::ImportV04OtherRoot,
+            &[("root", &path(root)), ("new", &path(new_root))],
+        ),
+        ImportError::OriginalUnreadable { root } => one(
+            MessageKey::ImportV04OriginalUnreadable,
+            &[("root", &path(root))],
+        ),
+        ImportError::DamagedLeftover(p) => {
+            one(MessageKey::ImportV04DamagedLeftover, &[("path", &path(p))])
+        }
+        ImportError::NewRootUsed { new_root } => one(
+            MessageKey::ImportV04NewRootUsed,
+            &[("new", &path(new_root))],
+        ),
+        ImportError::ForeignSource(p) => {
+            one(MessageKey::ImportV04ForeignSource, &[("new", &path(p))])
+        }
         ImportError::Rename(r) => one(
             MessageKey::ImportV04RenameFailed,
             &[("detail", &r.to_string())],
@@ -273,6 +307,18 @@ fn refusal_reason(catalog: &Catalog, r: &Refusal) -> String {
         Refusal::Unreadable { what } => {
             catalog.with(MessageKey::ImportV04ReasonUnreadable, &[("detail", what)])
         }
+        Refusal::Link { path } => catalog.with(
+            MessageKey::ImportV04ReasonLink,
+            &[("path", &path.display().to_string())],
+        ),
+        Refusal::MountPoint { path } => catalog.with(
+            MessageKey::ImportV04ReasonMountPoint,
+            &[("path", &path.display().to_string())],
+        ),
+        Refusal::NonUnicodePath { path } => catalog.with(
+            MessageKey::ImportV04ReasonNonUnicode,
+            &[("path", &path.display().to_string())],
+        ),
         other => catalog.with(
             MessageKey::ImportV04ReasonUnreadable,
             &[("detail", &other.to_string())],

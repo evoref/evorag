@@ -270,6 +270,11 @@ pub enum OpenError {
     /// 開かない (次の `import-v04` が片付けてやり直す、03 §12.4)。何も書いていない。
     #[error("the data root is an unfinished import (import-v04 will remove and redo it)")]
     UnfinishedImport,
+    /// データ根のフォルダが無く、`import-v04` の新しい根 (`<データ根>.v05-import`) がある (入れ替えの 2 つの改名の
+    /// 間で止まった)。空の根を作らずに断る (作ると、続きの入れ替えができなくなり、取り込んだ根と古い根が見えなく
+    /// なるため、03 §12.4)。何も書いていない。
+    #[error("the data root is missing while an import-v04 swap is unfinished ({}); run evorag import-v04 to finish it", new_root.display())]
+    ImportPending { new_root: PathBuf },
     /// `meta` が読めない・形式の版が無い。
     #[error("the database metadata is unreadable: {0}")]
     BadMeta(String),
@@ -678,6 +683,14 @@ impl Store {
         held: Option<DataRootLock>,
         unfinished: Unfinished,
     ) -> Result<(Self, OpenReport), OpenError> {
+        // 入れ替えの 2 つの改名の間で止まった根 (元の名前のフォルダが無く `.v05-import` がある) は、どの入口も
+        // 作らない (03 §12.4 の「止まった後の扱い」)。
+        if std::fs::symlink_metadata(&opts.data_root).is_err()
+            && let Some(new_root) = crate::import_v04::import_dir(&opts.data_root)
+            && std::fs::symlink_metadata(&new_root).is_ok()
+        {
+            return Err(OpenError::ImportPending { new_root });
+        }
         fsutil::create_private_dir(&opts.data_root)?;
         let wanted = opts.data_root.join(crate::lock::LOCK_FILE);
         let lock = match held {
@@ -1308,7 +1321,12 @@ impl Store {
     /// その日の日次の退避がまだ無いか (03 §7.1)。
     pub fn daily_backup_due(&self, backups: Option<&Path>) -> bool {
         let default = self.root.join(crate::backup::BACKUPS_DIR);
-        crate::backup::daily_due(backups.unwrap_or(&default), self.clock.now().as_millis())
+        let id = self.meta(meta::DATA_ROOT_ID).ok().flatten();
+        crate::backup::daily_due(
+            backups.unwrap_or(&default),
+            self.clock.now().as_millis(),
+            id.as_deref(),
+        )
     }
 
     /// その種類をジャーナルにも書くか。
