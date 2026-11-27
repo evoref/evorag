@@ -1,8 +1,7 @@
 //! 文の窓 (05 §3.4、v0.4): 添える往復の中で、問いに当たった文を中心に前後の文を足して引用にする。
 //!
-//! - 文の区切り: 。！？!? と改行。半角の `.` は、後ろが空白か終わりのときだけ区切る (「3.5」、URL・ドメインの
-//!   中では区切らない)。既知の略語 (「Mr.」「Dr.」「e.g.」など) の後ろでも区切らない。閉じの括弧・引用符は前の文に
-//!   含める。チャンクの規則 (`chunk.rs`) とは別で、索引を作り直さない。
+//! - 文の区切り: `evorag-memory` の文の分け方 v1 (04 §2。中身は 05 §3.8 の 1) を呼ぶ。区切りの文番号と同じ分け方
+//!   にし、別に持たない。チャンクの規則 (`chunk.rs`) とは別で、索引を作り直さない。
 //! - 文の点数: 問いの内容の単位 (05 §2.1) のうち、その文にあるものの重みの和。重みは、渡した文の集まりの中での
 //!   出現の少なさ (ln(1 + 文の数 / 出現した文の数))。
 //! - 問いの分析 (決定論): 件数・合計・一覧の意図、日付の表現、記憶を明示する言い方。
@@ -18,75 +17,17 @@ pub struct Sentence {
     pub end: usize,
 }
 
-/// 後ろに `.` が付いても文の終わりにしない語 (小文字)。
-const ABBREVIATIONS: &[&str] = &[
-    "mr", "mrs", "ms", "dr", "st", "jr", "sr", "prof", "vs", "etc", "e.g", "i.e", "inc", "ltd",
-    "no", "fig", "approx", "u.s", "a.m", "p.m",
-];
-
-fn is_closer(c: char) -> bool {
-    matches!(
-        c,
-        '」' | '』' | '）' | ')' | '"' | '\'' | '”' | '’' | '】' | ']'
-    )
-}
-
-/// `text` の `i` (バイト位置、`.` の位置) の `.` が文の終わりか。
-fn period_ends(text: &str, i: usize) -> bool {
-    let next = text[i + 1..].chars().next();
-    if next.is_some_and(|c| !c.is_whitespace()) {
-        return false;
-    }
-    // `.` の前の語 (空白まで)。
-    let word_start = text[..i].rfind(char::is_whitespace).map_or(0, |p| {
-        p + text[p..].chars().next().map_or(1, char::len_utf8)
-    });
-    let word = text[word_start..i].trim_start_matches(['(', '"', '\'', '“', '‘']);
-    let lower = word.to_lowercase();
-    !ABBREVIATIONS.contains(&lower.as_str())
-}
-
-/// 文に分ける。空の文は返さない。
+/// 文に分ける。空の文は返さない。分け方は `evorag-memory` の文の分け方 v1 ([`evorag_memory::split_v1`]) で、
+/// 区切りの文番号 (04 §5.2) と同じ (05 §3.8 の 1)。
 #[must_use]
 pub fn sentences(text: &str) -> Vec<Sentence> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut iter = text.char_indices().peekable();
-    while let Some((i, c)) = iter.next() {
-        let end_here = match c {
-            '。' | '！' | '？' | '!' | '?' | '\n' => true,
-            '.' => period_ends(text, i),
-            _ => false,
-        };
-        if !end_here {
-            continue;
-        }
-        let mut end = i + c.len_utf8();
-        while let Some(&(j, d)) = iter.peek() {
-            if is_closer(d) || (c != '\n' && matches!(d, '。' | '！' | '？' | '!' | '?')) {
-                end = j + d.len_utf8();
-                iter.next();
-            } else {
-                break;
-            }
-        }
-        push_trimmed(text, start, end, &mut out);
-        start = end;
-    }
-    push_trimmed(text, start, text.len(), &mut out);
-    out
-}
-
-fn push_trimmed(text: &str, start: usize, end: usize, out: &mut Vec<Sentence>) {
-    let s = &text[start..end];
-    let lead = s.len() - s.trim_start().len();
-    let trail = s.len() - s.trim_end().len();
-    if lead + trail < s.len() {
-        out.push(Sentence {
-            start: start + lead,
-            end: end - trail,
-        });
-    }
+    evorag_memory::split_v1(text)
+        .into_iter()
+        .map(|r| Sentence {
+            start: r.start,
+            end: r.end,
+        })
+        .collect()
 }
 
 /// 文ごとの点数 (問いの内容の単位のうち、その文にあるものの重みの和)。重みは `sentences` の集まりで求める。

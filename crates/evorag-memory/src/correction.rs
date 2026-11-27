@@ -1673,6 +1673,47 @@ mod tests {
         assert_eq!(dir("大阪じゃなく。"), None);
     }
 
+    /// 穴の範囲の文の区切りは、文番号の文の分け方 v1 (04 §2) に寄せない (M5.2 で決めた、2026-11-27)。2 つの分け方の
+    /// 食い違う事例で、穴がどう切れるかを固定する (v1 の文は、比べるために並べる)。
+    #[test]
+    fn holes_use_the_correction_delimiters_not_splitter_v1() {
+        fn v1(text: &str) -> Vec<&str> {
+            crate::sentences::split_v1(text)
+                .into_iter()
+                .map(|r| &text[r])
+                .collect()
+        }
+        // 全角の `．`・`\r` だけの改行: 穴はそこで切れ、古い値が取れる (v1 は切らないので、穴が前の語まで伸びる)。
+        for text in [
+            "住まいは東京．大阪じゃなくて京都です",
+            "東京\r大阪じゃなくて京都です",
+        ] {
+            assert_eq!(v1(text), [text], "{text:?}");
+            let (_, old, new) = dir(text).expect("a match");
+            assert_eq!(
+                (old.as_deref(), new.as_str()),
+                (Some("大阪"), "京都"),
+                "{text:?}"
+            );
+        }
+        // 後ろが空白でない `!`: 穴は切れない (v1 はここで切るので、古い値の穴が空になる)。
+        let text = "Yahoo!じゃなくてGoogleです";
+        assert_eq!(v1(text), ["Yahoo!", "じゃなくてGoogleです"]);
+        let (_, old, new) = dir(text).expect("a match");
+        assert_eq!((old.as_deref(), new.as_str()), (Some("Yahoo!"), "Google"));
+        // 略語: 穴は略語の `.` で切れる (v1 は切らない)。値が穴の端に合わず、訂正は単位を変えない側に倒れる。
+        let text = "I meant Dr. Smith, not Dr. Lee.";
+        assert_eq!(v1(text), [text]);
+        assert_eq!(
+            dir(text),
+            Some(("i meant {new}".to_owned(), None, "Dr".to_owned()))
+        );
+        let text = "It's St. Louis, not Chicago.";
+        assert_eq!(v1(text), [text]);
+        let (_, old, new) = dir(text).expect("a match");
+        assert_eq!((old.as_deref(), new.as_str()), (Some("Chicago"), "Louis"));
+    }
+
     #[test]
     fn commas_spaces_and_sentence_final_yo_desu_are_not_distinguished() {
         // 型の読点が無くても当たる。

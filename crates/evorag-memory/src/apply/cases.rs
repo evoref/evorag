@@ -5,9 +5,9 @@
 //! ふるい、§5.5)、伏せ字にしたターンの本文の期待 `turns` (走らせる側の伏せ字の作り方の確かめ)。単位・プロファイル・
 //! 想起など、導出と書き込みの経路の要る期待は読み飛ばす (M5.3・M5.4 の走らせる側で判定する)。
 //!
+//! 文番号は、利用者の発話を文の分け方 v1 ([`split_v1`]) で切って振る。
+//!
 //! 走らせる側の近似 (事例の書式が走らせる側に任せている部分。M5.4 の走らせる側で本物に替える):
-//! - 文番号は、利用者の発話を `。`・`！`・`？` と、後ろが空白か本文の終わりの `.`・`!`・`?` で切って振る (文の
-//!   分け方 v1 の代わり。事例の発話はこれで注の番号と合う)。
 //! - 訂正の候補は「X じゃなくて Y です」の型だけを見つける (訂正の字句の型の代わり)。
 //! - 忘れる単位は、すべての台帳の単位の候補のうち、当て方の述語 ([`DirectiveSet::forgotten_by`]) で新しい忘れるに
 //!   当たるもの (関門 1〜7 は当てない)。伏せ字 (と `[非表示]`) の範囲は、その根拠の発話の全体と同じ往復の応答の
@@ -32,6 +32,7 @@ use crate::ledger::{
     LedgerOutput, LedgerRef, LedgerTense, LedgerUnitOut, LedgerVerdict, SentenceSpan,
     UnknownFields,
 };
+use crate::sentences::split_v1;
 use crate::value_key::{ForgetKey, aspect_key, normalize_v1};
 
 const K: ForgetKey = ForgetKey::from_bytes_const([0x42; 32]);
@@ -296,7 +297,7 @@ impl Run {
         let mut corr_id = 0;
         for p in &pairs {
             let t = &self.turns[p];
-            for r in split_sentences(&t.text) {
+            for r in split_v1(&t.text) {
                 n += 1;
                 body.sentences.push(SentenceSpan::new(
                     n,
@@ -737,30 +738,6 @@ fn unit_out(u: &Value) -> LedgerUnitOut {
     }
 }
 
-/// 走らせる側の文の分け方 (文の分け方 v1 の代わり。モジュールの注)。
-fn split_sentences(text: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        let end = i + c.len_utf8();
-        let next = chars.peek().map(|(_, n)| *n);
-        let cut = matches!(c, '。' | '！' | '？')
-            || (matches!(c, '.' | '!' | '?') && next.is_none_or(char::is_whitespace));
-        if cut {
-            out.push(start..end);
-            while chars.peek().is_some_and(|(_, n)| n.is_whitespace()) {
-                chars.next();
-            }
-            start = chars.peek().map_or(text.len(), |(j, _)| *j);
-        }
-    }
-    if start < text.len() {
-        out.push(start..text.len());
-    }
-    out
-}
-
 /// 「X じゃなくて Y です」の訂正の候補 (新しい値, 古い値) の範囲 (走らせる側の近似)。
 fn correction_candidate(text: &str) -> Option<(Range<usize>, Range<usize>)> {
     const MID: &str = "じゃなくて";
@@ -802,16 +779,13 @@ fn m50_cases_for_the_pure_functions() {
 const EXPECTED_CHECKS: usize = 88;
 
 #[test]
-fn the_runner_splits_sentences_like_the_case_notes() {
+fn v1_splits_sentences_like_the_case_notes() {
     let text = "Me? I still live in Maplewood.";
-    let parts: Vec<&str> = split_sentences(text)
-        .into_iter()
-        .map(|r| &text[r])
-        .collect();
+    let parts: Vec<&str> = split_v1(text).into_iter().map(|r| &text[r]).collect();
     assert_eq!(parts, ["Me?", "I still live in Maplewood."]);
     let text = "霧ヶ丘に住んでいて、柴犬を飼っています。";
     let whole = 0..text.len();
-    assert_eq!(split_sentences(text), [whole]);
+    assert_eq!(split_v1(text), [whole]);
     let text = "出身は霧ヶ丘じゃなくて白樺台です。";
     let (new, old) = correction_candidate(text).expect("candidate");
     assert_eq!((&text[new], &text[old]), ("白樺台", "霧ヶ丘"));
