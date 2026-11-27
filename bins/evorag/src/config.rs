@@ -209,6 +209,11 @@ fn migrate_file(path: &Path, text: &str, old: u32) -> Result<PathBuf, String> {
         Ok(m) if m.file_type().is_symlink() => {
             return Err(at(path, &"a symbolic link is not rewritten"));
         }
+        // 読み取り専用の設定は、利用者が書き換えないよう求めたものとみなして見送る (Unix ではフォルダが書ければ
+        // 入れ替えに成功してしまうため、OS に頼らずここで止める。07 §4.1 の「移行の書き方」)。
+        Ok(m) if m.permissions().readonly() => {
+            return Err(at(path, &"a read-only file is not rewritten"));
+        }
         Ok(_) => {}
         Err(e) => return Err(at(path, &e)),
     }
@@ -1409,17 +1414,17 @@ data_root = \"d\"
         assert!(migrate(&path).is_err());
         std::fs::remove_dir_all(&tmp).unwrap();
 
-        // 読み取り専用の設定: Windows では入れ替えられないので、古い版のまま続ける。
+        // 読み取り専用の設定: どの OS でも書き換えずに見送り、古い版のまま続ける (Unix ではフォルダが書ければ入れ替え
+        // に成功してしまうので、OS に頼らずに見送る)。
         let writable = std::fs::metadata(&path).unwrap().permissions();
         let mut ro = writable.clone();
         ro.set_readonly(true);
         std::fs::set_permissions(&path, ro).unwrap();
         let l = load(&path, true).unwrap();
-        if cfg!(windows) {
-            assert!(l.migrate_failed.is_some());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
-            assert!(!dir.path().join("config.toml.bak-v1").exists());
-        }
+        assert!(l.migrate_failed.is_some());
+        assert_eq!(l.config.version, Some(1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert!(!dir.path().join("config.toml.bak-v1").exists());
         assert!(!dir.path().join("config.toml.tmp").exists());
         std::fs::set_permissions(&path, writable).unwrap();
     }
