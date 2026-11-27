@@ -27,6 +27,8 @@ pub mod import_v04;
 pub mod localtime;
 pub mod logging;
 mod masking;
+mod memory_role;
+pub use memory_role::{MemoryCall, MemoryConfig, MemoryRoute};
 mod notes;
 mod orphans;
 mod precompute;
@@ -52,7 +54,7 @@ use evorag_store::{
     Envelope, OpenError, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer, WriterHandle,
     meta,
 };
-use evorag_types::api::{Command, Event, RecallState, RoleStatus};
+use evorag_types::api::{Command, Event, MemoryState, RecallState, RoleStatus};
 use evorag_types::{Clock, Id, IdGen, Message, MessageKey};
 use tokio::sync::{mpsc, oneshot};
 
@@ -94,6 +96,8 @@ pub struct CoreConfig {
     /// embed と rerank の役割の llama-server (設定 `llm.embed`・`llm.rerank`、06 §2)。無ければ `None`。
     pub embed: Option<Arc<dyn LlmClient>>,
     pub rerank: Option<Arc<dyn LlmClient>>,
+    /// memory の役割 (設定 `llm.memory`、06 §2.1)。既定は設定なし (chat のサーバとモデルで区切りの呼び出しを行う)。
+    pub memory: MemoryConfig,
     /// 設定 `llm.chat.aux_request_extra` (補助の呼び出しに足す JSON、06 §6)。
     pub aux_request_extra: evorag_llm::RequestExtra,
     /// 裏の処理で、モデルの点検とリランカーの較正を行う (06 §3.3、05 §3.7)。試験では切る。
@@ -213,10 +217,12 @@ pub struct StartReport {
     pub chat_model_recorded: Option<bool>,
     /// 知らせる、読んで無視した設定のキー (07 §4.1)。
     pub ignored_config: Vec<String>,
-    /// embed と rerank の役割の状態 (06 §3)。
+    /// embed と rerank と、設定したときの memory の役割の状態 (06 §3)。
     pub roles: Vec<evorag_types::api::ModelRoleInfo>,
-    /// この起動でモデルを初めて記録した役割 (embed・rerank)。
+    /// この起動でモデルを初めて記録した役割 (embed・rerank・memory)。
     pub recorded_roles: Vec<String>,
+    /// 区切りの呼び出し (B2) を出す先の状態 (memory の役割と縮退、06 §2.1)。
+    pub memory: MemoryState,
     /// 想起の状態 (07 §2.1)。
     pub recall: evorag_types::api::RecallState,
     /// 事実の機能を止めた理由 (`memory.forget_key` が使えない、03 §3.1.1)。`None` なら使える。
@@ -258,8 +264,12 @@ struct Inner {
     conn: std::sync::RwLock<(Arc<dyn LlmClient>, ServerInfo, String)>,
     /// 記録した応答のモデル (06 §3.1)。送る前に、繋がっているモデルと照合する。
     chat_model: evorag_memory::ModelOrigin,
-    /// embed と rerank の役割 (06 §3)。
+    /// embed と rerank と、設定したときの memory の役割 (06 §3)。
     aux: Mutex<Vec<roles::AuxRole>>,
+    /// 設定 `llm.memory.request_extra` (06 §6)。
+    memory_request_extra: evorag_llm::RequestExtra,
+    /// 最後に知らせた memory の役割の状態 (変わったときだけ知らせる)。
+    memory_shown: Mutex<Option<MemoryState>>,
     /// 繋がらない役割を試し直す task と、点検の task (終了のときに止める)。
     aux_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// 裏の処理 (sleep-time) の task (終了のときに止める)。
@@ -591,11 +601,19 @@ impl Core {
         let ignored_config =
             ignored_config_notices(&store, &handle, &cfg.ignored_config, &*cfg.clock, &*cfg.ids);
 
-        // embed と rerank の役割 (06 §3)。記録と違えば使わず、繋がらなければ後で試す。
+        // embed と rerank の役割 (06 §3)。記録と違えば使わず、繋がらなければ後で試す。memory の役割は、設定した
+        // ときだけ同じく照合して記録する (設定しなければ記録を作らず、chat の記録を使う、06 §3.1)。
         let mut aux = vec![
             roles::AuxRole::new(evorag_memory::ROLE_EMBED, cfg.embed.clone(), &bindings),
             roles::AuxRole::new(evorag_memory::ROLE_RERANK, cfg.rerank.clone(), &bindings),
         ];
+        if cfg.memory.client.is_some() {
+            aux.push(roles::AuxRole::new(
+                evorag_memory::ROLE_MEMORY,
+                cfg.memory.client.clone(),
+                &bindings,
+            ));
+        }
         let mut recorded_roles = Vec::new();
         for a in &mut aux {
             let Some(client) = a.client.clone() else {
@@ -604,7 +622,12 @@ impl Core {
             match roles::check(&*client, a.recorded.as_ref()).await {
                 roles::Checked::Waiting => a.state = roles::RoleState::Waiting,
                 roles::Checked::Mismatch(o) => a.state = roles::RoleState::Mismatch(o),
-                roles::Checked::Ready { origin, record } => {
+                roles::Checked::Ready {
+                    origin,
+                    record,
+                    slots,
+                } => {
+                    a.slots = slots;
                     if record {
                         let w = Writes {
                             clock: &*cfg.clock,
@@ -648,6 +671,8 @@ impl Core {
             conn: std::sync::RwLock::new((llm, server.clone(), cfg.model_name)),
             chat_model: recorded_chat.unwrap_or(connected),
             aux: Mutex::new(aux),
+            memory_request_extra: cfg.memory.request_extra,
+            memory_shown: Mutex::new(None),
             aux_task: Mutex::new(None),
             sleep_task: Mutex::new(None),
             sleep: cfg.sleep,
@@ -763,6 +788,12 @@ impl Core {
             "core started"
         );
         core.inner.load_threshold();
+        let memory = memory_role::resolve(&core.inner).0;
+        *core
+            .inner
+            .memory_shown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(memory);
         let report = StartReport {
             server,
             store: open_report,
@@ -774,6 +805,7 @@ impl Core {
             ignored_config,
             roles: role_infos,
             recorded_roles,
+            memory,
             recall: core.inner.recall_state(),
             facts_disabled: core.inner.facts_key.problem(),
             forget_key_created: matches!(
@@ -791,20 +823,7 @@ impl Core {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(task);
         if waiting {
-            let worker = core.inner.clone();
-            let task = tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(roles::RETRY).await;
-                    if !recheck_roles(&worker).await {
-                        break;
-                    }
-                }
-            });
-            *core
-                .inner
-                .aux_task
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(task);
+            ensure_role_retry(&core.inner);
         }
         Ok((core, rx, report))
     }
@@ -985,6 +1004,23 @@ impl Core {
             .find(|a| a.role == role)
             .and_then(roles::AuxRole::ready_client)
             .is_some()
+    }
+
+    /// 区切りの呼び出し (B2) を出す先 (memory の役割と縮退、06 §2.1)。
+    pub fn memory_route(&self) -> MemoryRoute {
+        memory_role::resolve(&self.inner).1
+    }
+
+    /// memory の役割の状態 (状態の行、06 §2.1)。
+    pub fn memory_state(&self) -> MemoryState {
+        memory_role::resolve(&self.inner).0
+    }
+
+    /// B2 の呼ぶ側と試験のため: 設定した memory のサーバに繋がらなかった。繋がるまで chat で代行し、30 秒ごとに
+    /// 試し直す (06 §3 の表)。
+    #[doc(hidden)]
+    pub fn memory_unreachable(&self) {
+        memory_role::mark_unreachable(&self.inner);
     }
 
     /// 利用者が操作した (キー入力、発話の送信)。動いている裏の処理を止め、アイドルの判定を始め直す (04 §4)。
@@ -1267,9 +1303,7 @@ fn ignored_config_notices(
 /// 使えない機能が見つかれば知らせる。chat の点検は、裏の処理と同じく最後のスロットを使う (06 §4)。
 /// 役割ごとに保存するので、途中で落とされても、済んだ役割は次の機会に飛ばす。
 pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
-    let server = inner.conn().1;
-    let slot = (server.total_slots > 1).then(|| server.total_slots - 1);
-    for (role, client, key, build) in probe_targets(inner) {
+    for (role, client, key, build, slot) in probe_targets(inner) {
         let old = inner
             .store
             .read()
@@ -1284,6 +1318,9 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
                 probe::chat(&*client, &key, &build, &inner.aux_request_extra, slot).await
             }
             evorag_memory::ROLE_EMBED => probe::embed(&*client, &key, &build).await,
+            evorag_memory::ROLE_MEMORY => {
+                probe::memory(&*client, &key, &build, &inner.memory_request_extra, slot).await
+            }
             _ => probe::rerank(&*client, &key, &build).await,
         };
         tracing::info!(
@@ -1326,6 +1363,8 @@ async fn save_probe_result(
             );
         }
     }
+    // 点検の結果で、区切りの呼び出しを出す先が変わりうる (縮退・止める、06 §2.1)。
+    memory_role::refresh(inner);
 }
 
 /// 繋がらない役割を試し直す (06 §3)。繋がったら記録と照合し、記録が無ければ記録する。
@@ -1354,7 +1393,12 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
                 continue;
             }
             roles::Checked::Mismatch(o) => roles::RoleState::Mismatch(o),
-            roles::Checked::Ready { origin, record } => {
+            roles::Checked::Ready {
+                origin,
+                record,
+                slots,
+            } => {
+                inner.aux.lock().unwrap_or_else(|e| e.into_inner())[i].slots = slots;
                 if record {
                     let role = inner.aux.lock().unwrap_or_else(|e| e.into_inner())[i].role;
                     let bindings = inner
@@ -1394,6 +1438,10 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
             embedding::open(inner).await;
             inner.activity.kick();
         }
+        if info.role == evorag_memory::ROLE_MEMORY && info.status == RoleStatus::Ready {
+            // 点検と区切りの呼び出しを、次の機会に memory で行う。
+            inner.activity.kick();
+        }
         emit(inner, Event::RoleChanged { info, recorded_now });
         if rerank_ready {
             inner.load_threshold();
@@ -1406,7 +1454,25 @@ async fn recheck_roles(inner: &Arc<Inner>) -> bool {
             inner.activity.kick();
         }
     }
+    memory_role::refresh(inner);
     still
+}
+
+/// 繋がらない役割を 30 秒ごとに試し直す task を、動いていなければ始める (06 §3 の表)。
+fn ensure_role_retry(inner: &Arc<Inner>) {
+    let mut slot = inner.aux_task.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|t| !t.is_finished()) {
+        return;
+    }
+    let worker = inner.clone();
+    *slot = Some(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(roles::RETRY).await;
+            if !recheck_roles(&worker).await {
+                break;
+            }
+        }
+    }));
 }
 
 impl Inner {
@@ -1649,7 +1715,7 @@ pub(crate) async fn calibrate_now(inner: &Arc<Inner>) {
 
 /// まだ点検していないモデルがあるか (06 §3.3)。
 pub(crate) fn needs_probe(inner: &Inner) -> bool {
-    probe_targets(inner).iter().any(|(role, _, key, build)| {
+    probe_targets(inner).iter().any(|(role, _, key, build, _)| {
         inner
             .store
             .read()
@@ -1660,20 +1726,35 @@ pub(crate) fn needs_probe(inner: &Inner) -> bool {
     })
 }
 
-/// 点検する役割 (chat と、使える embed・rerank) と、その接続・model_key・`build_info`。
-type ProbeTarget = (&'static str, Arc<dyn LlmClient>, String, String);
+/// 点検する役割 (chat と、使える embed・rerank・memory) と、その接続・model_key・`build_info`・使うスロット
+/// (chat と memory は、スロットが 2 つ以上なら裏の処理と同じく最後のスロット、06 §4)。
+type ProbeTarget = (
+    &'static str,
+    Arc<dyn LlmClient>,
+    String,
+    String,
+    Option<u32>,
+);
 
 fn probe_targets(inner: &Inner) -> Vec<ProbeTarget> {
     let (llm, server, _) = inner.conn();
+    let last = |slots: u32| (slots > 1).then(|| slots - 1);
     let mut targets: Vec<ProbeTarget> = vec![(
         evorag_memory::ROLE_CHAT,
         llm,
         server.model_key.clone(),
         server.build_info.clone(),
+        last(server.total_slots),
     )];
     for a in inner.aux.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if let (Some(c), roles::RoleState::Ready(o)) = (a.ready_client(), &a.state) {
-            targets.push((a.role, c, o.model_key.clone(), o.build_info.clone()));
+            targets.push((
+                a.role,
+                c,
+                o.model_key.clone(),
+                o.build_info.clone(),
+                last(a.slots),
+            ));
         }
     }
     targets
@@ -1708,18 +1789,32 @@ fn show_model(inner: &Inner, name: Option<String>) {
                 Some(&inner.chat_model),
                 Some(&connected),
             ))
-            .chain(
-                inner
-                    .aux
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .iter()
-                    .map(roles::AuxRole::info),
-            )
+            .chain(aux_infos_with_memory(inner))
             .collect(),
             n_ctx: server.n_ctx,
         },
     );
+}
+
+/// embed・rerank・memory の役割の行。memory を設定していなければ、chat と同じモデルを使うことを「未設定」の
+/// 行で示す (06 §2.1。画面が「chat と同じ」と示す)。
+fn aux_infos_with_memory(inner: &Inner) -> Vec<evorag_types::api::ModelRoleInfo> {
+    let mut infos: Vec<_> = inner
+        .aux
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(roles::AuxRole::info)
+        .collect();
+    if !infos.iter().any(|i| i.role == evorag_memory::ROLE_MEMORY) {
+        infos.push(evorag_types::api::ModelRoleInfo {
+            role: evorag_memory::ROLE_MEMORY.to_owned(),
+            recorded: None,
+            connected: None,
+            status: RoleStatus::Unset,
+        });
+    }
+    infos
 }
 
 /// 送る前に、繋がっている応答のモデルが記録と同じかを確かめる (06 §3、AC-FR-512-3)。

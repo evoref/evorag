@@ -36,6 +36,7 @@ fn app() -> App {
             background_pending: 0,
             remote_llm: false,
             forget: None,
+            memory: None,
         },
     );
     let turns = (0..TURNS)

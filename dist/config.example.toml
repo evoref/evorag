@@ -5,7 +5,8 @@
 #   Windows: %LOCALAPPDATA%\evorag\config\config.toml
 #   Linux:   ~/.config/evorag/config.toml
 #   macOS:   ~/Library/Application Support/evorag/config/config.toml
-version = 1
+# 設定の形式の版 (v0.5 から 2。v0.4 までの設定は、起動したときに書き換えます)。
+version = 2
 
 [ui]
 # 画面の言語 (ja / en。en は v0.3 から)。いつでも変えられます (次の起動から効きます)。
@@ -50,6 +51,15 @@ top_p = 0.95
 # [llm.rerank]
 # url = "http://127.0.0.1:8082"
 # api_key_env = "EVORAG_API_KEY"
+
+# 区切りの呼び出し (覚えることの整理) に使う llama-server (v0.5)。書かなければ chat と同じサーバとモデルで
+# 呼びます (既定)。chat のモデルが遅い機械では、速いモデル (勧める候補: Qwen3-4B-Instruct-2507) を置けます。
+# 繋がらないときは chat で代行します。ルーターモードなら url を書かずに model だけを書きます。
+# [llm.memory]
+# url = "http://127.0.0.1:8083"
+# api_key_env = "EVORAG_API_KEY"
+# [llm.memory.request_extra]
+# chat_template_kwargs = { enable_thinking = false }
 
 # v0.1 の [[llm.chat.models]] (/model で切り替える候補) は、v0.2 から使いません。
 # 応答のモデルはデータ根に記録し、切り替えは evorag setup で行います。

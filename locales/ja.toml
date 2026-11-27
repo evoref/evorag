@@ -85,6 +85,8 @@ generating = "生成中 (Esc で中断)"
 thinking = "考えています (Esc で中断)"
 forget_mismatched = "確かめられない本文 {count} 件"
 forget_journal = "ジャーナルの書き直し待ち"
+memory_fallback = "memory: chat で代行"
+memory_stopped = "区切りの呼び出し: 停止"
 
 [ui.title]
 session = "セッション: {title}"
@@ -143,6 +145,16 @@ calibrated = "リランカーの較正が終わりました。以前の会話を
 calibration_failed = "リランカーが較正の基準に届かなかったので、以前の会話は自動では添えず、候補として示します。別のリランカーを evorag setup で選べます。"
 probe_issues = "{role} のモデルを点検しました: {reasons}。型縛りの補助の呼び出し (ノートの鍵など) を止めます。会話は続けられます (evorag doctor で詳しく見られます)。"
 style_changed = "答え方の既定を変えました。すべてのセッションに効きます。次の応答は、始まるまで少し長くかかります。"
+memory_fallback = "memory の役割を使えない ({reason}) ので、区切りの呼び出しは chat のサーバとモデルで行います。作った台帳には、縮退で作ったことを記録します (evorag doctor で詳しく見られます)。"
+memory_restored = "memory の役割が使えるようになりました。区切りの呼び出しを memory のモデルで行います。"
+memory_stopped = "chat のモデルでも区切りの呼び出しができない (点検に通らない) ので、区切りの呼び出しを止めます。会話と想起は続けられます (evorag doctor で詳しく見られます)。"
+memory_resumed = "区切りの呼び出しを再び行います。"
+probe_issues_memory = "memory のモデルを点検しました: {reasons}。区切りの呼び出しは chat のサーバとモデルで行います (evorag doctor で詳しく見られます)。"
+
+[ui.memory_reason]
+waiting = "繋がらない"
+mismatch = "記録と違うモデル"
+probe_failed = "点検に通らない"
 
 [ui.notice.facts]
 changed = "覚えた事実: {parts}"
@@ -286,6 +298,7 @@ unset = "未設定"
 waiting = "接続待ち"
 ready = "使っている"
 mismatch = "記録と違うので使っていない"
+same_as_chat = "chat と同じモデルを使う (既定)"
 
 [ui.style]
 title = "答え方の既定 (↑↓ 項目、←→ 値、Enter で決める、Esc でやめる)"
@@ -326,6 +339,8 @@ model_recorded_unusual = "応答のモデル ({file}) を、このデータ根�
 role_recorded = "{role} のモデル ({file}) を、このデータ根に記録しました。"
 role_mismatch = "{role} のモデルが、このデータ根に記録したモデルと違うので、使いません (記録: {recorded}、今: {connected})。記録したモデルで llama-server を起動し直すか、evorag を閉じて evorag setup で切り替えてください。それまでは {role} を使わずに動きます。"
 role_waiting = "{role} の llama-server に繋がりません。繋がるまで使わずに動き、30 秒ごとに試します。"
+memory_waiting = "memory の llama-server に繋がりません。繋がるまで、区切りの呼び出しは chat のサーバとモデルで行い、30 秒ごとに試します。"
+memory_mismatch = "memory のモデルが、このデータ根に記録したモデルと違うので使いません (記録: {recorded}、今: {connected})。区切りの呼び出しは chat のサーバとモデルで行います。記録したモデルで llama-server を起動し直すか、evorag を閉じて evorag setup で切り替えてください。"
 router_needs_model = "{url} の llama-server はルーターモード (1 つの URL で複数のモデルを扱う) です。設定の llm.chat.model に、使うモデルの名前 ({models} のどれか) を書いてください。evorag setup でも選べます。"
 router_model = "{url} のルーターで、モデル {model} を使えません ({detail})。設定の llm.chat.model の名前と、ルーターのプリセットを確かめてください。"
 config_obsolete = "設定の {key} は、この版では使いません (読んで無視します)。消してかまいません (v0.1 に戻す予定なら残してください)。"
@@ -454,6 +469,12 @@ config_header = "# evorag の設定 (evorag setup が書いた。キーの説明
 config_prompt_language = "# システムプロンプトの言語 (このデータ根では後から変えられない)"
 config_router_model = "# ルーターモードのモデルの名前 (プリセットの節の名前)"
 config_api_key_env = "# llama-server を --api-key で起動したときは、キーを入れた環境変数の名前を書く"
+memory_default = "memory: 設定なし。区切りの呼び出しは chat のサーバとモデルで行います (既定)。chat のモデルが遅い機械では、config.toml の [llm.memory] に速いモデル (勧める候補: Qwen3-4B-Instruct-2507) の llama-server を書けます。"
+memory_missing = "memory: {url} に繋がりません。繋がるまで、区切りの呼び出しは chat のサーバとモデルで行います。"
+redo_memory = "memory のモデルを切り替えても、古い区切りの台帳は自動では作り直しません。新しい区切りから新しいモデルで台帳を作り、古い区切りは前のモデルの台帳を使い続けます。作り直したいときは evorag rebuild --ledgers で明示してください。"
+redo_chat_ledgers = "llm.memory を設定していないので、区切りの呼び出しも chat のモデルで行います。切り替えると、新しい区切りから新しいモデルで台帳を作ります (古い区切りは前のモデルの台帳を使い続けます)。"
+memory_cache = "memory に chat と別のモデルを置いています。主記憶の少ない機械では、memory のモデルの読み込みが chat のキャッシュを追い出し、次の応答の始まりが遅くなることがあります。"
+memory_remote = "memory の接続先 {url} はこの機械の外です。区切りの呼び出しで、発話の本文 (private にした値を含む) がその機械に送られます。"
 
 # evorag --help の文 (clap が足す --help・--version の文と見出しは英語のまま)。
 [cli.help]
@@ -702,6 +723,16 @@ probe_embed = "モデルの点検 (embed): {dims} 次元、問い 1 件の埋め
 probe_rerank = "モデルの点検 (rerank): 往復 6 件のリランク {ms} ms"
 probe_failed = "モデルの点検 ({role}): 失敗しました ({detail})"
 probe_none = "モデルの点検: まだありません (evorag setup か、起動の後に裏で行います)"
+memory_default = "memory の役割: 設定なし。区切りの呼び出しは chat のサーバとモデルで行います (既定)"
+memory_ok = "memory の役割: {url} の {file} を使っています"
+memory_not_recorded = "memory の役割: {url} の {file} (まだ記録していません。次の起動で記録します)"
+memory_unreachable = "memory の役割: {url} に繋がりません ({detail})。区切りの呼び出しは chat のサーバとモデルで行います (縮退)"
+memory_mismatch = "memory の役割: 記録したモデル ({recorded}) と今のモデル ({connected}) が違うので使いません。区切りの呼び出しは chat のサーバとモデルで行います (縮退)。evorag setup で切り替えられます"
+memory_probe_failed = "memory の役割: モデルが点検に通らないので、区切りの呼び出しは chat のサーバとモデルで行います (縮退)"
+memory_stopped = "区切りの呼び出し: chat のモデルも点検に通らないので止めています (会話と想起は続きます)"
+probe_memory = "モデルの点検 (memory): プロンプトの処理 {prompt} トークン/秒、生成 {gen} トークン/秒。{issues}"
+probe_memory_aux_thinking_off = "  memory の呼び出しには、思考を切る指定を自動で足しています。設定に書くときは、config.toml の [llm.memory.request_extra] に chat_template_kwargs = { enable_thinking = false } と書きます。"
+probe_reasoning_budget = "  要求の chat_template_kwargs では思考を切れないモデルです (LFM2.5-8B-A1B など)。llama-server を --reasoning-budget 0 を付けて起動し直すと切れます。"
 broken = "壊れた DB のファイル: {count} 個 ({path} など)。不要なら消してかまいません"
 compact_pending = "データベースのファイルの空きの領域に、消した記録の跡が残っています。次の起動で除きます (compact。空きが足りなければ見送ります)"
 forget_mismatched = "忘れた内容と本文が合わない発言: {count} 件 (想起・裏の処理・書き出しには使いません)"
@@ -815,6 +846,7 @@ low_space = "空きが足りないので ({free} MiB、必要 {need} MiB)、退�
 [probe]
 thinking_not_off = "補助の呼び出しで思考を切れません (設定 llm.chat.aux_request_extra を確かめてください)"
 structured_broken = "型縛りの出力が空か、型に合いません"
+memory_thinking_not_off = "思考を切れません (llm.memory.request_extra を確かめてください。要求の指定で切れないモデルは、llama-server を --reasoning-budget 0 を付けて起動し直します)"
 
 
 [ui.memory]

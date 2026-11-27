@@ -25,8 +25,6 @@ use evorag_tui::app::{App, Status};
 use evorag_tui::catalog::{Catalog, Language};
 use evorag_types::{Clock, MessageKey, SystemClock, UuidV7Gen};
 
-const DEFAULT_URL: &str = "http://127.0.0.1:8080";
-
 /// `--version` (FR-906、07 §5): 版・作りの情報・入れ方・書く DB の形式の版。1 行目 (`evorag <版>`) の形は
 /// 変えない (`evorag update` が読む、12 §7.2)。通信せず、データ根・設定・`update/` に触れない。
 static VERSION: LazyLock<String> = LazyLock::new(|| {
@@ -872,19 +870,8 @@ fn main() -> ExitCode {
         );
     };
 
-    let url = cfg
-        .llm
-        .chat
-        .url
-        .clone()
-        .unwrap_or_else(|| DEFAULT_URL.to_owned());
-    let api_key = cfg.llm.chat.api_key.clone().or_else(|| {
-        cfg.llm
-            .chat
-            .api_key_env
-            .as_ref()
-            .and_then(|v| std::env::var(v).ok())
-    });
+    let url = cfg.chat_url();
+    let api_key = cfg.chat_api_key();
     let endpoint = match Endpoint::new(&url, api_key, cfg.llm.allow_remote) {
         Ok(e) => e,
         Err(e) => {
@@ -959,15 +946,7 @@ fn main() -> ExitCode {
         );
     }
     if let Some(Sub::Doctor) = &args.command {
-        return doctor::run(
-            &catalog,
-            &config_file,
-            &data_root,
-            backup_dir.as_deref(),
-            &url,
-            &rt,
-            llm,
-        );
+        return doctor::run(&catalog, &cfg, &config_file, &data_root, &rt, llm);
     }
     if let Some(Sub::Backups { action }) = &args.command {
         return match action {
@@ -1130,6 +1109,27 @@ fn main() -> ExitCode {
         aux.push(client);
     }
     let (embed, rerank) = (aux[0].clone(), aux[1].clone());
+    // memory の役割 (06 §2.1)。書かなければ chat のサーバとモデルで区切りの呼び出しを行う。
+    let memory_client = match cfg.memory_role() {
+        None => None,
+        Some(r) => match Endpoint::new(&r.url, r.api_key, cfg.llm.allow_remote)
+            .and_then(|e| HttpClient::new(e, RetryPolicy::default()))
+        {
+            Ok(c) => Some(Arc::new(c.with_model(r.model)) as Arc<dyn evorag_llm::LlmClient>),
+            Err(e) => {
+                return fail(
+                    &catalog,
+                    4,
+                    MessageKey::CliConfigError,
+                    &[("detail", &format!("llm.memory: {e}"))],
+                );
+            }
+        },
+    };
+    let memory = evorag_core::MemoryConfig {
+        client: memory_client,
+        request_extra: cfg.memory_request_extra(),
+    };
     let model_name = cfg.llm.chat.model.clone().unwrap_or_else(|| url.clone());
     let make_cfg = || CoreConfig {
         data_root: data_root.clone(),
@@ -1148,6 +1148,7 @@ fn main() -> ExitCode {
         ignored_config: ignored_config.clone(),
         embed: embed.clone(),
         rerank: rerank.clone(),
+        memory: memory.clone(),
         aux_request_extra: aux_request_extra.clone(),
         probe_models: true,
         sleep: cfg.sleep(),
@@ -1352,6 +1353,7 @@ fn main() -> ExitCode {
                 journal_pending: report.forget.journal_pending,
                 key_missing: report.forget.key_missing,
             }),
+            memory: Some(report.memory),
         },
     );
     app.notices.extend(update_notices);
@@ -1389,6 +1391,26 @@ fn main() -> ExitCode {
         if let Some(m) = evorag_tui::app::role_notice(&app.catalog, r) {
             app.notices.push(m);
         }
+    }
+    // 前の点検で、区切りの呼び出しを chat で代行・止めると分かっている (06 §2.1。繋がらない・記録と違うは上の
+    // 役割の知らせで示した)。
+    match report.memory {
+        evorag_types::api::MemoryState::Fallback(
+            evorag_types::api::MemoryFallback::ProbeFailed,
+        ) => {
+            let reason = app.catalog.key(evorag_tui::app::memory_reason_key(
+                evorag_types::api::MemoryFallback::ProbeFailed,
+            ));
+            let m = app
+                .catalog
+                .with(MessageKey::UiMemoryFallback, &[("reason", &reason)]);
+            app.notices.push(m);
+        }
+        evorag_types::api::MemoryState::Stopped => {
+            let m = app.catalog.key(MessageKey::UiMemoryStopped);
+            app.notices.push(m);
+        }
+        _ => {}
     }
     for key in &report.ignored_config {
         let m = app
@@ -1522,6 +1544,7 @@ mod tests {
                 ignored_config: Vec::new(),
                 embed: None,
                 rerank: None,
+                memory: Default::default(),
                 aux_request_extra: Default::default(),
                 probe_models: false,
                 sleep: evorag_core::SleepConfig::immediate(),

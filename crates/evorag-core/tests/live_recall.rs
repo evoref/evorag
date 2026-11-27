@@ -117,6 +117,7 @@ fn config(root: &Path, embed: &str, rerank: &str) -> CoreConfig {
         ignored_config: Vec::new(),
         embed: Some(client(embed)),
         rerank: Some(client(rerank)),
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),

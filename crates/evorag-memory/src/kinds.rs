@@ -18,6 +18,8 @@ pub const KIND_MODEL_BINDING: &str = "model_binding";
 pub const ROLE_CHAT: &str = "chat";
 pub const ROLE_EMBED: &str = "embed";
 pub const ROLE_RERANK: &str = "rerank";
+/// 区切りの呼び出し (B2) の役割 (06 §2.1、v0.5)。`llm.memory` を設定したときだけ記録する。
+pub const ROLE_MEMORY: &str = "memory";
 /// 設定の名前: 読んで無視した設定のキーと、その内容のハッシュ (同じなら 2 回目から知らせない、07 §4.1)。
 pub const SETTING_IGNORED_CONFIG: &str = "notice.ignored_config";
 /// 設定の名前: 答え方の既定 (07 §3 の `/style`)。

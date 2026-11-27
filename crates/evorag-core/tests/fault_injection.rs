@@ -79,6 +79,7 @@ fn fault_child() {
             ignored_config: Vec::new(),
             embed: None,
             rerank: None,
+            memory: Default::default(),
             aux_request_extra: Default::default(),
             probe_models: false,
             sleep: evorag_core::SleepConfig::immediate(),

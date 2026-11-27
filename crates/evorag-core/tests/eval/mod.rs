@@ -127,6 +127,7 @@ pub fn config(
         ignored_config: Vec::new(),
         embed,
         rerank,
+        memory: Default::default(),
         aux_request_extra: thinking_off(),
         probe_models: true,
         sleep: evorag_core::SleepConfig::immediate(),

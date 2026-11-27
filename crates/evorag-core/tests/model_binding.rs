@@ -57,6 +57,7 @@ fn config_with(
         ignored_config: ignored,
         embed,
         rerank,
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),
@@ -109,8 +110,13 @@ async fn the_first_start_records_the_chat_model_and_model_only_shows_it() {
         panic!()
     };
     assert_eq!(*n_ctx, 8192);
-    // chat・embed・rerank の順。embed と rerank は設定していない。
-    assert_eq!(roles.len(), 3);
+    // chat・embed・rerank・memory の順。embed と rerank は設定していない。memory は設定していないので「未設定」
+    // (chat と同じモデルを使う、06 §2.1)。
+    assert_eq!(roles.len(), 4);
+    assert_eq!(
+        (roles[3].role.as_str(), roles[3].status),
+        ("memory", RoleStatus::Unset)
+    );
     assert_eq!(roles[0].role, "chat");
     assert_eq!(roles[1].status, RoleStatus::Unset);
     assert_eq!(roles[0].recorded, roles[0].connected);
@@ -393,8 +399,8 @@ async fn embed_and_rerank_are_recorded_and_a_different_one_is_not_used() {
         panic!()
     };
     let names: Vec<_> = roles.iter().map(|r| r.role.as_str()).collect();
-    assert_eq!(names, ["chat", "embed", "rerank"]);
-    assert!(roles.iter().all(|r| r.status == RoleStatus::Ready));
+    assert_eq!(names, ["chat", "embed", "rerank", "memory"]);
+    assert!(roles[..3].iter().all(|r| r.status == RoleStatus::Ready));
     core.shutdown().await;
 
     // 埋め込みのモデルを替えても起動は止まらない。替えた役割は使わず、知らせる。

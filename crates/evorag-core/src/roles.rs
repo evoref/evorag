@@ -1,10 +1,12 @@
-//! embed・rerank の役割の接続と照合 (06 §3・§3.1、FR-512、ADR-0018)。
+//! embed・rerank・memory の役割の接続と照合 (06 §3・§3.1、FR-512、ADR-0018)。
 //!
 //! - 設定していない役割は `Unset` (その役割は無いものとして縮退する、05 §3.5)。
 //! - 繋がらなければ `Waiting`。使わずに、ときどき試す (llama-server を同時に起動して、読み込みが
 //!   evorag の起動に間に合わなかったときのため、06 §3 の表)。
 //! - 記録と同じモデルなら `Ready`。記録が無ければ、繋がっているモデルを記録して `Ready` にする。
 //! - 記録と違えば `Mismatch`。使わない (応答のモデルと違い、起動は止めない)。
+//! - memory の役割 (v0.5) は、`llm.memory` を設定したときだけここに置く。使えない間は chat で代行する
+//!   (memory_role.rs、06 §2.1)。
 
 use std::sync::Arc;
 
@@ -29,6 +31,8 @@ pub(crate) struct AuxRole {
     /// データ根に記録したモデル。
     pub recorded: Option<ModelOrigin>,
     pub state: RoleState,
+    /// 繋がっているサーバのスロットの数 (裏の処理は最後のスロットを使う、06 §4)。
+    pub slots: u32,
 }
 
 impl AuxRole {
@@ -47,6 +51,7 @@ impl AuxRole {
             client,
             recorded: bindings.by_role.get(role).map(|b| b.body.current.clone()),
             state,
+            slots: 1,
         }
     }
 
@@ -82,6 +87,8 @@ pub(crate) enum Checked {
     Ready {
         origin: ModelOrigin,
         record: bool,
+        /// サーバのスロットの数。
+        slots: u32,
     },
     Mismatch(ModelOrigin),
 }
@@ -99,10 +106,12 @@ pub(crate) async fn check(client: &dyn LlmClient, recorded: Option<&ModelOrigin>
         None => Checked::Ready {
             origin: o,
             record: true,
+            slots: server.total_slots,
         },
         Some(r) if r.model_key == o.model_key => Checked::Ready {
             origin: o,
             record: false,
+            slots: server.total_slots,
         },
         Some(_) => Checked::Mismatch(o),
     }

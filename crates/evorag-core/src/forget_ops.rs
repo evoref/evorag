@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use evorag_llm::LlmError;
+use evorag_llm::{LlmClient, LlmError};
 use evorag_memory::{
     ForgetAbort, ForgetEnv, KIND_TURN, TurnBody, attributes, hidden_marker, plan_forget,
     redaction_marker,
@@ -509,27 +509,41 @@ fn error_kind(e: &LlmError) -> String {
     }
 }
 
-/// 応答 (`chat`) の役割のモデルの、すべてのスロットにキャッシュの消去を求める (04 §7.2、06 §4。忘れると削除の
-/// 後)。構成を見分けない。断られたら (既定の構成の 501 など) 無視する。スロットは `/slots` で数え、数えられ
-/// なければ `total_slots` から求める。応えない llama-server で終了を止めないよう、全体の長さを限る。
+/// 応答 (`chat`) と、設定したときの `memory` (v0.5) の役割のモデルの、すべてのスロットにキャッシュの消去を求める
+/// (04 §7.2、06 §4。忘れると削除の後)。構成を見分けない。断られたら (既定の構成の 501 など) 無視する。スロットは
+/// `/slots` で数え、数えられなければ `total_slots` から求める。応えない llama-server で終了を止めないよう、全体の
+/// 長さを限る。
 pub(crate) async fn erase_slots(inner: &Inner) {
     let (client, server, _) = inner.conn();
+    let mut targets: Vec<(Arc<dyn LlmClient>, u32)> = vec![(client, server.total_slots)];
+    targets.extend(
+        inner
+            .aux
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|a| a.role == evorag_memory::ROLE_MEMORY)
+            .filter_map(|a| Some((a.client.clone()?, a.slots))),
+    );
     let all = async {
-        let ids: Vec<u32> = match tokio::time::timeout(ERASE_WAIT, client.slots()).await {
-            Ok(Ok(slots)) if !slots.is_empty() => slots.iter().map(|s| s.id).collect(),
-            _ => (0..server.total_slots.clamp(1, ERASE_MAX_SLOTS)).collect(),
-        };
-        let mut erased = 0usize;
-        for id in &ids {
-            match tokio::time::timeout(ERASE_WAIT, client.erase_slot(*id)).await {
-                Ok(Ok(())) => erased += 1,
-                Ok(Err(e)) => {
-                    tracing::debug!(slot = id, error = %error_kind(&e), "the slot cache was not erased");
+        let (mut total, mut erased) = (0usize, 0usize);
+        for (client, total_slots) in &targets {
+            let ids: Vec<u32> = match tokio::time::timeout(ERASE_WAIT, client.slots()).await {
+                Ok(Ok(slots)) if !slots.is_empty() => slots.iter().map(|s| s.id).collect(),
+                _ => (0..(*total_slots).clamp(1, ERASE_MAX_SLOTS)).collect(),
+            };
+            for id in &ids {
+                match tokio::time::timeout(ERASE_WAIT, client.erase_slot(*id)).await {
+                    Ok(Ok(())) => erased += 1,
+                    Ok(Err(e)) => {
+                        tracing::debug!(slot = id, error = %error_kind(&e), "the slot cache was not erased");
+                    }
+                    Err(_) => tracing::debug!(slot = id, "the slot cache erase timed out"),
                 }
-                Err(_) => tracing::debug!(slot = id, "the slot cache erase timed out"),
             }
+            total += ids.len();
         }
-        (ids.len(), erased)
+        (total, erased)
     };
     match tokio::time::timeout(ERASE_TOTAL, all).await {
         Ok((slots, erased)) => {

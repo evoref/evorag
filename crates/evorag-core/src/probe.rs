@@ -210,8 +210,49 @@ pub async fn chat(
     aux_extra: &RequestExtra,
     slot: Option<u32>,
 ) -> ModelProbeBody {
+    generating(
+        evorag_memory::ROLE_CHAT,
+        llm,
+        model_key,
+        build_info,
+        aux_extra,
+        slot,
+    )
+    .await
+}
+
+/// memory の役割を点検する (06 §3.3、v0.5)。`extra` は memory の呼び出しに足す JSON
+/// (`llm.memory.request_extra`)。確かめることは chat と同じ (型縛りの出力・思考を切れるか・速さ)。思考を
+/// 切れないと分かったら、`evorag doctor` と `evorag setup` が llama-server の `--reasoning-budget 0` を案内する。
+pub async fn memory(
+    llm: &dyn LlmClient,
+    model_key: &str,
+    build_info: &str,
+    extra: &RequestExtra,
+    slot: Option<u32>,
+) -> ModelProbeBody {
+    generating(
+        evorag_memory::ROLE_MEMORY,
+        llm,
+        model_key,
+        build_info,
+        extra,
+        slot,
+    )
+    .await
+}
+
+/// 生成の役割 (chat・memory) を点検する。
+async fn generating(
+    role: &str,
+    llm: &dyn LlmClient,
+    model_key: &str,
+    build_info: &str,
+    aux_extra: &RequestExtra,
+    slot: Option<u32>,
+) -> ModelProbeBody {
     let mut p = ModelProbeBody {
-        role: evorag_memory::ROLE_CHAT.into(),
+        role: role.into(),
         model_key: model_key.into(),
         build_info: build_info.into(),
         ..ModelProbeBody::default()
