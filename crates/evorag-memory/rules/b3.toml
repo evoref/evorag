@@ -6,9 +6,11 @@
 # 規則:
 # - 照合は NFKC と casefold の後に行う。ここに書く語は、NFKC と casefold で変わらない形で書く。
 # - 規則を変えたら `version` を上げる (導出の指紋に入る、04 §5.3)。
-# - 安全の規則 ([sensitive]) と、関門 3b の否定の印は、同梱のすべての言語のものを合わせて当てる。
-# - 日本語の語は部分一致、英語の語は ASCII の英数字で決めた語の境界で当てる ([reading] の否定の印)。
-#   [sensitive] の語は、言語に関わらず部分一致で当てる (安全の規則、04 §5.2)。
+# - 関門 3b の否定の印・節の区切りと、関門 6a の機微な情報は、同梱のすべての言語のものを合わせて当てる。
+# - 日本語の語は部分一致、英語の語は ASCII の英数字で決めた語の境界で当てる。[sensitive] の英語の語の末尾の `*` は、
+#   語の頭だけに境界を求める (語幹。`pregnan*` は "pregnant"・"pregnancy" に当たる)。
+# - *_exclude・exclude の語の一致 1 つにすっかり収まる一致は数えない (照合の前に伏せる)。
+# - [sensitive] の語の一覧は初版。v0.5 のリリースの準備で利用者が見直す (OQ-56)。
 
 version = 1
 
@@ -16,88 +18,146 @@ version = 1
 # 辞書の属性の v0.5 の宣言 (04 §5.1 の「辞書」)。attributes.toml の属性の名前で書く。
 # 層: v0.5 の辞書の属性はすべて world (書かない属性は world)。
 # 別名: 初版は空 (自由記述の属性を辞書の属性に写す語。足したら attributes.toml の version も上げる)。
-# 値の意味が否定を含む属性 (`negative`): 関門 3b (極性) を当てない。「えびは食べられません」を fact とする属性
-# (attributes.toml の describe のとおり)。否定の印があっても、値の意味が「食べないもの」なので捨てない。
+# 値の意味が否定を含む属性 (`negative`): 関門 3b (極性) の否定の印を見ない。「えびは食べられません」を fact とする
+# 属性 (attributes.toml の describe のとおり)。negated は、negative_end の語がある文だけ通す。
 negative = ["dietary"]
 
 [dictionary.aliases]
 
 [subject]
 # 関門 5: 応答する側を表す語 (04 §5.2)。正規化 v1 か照合の形で同じ呼び名を捨てる (部分一致ではない)。
-assistant = ["assistant", "ai", "アシスタント", "システム"]
+# 役割の語 (rules/common.toml の role_words) も同じく捨てる。モデルの名前 (人の名前と見分けられない) は入れない。
+assistant = ["assistant", "ai", "アシスタント", "システム", "bot", "ボット", "チャットボット", "chatbot"]
+# 関門 5: 二人称 (応答する側を指す)。同じ呼び名を捨てる。
+second_person = [
+  "あなた", "あんた", "君", "きみ", "お前", "おまえ", "貴方", "貴女", "そちら", "you", "your", "yours",
+  "yourself", "u",
+]
 
 [ja]
-# 関門 3b の否定の印 (`negation_mark`)。値の位置が掛かる節にどれかがあるのに叙法が fact なら捨て、どれも無いのに
-# negated なら捨てる。
-negation_mark = ["ない", "ません", "無い"]
+# 関門 3b の否定の印 (`negation_mark`)。日本語は述語が節の最後に来るので、値の後ろから節の終わりまでで見る。
+negation_mark = [
+  "ない", "ません", "無い", "なかっ", "なく", "なし", "ずに", "せず", "ず、", "ず。", "ずじまい", "へん", "ねえ",
+]
 # negation_mark の一致が、この語の一致 1 つにすっかり収まるときは、否定とみなさない (照合の前に伏せる)。
 negation_mark_exclude = [
-  "間違いない", "違いない", "少なくない", "少ない", "すくない", "仕方ない", "仕方がない", "しょうがない",
-  "危ない", "あぶない", "もったいない", "つまらない", "くだらない", "情けない", "切ない", "せつない",
-  "頼りない", "物足りない", "たまらない", "堪らない", "半端ない", "はんぱない", "欠かせない", "手放せない",
-  "止まらない", "やめられない", "忘れられない", "外せない", "見逃せない", "かもしれない", "かも知れない",
-  "しかない", "ほかならない", "他ならない", "なければならない", "なくてはならない", "ないといけない",
-  "なきゃいけない", "おさない", "きたない", "ないしょ",
+  "間違いない", "違いない", "少なくない", "少ない", "すくない", "少なく", "すくなく", "仕方ない", "仕方がない",
+  "しょうがない", "危ない", "あぶない", "もったいない", "つまらない", "くだらない", "情けない", "切ない",
+  "せつない", "頼りない", "物足りない", "たまらない", "堪らない", "半端ない", "はんぱない", "欠かせない",
+  "手放せない", "止まらない", "やめられない", "忘れられない", "外せない", "見逃せない", "かもしれない",
+  "かも知れない", "しかない", "ほかならない", "他ならない", "なければならない", "なくてはならない",
+  "ないといけない", "なきゃいけない", "おさない", "きたない", "ないしょ", "間もなく", "まもなく", "なくした",
+  "なくしもの", "おとなし", "はなし", "かなし", "まず、", "まず。", "必ず、", "かならず、", "たいへん", "へんな",
+  "このへん", "そのへん", "あのへん", "どのへん", "へんじ", "ねえさん", "ねえちゃん", "だねえ", "よねえ", "すねえ",
+  "ねえ、", "ねえ。",
+]
+# 関門 3b の節の区切り。読点だけでは切らない (「東京には、もう住んでいません」の否定を値の節に入れるため)。
+polarity_clause_break = [
+  "けど", "けれど", "が、", "ので", "から、", "し、", "ながら", "ていて", "でいて", "て、", "で、", ";",
+  "ですが", "ますが", "たが", "だが",
+]
+# 値の意味が否定を含む属性の negated を通す、否定を終える語 (値を言った文にどれかが要る)。
+negative_end = [
+  "食べられるようになっ", "飲めるようになっ", "治っ", "治りました", "もう大丈夫", "平気になっ", "克服",
+  "アレルギーではなくなっ", "アレルギーじゃなくなっ",
 ]
 
 [ja.sensitive]
-# 関門 6a の機微な情報のカテゴリ (04 §5.2)。値・old・自由記述の属性が、どれかの語を含めば捨てる。
+# 関門 6a の機微な情報 (04 §5.2、OQ-56)。値・old・自由記述の属性が、どれかの語を含めば捨てる (部分一致)。
+exclude = [
+  "病院", "病棟", "病室", "看病", "臆病", "仮病", "病みつき", "病み付き", "左翼手", "右翼手", "ゲイン", "ゲイト",
+  "ゲイツ", "甘党", "辛党", "左党", "悪党", "徒党",
+]
+address_shapes = [
+  "{n}丁目", "{n}番{n}号", "{n}番地", "{n}号室", "{c}{n}-{n}-{n}", "{c}{n}-{n}", "〒{n3}-{n4}", "{n3}-{n4}",
+]
+
+[ja.sensitive.words]
 health = [
-  "持病", "病気", "病名", "疾患", "高血圧", "低血圧", "糖尿病", "癌", "腫瘍", "喘息", "ぜんそく",
-  "うつ病", "鬱", "精神科", "心療内科", "統合失調症", "双極性", "パニック障害", "発達障害", "適応障害",
-  "認知症", "障害者", "通院", "入院", "服薬", "投薬", "と診断", "治療中", "闘病", "hiv", "エイズ", "妊娠", "不妊",
+  "持病", "病気", "病名", "疾患", "病", "高血圧", "低血圧", "糖尿病", "癌", "がん患者", "がん治療", "がん検診",
+  "胃がん", "肺がん", "乳がん", "大腸がん", "肝臓がん", "末期がん", "白血病", "腫瘍", "喘息", "ぜんそく", "うつ病",
+  "鬱", "精神科", "心療内科", "統合失調症", "双極性", "パニック障害", "発達障害", "適応障害", "認知症", "通院",
+  "入院", "服薬", "投薬", "と診断", "治療中", "闘病", "エイズ", "妊娠", "不妊",
 ]
 religion = [
   "宗教", "信仰", "信者", "宗派", "教会", "礼拝", "洗礼", "仏教", "キリスト教", "クリスチャン", "カトリック",
   "プロテスタント", "イスラム", "ムスリム", "モスク", "ユダヤ教", "ヒンドゥー", "神道", "檀家", "創価", "無神論",
 ]
-politics = [
-  "政党", "政治", "党員", "自民党", "立憲", "共産党", "公明党", "維新の会", "社民党", "保守派", "革新派",
-  "右翼", "左翼", "投票した", "選挙で",
-]
+politics = ["政党", "政治", "党", "党員", "保守派", "革新派", "右翼", "左翼", "投票した", "選挙で"]
 orientation = [
-  "性的指向", "同性愛", "異性愛", "両性愛", "ゲイ", "レズビアン", "バイセクシュアル", "トランスジェンダー",
-  "アセクシュアル", "クィア", "lgbt",
+  "性的指向", "同性愛", "異性愛", "両性愛", "ゲイ", "レズ", "バイセクシュアル", "トランスジェンダー",
+  "アセクシュアル", "クィア", "ノンバイナリー", "xジェンダー", "lgbt",
 ]
 address = ["住所", "番地", "号室", "郵便番号", "〒"]
-# 番地・号室の形の型 (`{n}` は数字の並び。算用数字と漢数字)。
-address_shapes = ["{n}丁目", "{n}番{n}号", "{n}番地", "{n}号室"]
+race = ["人種", "民族", "黒人", "白人", "混血"]
+creed = ["信条", "思想信条"]
+social_status = ["社会的身分", "被差別部落", "部落出身", "同和", "門地"]
+criminal_record = ["前科", "逮捕歴", "犯罪歴", "服役", "有罪判決", "刑務所", "執行猶予", "少年院"]
+crime_victim = ["被害者", "被害に遭", "性被害", "性犯罪", "ストーカー被害", "痴漢", "虐待", "dv被害"]
+disability = [
+  "障害者", "障がい", "障碍", "身体障害", "精神障害", "知的障害", "障害者手帳", "車いす", "車椅子",
+]
 
 [en]
+# 英語は否定が値の前にも後ろにも来るので、節の全体 (値を除く) で見る。
 negation_mark = [
   "not", "never", "no", "no longer", "nor", "neither", "cannot", "don't", "doesn't", "didn't", "isn't",
   "aren't", "wasn't", "weren't", "won't", "can't", "couldn't", "haven't", "hasn't", "hadn't", "wouldn't",
-  "shouldn't", "don’t", "doesn’t", "didn’t", "isn’t", "aren’t", "wasn’t", "weren’t", "won’t", "can’t",
-  "couldn’t", "haven’t", "hasn’t", "hadn’t", "wouldn’t", "shouldn’t",
+  "shouldn't", "ain't", "mustn't", "needn't", "shan't", "don’t", "doesn’t", "didn’t", "isn’t", "aren’t",
+  "wasn’t", "weren’t", "won’t", "can’t", "couldn’t", "haven’t", "hasn’t", "hadn’t", "wouldn’t", "shouldn’t",
+  "ain’t", "mustn’t", "needn’t", "shan’t", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent",
+  "wont", "cant", "couldnt", "havent", "hasnt", "hadnt", "wouldnt", "shouldnt", "aint", "mustnt", "neednt",
+  "shant",
 ]
 negation_mark_exclude = [
-  "not only", "no doubt", "no matter", "can't wait", "can’t wait", "cannot wait", "can't live without",
-  "can’t live without", "can't get enough", "can’t get enough", "couldn't be happier", "couldn’t be happier",
-  "never miss",
+  "not only", "no doubt", "no matter", "can't wait", "can’t wait", "cant wait", "cannot wait",
+  "can't live without", "can’t live without", "can't get enough", "can’t get enough", "couldn't be happier",
+  "couldn’t be happier", "never miss",
+]
+polarity_clause_break = [";", "but", "so", "because", "although", "though", "whereas", "while"]
+negative_end = [
+  "no longer allergic", "not allergic anymore", "not allergic any more", "can eat", "can now eat", "outgrew",
+  "grew out of", "got over",
 ]
 
 [en.sensitive]
+exclude = [
+  "political science", "cancer sign", "sign is cancer", "zodiac cancer", "cancer zodiac", "star sign cancer",
+  "tropic of cancer",
+]
+address_shapes = [
+  "{n} {ws} street", "{n} {ws} st", "{n} {ws} avenue", "{n} {ws} ave", "{n} {ws} road", "{n} {ws} rd",
+  "{n} {ws} boulevard", "{n} {ws} blvd", "{n} {ws} lane", "{n} {ws} drive", "{n} {w} terrace", "{n} {w} way",
+  "{n} {w} court", "{n} {w} place", "apt {n}", "apt. {n}", "apartment {n}", "suite {n}",
+]
+
+[en.sensitive.words]
 health = [
-  "diabetes", "diabetic", "cancer", "tumor", "hypertension", "high blood pressure", "asthma", "depression",
-  "anxiety disorder", "bipolar", "schizophrenia", "adhd", "autism", "autistic", "dementia", "illness",
-  "disease", "disorder", "diagnosed", "chronic", "medication", "hiv", "pregnant", "infertility",
+  "diabet*", "cancer", "tumor*", "chemo*", "hypertension", "high blood pressure", "asthma", "depress*",
+  "anxiety disorder", "bipolar", "schizophren*", "adhd", "autis*", "dementia", "illness*", "disease*",
+  "disorder*", "diagnos*", "chronic", "medication*", "therap*", "hiv", "pregnan*", "infertil*",
 ]
 religion = [
-  "religion", "religious", "church service", "churchgoer", "mosque", "synagogue", "christian", "catholic", "protestant", "muslim",
-  "islam", "buddhist", "buddhism", "hindu", "jewish", "judaism", "atheist", "baptized", "bible", "quran",
-  "koran",
+  "religion*", "religious", "church service", "churchgoer", "mosque", "synagogue", "christian*", "catholic*",
+  "protestant*", "muslim*", "islam", "islamic", "buddhis*", "hindu", "hindus", "hinduism", "jewish", "judaism",
+  "atheis*", "baptized", "bible", "quran", "koran",
 ]
 politics = [
-  "political", "politics", "democrat", "republican", "labour party", "conservative party", "voted for",
+  "political", "politics", "democrat*", "republican*", "labour party", "conservative party", "voted for",
   "party member",
 ]
 orientation = [
-  "sexual orientation", "gay", "lesbian", "bisexual", "homosexual", "heterosexual", "transgender",
-  "asexual", "queer",
+  "sexual orientation", "gay", "lesbian*", "bisexual*", "homosexual*", "heterosexual*", "transgender",
+  "asexual", "queer", "nonbinary", "non-binary",
 ]
 address = ["home address", "street address", "zip code", "postal code", "postcode"]
-address_shapes = [
-  "{n} {w} street", "{n} {w} st", "{n} {w} avenue", "{n} {w} ave", "{n} {w} road", "{n} {w} rd",
-  "{n} {w} boulevard", "{n} {w} blvd", "{n} {w} lane", "{n} {w} drive", "apt {n}", "apt. {n}",
-  "apartment {n}", "suite {n}",
+race = ["racial", "ethnicity", "ethnic"]
+creed = ["creed"]
+social_status = ["caste"]
+criminal_record = [
+  "criminal record", "convicted", "conviction*", "felon*", "arrested", "prison", "jail", "parole",
 ]
+crime_victim = [
+  "victim of", "assaulted", "sexual assault", "abused", "abuse", "stalker", "stalked", "domestic violence",
+]
+disability = ["disability", "disabilities", "disabled", "wheelchair", "handicap*", "deaf"]

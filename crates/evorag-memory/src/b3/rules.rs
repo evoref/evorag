@@ -22,6 +22,10 @@ use crate::value_key::normalize_v1;
 /// (04 §5.3) に入る)。
 pub const GATES_VERSION: u32 = 1;
 
+/// 前のふるいの規則の版 (台帳の `inputs` の `prefilter`、04 §5.2.1)。B2 の側で足す前のふるいの版の定数と同じ値に
+/// する (M5.3 で、その定数につなぎ替える)。関門は今の規則の前のふるいで本文を見るので、関門の結果の覚えの鍵に入れる。
+pub const PREFILTER_VERSION: u32 = 1;
+
 /// `rules/b3.toml` の言語ごとの部分。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,33 +34,47 @@ pub struct LanguageExtra {
     pub negation_mark: Vec<String>,
     /// 否定の印の一致が、この語の一致 1 つにすっかり収まるときは数えない。
     pub negation_mark_exclude: Vec<String>,
-    /// 関門 6a の機微な情報のカテゴリ。
+    /// 関門 3b の節の区切り (接続の区切り。読点だけでは切らない)。
+    pub polarity_clause_break: Vec<String>,
+    /// 関門 3b: 値の意味が否定を含む属性の `negated` を通す、否定を終える語 (「食べられるようになった」など)。
+    pub negative_end: Vec<String>,
+    /// 関門 6a の機微な情報。
     pub sensitive: Sensitive,
 }
 
-/// 関門 6a の機微な情報のカテゴリ (04 §5.2)。語は部分一致で当てる。
+/// 関門 6a の機微な情報のカテゴリの名前 (04 §5.2、OQ-56)。
+pub const SENSITIVE_CATEGORIES: &[&str] = &[
+    "health",
+    "religion",
+    "politics",
+    "orientation",
+    "address",
+    "race",
+    "creed",
+    "social_status",
+    "criminal_record",
+    "crime_victim",
+    "disability",
+];
+
+/// 関門 6a の機微な情報 (04 §5.2)。日本語の語は部分一致、英語の語は ASCII の語の境界で当てる (末尾の `*` は語の
+/// 頭だけの境界)。電話番号・カード番号・メールアドレスは、コードの型で見る。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sensitive {
-    pub health: Vec<String>,
-    pub religion: Vec<String>,
-    pub politics: Vec<String>,
-    pub orientation: Vec<String>,
-    /// 正確な住所の語。
-    pub address: Vec<String>,
-    /// 番地・号室の形の型。`{n}` は数字の並び (算用数字と漢数字)、`{w}` は文字の並び。ほかは字のまま当てる。
+    /// カテゴリ ([`SENSITIVE_CATEGORIES`]) → 語。
+    pub words: BTreeMap<String, Vec<String>>,
+    /// 語の一致が、この語の一致 1 つにすっかり収まるときは数えない (照合の前に伏せる)。
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// 番地・号室・郵便番号の形の型 ([`shape_parts`])。
     pub address_shapes: Vec<String>,
 }
 
 impl Sensitive {
-    /// 語の一覧のすべて (カテゴリの順)。
-    pub fn words(&self) -> impl Iterator<Item = &String> {
-        self.health
-            .iter()
-            .chain(&self.religion)
-            .chain(&self.politics)
-            .chain(&self.orientation)
-            .chain(&self.address)
+    /// 語の一覧のすべて (カテゴリの名前の順)。
+    pub fn all_words(&self) -> impl Iterator<Item = &String> {
+        self.words.values().flatten()
     }
 }
 
@@ -81,6 +99,8 @@ pub struct DictionaryDecl {
 pub struct SubjectRules {
     /// 関門 5: 応答する側を表す語。
     pub assistant: Vec<String>,
+    /// 関門 5: 二人称 (応答する側を指す)。
+    pub second_person: Vec<String>,
 }
 
 /// `rules/b3.toml` の全体。
@@ -126,29 +146,43 @@ impl B3Rules {
             }
         }
         words_problems(&mut out, "subject.assistant", &self.subject.assistant);
+        words_problems(
+            &mut out,
+            "subject.second_person",
+            &self.subject.second_person,
+        );
         for (lang, x) in [("ja", &self.ja), ("en", &self.en)] {
             let at = |n: &str| format!("{lang}.{n}");
-            words_problems(&mut out, &at("negation_mark"), &x.negation_mark);
-            words_problems(
-                &mut out,
-                &at("negation_mark_exclude"),
-                &x.negation_mark_exclude,
-            );
-            let s = &x.sensitive;
             for (name, list) in [
-                ("health", &s.health),
-                ("religion", &s.religion),
-                ("politics", &s.politics),
-                ("orientation", &s.orientation),
-                ("address", &s.address),
-                ("address_shapes", &s.address_shapes),
+                ("negation_mark", &x.negation_mark),
+                ("negation_mark_exclude", &x.negation_mark_exclude),
+                ("polarity_clause_break", &x.polarity_clause_break),
+                ("negative_end", &x.negative_end),
+                ("sensitive.exclude", &x.sensitive.exclude),
+                ("sensitive.address_shapes", &x.sensitive.address_shapes),
             ] {
-                words_problems(&mut out, &at(&format!("sensitive.{name}")), list);
+                words_problems(&mut out, &at(name), list);
             }
-            for shape in &s.address_shapes {
+            for (category, list) in &x.sensitive.words {
+                if !SENSITIVE_CATEGORIES.contains(&category.as_str()) {
+                    out.push(format!(
+                        "rules/b3.toml: {lang}.sensitive.words.{category} is not a category"
+                    ));
+                }
+                let stems: Vec<String> = list
+                    .iter()
+                    .map(|w| w.strip_suffix('*').unwrap_or(w).to_owned())
+                    .collect();
+                words_problems(
+                    &mut out,
+                    &at(&format!("sensitive.words.{category}")),
+                    &stems,
+                );
+            }
+            for shape in &x.sensitive.address_shapes {
                 if shape_parts(shape).is_none() {
                     out.push(format!(
-                        "rules/b3.toml: {lang}.sensitive.address_shapes `{shape}` needs `{{n}}` and only `{{n}}`/`{{w}}` holes"
+                        "rules/b3.toml: {lang}.sensitive.address_shapes `{shape}` needs a number hole and only known holes"
                     ));
                 }
             }
@@ -180,13 +214,19 @@ fn words_problems(out: &mut Vec<String>, name: &str, list: &[String]) {
 pub(super) enum ShapePart {
     /// 字のまま当てる部分。
     Text(String),
-    /// 数字の並び (`{n}`)。
+    /// 数字の並び (`{n}`。算用数字と漢数字の 1 文字以上)。
     Number,
-    /// 文字の並び (`{w}`)。
+    /// ちょうど k 桁の数字 (`{n3}` など。前後に数字が続かない)。
+    Digits(usize),
+    /// 英字の語 1 つ (`{w}`)。
     Word,
+    /// 空白 1 つで区切った英字の語の 1〜3 個 (`{ws}`)。
+    Words,
+    /// 漢字かカタカナの 1 文字 (`{c}`。町名の終わりの字)。
+    Cjk,
 }
 
-/// 型を部分に分ける。`{n}` を 1 つも含まないか、知らない穴を含むなら `None`。
+/// 型を部分に分ける。数字の穴を 1 つも含まないか、知らない穴を含むなら `None`。
 pub(super) fn shape_parts(shape: &str) -> Option<Vec<ShapePart>> {
     let mut parts = Vec::new();
     let mut rest = shape;
@@ -195,17 +235,29 @@ pub(super) fn shape_parts(shape: &str) -> Option<Vec<ShapePart>> {
             parts.push(ShapePart::Text(rest[..open].to_owned()));
         }
         let close = rest[open..].find('}')? + open;
-        parts.push(match &rest[open..=close] {
-            "{n}" => ShapePart::Number,
-            "{w}" => ShapePart::Word,
-            _ => return None,
+        let hole = &rest[open + 1..close];
+        parts.push(match hole {
+            "n" => ShapePart::Number,
+            "w" => ShapePart::Word,
+            "ws" => ShapePart::Words,
+            "c" => ShapePart::Cjk,
+            _ => {
+                let k: usize = hole.strip_prefix('n')?.parse().ok()?;
+                if !(1..=9).contains(&k) {
+                    return None;
+                }
+                ShapePart::Digits(k)
+            }
         });
         rest = &rest[close + 1..];
     }
     if !rest.is_empty() {
         parts.push(ShapePart::Text(rest.to_owned()));
     }
-    parts.contains(&ShapePart::Number).then_some(parts)
+    parts
+        .iter()
+        .any(|p| matches!(p, ShapePart::Number | ShapePart::Digits(_)))
+        .then_some(parts)
 }
 
 /// 同梱の `rules/b3.toml`。
@@ -266,6 +318,8 @@ impl<'r> Rules<'r> {
                 .map(|r| (r.language.clone(), r.version))
                 .collect(),
             b3: self.b3.version,
+            prefilter: PREFILTER_VERSION,
+            splitter: crate::sentences::SPLITTER_V1,
         }
     }
 }
@@ -289,6 +343,10 @@ pub struct RuleVersions {
     pub languages: Vec<(String, u32)>,
     /// `rules/b3.toml` の版。
     pub b3: u32,
+    /// 前のふるいの規則の版 ([`PREFILTER_VERSION`])。
+    pub prefilter: u32,
+    /// 文の分け方の版 (文番号の文、[`crate::SPLITTER_V1`])。
+    pub splitter: u32,
 }
 
 /// 辞書の属性 1 つと、その v0.5 の宣言。
@@ -529,7 +587,28 @@ mod tests {
                 ShapePart::Text("号".into()),
             ])
         );
+        assert_eq!(
+            shape_parts("〒{n3}-{n4}"),
+            Some(vec![
+                ShapePart::Text("〒".into()),
+                ShapePart::Digits(3),
+                ShapePart::Text("-".into()),
+                ShapePart::Digits(4),
+            ])
+        );
+        assert_eq!(
+            shape_parts("{c}{n}-{n}"),
+            Some(vec![
+                ShapePart::Cjk,
+                ShapePart::Number,
+                ShapePart::Text("-".into()),
+                ShapePart::Number,
+            ])
+        );
+        assert_eq!(shape_parts("{n} {ws} street").map(|p| p.len()), Some(4));
         assert_eq!(shape_parts("番地"), None);
+        assert_eq!(shape_parts("{w} street"), None);
         assert_eq!(shape_parts("{x}丁目"), None);
+        assert_eq!(shape_parts("{n0}丁目"), None);
     }
 }

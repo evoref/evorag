@@ -241,7 +241,7 @@ title = "プロファイルに表の区切り・長い値・改行を入れる�
 spec = "04 §5.2 の関門 6・7、記録する文字列 (改行をまたぐ値)、§5.4 の書式"
 ac = ["AC-NFR-504-3", "AC-FR-316-1"]
 stage = "M5.3"
-note = "改行をまたぐ値は、文の分け方 v1 が改行で文を分けるかで、捨てる理由が forbidden_char か value_not_in_evidence になる (M5.2 で決める)。数は区切りの文字と長さの 2 件だけを比べる"
+note = "改行をまたぐ値は、文の分け方 v1 が改行で文を分ける (04 §2) ので、根拠の文 3 (「好きな作家は東野」) に値が無く value_not_in_evidence で捨てる (M5.2 で決めた、2026-11-28)"
 [[case.step]]
 turn = { id = "a1", session = "A", at = "2026-06-21T10:00:00Z", text = "好きな記号は|と｜です。" } # 1
 [[case.step]]
@@ -259,7 +259,7 @@ ledger = { name = "L1", seg = "S1", keys = ["好きなもの"], units = [
 [[case.step]]
 op = { kind = "derive" }
 [[case.step]]
-expect = { units = [], profile = [], counts = { forbidden_char = 1, too_long = 1 } }
+expect = { units = [], profile = [], counts = { forbidden_char = 1, too_long = 1, value_not_in_evidence = 1 } }
 
 [[case]]
 lang = "en"

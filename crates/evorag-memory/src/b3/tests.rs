@@ -1,7 +1,7 @@
 //! 関門 (B3) の試験。関門ごとに通る事例と外れる事例を置く。v0.4 の関門の試験 (`gates.rs`) のうち v0.5 でも成り立つ
 //! ものは、新しい型で書き直した。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::directive::{DirectiveBody, DirectiveOp, TurnSpan};
@@ -301,7 +301,7 @@ fn values_must_be_in_the_sentence_on_word_boundaries() {
             "{text:?}"
         );
     }
-    let text = "RTX4070 Tiではなく RTX4070 を使っています";
+    let text = "前は RTX4070 Ti、今は RTX4070 を使っています";
     let p = one(text, &unit(1, "device", "RTX4070")).expect("passed");
     assert_eq!(p.value.text, "RTX4070");
 }
@@ -507,6 +507,49 @@ fn polarity_must_match_the_clause() {
     );
 }
 
+/// 否定の印の広がり (過去形・連用形・「なし」・方言・アポストロフィの無い英語の短縮形) と、関門 3b の節の切り方
+/// (読点だけでは切らず、接続の区切りで切る。日本語の印は値の後ろだけで見る)。
+#[test]
+fn polarity_sees_more_negations_and_connective_clauses() {
+    let fact = |s, a: &str, v: &str| unit(s, a, v);
+    for (text, a, v) in [
+        ("東京には住んでいなかった。", "residence", "東京"),
+        ("猫ではなく犬が好きです。", "likes", "猫"),
+        ("ペットは猫なしです。", "pet", "猫"),
+        ("大阪には住んでへん。", "residence", "大阪"),
+        ("I dont live in Tokyo.", "residence", "Tokyo"),
+        ("I ain't living in Tokyo.", "residence", "Tokyo"),
+        ("I mustn't eat shrimp, I love sushi.", "likes", "shrimp"),
+        ("東京には、もう住んでいません。", "residence", "東京"),
+        ("Osaka, I never lived there.", "residence", "Osaka"),
+    ] {
+        assert_eq!(
+            reason(text, &fact(1, a, v)),
+            Some(Reason::Polarity),
+            "{text:?}"
+        );
+    }
+    for (text, a, v) in [
+        ("猫ではなく犬が好きです。", "likes", "犬"),
+        ("大阪に住んでいて車は持っていない。", "residence", "大阪"),
+        ("猫は好きじゃないけど、犬が好きです。", "likes", "犬"),
+        ("まず、将棋が好きです。", "likes", "将棋"),
+        ("少なくとも将棋は好きです。", "likes", "将棋"),
+        (
+            "このへんで一番好きなのはラーメンです。",
+            "likes",
+            "ラーメン",
+        ),
+        (
+            "何も考えずに過ごすことが好きです。",
+            "likes",
+            "何も考えずに過ごすこと",
+        ),
+    ] {
+        assert!(one(text, &fact(1, a, v)).is_ok(), "{text:?}");
+    }
+}
+
 /// 値の意味が否定を含む属性 (`dietary`。attributes.toml の describe で「食べられません」も fact にする) には、
 /// 関門 3b を当てない (v0.4 のまま)。
 #[test]
@@ -518,6 +561,57 @@ fn negative_attributes_skip_polarity() {
         reason(text, &unit(1, "dislikes", "えび")),
         Some(Reason::Polarity)
     );
+    // 免除は否定を終える向きには効かない: negated は否定を終える語があるときだけ通す。
+    let negated = |t: &str| {
+        one(
+            t,
+            &with(unit(1, "dietary", "えび"), |u| {
+                u.mood = LedgerMood::Negated
+            }),
+        )
+    };
+    assert_eq!(
+        negated("えびが大好きで毎日食べる。").err(),
+        Some(Reason::Mood)
+    );
+    assert_eq!(
+        negated("えびはもう食べられない。").err(),
+        Some(Reason::Mood)
+    );
+    assert!(negated("えびを食べられるようになった。").is_ok());
+    assert!(
+        one(
+            "I can eat shrimp now, I outgrew it.",
+            &with(unit(1, "dietary", "shrimp"), |u| u.mood =
+                LedgerMood::Negated)
+        )
+        .is_ok()
+    );
+}
+
+/// 残した穴 (L3): 括弧の無い伝聞・他人の文を LLM が self に付けた候補は、主語の一致の関門では止まらない (根拠の文に
+/// self の呼び名は要らない、attacks.toml の AT07 の注)。塞いだら期待を直す。
+#[test]
+fn known_hole_unbracketed_hearsay_about_others_passes_as_self() {
+    assert!(one("妻は看護師です。", &unit(1, "occupation", "看護師")).is_ok());
+    assert!(
+        one(
+            "兄が大阪に住んでいると言っていた。",
+            &unit(1, "residence", "大阪")
+        )
+        .is_ok()
+    );
+}
+
+/// 残した穴 (L4): 関門 6a は主語の呼び名に当てない (04 §5.2 の 6a は値・`old`・自由記述の属性だけ)。塞いだら期待を
+/// 直す。
+#[test]
+fn known_hole_sensitive_words_in_the_subject_pass() {
+    let u = with(unit(1, "residence", "東京"), |u| {
+        u.entity = "糖尿病の父".into()
+    });
+    let p = one("糖尿病の父は東京に住んでいます。", &u).expect("passed");
+    assert_eq!(p.entity, "糖尿病の父");
 }
 
 // ---- 関門 4 ----
@@ -798,6 +892,113 @@ fn cache_keys_follow_the_inputs() {
     assert_ne!(cache_key(&env, &ev, &u), cache_key(&env3, &ev, &u));
 }
 
+/// 鍵が同じなら結果も同じ (今のターンの有無・改訂の番号・`[非表示]` の範囲・指示との照合の可否・値の鍵の鍵)。
+#[test]
+fn equal_cache_keys_give_equal_results() {
+    let text = "趣味は将棋です。";
+    let rules = Rules::bundled();
+    let other_key = ForgetKey::from_bytes([3; 32]);
+    let sentences = sentences_of(id(1), 0, text, 1);
+    let u = unit(1, "hobby", "将棋");
+    let plain = || Utterance::new(id(1), 0, text, Vec::new());
+    let mut b = DirectiveBody::new(DirectiveOp::Forget);
+    b.entity = Some("self".into());
+    b.aspect = Some("hobby".into());
+    b.vks = ValueKeys::of(&KEY, "将棋").to_hex();
+    b.norm = Some(1);
+    let r = span(text, "将棋");
+    b.hidden = vec![TurnSpan {
+        turn: id(1),
+        rev: 0,
+        start: u32::try_from(r.start).expect("fits"),
+        end: u32::try_from(r.end).expect("fits"),
+    }];
+    let set = DirectiveSet::new([(id(50), b)], "[伏せ字]", str::to_owned);
+    let from_directives = Utterance::with_directives(id(1), 0, text, &set).expect("matching");
+    let variants: Vec<(&str, Evidence<'_>, &ForgetKey)> = vec![
+        ("base", Evidence::new(&sentences, [plain()]), &KEY),
+        ("absent", Evidence::new(&sentences, []), &KEY),
+        (
+            "rev",
+            Evidence::new(&sentences, [Utterance::new(id(1), 1, text, Vec::new())]),
+            &KEY,
+        ),
+        (
+            "hidden_value",
+            Evidence::new(
+                &sentences,
+                [Utterance::new(id(1), 0, text, vec![r.clone()])],
+            ),
+            &KEY,
+        ),
+        (
+            "hidden_other",
+            Evidence::new(
+                &sentences,
+                [Utterance::new(id(1), 0, text, vec![span(text, "趣味")])],
+            ),
+            &KEY,
+        ),
+        (
+            "unmatched",
+            Evidence::new(&sentences, [plain()]).with_unmatched([id(1)]),
+            &KEY,
+        ),
+        (
+            "other_key",
+            Evidence::new(&sentences, [plain()]),
+            &other_key,
+        ),
+        (
+            "directives",
+            Evidence::new(&sentences, [from_directives]),
+            &KEY,
+        ),
+    ];
+    let results: Vec<(&str, CacheKey, Result<Passed, Reason>)> = variants
+        .iter()
+        .map(|(name, ev, key)| {
+            let env = Env {
+                dictionary: Dictionary::bundled(),
+                rules: &rules,
+                key,
+            };
+            (*name, cache_key(&env, ev, &u), screen(&env, ev, &u))
+        })
+        .collect();
+    for (a, ka, ra) in &results {
+        for (b, kb, rb) in &results {
+            if ka == kb {
+                assert_eq!(ra, rb, "{a} and {b} share a key");
+            }
+        }
+    }
+    let distinct: BTreeSet<String> = results
+        .iter()
+        .filter(|(n, ..)| *n != "directives")
+        .map(|(_, k, _)| format!("{k:?}"))
+        .collect();
+    assert_eq!(distinct.len(), variants.len() - 1);
+    let key_of = |n: &str| {
+        results
+            .iter()
+            .find(|(x, ..)| *x == n)
+            .map(|(_, k, _)| k.clone())
+    };
+    assert_eq!(key_of("directives"), key_of("hidden_value"));
+    let reason_of = |n: &str| {
+        results
+            .iter()
+            .find(|(x, ..)| *x == n)
+            .and_then(|(_, _, r)| r.as_ref().err().copied())
+    };
+    assert_eq!(reason_of("absent"), Some(Reason::Evidence));
+    assert_eq!(reason_of("rev"), Some(Reason::Evidence));
+    assert_eq!(reason_of("unmatched"), Some(Reason::Evidence));
+    assert_eq!(reason_of("hidden_value"), Some(Reason::ValueNotInEvidence));
+    assert_eq!(reason_of("base"), None);
+}
+
 #[test]
 fn reason_names_are_fixed() {
     let names: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
@@ -820,6 +1021,7 @@ fn reason_names_are_fixed() {
             "imperative",
             "instruction_ref",
             "redaction_marker",
+            "encoded",
             "sensitive",
             "too_long",
             "forgotten",

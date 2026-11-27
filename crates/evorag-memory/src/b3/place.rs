@@ -189,13 +189,14 @@ pub(super) fn in_question_clause(
 }
 
 /// 関門 3b: 値の位置 `pos` が掛かる、文 `sentence` の中の節 (本文 `text` の範囲)。節は、値の前の最後の節の区切り
-/// の後から、値の後の最初の節の区切りの前まで (区切りは関門 3 の補いと同じ `clause_break`。同梱のすべての言語)。
-/// 区切りの一致は、正規化 v1 と照合の形の対応表 (04 §5.6) で元の位置に戻す。対応表を作れないときは文の全体。
+/// の後から、値の後の最初の節の区切りの前まで。区切りは関門 3b の節の区切り (`polarity_clause_break`。接続の区切り
+/// で、読点だけでは切らない。同梱のすべての言語)。区切りの一致は、正規化 v1 と照合の形の対応表 (04 §5.6) で元の
+/// 位置に戻す。対応表を作れないときは文の全体。
 pub(super) fn clause_at(
     text: &str,
     sentence: &Range<usize>,
     pos: &Range<usize>,
-    languages: &[&LanguageRules],
+    extras: &[(&LanguageRules, &LanguageExtra)],
 ) -> Range<usize> {
     let s = &text[sentence.clone()];
     let maps = [Mapped::new(s), Mapped::loose(s)];
@@ -204,9 +205,9 @@ pub(super) fn clause_at(
     }
     let (mut start, mut end) = (sentence.start, sentence.end);
     let value = pos.start.max(sentence.start)..pos.end.min(sentence.end);
-    for r in languages {
+    for (r, x) in extras {
         let edges = if bounded(r) { Edges::Word } else { Edges::Any };
-        for w in &r.reading.clause_break {
+        for w in &x.polarity_clause_break {
             for (m, needle) in maps
                 .iter()
                 .flatten()
@@ -226,13 +227,36 @@ pub(super) fn clause_at(
     start..end
 }
 
-/// 関門 3b: 節 `clause` に否定の印 (どれかの言語の `negation_mark`。除外の語 `negation_mark_exclude` の一致に
-/// すっかり収まるものは数えない) があるか。
-pub(super) fn has_negation(clause: &str, extras: &[(&LanguageRules, &LanguageExtra)]) -> bool {
-    let forms = Forms::new(clause);
+/// 関門 3b: 節 `clause` (本文 `text` の範囲) の中で、値の位置 `pos` の外に否定の印 (どれかの言語の
+/// `negation_mark`。除外の語 `negation_mark_exclude` の一致にすっかり収まるものは数えない) があるか。値の中の印は
+/// 数えない (値の意味の一部なので)。日本語の印は、述語が節の最後に来るので値の後ろだけで見る (「猫ではなく犬が
+/// 好き」の「犬」に前の「なく」を当てない)。英語の印は値の前と後ろの両方で見る。
+pub(super) fn has_negation(
+    text: &str,
+    clause: &Range<usize>,
+    pos: &Range<usize>,
+    extras: &[(&LanguageRules, &LanguageExtra)],
+) -> bool {
+    let head = Forms::new(
+        text.get(clause.start..pos.start.max(clause.start))
+            .unwrap_or(""),
+    );
+    let tail = Forms::new(text.get(pos.end.min(clause.end)..clause.end).unwrap_or(""));
+    extras.iter().any(|(r, x)| {
+        let b = bounded(r);
+        let hit = |f: &Forms<'_>| f.mention_outside(&x.negation_mark, &x.negation_mark_exclude, b);
+        hit(&tail) || (b && hit(&head))
+    })
+}
+
+/// 関門 3b: 文に、値の意味が否定を含む属性の否定を終える語 (どれかの言語の `negative_end`) があるか。
+pub(super) fn has_negative_end(
+    sentence: &Forms<'_>,
+    extras: &[(&LanguageRules, &LanguageExtra)],
+) -> bool {
     extras
         .iter()
-        .any(|(r, x)| forms.mention_outside(&x.negation_mark, &x.negation_mark_exclude, bounded(r)))
+        .any(|(r, x)| sentence.mention(&x.negative_end, bounded(r)))
 }
 
 /// 送る本文 (前のふるいの後) の、引用の括弧の内側の範囲と、その括弧の属性の例外 (関門 4)。旧エンジンの

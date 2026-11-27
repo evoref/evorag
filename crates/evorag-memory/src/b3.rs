@@ -22,6 +22,7 @@
 
 mod place;
 mod rules;
+mod sensitive;
 mod text;
 
 #[cfg(test)]
@@ -41,17 +42,21 @@ use crate::ledger::{ByteRange, LedgerLayer, LedgerMood, LedgerTense, LedgerUnit,
 use crate::lexical::{Signals, signals};
 use crate::prefilter::Prefiltered;
 use crate::unit::{UnitLayer, UnitTense};
-use crate::value_key::{Edges, ForgetKey, Haystack, Hit, Needle, aspect_key, normalize_v1};
+use crate::value_key::{
+    Edges, ForgetKey, Haystack, Hit, Needle, ValueKey, aspect_key, normalize_v1,
+};
 use place::{
-    Cut, Forms, QuoteRegions, clause_at, has_cue, has_negation, in_question_clause, sentences_at,
-    to_sent,
+    Cut, Forms, QuoteRegions, clause_at, has_cue, has_negation, has_negative_end,
+    in_question_clause, sentences_at, to_sent,
 };
 pub use rules::{
     B3Rules, DictAttribute, Dictionary, DictionaryDecl, DictionaryError, GATES_VERSION,
-    LanguageExtra, RuleVersions, Rules, Sensitive, SubjectRules, b3_rules,
+    LanguageExtra, PREFILTER_VERSION, RuleVersions, Rules, SENSITIVE_CATEGORIES, Sensitive,
+    SubjectRules, b3_rules,
 };
+use sensitive::is_sensitive;
 pub use text::{MAX_SUBJECT_CHARS, check_text};
-use text::{SELF, check_subject, has_redaction_marker, is_sensitive};
+use text::{SELF, check_subject, has_redaction_marker};
 
 /// 自由記述の属性の長さの上限 (正規化 v1 の後の文字数、04 §5.1)。
 pub const FREE_ASPECT_MAX_CHARS: usize = 40;
@@ -71,6 +76,7 @@ pub enum Reason {
     /// 関門 2: 値が根拠の文に (`[非表示]` の範囲の外で) 一致しない。位置を保存した本文に戻せないときも。
     ValueNotInEvidence,
     /// 関門 3: 叙法が問い・仮定、辞書の属性の `world` 以外の否定。値の位置が問いの文の最後の節にあるときも。
+    /// 値の意味が否定を含む属性の否定で、否定を終える語が無いときも (関門 3b の位置で当てる)。
     Mood,
     /// 関門 3a: `cue = true` の属性で、値の位置が掛かる文に手がかりの語が無い。
     NoCue,
@@ -97,6 +103,8 @@ pub enum Reason {
     InstructionRef,
     /// 関門 6: 伏せ字の印を含む、または根拠の文の中で値の一致が印に接する。
     RedactionMarker,
+    /// 関門 6: 符号化の塊 (base64 らしい 40 文字以上の並び)。
+    Encoded,
     /// 関門 6a: 機微な情報のカテゴリ。
     Sensitive,
     /// 関門 7: 値が属性の上限を超える。
@@ -107,7 +115,7 @@ pub enum Reason {
 
 impl Reason {
     /// すべての理由 (当てる順)。
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Aspect,
         Self::Evidence,
         Self::ValueNotInEvidence,
@@ -124,6 +132,7 @@ impl Reason {
         Self::Imperative,
         Self::InstructionRef,
         Self::RedactionMarker,
+        Self::Encoded,
         Self::Sensitive,
         Self::TooLong,
         Self::Forgotten,
@@ -149,6 +158,7 @@ impl Reason {
             Self::Imperative => "imperative",
             Self::InstructionRef => "instruction_ref",
             Self::RedactionMarker => "redaction_marker",
+            Self::Encoded => "encoded",
             Self::Sensitive => "sensitive",
             Self::TooLong => "too_long",
             Self::Forgotten => "forgotten",
@@ -359,7 +369,8 @@ impl<'a> Utterance<'a> {
     }
 
     /// [`Utterance::new`] の `[非表示]` の範囲を、指示の集合から求める。指示と今の本文が合わないターン (04 §7.2)
-    /// は `None` (呼び手はそのターンを渡さない。そのターンの候補は関門 1 で落ちる)。
+    /// は `None` (呼び手はそのターンを渡さずに [`Evidence::with_unmatched`] で示す。そのターンの候補は関門 1 で
+    /// 落ち、覚えの鍵もターンが無いときと分かれる)。
     #[must_use]
     pub fn with_directives(
         turn: Id,
@@ -409,6 +420,8 @@ impl<'a> Utterance<'a> {
 pub struct Evidence<'a> {
     sentences: BTreeMap<u32, &'a SentenceSpan>,
     turns: BTreeMap<Id, Utterance<'a>>,
+    /// 指示と今の本文が合わないターン (04 §7.2。そのターンの候補は関門 1 で落とす)。
+    unmatched: BTreeSet<Id>,
 }
 
 impl<'a> Evidence<'a> {
@@ -426,8 +439,44 @@ impl<'a> Evidence<'a> {
         Self {
             sentences: by_number,
             turns: turns.into_iter().map(|u| (u.turn, u)).collect(),
+            unmatched: BTreeSet::new(),
         }
     }
+
+    /// 指示と今の本文が合わないターン ([`Utterance::with_directives`] が `None` を返したターン) を示す。そのターンの
+    /// 候補は関門 1 で落とし、覚えの鍵 ([`cache_key`]) でも、ターンが無いときと見分ける。
+    #[must_use]
+    pub fn with_unmatched(mut self, turns: impl IntoIterator<Item = Id>) -> Self {
+        self.unmatched.extend(turns);
+        self
+    }
+
+    /// 根拠の文のターンの今の状態 (覚えの鍵に入れる)。
+    fn turn_state(&self, turn: Id) -> TurnState {
+        if self.unmatched.contains(&turn) {
+            return TurnState::Unmatched;
+        }
+        self.turns
+            .get(&turn)
+            .map_or(TurnState::Absent, |u| TurnState::Present {
+                rev: u.rev,
+                hidden: u.hidden.iter().map(|r| (r.start, r.end)).collect(),
+            })
+    }
+}
+
+/// 根拠の文のターンの今の状態 (関門 1 の材料)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TurnState {
+    /// 今のターンが無い (消したセッション・応答のターン)。
+    Absent,
+    /// 指示と今の本文が合わない。
+    Unmatched,
+    /// 今のターンの改訂の番号と `[非表示]` の範囲。
+    Present {
+        rev: u32,
+        hidden: Vec<(usize, usize)>,
+    },
 }
 
 /// 関門の環境。
@@ -439,8 +488,8 @@ pub struct Env<'a> {
     pub key: &'a ForgetKey,
 }
 
-/// 関門 1〜7 の結果を覚えるときの鍵 (04 §5.3: 要素・根拠の `rev`・`[非表示]` の範囲・規則の版)。同じ鍵なら
-/// [`screen`] の結果は同じ。
+/// 関門 1〜7 の結果を覚えるときの鍵 (04 §5.3: 要素・根拠の文と `rev`・今のターンの状態と `[非表示]` の範囲・
+/// 規則と辞書の版・鍵の由来)。同じ鍵なら [`screen`] の結果は同じ (同じターンの同じ改訂の番号の本文は同じ)。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     /// 文番号が指す根拠の文 (ターン, 改訂の番号, 始まり, 終わり)。台帳に無い文番号は `None`。
@@ -453,23 +502,23 @@ pub struct CacheKey {
     tense: LedgerTense,
     old: String,
     when: String,
-    /// 根拠のターンの `[非表示]` の範囲。
-    hidden: Vec<(usize, usize)>,
+    /// 根拠の文のターンの今の状態 (無い・指示と合わない・今の改訂の番号と `[非表示]` の範囲)。
+    turn: Option<TurnState>,
     rules: RuleVersions,
     dictionary: u32,
+    /// 値の鍵の鍵の由来 (鍵そのものではなく、鍵から作った識別。記録する値の鍵が鍵で変わるため)。
+    key_id: ValueKey,
 }
+
+/// 覚えの鍵に入れる、値の鍵の鍵の識別の入力。
+const KEY_ID_LABEL: &str = "evorag.b3.cache-key";
 
 /// [`screen`] の結果を覚えるときの鍵。
 ///
-/// 前のふるいの規則は、今の規則で当てる (コードの版は [`GATES_VERSION`] に含める)。
+/// 前のふるいは今の規則で当てるので、その版 ([`PREFILTER_VERSION`]) と文の分け方の版を規則の版に入れる。
 #[must_use]
 pub fn cache_key(env: &Env<'_>, evidence: &Evidence<'_>, unit: &LedgerUnit) -> CacheKey {
     let span = evidence.sentences.get(&unit.sentence);
-    let hidden = span
-        .and_then(|s| evidence.turns.get(&s.turn))
-        .map_or_else(Vec::new, |u| {
-            u.hidden.iter().map(|r| (r.start, r.end)).collect()
-        });
     CacheKey {
         sentence: span.map(|s| (s.turn, s.rev, s.start, s.end)),
         layer: unit.layer,
@@ -480,9 +529,10 @@ pub fn cache_key(env: &Env<'_>, evidence: &Evidence<'_>, unit: &LedgerUnit) -> C
         tense: unit.tense,
         old: unit.old.clone(),
         when: unit.when.clone(),
-        hidden,
+        turn: span.map(|s| evidence.turn_state(s.turn)),
         rules: env.rules.versions(),
         dictionary: env.dictionary.version(),
+        key_id: aspect_key(env.key, KEY_ID_LABEL),
     }
 }
 
@@ -643,6 +693,9 @@ pub fn screen(env: &Env<'_>, evidence: &Evidence<'_>, unit: &LedgerUnit) -> Resu
         .sentences
         .get(&unit.sentence)
         .ok_or(Reason::Evidence)?;
+    if evidence.unmatched.contains(&span.turn) {
+        return Err(Reason::Evidence);
+    }
     let u = evidence.turns.get(&span.turn).ok_or(Reason::Evidence)?;
     let stored_sentence = usize::try_from(span.start).map_err(|_| Reason::Evidence)?
         ..usize::try_from(span.end).map_err(|_| Reason::Evidence)?;
@@ -751,12 +804,22 @@ pub fn screen(env: &Env<'_>, evidence: &Evidence<'_>, unit: &LedgerUnit) -> Resu
     {
         return Err(Reason::NoCue);
     }
-    // 関門 3b: 値の位置が掛かる節の否定の印と叙法が合う (値の意味が否定を含む属性には当てない)。
-    if !dict.is_some_and(DictAttribute::negative) {
-        let extras = rules.extras();
+    // 関門 3b: 値の位置が掛かる節の否定の印と叙法が合う。値の意味が否定を含む属性は否定の印を見ず、その否定
+    // (`negated`) は、否定を終える語が値の文にあるときだけ通す (LLM の誤り 1 つで、食べられないものの記録を終え
+    // ないため)。
+    let extras = rules.extras();
+    if dict.is_some_and(DictAttribute::negative) {
+        if mood == Mood::Negated
+            && !sentences
+                .iter()
+                .any(|s| has_negative_end(&Forms::new(&sent[s.clone()]), &extras))
+        {
+            return Err(Reason::Mood);
+        }
+    } else {
         let negation = sentences.iter().any(|s| {
-            let clause = clause_at(sent, s, place, languages);
-            has_negation(&sent[clause], &extras)
+            let clause = clause_at(sent, s, place, &extras);
+            has_negation(sent, &clause, place, &extras)
         });
         if negation != (mood == Mood::Negated) {
             return Err(Reason::Polarity);
