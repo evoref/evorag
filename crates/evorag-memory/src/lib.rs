@@ -28,6 +28,7 @@ mod prefilter;
 mod read;
 mod rules;
 mod segment;
+mod segment_plan;
 mod sentences;
 mod table;
 mod unit;
@@ -133,6 +134,10 @@ pub use rules::{
 pub use segment::{
     KIND_SEGMENT, LOOKUP_SEGMENT_FIRST, LOOKUP_SEGMENT_SESSION, REL_SEGMENT_SESSION,
     REL_SEGMENT_TURN, SegmentBody, SegmentError, segment_id,
+};
+pub use segment_plan::{
+    PlanError, PlannedPair, PlannedSegment, SEGMENT_CLOSE_AFTER_MS, SEGMENT_MAX_CHARS,
+    SEGMENT_MAX_PAIRS, SegmentChange, SegmentPlan, TAIL_CALL_PAIRS, plan_segments, tail_call_due,
 };
 pub use sentences::{SPLITTER_V1, split_v1};
 pub use table::{
