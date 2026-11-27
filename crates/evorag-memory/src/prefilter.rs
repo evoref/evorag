@@ -22,6 +22,12 @@ use crate::rules::{all_language_rules, fold, language_rules};
 /// 抽出の対象にするセッションのモード (04 §5.2)。ほかのモード (知らないものを含む) は飛ばす。
 pub const MODE_CHAT: &str = "chat";
 
+/// 前のふるいの規則の版。台帳の `inputs` の `prefilter` に書く (04 §5.2.1。版の合わない台帳は有効でない)。
+///
+/// この関数の判定 (囲み・引用の行・送らない理由の順) か、同梱の規則の `[prefilter]` (全言語) を変えたら上げる。
+/// 規則の中身は試験 (`prefilter_rules_are_pinned`) で固定する。
+pub const PREFILTER_V1: u32 = 1;
+
 /// 送らない理由 (04 §5.2)。並びは当てる順。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkipReason {
@@ -133,6 +139,12 @@ impl Prefiltered {
     /// 抽出の LLM に送る本文。
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// 送る本文の、保存した本文の続いた片の境 (送る本文のバイト位置。最初の片の始まりを除く、昇順)。片の境を
+    /// またぐ範囲は保存した本文に戻せない ([`Prefiltered::to_stored`])。
+    pub(crate) fn piece_starts(&self) -> impl Iterator<Item = usize> + '_ {
+        self.pieces.iter().skip(1).map(|p| p.sent)
     }
 
     /// 送る本文の範囲を、保存した本文の範囲に直す (除いた分を足し戻す)。
@@ -404,6 +416,33 @@ mod tests {
         assert_eq!(p.to_stored(0..6), Some(2..8));
         let p = Prefiltered::from_stored("＞ 引用\n  本文  ");
         assert_eq!(p.text(), "本文");
+    }
+
+    /// 同梱の規則の `[prefilter]` (全言語) を固定する。落ちたら [`PREFILTER_V1`] の代わりに版を上げ、ここの値を直す
+    /// (版の合わない台帳を有効でなくするため、04 §5.2.1)。
+    #[test]
+    fn prefilter_rules_are_pinned() {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for r in all_language_rules() {
+            h.update(
+                format!(
+                    "{}:{:?}
+",
+                    r.language, r.prefilter
+                )
+                .as_bytes(),
+            );
+        }
+        let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            (PREFILTER_V1, got.as_str()),
+            (
+                1,
+                "66c5a189a87ca7860b7f20e476a9fd81be2b9cdecfd071fe93b3490af20367e5"
+            ),
+            "the [prefilter] rules changed: raise the prefilter version"
+        );
     }
 
     #[test]

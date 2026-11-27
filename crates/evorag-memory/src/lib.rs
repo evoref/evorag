@@ -6,6 +6,7 @@
 //! 記録とその関係・副索引は、1 つの依頼 (= 1 つのトランザクション) にまとめる (03 §3.4)。
 
 pub mod apply;
+pub mod b2;
 mod chars;
 mod correction;
 mod derived;

@@ -224,6 +224,7 @@ fn sample_ledger() -> LedgerBody {
             ms: 4_250,
         },
         scrubbed: 0,
+        failed_parts: 0,
         extra: Default::default(),
     }
 }

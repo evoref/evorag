@@ -196,6 +196,7 @@ fn ledger_for(segment: Id, u1: Id, u2: Id, status: LedgerStatus) -> LedgerBody {
         attempts: 0,
         tokens: LedgerTokens::default(),
         scrubbed: 0,
+        failed_parts: 0,
         extra: Default::default(),
     }
 }
