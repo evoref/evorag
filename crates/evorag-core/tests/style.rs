@@ -46,6 +46,7 @@ async fn start(root: &Path, llm: &ReplayClient, seed: u64) -> (Core, UnboundedRe
         ignored_config: Vec::new(),
         embed: None,
         rerank: None,
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),

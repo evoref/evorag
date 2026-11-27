@@ -309,10 +309,17 @@ fn files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
 fn the_tui_asks_to_import_a_v04_root_and_exits_with_2_when_declined() {
     let (tmp, data) = fixture("cli-startup-declined");
     let url = fake_llama_server();
-    let config = format!("[llm.chat]\nurl = \"{url}\"\n");
+    // 版 1 (v0.4) の設定。取り込みを断ったら書き換えない (v0.4 に戻して起動できるように、07 §4.1)。
+    let config = format!("version = 1\n[llm.chat]\nurl = \"{url}\"\n");
     let before = files(&data);
     for answer in ["n\n", ""] {
         let out = evorag(tmp.path(), &config, &[], answer);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("config.toml")).unwrap(),
+            config,
+            "the config is not migrated when the import is declined"
+        );
+        assert!(!tmp.path().join("config.toml.bak-v1").exists());
         let t = text(&out);
         assert_eq!(out.status.code(), Some(2), "{t}");
         assert!(t.contains("v0.4 の形式 (形式の版 0.3)"), "{t}");

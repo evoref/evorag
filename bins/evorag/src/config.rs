@@ -1,6 +1,6 @@
 //! `config.toml` (07 §4)。
 //!
-//! - 先頭に `version = 1`。
+//! - 先頭に `version = 2` (v0.5 から。v0.4 までは 1、07 §4.1)。
 //! - 読めないキー・型の誤り・範囲外の値は、行番号つきのエラーで起動しない (FR-904)。
 //! - 後の版で足すキーは、警告を出して無視する (古い版に戻しても起動できるように)。
 
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use evorag_tui::catalog::Language;
 use serde::Deserialize;
 
-/// 設定の形式の版 (03 §12.3)。
-pub const CONFIG_VERSION: u32 = 1;
+/// 設定の形式の版 (03 §12.3)。v0.5 で `[llm.memory]` を足すために 2 に上げた (07 §4.1、OQ-55 の 3)。
+pub const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -49,6 +49,8 @@ pub struct Llm {
     /// v0.2 のキー。
     pub embed: Option<toml::Table>,
     pub rerank: Option<toml::Table>,
+    /// v0.5 のキー (06 §2.1)。書かなければ chat のサーバとモデルで区切りの呼び出しを行う。
+    pub memory: Option<toml::Table>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,6 +100,11 @@ pub struct Loaded {
     pub ignored: Vec<String>,
     /// 古い版の設定を書き換えたときの、元のファイルの写し (03 §12.3、FR-807)。
     pub migrated: Option<PathBuf>,
+    /// 古い版の設定を書き換えられなかった・見送った理由 (ファイルの名前を含む)。古い版のまま読んで続ける
+    /// (07 §4.1 の「移行の書き方」)。
+    pub migrate_failed: Option<String>,
+    /// `[llm.memory]` に `url` も `model` も無いのに `request_extra` を書いた (使わないことを警告する、07 §4.2)。
+    pub memory_extra_unused: bool,
 }
 
 fn line_of(text: &str, key: &str) -> usize {
@@ -154,48 +161,182 @@ fn line_of_in(text: &str, table: &str, key: &str) -> usize {
     line_of(text, key)
 }
 
+/// 先頭の BOM (UTF-8 の `EF BB BF`)。設定の先頭にあれば許し、移行でもそのまま残す (07 §4.1)。
+const BOM: char = '\u{feff}';
+
 /// 読む。ファイルが無ければ既定の設定 (setup で作る、07 §5)。
 ///
-/// `migrate` なら、古い版の設定 (`version` の無いもの = 版 0) を、元のファイルを
-/// `config.toml.bak-v<旧版>` に写してから今の版に書き換える (03 §12.3、FR-807)。
-/// 版 0 から 1 への移行は、先頭に `version = 1` を足すだけ (コメントを残す)。
+/// `migrate` なら、古い版の設定を、元のファイルを `config.toml.bak-v<旧版>` に写してから今の版に書き換える
+/// (03 §12.3、FR-807、07 §4.1 の「移行の細目」と「移行の書き方」)。どの移行も中身を変えずに版だけを上げる
+/// (コメントを残す)。
+/// - 版 0 (`version` の無いもの) から: 先頭に `version = 2` を足す。
+/// - 版 1 (v0.1〜v0.4) から: `version = 1` の値を 2 に書き換える (07 §4.1。v0.4 は `[llm.memory]` を読めない)。
+///
+/// 書き換えられない・見送ったときは、`migrate_failed` に理由を入れて古い版のまま返す (止めない)。
+///
+/// # Errors
+///
+/// 設定を読めない・設定の誤り (行番号つき)。
 pub fn load(path: &Path, migrate: bool) -> Result<Loaded, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let mut loaded = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    if migrate && loaded.config.version.is_none() && !text.trim().is_empty() {
-        let backup = path.with_file_name(format!(
-            "{}.bak-v0",
-            path.file_name()
-                .map_or("config.toml".into(), |n| n.to_string_lossy())
-        ));
-        let write = || -> std::io::Result<()> {
-            std::fs::copy(path, &backup)?;
-            let tmp = path.with_extension("toml.tmp");
-            std::fs::write(
-                &tmp,
-                format!(
-                    "version = {CONFIG_VERSION}
-{text}"
-                ),
-            )?;
-            std::fs::rename(&tmp, path)
-        };
-        write().map_err(|e| format!("{}: {e}", path.display()))?;
-        loaded.config.version = Some(CONFIG_VERSION);
-        loaded.migrated = Some(backup);
+    let at = |e: String| format!("{}: {e}", path.display());
+    let mut loaded = parse(&text).map_err(at)?;
+    let old = loaded.config.version.unwrap_or(0);
+    if migrate && old < CONFIG_VERSION && !text.trim_start_matches(BOM).trim().is_empty() {
+        match migrate_file(path, &text, old) {
+            Ok(backup) => {
+                loaded.config.version = Some(CONFIG_VERSION);
+                loaded.migrated = Some(backup);
+            }
+            Err(e) => loaded.migrate_failed = Some(e),
+        }
     }
     Ok(loaded)
 }
 
+/// 版 `old` の設定のファイルを今の版に書き換え、元の写しの置き場所を返す (07 §4.1 の「移行の書き方」)。
+/// 写しと書き換えた設定は所有者だけの権限で作り、一時のファイルに書き切ってから入れ替える。失敗したら
+/// 一時のファイルを消す。誤りの文言は、失敗したファイルの名前を含む。
+fn migrate_file(path: &Path, text: &str, old: u32) -> Result<PathBuf, String> {
+    use evorag_store::fsutil;
+    let at = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
+    // リンクを入れ替えると、リンクの先ではなくリンクそのものが普通のファイルになるので見送る。
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(at(path, &"a symbolic link is not rewritten"));
+        }
+        // 読み取り専用の設定は、利用者が書き換えないよう求めたものとみなして見送る (Unix ではフォルダが書ければ
+        // 入れ替えに成功してしまうため、OS に頼らずここで止める。07 §4.1 の「移行の書き方」)。
+        Ok(m) if m.permissions().readonly() => {
+            return Err(at(path, &"a read-only file is not rewritten"));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(at(path, &e)),
+    }
+    let new = migrated_text(text, old).map_err(|e| at(path, &e))?;
+    let backup = free_backup_name(path, old);
+    if let Err(e) = write_private_durable(&backup, text.as_bytes()) {
+        let _ = std::fs::remove_file(&backup);
+        return Err(at(&backup, &e));
+    }
+    let tmp = path.with_extension("toml.tmp");
+    let replaced = (|| -> std::io::Result<()> {
+        // 前の移行の残り。
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        write_private_durable(&tmp, new.as_bytes())?;
+        fsutil::rename_durable(&tmp, path)
+    })();
+    if let Err(e) = replaced {
+        let _ = std::fs::remove_file(&tmp);
+        // 元のファイルは変わっていないので、この回の写しも残さない (失敗が続くたびに写しが増えないように)。
+        let _ = std::fs::remove_file(&backup);
+        return Err(at(path, &e));
+    }
+    Ok(backup)
+}
+
+/// 所有者だけが読み書きできるファイルとして書き (03 §2.1)、ディスクへ書き切る。
+fn write_private_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    evorag_store::fsutil::prepare_private_file(path)?;
+    std::fs::write(path, bytes)?;
+    evorag_store::fsutil::sync_file(path)
+}
+
+/// 元の写しの名前 (`config.toml.bak-v<旧版>`)。既にあれば上書きせず、`.<番号>` を足した空いている名前。
+fn free_backup_name(path: &Path, old: u32) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or("config.toml".into(), |n| n.to_string_lossy());
+    let base = format!("{name}.bak-v{old}");
+    let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    let first = path.with_file_name(&base);
+    if !taken(&first) {
+        return first;
+    }
+    (1u32..)
+        .map(|n| path.with_file_name(format!("{base}.{n}")))
+        .find(|p| !taken(p))
+        .expect("a free backup name")
+}
+
+/// 版 `old` の設定の文を、今の版の文に書き換える (中身を変えずに版だけを上げる、03 §12.3)。書き換えた文が
+/// 今の版として読めることを確かめる。先頭の BOM はそのまま残す。
+fn migrated_text(text: &str, old: u32) -> Result<String, String> {
+    let (bom, text) = match text.strip_prefix(BOM) {
+        Some(rest) => (BOM.to_string(), rest),
+        None => (String::new(), text),
+    };
+    let new = if old == 0 {
+        format!(
+            "version = {CONFIG_VERSION}
+{text}"
+        )
+    } else {
+        // 最初の表の見出しより前にある `version = <old>` の行の値だけを書き換える (後ろのコメントは残す)。
+        let mut done = false;
+        let mut out = String::with_capacity(text.len());
+        let mut in_table = false;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            in_table |= table_header(trimmed.trim_end()).is_some();
+            if !done && !in_table {
+                let indent = &line[..line.len() - trimmed.len()];
+                let value = trimmed
+                    .strip_prefix("version")
+                    .map(str::trim_start)
+                    .and_then(|r| r.strip_prefix('='))
+                    .map(str::trim_start);
+                let old_text = old.to_string();
+                if let Some(rest) = value.and_then(|v| v.strip_prefix(old_text.as_str()))
+                    && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    out.push_str(&format!("{indent}version = {CONFIG_VERSION}{rest}"));
+                    done = true;
+                    continue;
+                }
+            }
+            out.push_str(line);
+        }
+        if !done {
+            return Err(format!(
+                "line {}: version = {old} could not be rewritten",
+                line_of(text, "version")
+            ));
+        }
+        out
+    };
+    let new = format!("{bom}{new}");
+    match parse(&new) {
+        Ok(l) if l.config.version == Some(CONFIG_VERSION) => Ok(new),
+        Ok(_) => Err(format!(
+            "line {}: version = {old} could not be rewritten",
+            line_of(text, "version")
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 /// 古い版の設定を今の版に書き換える ([`load`] の `migrate`)。書き換えたら、元のファイルの写しを返す。
-/// TUI の起動は、更新の片付けの後にこれを呼ぶ (動いている evorag が置いてあるものと違えば、設定に触れずに
-/// 止めるため、12 §7.3)。
+/// TUI の起動は、v0.5 の根を開けた後にこれを呼ぶ (07 §4.1。取り込みを断った・起動が止まったときは設定に
+/// 触れない)。
+///
+/// # Errors
+///
+/// 書き換えられなかった・見送った理由 (ファイルの名前を含む)。呼ぶ側は警告して古い版のまま続ける。
 pub fn migrate(path: &Path) -> Result<Option<PathBuf>, String> {
-    load(path, true).map(|l| l.migrated)
+    let l = load(path, true)?;
+    match l.migrate_failed {
+        Some(e) => Err(e),
+        None => Ok(l.migrated),
+    }
 }
 
 /// `evorag update` が読む設定 (12 §7.2)。設定を書き換えない。
@@ -306,10 +447,12 @@ fn newer_for_update(text: &str, table: &toml::Table, version: u32) -> Result<Upd
 }
 
 pub fn parse(text: &str) -> Result<Loaded, String> {
+    let text = text.strip_prefix(BOM).unwrap_or(text);
     // toml の誤りは行と桁を含む。
     let config: Config = toml::from_str(text).map_err(|e| e.to_string().trim().to_owned())?;
+    // 古い版 (1) は読める (TUI の起動で今の版に書き換える)。新しい版は読めない。
     if let Some(v) = config.version
-        && v != CONFIG_VERSION
+        && !(1..=CONFIG_VERSION).contains(&v)
     {
         return Err(format!(
             "line {}: version = {v} is not supported (this evorag reads version {CONFIG_VERSION})",
@@ -350,12 +493,13 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         ));
     }
     let mut ignored = Vec::new();
+    let mut memory_extra_unused = false;
     for (name, t) in [
         ("llm.embed", &config.llm.embed),
         ("llm.rerank", &config.llm.rerank),
     ] {
         if let Some(t) = t {
-            for k in ["url", "model", "api_key", "api_key_env"] {
+            for k in ROLE_KEYS {
                 if t.get(k).is_some_and(|v| !v.is_str()) {
                     return Err(format!(
                         "line {}: {name}.{k} must be a string",
@@ -363,12 +507,41 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
                     ));
                 }
             }
-            for k in t
-                .keys()
-                .filter(|k| !["url", "model", "api_key", "api_key_env"].contains(&k.as_str()))
-            {
+            for k in t.keys().filter(|k| !ROLE_KEYS.contains(&k.as_str())) {
                 ignored.push(format!("{name}.{k}"));
             }
+        }
+    }
+    if let Some(t) = &config.llm.memory {
+        for k in ROLE_KEYS {
+            if t.get(k).is_some_and(|v| !v.is_str()) {
+                return Err(format!(
+                    "line {}: llm.memory.{k} must be a string",
+                    line_of_in(text, "llm.memory", k)
+                ));
+            }
+        }
+        if t.get(REQUEST_EXTRA).is_some_and(|v| !v.is_table()) {
+            return Err(format!(
+                "line {}: llm.memory.{REQUEST_EXTRA} must be a table",
+                line_of_in(text, "llm.memory", REQUEST_EXTRA)
+            ));
+        }
+        for k in t
+            .keys()
+            .filter(|k| !ROLE_KEYS.contains(&k.as_str()) && k.as_str() != REQUEST_EXTRA)
+        {
+            ignored.push(format!("llm.memory.{k}"));
+        }
+        // `url` も `model` も無ければ memory の役割は無い (chat と同じ) ので、`request_extra` は使わない
+        // (chat には `llm.chat.aux_request_extra` が効く、07 §4.2)。
+        let set = |k: &str| {
+            t.get(k)
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.trim().is_empty())
+        };
+        if t.contains_key(REQUEST_EXTRA) && !set("url") && !set("model") {
+            memory_extra_unused = true;
         }
     }
     if let Some(u) = &config.update {
@@ -442,11 +615,17 @@ pub fn parse(text: &str) -> Result<Loaded, String> {
         config,
         ignored,
         migrated: None,
+        migrate_failed: None,
+        memory_extra_unused,
     })
 }
 
 /// `update.trusted_keys` のキー (07 §4.2)。
 const TRUSTED_KEYS: &str = "trusted_keys";
+/// 役割の表 (`llm.embed`・`llm.rerank`・`llm.memory`) の接続のキー (06 §2)。
+const ROLE_KEYS: [&str; 4] = ["url", "model", "api_key", "api_key_env"];
+/// `llm.memory` の要求に足す JSON のキー (07 §4.2)。
+const REQUEST_EXTRA: &str = "request_extra";
 
 /// `update.trusted_keys` の値を、更新の署名を確かめる鍵として読む (07 §4.2)。
 fn trusted_keys(value: &toml::Value) -> Result<Vec<evorag_update::TrustedKey>, String> {
@@ -608,7 +787,10 @@ pub fn default_places() -> Option<Places> {
     }
 }
 
-/// embed・rerank の役割の接続先の設定 (07 §4.2)。`url` が無ければ、その役割は無い。
+/// chat の接続先の既定 (07 §4.2)。
+pub const DEFAULT_CHAT_URL: &str = "http://127.0.0.1:8080";
+
+/// embed・rerank・memory の役割の接続先の設定 (07 §4.2)。`url` が無ければ、その役割は無い。
 pub struct RoleConfig {
     pub url: String,
     pub api_key: Option<String>,
@@ -617,6 +799,75 @@ pub struct RoleConfig {
 }
 
 impl Config {
+    /// chat の接続先 (書かなければ既定)。
+    pub fn chat_url(&self) -> String {
+        self.llm
+            .chat
+            .url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CHAT_URL.to_owned())
+    }
+
+    /// chat の API キー (`llm.chat.api_key`、無ければ `api_key_env` の環境変数)。
+    pub fn chat_api_key(&self) -> Option<String> {
+        self.llm.chat.api_key.clone().or_else(|| {
+            self.llm
+                .chat
+                .api_key_env
+                .as_ref()
+                .and_then(|v| std::env::var(v).ok())
+        })
+    }
+
+    /// memory の役割の接続先 (06 §2.1、07 §4.2)。`llm.memory.url` が空で `model` だけを書いたときは、chat の
+    /// 接続先のルーターの別のモデルとして使い、API キーも chat のものを使う。どちらも空なら `None` (chat の
+    /// サーバとモデルで区切りの呼び出しを行う、既定)。
+    pub fn memory_role(&self) -> Option<RoleConfig> {
+        let t = self.llm.memory.as_ref()?;
+        let s = |k: &str| {
+            t.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .filter(|v| !v.trim().is_empty())
+        };
+        let own_key = s("api_key").or_else(|| s("api_key_env").and_then(|v| std::env::var(v).ok()));
+        match (s("url"), s("model")) {
+            (Some(url), model) => Some(RoleConfig {
+                url,
+                api_key: own_key,
+                model,
+            }),
+            (None, Some(model)) => Some(RoleConfig {
+                url: self.chat_url(),
+                api_key: own_key.or_else(|| self.chat_api_key()),
+                model: Some(model),
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// `llm.chat.aux_request_extra` (補助の呼び出しに足す JSON、06 §6)。
+    pub fn chat_aux_request_extra(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.llm
+            .chat
+            .aux_request_extra
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    }
+
+    /// `llm.memory.request_extra` (memory の呼び出しに足す JSON、06 §6)。値は読むときに確かめた。
+    pub fn memory_request_extra(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.llm
+            .memory
+            .as_ref()
+            .and_then(|t| t.get(REQUEST_EXTRA))
+            .and_then(|v| serde_json::to_value(v).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    }
+
     pub fn role(&self, role: &str) -> Option<RoleConfig> {
         let t = match role {
             "embed" => self.llm.embed.as_ref()?,
@@ -836,7 +1087,9 @@ trusted_keys = [\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"]
         assert!(e.contains("line 2"), "{e}");
         let e = parse("[llm.chat.generation]\n\ntemperature = 9\n").unwrap_err();
         assert!(e.contains("line 3"), "{e}");
-        let e = parse("version = 2\n").unwrap_err();
+        let e = parse("version = 3\n").unwrap_err();
+        assert!(e.contains("line 1"), "{e}");
+        let e = parse("version = 0\n").unwrap_err();
         assert!(e.contains("line 1"), "{e}");
     }
 
@@ -911,7 +1164,7 @@ url = \"http://127.0.0.1:8081\"
         let new = std::fs::read_to_string(&path).unwrap();
         assert!(
             new.starts_with(
-                "version = 1
+                "version = 2
 "
             ),
             "{new}"
@@ -1034,22 +1287,241 @@ data_root = \"d\"
     fn only_a_newer_config_is_read_for_the_startup_cleanup() {
         let dir = evorag_store::testutil::TempDir::new("config-newer");
         let path = dir.path().join("config.toml");
-        let text = "version = 2\nfuture = 1\n[storage]\ndata_root = \"d\"\n";
+        let text = "version = 3\nfuture = 1\n[storage]\ndata_root = \"d\"\n";
         std::fs::write(&path, text).unwrap();
         assert!(load(&path, false).is_err());
         let u = newer_config(&path).expect("a newer config");
         assert_eq!(u.data_root.as_deref(), Some(Path::new("d")));
-        assert_eq!(u.version, Some(2));
+        assert_eq!(u.version, Some(3));
         for other in [
             "version = 1\nunknown = 1\n",
             "unknown = 1\n",
             "version = 1\n",
+            "version = 2\n",
             "[storage\n",
         ] {
             std::fs::write(&path, other).unwrap();
             assert!(newer_config(&path).is_none(), "{other}");
         }
         assert!(newer_config(&dir.path().join("none.toml")).is_none());
+    }
+
+    /// v0.4 までの設定 (版 1) は、中身を変えずに版だけを 2 に上げ、元のファイルを `config.toml.bak-v1` に写す
+    /// (07 §4.1、03 §12.3)。読むだけ (doctor) のときは書き換えない。
+    /// verifies: AC-FR-807-1 (版 1 から 2 への移行)
+    #[test]
+    fn a_version_1_config_is_backed_up_and_raised_to_version_2() {
+        let dir = evorag_store::testutil::TempDir::new("config-v1");
+        let path = dir.path().join("config.toml");
+        let old = "# 自分のメモ\nversion = 1   # 版\n[llm.chat]\nurl = \"http://127.0.0.1:8081\"\n[memory]\nversion = 1\n";
+        std::fs::write(&path, old).unwrap();
+
+        let l = load(&path, false).unwrap();
+        assert_eq!((l.config.version, l.migrated), (Some(1), None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+
+        let l = load(&path, true).unwrap();
+        let backup = dir.path().join("config.toml.bak-v1");
+        assert_eq!(l.migrated.as_deref(), Some(backup.as_path()));
+        assert_eq!(l.config.version, Some(CONFIG_VERSION));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+        let new = std::fs::read_to_string(&path).unwrap();
+        // 版の行だけが変わる (コメントと、表の中の同じ名前のキーは残る)。
+        assert_eq!(
+            new,
+            old.replacen("version = 1   # 版", "version = 2   # 版", 1),
+            "{new}"
+        );
+        assert_eq!(
+            parse(&new).unwrap().config.llm.chat.url.as_deref(),
+            Some("http://127.0.0.1:8081")
+        );
+        // 2 回目は何もしない。
+        assert_eq!(load(&path, true).unwrap().migrated, None);
+        assert!(!dir.path().join("config.toml.bak-v2").exists());
+    }
+
+    /// 移行の書き方 (07 §4.1): 写しと書き換えた設定は所有者だけの権限。前の移行の一時のファイルは消す。写しの名前が
+    /// 既にあれば上書きせずに別の名前にする (読み取り専用の写しで失敗し続けない)。先頭の BOM は許して残す。
+    #[test]
+    fn the_migration_keeps_the_file_private_and_never_overwrites_a_backup() {
+        use evorag_store::fsutil;
+        let dir = evorag_store::testutil::TempDir::new("config-migrate-write");
+        let path = dir.path().join("config.toml");
+        let backup = dir.path().join("config.toml.bak-v1");
+        let tmp = dir.path().join("config.toml.tmp");
+        let old = "\u{feff}version = 1\n[llm.chat]\napi_key = \"secret\"\n";
+        std::fs::write(&path, old).unwrap();
+        std::fs::write(&backup, "earlier backup").unwrap();
+        let writable = std::fs::metadata(&backup).unwrap().permissions();
+        let mut ro = writable.clone();
+        ro.set_readonly(true);
+        std::fs::set_permissions(&backup, ro).unwrap();
+        std::fs::write(&tmp, "left by an earlier migration").unwrap();
+
+        let l = load(&path, true).unwrap();
+        assert_eq!(l.migrate_failed, None);
+        let second = dir.path().join("config.toml.bak-v1.1");
+        assert_eq!(l.migrated.as_deref(), Some(second.as_path()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "earlier backup");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), old);
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            new,
+            "\u{feff}version = 2\n[llm.chat]\napi_key = \"secret\"\n"
+        );
+        assert!(!tmp.exists(), "the leftover temporary file is removed");
+        if fsutil::acl_applicable(dir.path()).unwrap() {
+            assert!(
+                fsutil::is_private(&path).unwrap(),
+                "the config stays private"
+            );
+            assert!(
+                fsutil::is_private(&second).unwrap(),
+                "the backup is private"
+            );
+        }
+        std::fs::set_permissions(&backup, writable).unwrap();
+
+        // 版 0 の BOM の後ろに版を足す (BOM を途中に入れない)。
+        std::fs::write(&path, "\u{feff}[storage]\n").unwrap();
+        let l = load(&path, true).unwrap();
+        assert!(l.migrated.is_some(), "{:?}", l.migrate_failed);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}version = 2\n[storage]\n"
+        );
+    }
+
+    /// 移行に失敗・見送ったら、ファイルの名前と理由を返して古い版のまま読む (起動を止めない、07 §4.1)。この回の
+    /// 写しと一時のファイルは残さない。
+    #[test]
+    fn a_failed_migration_keeps_the_old_version_and_names_the_file() {
+        let dir = evorag_store::testutil::TempDir::new("config-migrate-fail");
+        let path = dir.path().join("config.toml");
+        let old = "version = 1\n[llm.chat]\nurl = \"http://127.0.0.1:8081\"\n";
+        std::fs::write(&path, old).unwrap();
+        // 一時のファイルの名前にフォルダがあって、書けない。
+        let tmp = dir.path().join("config.toml.tmp");
+        std::fs::create_dir_all(tmp.join("x")).unwrap();
+        let l = load(&path, true).unwrap();
+        let e = l.migrate_failed.expect("the migration fails");
+        assert!(e.contains("config.toml"), "{e}");
+        assert_eq!(l.config.version, Some(1));
+        assert_eq!(l.migrated, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert!(!dir.path().join("config.toml.bak-v1").exists());
+        assert!(migrate(&path).is_err());
+        std::fs::remove_dir_all(&tmp).unwrap();
+
+        // 読み取り専用の設定: どの OS でも書き換えずに見送り、古い版のまま続ける (Unix ではフォルダが書ければ入れ替え
+        // に成功してしまうので、OS に頼らずに見送る)。
+        let writable = std::fs::metadata(&path).unwrap().permissions();
+        let mut ro = writable.clone();
+        ro.set_readonly(true);
+        std::fs::set_permissions(&path, ro).unwrap();
+        let l = load(&path, true).unwrap();
+        assert!(l.migrate_failed.is_some());
+        assert_eq!(l.config.version, Some(1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert!(!dir.path().join("config.toml.bak-v1").exists());
+        assert!(!dir.path().join("config.toml.tmp").exists());
+        std::fs::set_permissions(&path, writable).unwrap();
+    }
+
+    /// 設定のファイルがシンボリックリンクなら移行を見送る (リンクそのものを普通のファイルに替えないため)。リンクを
+    /// 作れない環境 (Windows の権限) では試さない。
+    #[test]
+    fn a_symlinked_config_is_not_migrated() {
+        let dir = evorag_store::testutil::TempDir::new("config-migrate-link");
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(&real, "version = 1\n").unwrap();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
+        if !made {
+            return;
+        }
+        let l = load(&link, true).unwrap();
+        let e = l.migrate_failed.expect("skipped");
+        assert!(
+            e.contains("config.toml") && e.contains("symbolic link"),
+            "{e}"
+        );
+        assert_eq!(l.config.version, Some(1));
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "version = 1\n");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!dir.path().join("config.toml.bak-v1").exists());
+    }
+
+    /// `[llm.memory]` (v0.5、07 §4.2): 書かなければ chat と同じサーバとモデル。`url` か、chat のルーターの
+    /// `model` を書くと memory の役割になる。型の誤りは行番号つきの誤り、知らないキーは警告して無視する。
+    #[test]
+    fn the_memory_role_is_read_from_llm_memory() {
+        let l = parse("version = 2\n").unwrap();
+        assert!(l.config.memory_role().is_none());
+        assert!(l.config.memory_request_extra().is_empty());
+        // 空の url も設定なし。
+        assert!(
+            parse("[llm.memory]\nurl = \"\"\n")
+                .unwrap()
+                .config
+                .memory_role()
+                .is_none()
+        );
+
+        let l = parse(
+            "version = 2\n[llm.memory]\nurl = \"http://127.0.0.1:8083\"\napi_key = \"k\"\nfuture = 1\n[llm.memory.request_extra]\nchat_template_kwargs = { enable_thinking = false }\n",
+        )
+        .unwrap();
+        assert_eq!(l.ignored, ["llm.memory.future"]);
+        let r = l.config.memory_role().unwrap();
+        assert_eq!(
+            (r.url.as_str(), r.api_key.as_deref(), r.model),
+            ("http://127.0.0.1:8083", Some("k"), None)
+        );
+        assert!(
+            l.config
+                .memory_request_extra()
+                .contains_key("chat_template_kwargs")
+        );
+
+        // url が空で model だけ: chat の接続先のルーターの別のモデル。API キーも chat のもの。
+        let l = parse(
+            "[llm.chat]\nurl = \"http://127.0.0.1:9000\"\napi_key = \"c\"\n[llm.memory]\nmodel = \"qwen3-4b\"\n",
+        )
+        .unwrap();
+        let r = l.config.memory_role().unwrap();
+        assert_eq!(
+            (r.url.as_str(), r.api_key.as_deref(), r.model.as_deref()),
+            ("http://127.0.0.1:9000", Some("c"), Some("qwen3-4b"))
+        );
+        let r = parse("[llm.memory]\nmodel = \"m\"\n")
+            .unwrap()
+            .config
+            .memory_role()
+            .unwrap();
+        assert_eq!(r.url, DEFAULT_CHAT_URL);
+
+        for (bad, line) in [
+            ("[llm.memory]\nurl = 1\n", 2),
+            ("version = 2\n[llm.memory]\n\nmodel = true\n", 4),
+            ("[llm.memory]\nrequest_extra = 1\n", 2),
+            ("llm.memory.api_key_env = 3\n", 1),
+        ] {
+            let e = parse(bad).expect_err(bad);
+            assert!(
+                e.contains(&format!("line {line}: llm.memory.")),
+                "{bad}: {e}"
+            );
+        }
     }
 
     /// 配布物に同梱する設定の例 (日本語と英語) が、そのまま読める (12 §5.1)。英語の例の説明に日本語は無い。

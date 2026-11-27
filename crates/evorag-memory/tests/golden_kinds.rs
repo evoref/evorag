@@ -187,6 +187,8 @@ fn model_probe_v1() {
             embed_ms: None,
             rerank6_ms: None,
             error: Some("speed: timed out".into()),
+            // v0.5 の任意の項目。見本には無い。
+            extra_hash: None,
         },
     );
 }

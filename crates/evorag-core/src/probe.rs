@@ -153,6 +153,72 @@ pub fn aux_extra_with(config: &RequestExtra, p: Option<&ModelProbeBody>) -> Requ
     e
 }
 
+/// 要求の付け足し (設定の指定) のハッシュ (点検の結果の `extra_hash`、06 §3.3)。キーの順に依らない
+/// (FNV-1a 64 ビット、16 進 16 文字。版をまたいで変わらない)。
+#[must_use]
+pub fn extra_hash(extra: &RequestExtra) -> String {
+    fn canonical(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(k.clone()).to_string());
+                    out.push(':');
+                    canonical(&m[k], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    canonical(x, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut text = String::new();
+    canonical(&serde_json::Value::Object(extra.clone()), &mut text);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// 点検の結果が、今の要求の付け足し `extra` で点検したものか (違えば点検し直す、06 §3.3 の例外)。ハッシュを
+/// 持たない結果 (v0.5 より前の点検と、embed・rerank) は比べない。
+#[must_use]
+pub fn is_current(p: &ModelProbeBody, extra: &RequestExtra) -> bool {
+    p.extra_hash
+        .as_ref()
+        .is_none_or(|h| *h == extra_hash(extra))
+}
+
+/// 保存する点検の結果か。chat・memory で、型縛りの確かめが接続の失敗や締切切れで終わって結果が出なかったものは
+/// 保存せず、次の機会に点検し直す (一時の失敗で「点検に通らない」に固定しないため、06 §3.3 の例外)。
+#[must_use]
+pub fn worth_saving(p: &ModelProbeBody) -> bool {
+    let generating = p.role == evorag_memory::ROLE_CHAT || p.role == evorag_memory::ROLE_MEMORY;
+    !(generating && p.structured_ok.is_none())
+}
+
+/// chat・memory の点検の結果が、点検に通らなかったものか (型縛りの出力が型に合わない・思考を切れない)。
+#[must_use]
+pub fn failed(p: &ModelProbeBody) -> bool {
+    p.structured_ok == Some(false) || p.thinking_off == Some(false)
+}
+
 /// chat の点検の結果が、思考を切る指定を試す前のもの (v0.3 までの点検) で、思考を切れない・型縛りの出力が
 /// 空だったか。設定に思考を切る指定が無ければ、点検し直す (v0.3 から更新した利用者にも OQ-52 を効かせる)。
 pub fn needs_retry(p: &ModelProbeBody, config: &RequestExtra) -> bool {
@@ -210,10 +276,52 @@ pub async fn chat(
     aux_extra: &RequestExtra,
     slot: Option<u32>,
 ) -> ModelProbeBody {
+    generating(
+        evorag_memory::ROLE_CHAT,
+        llm,
+        model_key,
+        build_info,
+        aux_extra,
+        slot,
+    )
+    .await
+}
+
+/// memory の役割を点検する (06 §3.3、v0.5)。`extra` は memory の呼び出しに足す JSON
+/// (`llm.memory.request_extra`)。確かめることは chat と同じ (型縛りの出力・思考を切れるか・速さ)。思考を
+/// 切れないと分かったら、`evorag doctor` と `evorag setup` が llama-server の `--reasoning-budget 0` を案内する。
+pub async fn memory(
+    llm: &dyn LlmClient,
+    model_key: &str,
+    build_info: &str,
+    extra: &RequestExtra,
+    slot: Option<u32>,
+) -> ModelProbeBody {
+    generating(
+        evorag_memory::ROLE_MEMORY,
+        llm,
+        model_key,
+        build_info,
+        extra,
+        slot,
+    )
+    .await
+}
+
+/// 生成の役割 (chat・memory) を点検する。
+async fn generating(
+    role: &str,
+    llm: &dyn LlmClient,
+    model_key: &str,
+    build_info: &str,
+    aux_extra: &RequestExtra,
+    slot: Option<u32>,
+) -> ModelProbeBody {
     let mut p = ModelProbeBody {
-        role: evorag_memory::ROLE_CHAT.into(),
+        role: role.into(),
         model_key: model_key.into(),
         build_info: build_info.into(),
+        extra_hash: Some(extra_hash(aux_extra)),
         ..ModelProbeBody::default()
     };
     // 型縛りの補助の呼び出し (06 §6): 型に合う JSON が返るか、思考が出ないか。

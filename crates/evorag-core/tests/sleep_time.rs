@@ -117,6 +117,7 @@ fn config(root: &Path, rerank: Arc<Slow>, sleep: SleepConfig, power: fn() -> Pow
         ignored_config: Vec::new(),
         embed: None,
         rerank: Some(rerank as Arc<dyn LlmClient>),
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: true,
         sleep,

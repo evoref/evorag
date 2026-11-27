@@ -133,6 +133,7 @@ fn config(root: &Path, rerank: Option<Arc<ReplayClient>>) -> CoreConfig {
         ignored_config: Vec::new(),
         embed: None,
         rerank: rerank.map(|r| r as Arc<dyn LlmClient>),
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),

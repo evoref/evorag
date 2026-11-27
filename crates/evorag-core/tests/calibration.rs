@@ -60,6 +60,7 @@ fn config(root: &Path, seed: u64, rerank: Arc<ReplayClient>) -> CoreConfig {
         ignored_config: Vec::new(),
         embed: None,
         rerank: Some(rerank as Arc<dyn LlmClient>),
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: true,
         sleep: evorag_core::SleepConfig::immediate(),

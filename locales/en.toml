@@ -85,6 +85,8 @@ generating = "Generating (Esc to stop)"
 thinking = "Thinking (Esc to stop)"
 forget_mismatched = "Unverifiable texts: {count}"
 forget_journal = "Journal rewrite pending"
+memory_fallback = "memory: using chat"
+memory_stopped = "Segment calls: stopped"
 
 [ui.title]
 session = "Session: {title}"
@@ -143,6 +145,16 @@ calibrated = "Reranker calibration is done. Earlier conversations are now attach
 calibration_failed = "The reranker did not meet the calibration standard, so earlier conversations are shown as candidates instead of being attached automatically. You can choose another reranker with evorag setup."
 probe_issues = "Checked the {role} model: {reasons}. Auxiliary calls that need structured output (such as note search keys) are turned off. You can keep chatting (see evorag doctor for details)."
 style_changed = "Default answer style changed. It applies to all sessions. The next reply will take a little longer to start."
+memory_fallback = "The memory role cannot be used ({reason}), so segment calls go to the chat server and model. Ledgers made meanwhile record that they were made in fallback (see evorag doctor for details)."
+memory_restored = "The memory role is available again. Segment calls use the memory model."
+memory_stopped = "Segment calls cannot use the chat model either (it failed the model check), so they are stopped. You can keep chatting, and recall keeps working (see evorag doctor for details)."
+memory_resumed = "Segment calls are running again."
+probe_issues_memory = "Checked the memory model: {reasons}. Segment calls go to the chat server and model (see evorag doctor for details)."
+
+[ui.memory_reason]
+waiting = "cannot connect"
+mismatch = "model differs from the record"
+probe_failed = "failed the model check"
 
 [ui.notice.facts]
 changed = "Facts learned: {parts}"
@@ -286,6 +298,7 @@ unset = "not set"
 waiting = "waiting to connect"
 ready = "in use"
 mismatch = "not used (differs from the record)"
+same_as_chat = "uses the chat model (default)"
 
 [ui.style]
 title = "Default answer style (↑↓ item, ←→ value, Enter to apply, Esc to cancel)"
@@ -326,6 +339,8 @@ model_recorded_unusual = "The reply model ({file}) has been recorded for this da
 role_recorded = "The {role} model ({file}) has been recorded for this data root."
 role_mismatch = "The {role} model differs from the model recorded for this data root, so it is not used (recorded: {recorded}, now: {connected}). Restart llama-server with the recorded model, or close evorag and switch with evorag setup. Until then evorag runs without {role}."
 role_waiting = "Cannot connect to the {role} llama-server. evorag runs without it until it connects, retrying every 30 seconds."
+memory_waiting = "Cannot connect to the memory llama-server. Until it connects, segment calls go to the chat server and model, retrying every 30 seconds."
+memory_mismatch = "The memory model differs from the model recorded for this data root, so it is not used (recorded: {recorded}, now: {connected}). Segment calls go to the chat server and model. Restart llama-server with the recorded model, or close evorag and switch with evorag setup."
 router_needs_model = "The llama-server at {url} is in router mode (one URL serves several models). Write the model to use (one of {models}) in llm.chat.model in the configuration. You can also choose it with evorag setup."
 router_model = "The router at {url} cannot use the model {model} ({detail}). Check the name in llm.chat.model and the router's presets."
 config_obsolete = "The configuration key {key} is not used by this version (it is read and ignored). You can remove it (keep it if you plan to go back to v0.1)."
@@ -337,6 +352,8 @@ config_error = "The configuration file has an error: {detail}"
 config_newer_hint = "This configuration is for a newer version of evorag. If a rollback to an older version stopped partway, run evorag update rollback; to move up to the newer version, run evorag update apply."
 config_ignored = "The configuration key {key} is not used by this version yet (ignored)."
 config_migrated = "The configuration file {path} was rewritten in the current format (the original is kept at {backup})."
+config_migrate_failed = "The configuration file could not be rewritten in the current format ({detail}). evorag reads it in the earlier format and continues."
+config_memory_extra_unused = "[llm.memory] in the configuration has neither url nor model, so llm.memory.request_extra is not used (segment calls go to the chat server and model, and llm.chat.aux_request_extra applies)."
 prompt_language_fixed = "The prompt language of this data root is fixed to {recorded}. prompt.language in the configuration is not used."
 error = "Error: {detail}"
 env_unset = "(not set)"
@@ -454,6 +471,12 @@ config_header = "# evorag configuration (written by evorag setup; the keys are d
 config_prompt_language = "# Language of the system prompt (cannot be changed later for this data root)"
 config_router_model = "# Model name in router mode (the name of the preset section)"
 config_api_key_env = "# If llama-server was started with --api-key, write the name of the environment variable that holds the key"
+memory_default = "memory: not set. Segment calls go to the chat server and model (the default). On a machine where the chat model is slow, you can put a faster model's llama-server (suggested: Qwen3-4B-Instruct-2507) under [llm.memory] in config.toml."
+memory_missing = "memory: cannot connect to {url}. Until it connects, segment calls go to the chat server and model."
+redo_memory = "Switching the memory model does not redo the ledgers of old segments. New segments get ledgers from the new model, and old segments keep using the previous model's ledgers."
+redo_chat_ledgers = "llm.memory is not set, so segment calls also use the chat model. After switching, new segments get ledgers from the new model (old segments keep using the previous model's ledgers)."
+memory_cache = "The memory role uses a different model from chat. On a machine with little memory, loading the memory model can evict the chat cache and slow down the start of the next reply."
+memory_remote = "The memory server {url} is outside this machine. Segment calls send the text of your messages (including values marked private) to that machine."
 
 # Text of evorag --help (the --help and --version texts and the headings added by clap stay in English).
 [cli.help]
@@ -702,6 +725,16 @@ probe_embed = "Model check (embed): {dims} dimensions, {ms} ms to embed one ques
 probe_rerank = "Model check (rerank): {ms} ms to rerank 6 exchanges"
 probe_failed = "Model check ({role}): failed ({detail})"
 probe_none = "Model check: none yet (done by evorag setup, or in the background after a start)"
+memory_default = "memory role: not set. Segment calls go to the chat server and model (the default)"
+memory_ok = "memory role: using {file} at {url}"
+memory_not_recorded = "memory role: {file} at {url} (not recorded yet; it is recorded at the next start)"
+memory_unreachable = "memory role: cannot connect to {url} ({detail}). Segment calls go to the chat server and model (fallback)"
+memory_mismatch = "memory role: the recorded model ({recorded}) differs from the current one ({connected}), so it is not used. Segment calls go to the chat server and model (fallback). You can switch with evorag setup"
+memory_probe_failed = "memory role: the model failed the model check, so segment calls go to the chat server and model (fallback)"
+memory_stopped = "Segment calls: stopped because the chat model also failed the model check (chatting and recall keep working)"
+probe_memory = "Model check (memory): prompt processing {prompt} tokens/s, generation {gen} tokens/s. {issues}"
+probe_memory_aux_thinking_off = "  evorag adds a setting that turns thinking off to its memory calls. To write it in the configuration, put chat_template_kwargs = { enable_thinking = false } under [llm.memory.request_extra] in config.toml."
+probe_reasoning_budget = "  This model does not turn thinking off with chat_template_kwargs in the request (LFM2.5-8B-A1B, for example). Restart llama-server with --reasoning-budget 0 to turn it off."
 broken = "Broken database files: {count} ({path}, for example). You can delete them if you do not need them"
 compact_pending = "Traces of deleted records remain in the free space of the database file. They are removed at the next start (compact; skipped if there is not enough free space)"
 forget_mismatched = "Messages that do not match what was forgotten: {count} (not used for recall, background work or export)"
@@ -815,6 +848,7 @@ low_space = "Background work such as backups has stopped because there is not en
 [probe]
 thinking_not_off = "thinking cannot be turned off in auxiliary calls (check llm.chat.aux_request_extra in the configuration)"
 structured_broken = "structured output is empty or does not fit the schema"
+memory_thinking_not_off = "thinking cannot be turned off (check llm.memory.request_extra; for a model that ignores it, restart llama-server with --reasoning-budget 0)"
 
 
 [ui.memory]

@@ -2,7 +2,8 @@
 
 use evorag_types::MessageKey;
 use evorag_types::api::{
-    BackgroundState, RecallState, Role, StyleItem, TurnMark, TurnMarkKind, TurnStatus, TurnView,
+    BackgroundState, MemoryState, RecallState, Role, StyleItem, TurnMark, TurnMarkKind, TurnStatus,
+    TurnView,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -412,6 +413,18 @@ pub fn draw(app: &App, f: &mut Frame) {
     } else {
         String::new()
     };
+    // 区切りの呼び出しを chat で代行している・止めている (06 §2.1)。
+    match st.memory {
+        Some(MemoryState::Fallback(_)) => {
+            limited.push_str(" │ ");
+            limited.push_str(&app.catalog.key(MessageKey::UiStatusMemoryFallback));
+        }
+        Some(MemoryState::Stopped) => {
+            limited.push_str(" │ ");
+            limited.push_str(&app.catalog.key(MessageKey::UiStatusMemoryStopped));
+        }
+        _ => {}
+    }
     // 忘れるの指示と合わないターンと、ジャーナルの書き直しの残り (04 §7.2・§7.8)。
     if let Some(fs) = st.forget {
         if fs.mismatched > 0 {
@@ -684,6 +697,84 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// memory の役割の縮退と、区切りの呼び出しを止めたことを、知らせと状態の行に出す (06 §2.1)。
+    /// verifies: AC-FR-515-1 (状態の行に縮退が出る)
+    #[test]
+    fn the_status_line_shows_the_memory_role_fallback() {
+        use evorag_types::api::MemoryFallback;
+        let line = |app: &App| {
+            let mut term = Terminal::new(TestBackend::new(120, 8)).unwrap();
+            term.draw(|f| draw(app, f)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+                .collect::<String>()
+                .replace(' ', "")
+        };
+        let mut app = App::new(
+            Catalog::load("ja"),
+            Status {
+                endpoint: "127.0.0.1:8080".into(),
+                memory: Some(MemoryState::Own),
+                ..Status::default()
+            },
+        );
+        assert!(!line(&app).contains("代行"));
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::Fallback(MemoryFallback::Waiting),
+            by_probe: false,
+        });
+        assert!(line(&app).contains("memory:chatで代行"), "{}", line(&app));
+        let last = app.notices.last().unwrap();
+        assert!(
+            last.contains("繋がらない") && last.contains("chat のサーバとモデル"),
+            "{last}"
+        );
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::Own,
+            by_probe: false,
+        });
+        assert!(!line(&app).contains("代行"));
+        assert!(
+            app.notices
+                .last()
+                .unwrap()
+                .contains("使えるようになりました")
+        );
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::Stopped,
+            by_probe: false,
+        });
+        assert!(
+            line(&app).contains("区切りの呼び出し:停止"),
+            "{}",
+            line(&app)
+        );
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::SameAsChat,
+            by_probe: false,
+        });
+        assert!(app.notices.last().unwrap().contains("再び"));
+        // 点検に通らないことで変わったときは、点検の知らせに任せて重ねない (状態の行は変える)。
+        let before = app.notices.len();
+        app.on_event(Event::MemoryRole {
+            state: MemoryState::Fallback(MemoryFallback::ProbeFailed),
+            by_probe: true,
+        });
+        assert_eq!(app.notices.len(), before);
+        assert!(line(&app).contains("memory:chatで代行"));
+        // memory の点検の知らせは、型縛りの補助の呼び出しを止めたこと (状態の行の「一部の機能を止めています」)
+        // にしない。思考を切れないときは --reasoning-budget 0 を案内する。
+        app.on_event(Event::ProbeIssues {
+            role: "memory".into(),
+            thinking_not_off: true,
+            structured_broken: false,
+        });
+        assert!(!app.status.limited);
+        assert!(app.notices.last().unwrap().contains("--reasoning-budget 0"));
+    }
+
     #[test]
     fn wrap_counts_wide_characters() {
         assert_eq!(wrap("あいうえ", 5), ["あい", "うえ"]);
@@ -705,6 +796,7 @@ mod tests {
                 background_pending: 0,
                 remote_llm: false,
                 forget: None,
+                memory: None,
             },
         );
         let sid = Id::from_bytes([1; 16]);

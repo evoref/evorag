@@ -866,6 +866,57 @@ allow_unsafe_location = false
     }
 }
 
+/// 設定を移行するのは `setup` と、v0.5 の根を開けた後の TUI だけ。ほかの命令は、版 1・版 0 の設定を読んでも
+/// 書き換えない (07 §4.1 の「移行の細目」。v0.4 に戻しても、その設定のまま起動できるように)。
+///
+/// verifies: 07 §4.1 (移行しない命令)
+#[test]
+fn commands_other_than_setup_and_the_tui_never_migrate_the_config() {
+    let dir = TempDir::new("cli-no-migrate");
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let cfg = dir.path().join("config.toml");
+    for old in [
+        "version = 1\n[storage]\nallow_unsafe_location = false\n",
+        "[storage]\nallow_unsafe_location = false\n",
+    ] {
+        for args in [
+            &["backups", "list"][..],
+            &["doctor"],
+            &["export"],
+            &["rebuild"],
+            &["repair"],
+            &["reset"],
+        ] {
+            std::fs::write(&cfg, old).unwrap();
+            let mut cmd = Command::new(&exe);
+            cmd.arg("--config")
+                .arg(&cfg)
+                .arg("--data-root")
+                .arg(dir.path().join("data"))
+                .args(args);
+            if args[0] == "export" {
+                let _ = std::fs::remove_dir_all(dir.path().join("out"));
+                cmd.arg(dir.path().join("out"));
+            }
+            let out = cmd.stdin(std::process::Stdio::null()).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                std::fs::read_to_string(&cfg).unwrap(),
+                old,
+                "{args:?}: the config was rewritten: {err}"
+            );
+            for v in [
+                "config.toml.bak-v0",
+                "config.toml.bak-v1",
+                "config.toml.tmp",
+            ] {
+                assert!(!dir.path().join(v).exists(), "{args:?}: {v} was made");
+            }
+        }
+    }
+}
+
 /// この版の読めない新しい形式の設定でも、`evorag update` は更新に要るキーだけを読んで動く。足した鍵の誤りは
 /// 4 のまま。
 #[test]

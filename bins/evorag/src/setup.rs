@@ -11,6 +11,8 @@
 //!    見分け、役割ごとに候補が複数あれば選ばせる。設定には URL とモデルの名前を書く。
 //! 4. 役割ごとのモデルを、データ根の記録と比べる。記録が無ければ記録する。違えば、違いの中身と
 //!    やり直しになるものを示し、利用者が対話で確かめたときだけ書き換える (`--yes` では書き換えない)。
+//! 5. memory の役割 (v0.5、06 §2.1) は探さない。`llm.memory` を設定していれば、その接続先を確かめて、ほかの
+//!    役割と同じく記録と比べて点検する。設定していなければ、chat で区切りの呼び出しを行うことを示す。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -22,7 +24,7 @@ use evorag_llm::{Endpoint, HttpClient, LlmClient, LlmError, RetryPolicy, ServerI
 use evorag_tui::catalog::Catalog;
 use evorag_types::{MessageKey, SystemClock, UuidV7Gen};
 
-use crate::config::Config;
+use crate::config::{CONFIG_VERSION, Config};
 
 /// chat を探す接続先の既定。
 const CANDIDATES: &[&str] = &["http://127.0.0.1:8080", "http://127.0.0.1:8081"];
@@ -234,7 +236,7 @@ fn template(
 ) -> String {
     let comment = |k: MessageKey| c.key(k);
     let mut s = format!(
-        "{}\nversion = 1\n",
+        "{}\nversion = {CONFIG_VERSION}\n",
         comment(MessageKey::CliSetupConfigHeader)
     );
     if let Some(l) = language {
@@ -280,7 +282,10 @@ fn updated(
 ) -> Result<Option<String>, String> {
     let mut t: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     let before = t.clone();
-    t.insert("version".into(), toml::Value::Integer(1));
+    t.insert(
+        "version".into(),
+        toml::Value::Integer(i64::from(CONFIG_VERSION)),
+    );
     let table = |t: &mut toml::Table, k: &str| -> Result<toml::Table, String> {
         match t.remove(k) {
             None => Ok(toml::Table::new()),
@@ -318,6 +323,55 @@ fn updated(
         return Ok(None);
     }
     toml::to_string(&t).map(Some).map_err(|e| e.to_string())
+}
+
+/// 設定した memory の役割の接続先を確かめる (06 §2.1)。設定していなければ、chat で区切りの呼び出しを行うことを
+/// 示して `None`。繋がらなければ、繋がるまで chat で代行することを示して `None`。
+fn memory_role(
+    rt: &tokio::runtime::Runtime,
+    cfg: &Config,
+    say: &impl Fn(MessageKey, &[(&str, &str)]),
+) -> Option<Found> {
+    let Some(r) = cfg.memory_role() else {
+        say(MessageKey::CliSetupMemoryDefault, &[]);
+        return None;
+    };
+    // ルーターのモデルは読み込みを待つので、締切を長くする (router_roles と同じ)。
+    let limit = Duration::from_secs(if r.model.is_some() { 150 } else { 5 });
+    match connect(
+        rt,
+        &r.url,
+        r.api_key.clone(),
+        cfg.llm.allow_remote,
+        r.model.as_deref(),
+        limit,
+    ) {
+        Probe::Found(client, info) => {
+            say(
+                MessageKey::CliSetupRoleFound,
+                &[
+                    ("role", "memory"),
+                    ("url", &r.url),
+                    ("file", evorag_llm::file_name(&info.model_path)),
+                ],
+            );
+            // 発話の本文が、裏の呼び出しで外の機械に出る (06 §9)。
+            if !client.is_loopback() {
+                say(MessageKey::CliSetupMemoryRemote, &[("url", &r.url)]);
+            }
+            Some(Found {
+                role: "memory",
+                url: r.url,
+                model: r.model,
+                info,
+                client,
+            })
+        }
+        _ => {
+            say(MessageKey::CliSetupMemoryMissing, &[("url", &r.url)]);
+            None
+        }
+    }
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -511,6 +565,14 @@ pub fn run(
         // 3 つの役割を 1 つのプロセスで動かす手段 (S-15 §2)。
         say(MessageKey::CliSetupPresetExample, &[]);
     }
+    // memory の役割 (06 §2.1)。探さずに、設定した接続先だけを確かめる。
+    let memory_found = memory_role(rt, cfg, &say);
+    if let Some(m) = &memory_found
+        && m.info.model_key != info.model_key
+    {
+        // 別のモデルの読み込みが、chat の KV キャッシュを追い出しうる (06 §2.1、§3.2 の 4)。
+        say(MessageKey::CliSetupMemoryCache, &[]);
+    }
     // 設定に書く役割 (設定の接続先・名前と違うものだけ)。
     let aux_targets: Vec<(&str, &str, Option<&str>)> = aux_found
         .iter()
@@ -542,7 +604,8 @@ pub fn run(
         }
     };
 
-    // 3. 設定ファイルを書く。
+    // 3. 設定ファイルを書く。古い版の設定は、読むときに今の版に書き換えた (元のファイルを
+    //    `config.toml.bak-v<旧版>` に写す、03 §12.3、07 §4.1)。
     let path = config_file.display().to_string();
     let written = match std::fs::read_to_string(config_file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_private(
@@ -638,6 +701,7 @@ pub fn run(
     let recorded = models.recorded();
     let mut roles: Vec<(&str, &ServerInfo, &Arc<HttpClient>)> = vec![("chat", &info, &chat.client)];
     roles.extend(aux_found.iter().map(|f| (f.role, &f.info, &f.client)));
+    roles.extend(memory_found.iter().map(|f| (f.role, &f.info, &f.client)));
     // 記録と合っている役割 (このあと点検する)。
     let mut usable_roles: Vec<(&str, evorag_memory::ModelOrigin, &Arc<HttpClient>)> = Vec::new();
     for (role, info, client) in roles {
@@ -671,9 +735,14 @@ pub fn run(
                 let redo = match role {
                     "chat" => MessageKey::CliSetupRedoChat,
                     "embed" => MessageKey::CliSetupRedoEmbed,
+                    "memory" => MessageKey::CliSetupRedoMemory,
                     _ => MessageKey::CliSetupRedoRerank,
                 };
                 say(redo, &[]);
+                // memory を設定していなければ、区切りの呼び出しも chat のモデルで行う (06 §3.2 の 4)。
+                if role == "chat" && cfg.memory_role().is_none() {
+                    say(MessageKey::CliSetupRedoChatLedgers, &[]);
+                }
                 let switched = if args.yes {
                     say(MessageKey::CliSetupNeedsConfirm, &[]);
                     false
@@ -702,24 +771,28 @@ pub fn run(
     }
 
     // 5. 使うモデルの性質を点検する (06 §3.3)。前回の点検と model_key・`build_info` が同じなら行わない。
-    let aux_extra: evorag_llm::RequestExtra = cfg
-        .llm
-        .chat
-        .aux_request_extra
-        .as_ref()
-        .and_then(|t| serde_json::to_value(t).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let aux_extra = cfg.chat_aux_request_extra();
+    let memory_extra = cfg.memory_request_extra();
     let rerank_use = usable_roles
         .iter()
         .find(|(r, _, _)| *r == "rerank")
         .map(|(_, o, c)| (o.model_key.clone(), Arc::clone(c)));
     for (role, o, client) in usable_roles {
-        // 前回と同じモデルと版なら点検しない。ただし v0.3 までの点検で思考を切れなかった chat は、思考を切る
-        // 指定を試して確かめ直す (OQ-52)。
+        // 前回と同じモデルと版なら点検しない。ただし、v0.3 までの点検で思考を切れなかった chat は思考を切る指定を
+        // 試して確かめ直し (OQ-52)、chat と memory は、要求の付け足しを直したときと、前回の点検に通らなかったとき
+        // (llama-server の `--reasoning-budget 0` などを直したかもしれない) に点検し直す (06 §3.3 の例外)。
+        let extra = if role == "memory" {
+            &memory_extra
+        } else {
+            &aux_extra
+        };
         if models
             .probe(role, &o.model_key, &o.build_info)
-            .is_some_and(|p| !evorag_core::probe::needs_retry(&p, &aux_extra))
+            .is_some_and(|p| {
+                !evorag_core::probe::needs_retry(&p, &aux_extra)
+                    && evorag_core::probe::is_current(&p, extra)
+                    && !(matches!(role, "chat" | "memory") && evorag_core::probe::failed(&p))
+            })
         {
             continue;
         }
@@ -737,11 +810,25 @@ pub fn run(
                     .await
                 }
                 "embed" => evorag_core::probe::embed(&**client, &o.model_key, &o.build_info).await,
+                "memory" => {
+                    evorag_core::probe::memory(
+                        &**client,
+                        &o.model_key,
+                        &o.build_info,
+                        &memory_extra,
+                        None,
+                    )
+                    .await
+                }
                 _ => evorag_core::probe::rerank(&**client, &o.model_key, &o.build_info).await,
             }
         });
         for line in crate::doctor::probe_lines(c, role, &body) {
             eprintln!("{line}");
+        }
+        // 型縛りの確かめが終わらなかった点検は保存しない (次の機会に点検し直す、06 §3.3 の例外)。
+        if !evorag_core::probe::worth_saving(&body) {
+            continue;
         }
         if let Err(e) = models.save_probe(&body) {
             say(MessageKey::CliError, &[("detail", &e)]);
@@ -928,7 +1015,8 @@ mod tests {
 
     #[test]
     fn updating_keeps_other_keys_and_reports_no_change() {
-        let text = "version = 1\n[llm.chat]\nurl = \"http://127.0.0.1:8080\"\n[storage]\nallow_unsafe_location = true\n";
+        // 古い版の設定は、setup が先に今の版に書き換える (`config::migrate`)。
+        let text = "version = 2\n[llm.chat]\nurl = \"http://127.0.0.1:8080\"\n[storage]\nallow_unsafe_location = true\n";
         assert_eq!(
             updated(text, "http://127.0.0.1:8080", None, None, None, &[]).unwrap(),
             None

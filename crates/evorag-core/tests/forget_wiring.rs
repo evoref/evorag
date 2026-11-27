@@ -121,6 +121,7 @@ fn config_as(root: &Path, seed: u64, clock: Arc<ManualClock>, version: &str) -> 
         ignored_config: Vec::new(),
         embed: None,
         rerank: None,
+        memory: Default::default(),
         aux_request_extra: Default::default(),
         probe_models: false,
         sleep: evorag_core::SleepConfig::immediate(),
@@ -1431,6 +1432,38 @@ async fn deleting_a_session_asks_to_erase_the_slot_caches() {
     until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
     core.settle().await;
     assert_eq!(llm.erased_slots(), [0, 1]);
+    core.shutdown().await;
+}
+
+/// `llm.memory` を設定したときは、memory の役割のモデルのスロットにも消去を求める (06 §4、v0.5)。
+///
+/// verifies: 06 §4 (memory の役割のスロットの消去)
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_also_erases_the_memory_role_slots() {
+    let dir = TempDir::new("delete-erase-memory");
+    let root = dir.path();
+    prepare(root);
+    let llm = chat(&[]);
+    let memory = ReplayClient::from_json(
+        r#"{
+          "props": {"build_info": "b1-test", "model_path": "/m/memory.gguf", "total_slots": 3,
+                    "default_generation_settings": {"n_ctx": 8192}},
+          "models": {"data": [{"id": "memory", "meta": {"n_params": 1, "size": 9, "n_vocab": 3}}]}
+        }"#,
+    )
+    .unwrap();
+    let mut cfg = config(root, 7, clock_at(T0));
+    cfg.memory.client = Some(Arc::new(memory.clone()));
+    let (core, mut rx, _) = Core::start(cfg, Arc::new(llm.clone())).await.unwrap();
+    core.settle().await;
+    settle(&core).await;
+    new_session(&core, &mut rx).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle().await;
+    assert_eq!(llm.erased_slots(), [0, 1]);
+    // `/slots` に答えないので、`total_slots` から数える。
+    assert_eq!(memory.erased_slots(), [0, 1, 2]);
     core.shutdown().await;
 }
 

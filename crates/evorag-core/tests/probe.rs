@@ -59,6 +59,7 @@ fn config(root: &Path, seed: u64) -> CoreConfig {
         ignored_config: Vec::new(),
         embed: None,
         rerank: None,
+        memory: Default::default(),
         aux_request_extra: aux,
         probe_models: true,
         sleep: evorag_core::SleepConfig::immediate(),

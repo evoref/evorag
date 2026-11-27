@@ -1087,6 +1087,65 @@ message_keys! {
     CliHelpReset => "cli.help.reset",
     CliHelpResetOld => "cli.help.reset_old",
     CliHelpResetYes => "cli.help.reset_yes",
+    /// `/model` の memory の役割で、`llm.memory` を設定していない (chat と同じモデルを使う、06 §2.1)。
+    UiRoleStatusSameAsChat => "ui.role_status.same_as_chat",
+    /// 状態の行: memory の役割を使えず、chat で区切りの呼び出しをしている (06 §2.1)。
+    UiStatusMemoryFallback => "ui.status.memory_fallback",
+    /// 状態の行: chat でも呼べないので、区切りの呼び出しを止めている (06 §2.1)。
+    UiStatusMemoryStopped => "ui.status.memory_stopped",
+    /// memory の役割の縮退に入った。引数: `reason` (`ui.memory_reason.*`)。
+    UiMemoryFallback => "ui.notice.memory_fallback",
+    /// memory の役割が使えるようになった (縮退から戻った)。
+    UiMemoryRestored => "ui.notice.memory_restored",
+    /// chat でも呼べないので、区切りの呼び出しを止めた。
+    UiMemoryStopped => "ui.notice.memory_stopped",
+    /// chat で区切りの呼び出しができるようになった (止めていたのを戻した)。
+    UiMemoryResumed => "ui.notice.memory_resumed",
+    /// memory の役割を使えない理由。
+    UiMemoryReasonWaiting => "ui.memory_reason.waiting",
+    UiMemoryReasonMismatch => "ui.memory_reason.mismatch",
+    UiMemoryReasonProbeFailed => "ui.memory_reason.probe_failed",
+    /// memory のモデルの点検で、使えない機能が見つかった。引数: `reasons`。
+    UiProbeIssuesMemory => "ui.notice.probe_issues_memory",
+    /// memory のモデルの点検: 思考を切れない (`--reasoning-budget 0` の案内、06 §3.3)。
+    UiProbeMemoryThinkingNotOff => "probe.memory_thinking_not_off",
+    /// 起動時: memory の役割に繋がらない (chat で代行する)。
+    CliMemoryWaiting => "cli.memory_waiting",
+    /// 起動時: memory のモデルが記録と違う (chat で代行する)。引数: `recorded`、`connected`。
+    CliMemoryMismatch => "cli.memory_mismatch",
+    /// `doctor` の memory の役割 (06 §2.1)。
+    DoctorMemoryDefault => "doctor.memory_default",
+    /// 引数: `url`、`file`。
+    DoctorMemoryOk => "doctor.memory_ok",
+    /// 引数: `url`、`file`。
+    DoctorMemoryNotRecorded => "doctor.memory_not_recorded",
+    /// 引数: `url`、`detail`。
+    DoctorMemoryUnreachable => "doctor.memory_unreachable",
+    /// 引数: `recorded`、`connected`。
+    DoctorMemoryMismatch => "doctor.memory_mismatch",
+    DoctorMemoryProbeFailed => "doctor.memory_probe_failed",
+    DoctorMemoryStopped => "doctor.memory_stopped",
+    /// `doctor` の memory のモデルの点検。引数: `prompt`、`gen`、`issues`。
+    DoctorProbeMemory => "doctor.probe_memory",
+    /// 点検が memory の呼び出しに思考を切る指定を自動で足した (06 §6、OQ-52)。
+    DoctorProbeMemoryAuxThinkingOff => "doctor.probe_memory_aux_thinking_off",
+    /// 要求の指定では思考を切れないモデルへの `--reasoning-budget 0` の案内 (06 §3.3)。
+    DoctorProbeReasoningBudget => "doctor.probe_reasoning_budget",
+    /// `evorag setup` の memory の役割 (06 §3.2)。
+    CliSetupMemoryDefault => "cli.setup.memory_default",
+    /// 引数: `url`。
+    CliSetupMemoryMissing => "cli.setup.memory_missing",
+    CliSetupRedoMemory => "cli.setup.redo_memory",
+    /// chat のモデルを切り替えると、台帳の選択も替わる (`llm.memory` を設定していないとき)。
+    CliSetupRedoChatLedgers => "cli.setup.redo_chat_ledgers",
+    /// memory に chat と別のモデルを置くと、chat のキャッシュを追い出しうる (06 §2.1)。
+    CliSetupMemoryCache => "cli.setup.memory_cache",
+    /// memory の接続先がループバック以外 (06 §9)。引数: `url`。
+    CliSetupMemoryRemote => "cli.setup.memory_remote",
+    /// 設定の移行に失敗した・見送った (古い版のまま続ける、07 §4.1)。引数: `detail` (ファイルの名前と理由)。
+    CliConfigMigrateFailed => "cli.config_migrate_failed",
+    /// `[llm.memory]` に `url` も `model` も無いのに `request_extra` を書いた (07 §4.2)。
+    CliConfigMemoryExtraUnused => "cli.config_memory_extra_unused",
 }
 
 /// 漢字・仮名・全角の文字を含むか。`ja` 以外の文言カタログの検査 (`cargo xtask i18n`) と、英語の UI の試験で

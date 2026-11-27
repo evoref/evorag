@@ -6,7 +6,8 @@
 #   Windows: %LOCALAPPDATA%\evorag\config\config.toml
 #   Linux:   ~/.config/evorag/config.toml
 #   macOS:   ~/Library/Application Support/evorag/config/config.toml
-version = 1
+# Configuration format version (2 from v0.5; a v0.4 configuration is rewritten when evorag starts).
+version = 2
 
 [ui]
 # Language of the screens (ja / en; en from v0.3). It can be changed at any time (takes effect from the next start).
@@ -54,6 +55,16 @@ top_p = 0.95
 # [llm.rerank]
 # url = "http://127.0.0.1:8082"
 # api_key_env = "EVORAG_API_KEY"
+
+# llama-server for segment calls (organizing what to remember, v0.5). If you leave it out, the chat server and
+# model are used (the default). On a machine where the chat model is slow, you can use a faster model
+# (suggested: Qwen3-4B-Instruct-2507). While it cannot be reached, chat is used instead. For router mode, write
+# only model, without url.
+# [llm.memory]
+# url = "http://127.0.0.1:8083"
+# api_key_env = "EVORAG_API_KEY"
+# [llm.memory.request_extra]
+# chat_template_kwargs = { enable_thinking = false }
 
 # [[llm.chat.models]] of v0.1 (the candidates /model switched among) is not used from v0.2.
 # The reply model is recorded for the data root, and is switched with evorag setup.

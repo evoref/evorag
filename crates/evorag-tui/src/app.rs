@@ -5,8 +5,8 @@
 use evorag_types::api::{
     BackgroundState, Command, Event, FactGroup, FactGroupKey, FactHistory, FactKey, FactList,
     FactOp, FactRow, FactRowRef, FactStatus, FactSubject, FactTense, FactsUnavailable, ForgetState,
-    ForgottenFact, ModelRoleInfo, PrivateCause, PrivateScope, RecallState, Role, RoleStatus,
-    SessionView, StyleItem, TurnStatus, TurnView,
+    ForgottenFact, MemoryFallback, MemoryState, ModelRoleInfo, PrivateCause, PrivateScope,
+    RecallState, Role, RoleStatus, SessionView, StyleItem, TurnStatus, TurnView,
 };
 use evorag_types::{Id, MessageKey};
 
@@ -63,9 +63,44 @@ fn status_key(s: RoleStatus) -> MessageKey {
     }
 }
 
-/// embed・rerank の役割が、使えない理由の知らせ (繋がらない、記録と違う、06 §3)。使えれば `None`。
+/// memory の役割の行の状態の名前 (設定していなければ「chat と同じ」、06 §2.1)。
+fn role_status_key(r: &ModelRoleInfo) -> MessageKey {
+    if r.role == MEMORY_ROLE && r.status == RoleStatus::Unset {
+        MessageKey::UiRoleStatusSameAsChat
+    } else {
+        status_key(r.status)
+    }
+}
+
+/// memory の役割の名前 (06 §2.1)。
+const MEMORY_ROLE: &str = "memory";
+
+/// memory の役割を使えない理由の文言キー (06 §2.1)。
+pub fn memory_reason_key(r: MemoryFallback) -> MessageKey {
+    match r {
+        MemoryFallback::Waiting => MessageKey::UiMemoryReasonWaiting,
+        MemoryFallback::Mismatch => MessageKey::UiMemoryReasonMismatch,
+        MemoryFallback::ProbeFailed => MessageKey::UiMemoryReasonProbeFailed,
+    }
+}
+
+/// embed・rerank・memory の役割が、使えない理由の知らせ (繋がらない、記録と違う、06 §3)。使えれば `None`。
+/// memory は使えない間 chat で代行することを示す (06 §2.1)。
 pub fn role_notice(catalog: &Catalog, r: &ModelRoleInfo) -> Option<String> {
     let file = |m: &Option<(String, String)>| m.as_ref().map(|c| c.0.clone()).unwrap_or_default();
+    if r.role == MEMORY_ROLE {
+        return match r.status {
+            RoleStatus::Waiting => Some(catalog.key(MessageKey::CliMemoryWaiting)),
+            RoleStatus::Mismatch => Some(catalog.with(
+                MessageKey::CliMemoryMismatch,
+                &[
+                    ("recorded", &file(&r.recorded)),
+                    ("connected", &file(&r.connected)),
+                ],
+            )),
+            RoleStatus::Unset | RoleStatus::Ready => None,
+        };
+    }
     match r.status {
         RoleStatus::Waiting => Some(catalog.with(MessageKey::CliRoleWaiting, &[("role", &r.role)])),
         RoleStatus::Mismatch => Some(catalog.with(
@@ -228,6 +263,8 @@ pub struct Status {
     pub remote_llm: bool,
     /// 忘れるの状態 (合わないターン・ジャーナルの書き直しの残り、04 §7.2・§7.8)。
     pub forget: Option<ForgetState>,
+    /// 区切りの呼び出しを出す先の状態 (memory の役割の縮退、06 §2.1)。
+    pub memory: Option<MemoryState>,
 }
 
 /// 生成中の応答。
@@ -1079,7 +1116,7 @@ impl App {
                 let lines: Vec<String> = roles
                     .iter()
                     .map(|r| {
-                        let status = self.catalog.key(status_key(r.status));
+                        let status = self.catalog.key(role_status_key(r));
                         self.catalog.with(
                             MessageKey::UiModelRole,
                             &[
@@ -1135,6 +1172,59 @@ impl App {
                     let m = self.catalog.key(k);
                     self.notice(m);
                 }
+            }
+            Event::ProbeIssues {
+                role,
+                thinking_not_off,
+                structured_broken,
+            } if role == MEMORY_ROLE => {
+                // memory は止めずに chat で代行する (06 §3.3)。代行は `MemoryRole` で状態の行に出る。
+                let mut reasons = Vec::new();
+                if thinking_not_off {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeMemoryThinkingNotOff));
+                }
+                if structured_broken {
+                    reasons.push(self.catalog.key(MessageKey::UiProbeStructuredBroken));
+                }
+                let m = self.catalog.with(
+                    MessageKey::UiProbeIssuesMemory,
+                    &[("reasons", &self.catalog.join_comma(&reasons))],
+                );
+                self.notice(m);
+            }
+            Event::MemoryRole { state, by_probe } => {
+                let before = self.status.memory.replace(state);
+                // 点検に通らないことは `ProbeIssues` で知らせた (状態の行は変える)。
+                if by_probe
+                    && matches!(
+                        state,
+                        MemoryState::Fallback(MemoryFallback::ProbeFailed) | MemoryState::Stopped
+                    )
+                {
+                    return;
+                }
+                let key = match state {
+                    MemoryState::Fallback(r) => {
+                        let reason = self.catalog.key(memory_reason_key(r));
+                        let m = self
+                            .catalog
+                            .with(MessageKey::UiMemoryFallback, &[("reason", &reason)]);
+                        self.notice(m);
+                        return;
+                    }
+                    MemoryState::Stopped => MessageKey::UiMemoryStopped,
+                    MemoryState::Own if matches!(before, Some(MemoryState::Fallback(_))) => {
+                        MessageKey::UiMemoryRestored
+                    }
+                    MemoryState::Own | MemoryState::SameAsChat
+                        if before == Some(MemoryState::Stopped) =>
+                    {
+                        MessageKey::UiMemoryResumed
+                    }
+                    MemoryState::Own | MemoryState::SameAsChat => return,
+                };
+                let m = self.catalog.key(key);
+                self.notice(m);
             }
             Event::ProbeIssues {
                 role,
@@ -3358,6 +3448,7 @@ mod tests {
                     journal_pending: true,
                     key_missing: true,
                 }),
+                memory: None,
             },
         );
         assert_english(&a, "empty");

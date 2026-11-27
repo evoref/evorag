@@ -510,6 +510,30 @@ pub enum RoleStatus {
     Mismatch,
 }
 
+/// `memory` の役割で、区切りの呼び出し (B2) をどう行うか (06 §2.1。状態の行と `evorag doctor`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryState {
+    /// `llm.memory` を設定していない: chat のサーバとモデルで呼ぶ (既定)。
+    SameAsChat,
+    /// 設定した memory のサーバとモデルで呼ぶ。
+    Own,
+    /// 設定した memory を使えないので、chat のサーバとモデルで呼ぶ (縮退)。
+    Fallback(MemoryFallback),
+    /// chat でも呼べない (chat の点検に通らない) ので、区切りの呼び出しを止めている。会話は続く。
+    Stopped,
+}
+
+/// memory の役割を使えない理由 (06 §2.1・§3 の表)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFallback {
+    /// memory のサーバに繋がらない (30 秒ごとに試す)。
+    Waiting,
+    /// 記録と違うモデル (`evorag setup` で切り替える)。
+    Mismatch,
+    /// モデルの性質の点検 (06 §3.3) に通らない。
+    ProbeFailed,
+}
+
 /// 裏の処理の状態 (07 §2.1 の状態の行、04 §4)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundState {
@@ -757,6 +781,12 @@ pub enum Event {
         info: ModelRoleInfo,
         /// この変化でモデルを初めて記録した。
         recorded_now: bool,
+    },
+    /// memory の役割の状態が変わった (縮退に入った・戻った・区切りの呼び出しを止めた、06 §2.1)。
+    MemoryRole {
+        state: MemoryState,
+        /// モデルの点検の結果で変わった (使えない機能は `ProbeIssues` で知らせ済み。画面は知らせを重ねない)。
+        by_probe: bool,
     },
     /// 事実の一覧 (`ShowFacts` の答え)。
     FactsInfo { list: FactList },
