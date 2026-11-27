@@ -31,6 +31,7 @@ mod prefilter;
 mod read;
 mod rules;
 mod segment;
+pub mod segment_keys;
 mod segment_plan;
 mod sentences;
 mod table;
