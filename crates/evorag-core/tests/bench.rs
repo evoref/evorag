@@ -161,6 +161,7 @@ fn llm(replies: usize) -> Timed {
 fn config(root: &Path) -> CoreConfig {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: env!("CARGO_PKG_VERSION").into(),
@@ -405,6 +406,7 @@ async fn bm_102_send_to_request_with_embed_and_rerank() {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     evorag_core::rebind::DataRootModels::open(
         dir.path(),
+        evorag_core::RootFormat::V04Bench,
         env!("CARGO_PKG_VERSION"),
         clock.clone(),
         Arc::new(UuidV7Gen::new(clock)),

@@ -67,6 +67,7 @@ fn rr_key() -> String {
 fn config(root: &Path, rerank: Option<Arc<ReplayClient>>) -> CoreConfig {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),
@@ -97,6 +98,7 @@ fn prepare(root: &Path, threshold: Option<(bool, f64, f64)>, rerank6_ms: Option<
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_640_000_000)));
     let m = DataRootModels::open(
         root,
+        evorag_core::RootFormat::V04Bench,
         "0.0.6",
         clock.clone(),
         Arc::new(UuidV7Gen::with_seed(clock, 3)),

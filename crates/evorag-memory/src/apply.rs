@@ -31,7 +31,7 @@ mod strings;
 #[cfg(test)]
 mod cases;
 
-pub use keys::{SUBSTRING_MAX_CHARS, SubstringKeys};
+pub use keys::{SUBSTRING_MAX_CHARS, SubstringKeys, locate_keys};
 pub use marks::{Located, TurnRedactions, hidden_in_evidence, locate_forgotten};
 pub use scrub::{
     RawLedger, RevText, ScrubContext, ScrubError, Scrubbed, TurnTexts, scan_raw_ledger,

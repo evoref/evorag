@@ -374,6 +374,9 @@ pub enum FactsUnavailable {
     StoppedByProbe,
     /// `memory.forget_key` が使えない (03 §3.1.1)。事実への操作もできない。
     KeyUnavailable,
+    /// v0.5 の根を開いた開発中の版で、新しいエンジンの単位をまだ作らない (08 §2.6 の M5.1〜M5.3。旧エンジンの事実は
+    /// v0.5 の根では作らない)。事実への操作もできない。
+    DevelopmentBuild,
 }
 
 /// 事実の一覧 (`/memory`、04 §7.1)。

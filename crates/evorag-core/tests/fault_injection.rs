@@ -63,6 +63,7 @@ fn fault_child() {
     rt.block_on(async move {
         let clock = Arc::new(SystemClock);
         let cfg = CoreConfig {
+            root_format: evorag_core::RootFormat::V04Bench,
             data_root: root.into(),
             config_file: None,
             evorag_version: "0.0.5".into(),

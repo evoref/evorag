@@ -52,6 +52,10 @@ impl Request {
 
 /// 事実を作っていない・止めている理由 (07 §3 の `/memory`)。
 fn note(inner: &Inner) -> Option<FactsUnavailable> {
+    // v0.5 の根では、旧エンジンの事実を作らない。新しいエンジンの単位は M5.3 から (08 §2.6)。
+    if !crate::old_engine(inner) {
+        return Some(FactsUnavailable::DevelopmentBuild);
+    }
     if inner.facts_key.key().is_none() {
         return Some(FactsUnavailable::KeyUnavailable);
     }
@@ -101,6 +105,12 @@ fn list_of(snap: &Snapshot, note: Option<FactsUnavailable>) -> FactList {
 
 /// 今の一覧を作る。記録を読めなければ `None`。
 pub(crate) fn current_list(inner: &Inner) -> Option<FactList> {
+    if !crate::old_engine(inner) {
+        return Some(FactList {
+            groups: Vec::new(),
+            note: note(inner),
+        });
+    }
     let r = inner.store.read().ok()?;
     Some(list_of(&snapshot(&r)?, note(inner)))
 }
@@ -400,6 +410,11 @@ fn plan(
 /// 操作は落とされない task で行い、命令の待ち行列を鍵の待ちで止めない。終了の処理は、この task を
 /// `background` で待つ (書いてから知らせるまでを途中で止めない)。
 pub(crate) fn run(inner: &Arc<Inner>, req: Request) {
+    // v0.5 の根では、旧エンジンの指示 (`fact_directive`) を書かない (08 §2.6)。
+    if !crate::old_engine(inner) {
+        rejected(inner, MessageKey::FactsDevelopmentBuild, None);
+        return;
+    }
     if inner.facts_key.key().is_none() {
         rejected(inner, MessageKey::FactsDisabled, None);
         return;

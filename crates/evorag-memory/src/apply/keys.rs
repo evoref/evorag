@@ -68,6 +68,111 @@ impl SubstringKeys {
     }
 }
 
+/// 本文 `text` の中で、値の鍵か照合の鍵が `keys` のどれかに当たる部分文字列 (書記素の境界で切ったもの。正規化の
+/// 後の長さが [`SUBSTRING_MAX_CHARS`] 以下) の範囲 (本文のバイト位置。重なりうる)。
+///
+/// 値の文字列を持たない指示 (`vks` だけを持つ v0.5 の `private`) の値を、本文の中で探すのに使う (想起での
+/// `[非表示]`、04 §7.5・§7.9)。[`SubstringKeys`] と同じ部分文字列を引くので、費用も同じ (書記素の数 × 上限)。
+#[must_use]
+pub fn locate_keys(
+    key: &ForgetKey,
+    keys: &BTreeSet<ValueKey>,
+    text: &str,
+) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    if keys.is_empty() || text.is_empty() {
+        return out;
+    }
+    let clusters = graphemes(text);
+    let forms: Vec<String> = clusters
+        .iter()
+        .map(|r| fold_cluster(&text[r.clone()]))
+        .collect();
+    let dropped = dropped_spaces(text, &clusters);
+    let any_dropped = dropped.iter().any(|d| *d);
+    let fast = joined(&forms, None) == normalize_v1(text)
+        && (!any_dropped || joined(&forms, Some(&dropped)) == normalize_loose(text));
+    if !fast {
+        for i in 0..clusters.len() {
+            for j in i..clusters.len() {
+                let sub = &text[clusters[i].start..clusters[j].end];
+                let (v1, loose) = (normalize_v1(sub), normalize_loose(sub));
+                let (n1, nl) = (v1.chars().count(), loose.chars().count());
+                if n1 > SUBSTRING_MAX_CHARS && nl > SUBSTRING_MAX_CHARS {
+                    break;
+                }
+                let hit = [(v1, n1), (loose, nl)].into_iter().any(|(form, n)| {
+                    !form.is_empty()
+                        && n <= SUBSTRING_MAX_CHARS
+                        && keys.contains(&value_key(key, &form))
+                });
+                if hit {
+                    out.push(clusters[i].start..clusters[j].end);
+                }
+            }
+        }
+        return out;
+    }
+    let ks = KeyStream::new(key);
+    for start in 0..forms.len() {
+        locate_from(&ks, keys, &forms, &clusters, None, start, &mut out);
+        if any_dropped {
+            locate_from(
+                &ks,
+                keys,
+                &forms,
+                &clusters,
+                Some(&dropped),
+                start,
+                &mut out,
+            );
+        }
+    }
+    out
+}
+
+/// 書記素 `start` から始まる部分文字列のうち、鍵が `keys` に当たるものの範囲を足す ([`grow`] と同じ伸ばし方)。
+fn locate_from(
+    ks: &KeyStream,
+    keys: &BTreeSet<ValueKey>,
+    forms: &[String],
+    clusters: &[std::ops::Range<usize>],
+    dropped: Option<&[bool]>,
+    start: usize,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    let mut h = ks.start();
+    let mut chars = 0usize;
+    let mut pending = false;
+    let mut buf = [0u8; 4];
+    for (j, f) in forms.iter().enumerate().skip(start) {
+        if dropped.is_some_and(|d| d[j]) {
+            continue;
+        }
+        let mut grew = false;
+        for c in f.chars() {
+            if c.is_whitespace() {
+                pending = chars > 0;
+            } else {
+                if pending {
+                    h.update(b" ");
+                    chars += 1;
+                    pending = false;
+                }
+                h.update(c.encode_utf8(&mut buf).as_bytes());
+                chars += 1;
+                grew = true;
+            }
+        }
+        if chars > SUBSTRING_MAX_CHARS {
+            return;
+        }
+        if grew && keys.contains(&ks.finish(&h)) {
+            out.push(clusters[start].start..clusters[j].end);
+        }
+    }
+}
+
 /// `s` の部分文字列の鍵を `out` に足す。
 ///
 /// 書記素ごとの正規化 ([`fold_cluster`]) を 1 回だけ作り、始まりの書記素ごとに、後ろへ 1 つずつ書記素をつないで
@@ -282,5 +387,34 @@ mod tests {
             elapsed < std::time::Duration::from_secs(30),
             "{elapsed:?} for 2,000 characters"
         );
+    }
+}
+
+#[cfg(test)]
+mod locate_tests {
+    use super::*;
+    use crate::value_key::loose_key;
+
+    const K: ForgetKey = ForgetKey::from_bytes_const([9; 32]);
+
+    /// 値の鍵か照合の鍵に当たる部分文字列の範囲を、本文の位置で返す (値の文字列を持たない指示のため)。
+    #[test]
+    fn substrings_matching_the_keys_are_located() {
+        let text = "私はえびが苦手で、えびせんも食べません。";
+        let keys = BTreeSet::from([value_key(&K, "えび")]);
+        let found: Vec<&str> = locate_keys(&K, &keys, text)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect();
+        assert_eq!(found, ["えび", "えび"]);
+
+        let text = "My pet is a Cat.";
+        let keys = BTreeSet::from([loose_key(&K, "cat")]);
+        let found: Vec<&str> = locate_keys(&K, &keys, text)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect();
+        assert!(found.contains(&"Cat"), "{found:?}");
+        assert!(locate_keys(&K, &BTreeSet::new(), text).is_empty());
     }
 }

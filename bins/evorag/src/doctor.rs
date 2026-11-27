@@ -56,7 +56,16 @@ pub fn run(
         MessageKey::DoctorRoot,
         &[("path", &data_root.display().to_string())],
     );
-    let mut kinds = evorag_memory::kinds();
+    // 種類は根の形式で選ぶ (v0.4 の根は、読むだけで点検し、取り込みを案内する、03 §12.4)。
+    // 見分けは、ストアが書き込みで開く前と同じ (修復の要る DB は、データ根の外の写しを直して読む。何も書かない)。
+    let v04 = evorag_store::root_probe::probe_root(data_root)
+        .ok()
+        .and_then(|p| p.v04());
+    let mut kinds = if v04.is_some() {
+        evorag_memory::kinds()
+    } else {
+        evorag_memory::kinds_v05()
+    };
     kinds.sort_by_key(|k| k.name);
     let report = match inspect_collect(
         data_root,
@@ -87,6 +96,15 @@ pub fn run(
         }
     };
     match &report.db {
+        // v0.4 の根は、この版では修復も作り直しもしない (v0.4 で一度開いて閉じてから取り込む、03 §8)。
+        DbState::Missing | DbState::NeedsRepair(_) | DbState::Unreadable(_) if v04.is_some() => {
+            let unknown = c.key(MessageKey::CliFormatUnknown);
+            let format = v04
+                .as_ref()
+                .and_then(|v| v.format.clone())
+                .unwrap_or(unknown);
+            say(c, MessageKey::DoctorNeedsV04Open, &[("format", &format)]);
+        }
         DbState::Missing => say(c, MessageKey::DoctorDbMissing, &[]),
         DbState::NeedsRepair(d) => say(c, MessageKey::DoctorDbRepair, &[("detail", d)]),
         DbState::Unreadable(d) => say(c, MessageKey::DoctorDbBad, &[("detail", d)]),
@@ -100,6 +118,13 @@ pub fn run(
                     ("writer", &get("last_writer")),
                 ],
             );
+            if evorag_store::root_probe::older_than_v05(&get("format.version")) {
+                say(
+                    c,
+                    MessageKey::DoctorNeedsImport,
+                    &[("format", &get("format.version"))],
+                );
+            }
             let (mut unreadable, mut corrupt, mut newer) = (0, 0, 0);
             for (kind, n) in &report.census.known {
                 say(

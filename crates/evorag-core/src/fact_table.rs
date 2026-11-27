@@ -119,7 +119,8 @@ pub(crate) fn needed(inner: &Inner) -> bool {
         let st = state(inner);
         st.clean != Some(st.version)
     };
-    due && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst)
+    // v0.5 の根では事実の表も事実の検索の鍵も作らない (08 §2.6)。
+    due && crate::old_engine(inner) && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// 出典のターンが残っているか (記録が読める)。表と鍵と想起で同じ判定を使う (04 §5.4・§5.5)。
@@ -237,7 +238,10 @@ async fn rebuild(inner: &Inner) -> Option<bool> {
 /// 応答 (と、次のターンの分の先の処理) のシステムプロンプトに置く事実の表 (05 §4.1 の順 4)。
 /// 覚えた表が今のものなら、それをそのまま使う (作り直さない)。
 pub(crate) async fn for_turn(inner: &Inner, session: Id) -> Option<FactTable> {
-    if inner.facts_key.key().is_none() || !crate::memory_on(inner, session) {
+    if !crate::old_engine(inner)
+        || inner.facts_key.key().is_none()
+        || !crate::memory_on(inner, session)
+    {
         return None;
     }
     let budget = budget(inner);
@@ -282,7 +286,8 @@ async fn can_count(inner: &Inner) -> bool {
 
 /// 起動の後に表を作っておく (最初の応答の経路で数えないように)。事実の機能が使えなければ作らない。
 pub(crate) async fn prepare(inner: &Inner) {
-    if inner.facts_key.key().is_none() || state(inner).built.is_some() {
+    if !crate::old_engine(inner) || inner.facts_key.key().is_none() || state(inner).built.is_some()
+    {
         return;
     }
     let _ = rebuild(inner).await;

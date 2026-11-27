@@ -29,6 +29,7 @@ fn config(root: &std::path::Path) -> CoreConfig {
         serde_json::json!({"enable_thinking": false}),
     );
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: env!("CARGO_PKG_VERSION").into(),

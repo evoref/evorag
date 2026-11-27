@@ -101,6 +101,7 @@ fn chat(replies: usize) -> ReplayClient {
 fn config(root: &Path, embed: &str, rerank: &str) -> CoreConfig {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: env!("CARGO_PKG_VERSION").into(),
@@ -213,6 +214,7 @@ async fn calibrate(root: &Path, rerank: &str) {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     DataRootModels::open(
         root,
+        evorag_core::RootFormat::V04Bench,
         env!("CARGO_PKG_VERSION"),
         clock.clone(),
         Arc::new(UuidV7Gen::new(clock)),

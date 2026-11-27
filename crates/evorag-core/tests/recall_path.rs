@@ -1,4 +1,5 @@
-//! 以前の会話の想起の経路 (05 §3〜§5)。llama-server は記録の再生で置き換える (09 §3.3)。
+//! 以前の会話の想起の経路 (05 §3〜§5)。llama-server は記録の再生で置き換える (09 §3.3)。v0.5 の根で確かめる (想起は
+//! v0.4 のまま動く、08 §2.6)。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ fn cassette(replies: usize) -> ReplayClient {
 fn config(root: &Path, seed: u64) -> CoreConfig {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     CoreConfig {
+        root_format: evorag_core::RootFormat::V05,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),
@@ -116,18 +118,30 @@ fn nonce_of(system: &str) -> Option<String> {
     Some(system[start..start + 16].to_owned())
 }
 
+/// 終了の後に、v0.5 の根を開く (想起の経路は v0.5 の根で確かめる、08 §2.6)。
+fn open_v05(
+    root: &Path,
+    clock: Arc<ManualClock>,
+) -> (evorag_store::Store, evorag_store::OpenReport) {
+    let (kinds, plan) = evorag_memory::v05_root();
+    evorag_store::Store::open_with(
+        evorag_store::OpenOptions {
+            data_root: root.to_path_buf(),
+            evorag_version: "0.0.6".into(),
+            kinds,
+            clock: clock.clone(),
+            ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
+            config_file: None,
+        },
+        plan,
+    )
+    .unwrap()
+}
+
 /// 終了の後に、応答のターンの本体を読む。
 fn turn_body(root: &Path, id: Id) -> TurnBody {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
-    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
-        data_root: root.to_path_buf(),
-        evorag_version: "0.0.6".into(),
-        kinds: evorag_memory::kinds(),
-        clock: clock.clone(),
-        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
-        config_file: None,
-    })
-    .unwrap();
+    let (store, _) = open_v05(root, clock);
     let rtx = store.read().unwrap();
     match rtx.get(KIND_TURN, id).unwrap() {
         Some(Read::Ok(e)) => e.body_as().unwrap(),
@@ -350,15 +364,7 @@ async fn a_lost_index_is_rebuilt_from_the_database() {
 
 fn chunks(root: &Path) -> Vec<evorag_memory::ChunkBody> {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(0)));
-    let (store, _) = evorag_store::Store::open(evorag_store::OpenOptions {
-        data_root: root.to_path_buf(),
-        evorag_version: "0.0.6".into(),
-        kinds: evorag_memory::kinds(),
-        clock: clock.clone(),
-        ids: Arc::new(UuidV7Gen::with_seed(clock, 1)),
-        config_file: None,
-    })
-    .unwrap();
+    let (store, _) = open_v05(root, clock);
     let rtx = store.read().unwrap();
     let mut out = Vec::new();
     rtx.for_each(evorag_memory::KIND_CHUNK, |r| {

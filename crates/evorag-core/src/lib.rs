@@ -37,6 +37,8 @@ pub mod rebuild;
 mod recall;
 pub mod repair;
 mod roles;
+mod root_format;
+pub use root_format::RootFormat;
 mod views;
 
 use std::path::PathBuf;
@@ -62,6 +64,9 @@ pub use recall::{RecallTuning, set_tuning};
 /// コアの設定。
 pub struct CoreConfig {
     pub data_root: PathBuf,
+    /// 開く (無ければ作る) データ根の形式 (03 §12.4)。製品は [`RootFormat::V05`]。v0.4 の根は
+    /// [`StartError::Store`] の [`OpenError::NeedsImport`] で断る (何も書かない)。
+    pub root_format: RootFormat,
     /// `config.toml` (移行の前の退避に含める、03 §7.2)。
     pub config_file: Option<PathBuf>,
     pub evorag_version: String,
@@ -476,20 +481,17 @@ impl Core {
             }
         }
 
-        let mut kinds = evorag_memory::kinds();
-        kinds.sort_by_key(|k| k.name);
+        // v0.5 の根だけを開く (無ければ v0.5 の根を作る)。v0.4 の根は在り場所で移行せず、何も書かずに
+        // `NeedsImport` で断る (03 §12.4。呼ぶ側が取り込むかを尋ねる)。
         let opts = OpenOptions {
             data_root: cfg.data_root,
             evorag_version: cfg.evorag_version,
-            kinds,
+            kinds: Vec::new(),
             clock: cfg.clock.clone(),
             ids: cfg.ids.clone(),
             config_file: cfg.config_file,
         };
-        let (store, mut open_report) = match lock {
-            Some(lock) => Store::open_locked(opts, lock)?,
-            None => Store::open(opts)?,
-        };
+        let (store, mut open_report) = cfg.root_format.open(opts, lock)?;
         if let Some(r) = store.read_only() {
             return Err(StartError::ReadOnly(format!("{r:?}")));
         }
@@ -2257,6 +2259,13 @@ pub(crate) fn enough_space(inner: &Inner) -> bool {
         }
         _ => true,
     }
+}
+
+/// 旧エンジン (ノート・事実の抽出と統合・訂正の検証・事実の表と、事実への操作) を動かす根か (08 §2.6)。v0.5 の
+/// 根では動かさない (新しい根に `fact`・`note`・`correction`・`fact_directive` を書かないため)。動かすのは、比較の
+/// 台が開く v0.4 の形式の根 ([`RootFormat::V04Bench`]) だけ。
+pub(crate) fn old_engine(inner: &Inner) -> bool {
+    !inner.store.is_v05_root()
 }
 
 /// 裏の処理に足りる空きがあるか (知らせは出さない。裏の処理の判定で毎秒見る、03 §8)。

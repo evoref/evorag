@@ -5,7 +5,7 @@
 //! - 無く、事実への指示の記録も無ければ、OS の乱数で作り、会話と同じ優先度で一度だけ書く。
 //! - 食い違い・形の不正・「指示があるのに鍵が無い」ときは、作らずに事実の機能を止める (フェイルクローズ)。
 
-use evorag_memory::{ForgetKey, KIND_FACT_DIRECTIVE};
+use evorag_memory::{ForgetKey, KIND_DIRECTIVE, KIND_FACT_DIRECTIVE};
 use evorag_store::{Read, Store, WriteOp, WriteRequest, WriterHandle, meta};
 
 /// 鍵が使えない理由 (03 §3.1.1 のフェイルクローズ)。事実の抽出・統合・事実の表を止める。
@@ -48,15 +48,21 @@ impl FactsKey {
     }
 }
 
-/// 事実への指示の記録があるか (読めない記録も「ある」と数える。安全の側に倒す)。
+/// 指示の記録があるか (読めない記録も「ある」と数える。安全の側に倒す)。v0.4 の根の `fact_directive` と、v0.5 の
+/// 根の `directive` (03 §3.1.1 のフェイルクローズ) の両方を見る (それぞれの根には、もう片方の種類の記録は無い)。
 fn has_directives(store: &Store) -> Result<bool, String> {
     let tx = store.read().map_err(|e| e.to_string())?;
     let mut found = false;
-    tx.for_each(KIND_FACT_DIRECTIVE, |r| {
-        found = matches!(r, Read::Ok(_) | Read::Newer { .. } | Read::Corrupt { .. });
-        !found
-    })
-    .map_err(|e| e.to_string())?;
+    for kind in [KIND_FACT_DIRECTIVE, KIND_DIRECTIVE] {
+        tx.for_each(kind, |r| {
+            found = matches!(r, Read::Ok(_) | Read::Newer { .. } | Read::Corrupt { .. });
+            !found
+        })
+        .map_err(|e| e.to_string())?;
+        if found {
+            break;
+        }
+    }
     Ok(found)
 }
 

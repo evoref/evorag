@@ -44,6 +44,7 @@ fn reranker(size: u64) -> Arc<ReplayClient> {
 fn config(root: &Path, seed: u64, rerank: Arc<ReplayClient>) -> CoreConfig {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_000_000)));
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: "0.0.6".into(),
@@ -166,6 +167,7 @@ async fn switching_rerankers_keeps_each_threshold() {
         let clock = Arc::new(ManualClock::new(Timestamp::from_millis(1_762_650_100_000)));
         let m = DataRootModels::open(
             dir.path(),
+            evorag_core::RootFormat::V04Bench,
             "0.0.6",
             clock.clone(),
             Arc::new(UuidV7Gen::with_seed(clock, seed)),

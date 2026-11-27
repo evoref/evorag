@@ -82,6 +82,7 @@ fn prepare(root: &Path) {
     let clock = Arc::new(ManualClock::new(Timestamp::from_millis(T0 - 10_000_000)));
     let m = DataRootModels::open(
         root,
+        evorag_core::RootFormat::V04Bench,
         "0.0.6",
         clock.clone(),
         Arc::new(UuidV7Gen::with_seed(clock, 3)),
@@ -104,6 +105,7 @@ fn config(root: &Path, seed: u64, clock: Arc<ManualClock>) -> CoreConfig {
 
 fn config_as(root: &Path, seed: u64, clock: Arc<ManualClock>, version: &str) -> CoreConfig {
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: version.into(),
@@ -1435,6 +1437,7 @@ async fn deleting_a_session_asks_to_erase_the_slot_caches() {
 fn repair_options(root: &Path, at: i64, seed: u64) -> evorag_core::repair::RepairOptions {
     let clock = clock_at(at);
     evorag_core::repair::RepairOptions {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         evorag_version: "0.0.6".into(),
         config_file: None,

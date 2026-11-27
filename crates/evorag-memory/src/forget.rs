@@ -1261,6 +1261,62 @@ fn remap_sources(set: &mut FactSet, turn: Id, r: &Redaction, marker: &str) -> us
 // ターンごとの忘れるの指示
 // ---------------------------------------------------------------------------------------------------------------
 
+/// v0.5 の根の忘れる・印を解くの指示 (`directive`) を、旧エンジンの忘れるの判定 ([`TurnForgets`]、書き出しと
+/// `doctor` の確かめ) が読む `fact_directive` の本体の形に写す。忘れると印を解くのほかの指示は `None`。
+///
+/// `import-v04` は `fact_directive` の伏せ字・`[非表示]` の範囲・`turns`・`vks` などを値を変えずに `directive` へ写す
+/// (03 §12.4) ので、その逆に写す。主語と属性は entity と辞書の属性 (無ければ空)。新しいエンジンの当て方が入るまで
+/// (M5.4、08 §2.6) の橋渡し。
+#[must_use]
+pub fn directive_as_fact_directive(
+    b: &crate::directive::DirectiveBody,
+) -> Option<FactDirectiveBody> {
+    use crate::directive::DirectiveOp;
+    let op = match b.op() {
+        DirectiveOp::Forget => OP_FORGET,
+        DirectiveOp::Unblock => crate::import_v04::OP_UNBLOCK,
+        _ => return None,
+    };
+    Some(FactDirectiveBody {
+        op: op.to_owned(),
+        subject: b.entity.clone().unwrap_or_default(),
+        attribute: b.aspect.clone().unwrap_or_default(),
+        vk: None,
+        norm: b.norm,
+        fact: None,
+        target: b.target,
+        scope: None,
+        marks: b.marks.clone(),
+        vks: b.vks.clone(),
+        turns: b.turns.clone(),
+        redactions: b
+            .redactions
+            .iter()
+            .map(|r| RedactionBody {
+                turn: r.turn,
+                rev_before: r.rev_before,
+                rev_after: r.rev_after,
+                start: r.start,
+                end: r.end,
+                hash: r.hash.clone(),
+            })
+            .collect(),
+        hidden: b
+            .hidden
+            .iter()
+            .map(|h| HiddenBody {
+                turn: h.turn,
+                rev: h.rev,
+                start: h.start,
+                end: h.end,
+            })
+            .collect(),
+        history: b.history,
+        redact: b.redact,
+        origin: ORIGIN_USER.to_owned(),
+    })
+}
+
 /// 1 つの忘れるの指示が 1 つのターンに持つもの。
 #[derive(Debug, Clone)]
 struct Step {
@@ -1286,13 +1342,28 @@ impl TurnForgets {
     /// # Errors
     /// 記録を読めないとき。
     pub fn load(tx: &ReadTxn<'_>) -> Result<Self, MemoryError> {
-        let mut bodies = Vec::new();
+        let mut steps = Vec::new();
         for_each_directive_body(tx, |id, b| {
             if b.op == OP_FORGET {
-                bodies.push((id, b));
+                steps.push((id, b.redactions, b.hidden));
             }
         })?;
-        Ok(Self::from_bodies(bodies))
+        // v0.5 の根の忘れるの指示 (`directive`。`import-v04` で写したもの、03 §12.4)。v0.5 の根では旧エンジンが
+        // 指示を書かないので、想起の `[非表示]` と合わないターンの見分けは、新しいエンジンの当て方が入るまで
+        // (M5.4)、これで当て続ける (08 §2.6 の「想起は v0.4 のまま動く」)。v0.4 の根には `directive` が無く、v0.5 の
+        // 根には `fact_directive` が無い。
+        tx.for_each(crate::directive::KIND_DIRECTIVE, |r| {
+            if let Read::Ok(e) = r
+                && e.v == crate::directive::DIRECTIVE_V
+                && let Ok(b) = e.body_as::<crate::directive::DirectiveBody>()
+                && let Some(b) = directive_as_fact_directive(&b)
+                && b.op == OP_FORGET
+            {
+                steps.push((e.id, b.redactions, b.hidden));
+            }
+            true
+        })?;
+        Ok(Self::from_steps(steps))
     }
 
     /// 事実への指示の本体 (ID と本体) から作る。忘れるでない指示は無視する。DB の読み取りの口
@@ -1307,16 +1378,26 @@ impl TurnForgets {
         )
     }
 
-    fn from_bodies(mut bodies: Vec<(Id, FactDirectiveBody)>) -> Self {
-        bodies.sort_by_key(|(id, _)| *id);
+    fn from_bodies(bodies: Vec<(Id, FactDirectiveBody)>) -> Self {
+        Self::from_steps(
+            bodies
+                .into_iter()
+                .map(|(id, b)| (id, b.redactions, b.hidden))
+                .collect(),
+        )
+    }
+
+    /// 忘れるの指示ごとの (ID、伏せ字、`[非表示]` の範囲) から作る (指示の ID の順に当てる)。
+    fn from_steps(mut steps: Vec<(Id, Vec<RedactionBody>, Vec<HiddenBody>)>) -> Self {
+        steps.sort_by_key(|(id, _, _)| *id);
         let mut out = Self::default();
-        for (directive, b) in bodies {
+        for (directive, redactions, hidden_spans) in steps {
             let mut per_turn: BTreeMap<Id, (Vec<&RedactionBody>, Vec<&HiddenBody>)> =
                 BTreeMap::new();
-            for r in &b.redactions {
+            for r in &redactions {
                 per_turn.entry(r.turn).or_default().0.push(r);
             }
-            for h in &b.hidden {
+            for h in &hidden_spans {
                 per_turn.entry(h.turn).or_default().1.push(h);
             }
             for (turn, (rs, hs)) in per_turn {

@@ -71,8 +71,9 @@ pub use fold::{
 };
 pub use forget::{
     ForgetAbort, ForgetEnv, ForgetOptions, ForgetPlan, ForgetPreview, ForgetSample, ForgetScope,
-    PlanHash, Replay, TurnForgets, forget_backups_for_all, forget_backups_job, journal_cuts,
-    latest_forget, plan_forget, rebuild_directive_indexes, replay_forgets,
+    PlanHash, Replay, TurnForgets, directive_as_fact_directive, forget_backups_for_all,
+    forget_backups_job, journal_cuts, latest_forget, plan_forget, rebuild_directive_indexes,
+    replay_forgets,
 };
 pub use gates::{
     Accepted, EvidenceMatch, GateEnv, GateReason, MAX_SUBJECT_CHARS, RawCandidate, RawMood, Safety,

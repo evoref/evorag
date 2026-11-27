@@ -21,6 +21,7 @@ pub mod recopy;
 pub mod relations;
 mod repair;
 pub mod restore;
+pub mod root_probe;
 pub mod root_rename;
 mod store;
 #[doc(hidden)]

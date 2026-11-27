@@ -66,8 +66,11 @@ pub(crate) fn needed(inner: &Inner) -> bool {
                 .due_at
                 .is_some_and(|t| inner.clock.now().as_millis() >= t)
     };
-    // 起動時の突き合わせ (出典の無いノートの削除と退避の整理、orphans.rs) が済んでから。
-    due && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst) && usable(inner)
+    // 起動時の突き合わせ (出典の無いノートの削除と退避の整理、orphans.rs) が済んでから。v0.5 の根では作らない
+    // (08 §2.6)。
+    due && crate::old_engine(inner)
+        && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst)
+        && usable(inner)
 }
 
 /// 作る (作り直す) ノート 1 つ分。

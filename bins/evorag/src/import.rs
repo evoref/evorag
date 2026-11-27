@@ -2,6 +2,10 @@
 //!
 //! 終了コード: 0 取り込んで入れ替えた (止まった入れ替えを続けて終えたときも)。1 取り込める根でない・照合が合わない・
 //! 確認で y 以外を答えた・ほかの失敗。2 ロックが取れない・危ない置き場所・改名の隙にほかのプロセスが開いた。
+//!
+//! v0.4 の根 (形式の版 `0.3`) を開こうとしたとき (03 §12.4 の「きっかけ」): TUI の起動は取り込むかを尋ね
+//! ([`import_at_startup`])、y なら取り込んで新しい根で続け、y 以外は何も変えずに 2 で終わる。データ根に書くほかの
+//! コマンドは、何も書かずに `import-v04` を案内して 2 で終わる ([`needs_import`]・[`refuse_v04_root`])。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -11,7 +15,7 @@ use evorag_core::import_v04::{
     Finished, ImportError, ImportOptions, Plan, Resumed, import_and_swap, resume_on_startup,
 };
 use evorag_store::import_v04::{NextStep, Refusal, import_dir};
-use evorag_store::lock::LockError;
+use evorag_store::lock::{DataRootLock, LockError};
 use evorag_store::root_rename::RenameRootError;
 use evorag_tui::catalog::Catalog;
 use evorag_types::{Clock, MessageKey, UuidV7Gen};
@@ -50,6 +54,166 @@ pub(crate) fn run(
                 eprintln!("{line}");
             }
             ExitCode::from(e.exit_code())
+        }
+    }
+}
+
+/// v0.4 の根 (形式の版 `format`) なので、在り場所では開かずに `import-v04` を案内する (03 §8・§12.4)。何も書いて
+/// いない。終了コード 2 (データ根が使えない、07 §5)。
+pub(crate) fn needs_import(catalog: &Catalog, data_root: &Path, format: &str) -> ExitCode {
+    eprintln!(
+        "{}",
+        catalog.with(
+            MessageKey::CliNeedsImport,
+            &[
+                ("path", &data_root.display().to_string()),
+                ("format", format)
+            ]
+        )
+    );
+    ExitCode::from(2)
+}
+
+/// 前回正しく閉じていない v0.4 の根か、DB が無い・読めずにジャーナルが v0.4 の根のもの (形式の版 `format`。分からなけれ
+/// ば `None`) なので、在り場所で修復も作り直しもせずに、v0.4 で一度開いて閉じてから取り込むよう案内する (03 §8)。
+/// 何も書いていない。終了コード 2。
+pub(crate) fn needs_v04_open(
+    catalog: &Catalog,
+    data_root: &Path,
+    format: Option<&str>,
+) -> ExitCode {
+    let unknown = catalog.key(MessageKey::CliFormatUnknown);
+    eprintln!(
+        "{}",
+        catalog.with(
+            MessageKey::CliNeedsV04Open,
+            &[
+                ("path", &data_root.display().to_string()),
+                ("format", format.unwrap_or(&unknown))
+            ]
+        )
+    );
+    ExitCode::from(2)
+}
+
+/// データ根が v0.4 以前の根 (か、そうとみなす根) なら、何も書かずに案内した終了コード 2 を返す (データ根に書く
+/// コマンドのうち、ストアを開かずに書くもの: `restore`・`backups purge`)。見分けはストアが書き込みで開く前と同じ
+/// ([`evorag_store::root_probe::probe_root`]。修復の要る DB は、データ根の外の写しを直して読む)。見分けられない
+/// (ジャーナルを読めない) ときも断る。
+pub(crate) fn refuse_v04_root(catalog: &Catalog, data_root: &Path) -> Option<ExitCode> {
+    let probe = match evorag_store::root_probe::probe_root(data_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                catalog.with(
+                    MessageKey::CliDataRootUnusable,
+                    &[("detail", &e.to_string())]
+                )
+            );
+            return Some(ExitCode::from(2));
+        }
+    };
+    let v04 = probe.v04()?;
+    Some(match (v04.format, v04.clean) {
+        (Some(format), true) => needs_import(catalog, data_root, &format),
+        (format, _) => needs_v04_open(catalog, data_root, format.as_deref()),
+    })
+}
+
+/// 退避 (フォルダか、その中の `evorag.redb`) の DB の形式の版 (読めなければ `None`)。
+fn backup_format(backup: &Path) -> Option<String> {
+    let file = if backup.is_dir() {
+        backup.join(evorag_store::DB_FILE)
+    } else {
+        backup.to_path_buf()
+    };
+    evorag_store::inspect::format_version(&file)
+}
+
+/// 退避が v0.5 より古い形式か (v0.5 では戻さない、03 §8)。
+pub(crate) fn backup_older_than_v05(backup: &Path) -> bool {
+    backup_format(backup).is_some_and(|f| evorag_store::root_probe::older_than_v05(&f))
+}
+
+/// `evorag restore <退避>` の前の確かめ (03 §8)。今の根が v0.4 の根なら [`refuse_v04_root`]。退避が v0.5 より古い
+/// 形式なら、今の根に関わらず、何も変えずに終了コード 1 (v0.4 の退避は v0.4 で戻してから取り込む)。
+pub(crate) fn check_restore(
+    catalog: &Catalog,
+    data_root: &Path,
+    backup: &Path,
+) -> Option<ExitCode> {
+    if let Some(code) = refuse_v04_root(catalog, data_root) {
+        return Some(code);
+    }
+    let format = backup_format(backup)?;
+    evorag_store::root_probe::older_than_v05(&format).then(|| {
+        eprintln!(
+            "{}",
+            catalog.with(
+                MessageKey::CliRestoreBackupV04,
+                &[
+                    ("backup", &backup.display().to_string()),
+                    ("format", &format)
+                ]
+            )
+        );
+        ExitCode::from(1)
+    })
+}
+
+/// TUI の起動で v0.4 の根 (形式の版 `format`) を開こうとしたときに、取り込むかを尋ねる (03 §12.4 の「きっかけ」)。y
+/// なら `import-v04` と同じ手順で取り込んで入れ替え、新しい根のロックを返す (呼ぶ側は、そのまま新しい根を開く)。
+/// y 以外・取り込めない・失敗したときは、理由を示した終了コード 2 (データ根が使えない) を返す。
+pub(crate) fn import_at_startup(
+    catalog: &Catalog,
+    data_root: &Path,
+    format: &str,
+    allow_unsafe_location: bool,
+    clock: Arc<dyn Clock>,
+) -> Result<DataRootLock, ExitCode> {
+    eprintln!(
+        "{}",
+        catalog.with(
+            MessageKey::ImportV04AtStartup,
+            &[
+                ("path", &data_root.display().to_string()),
+                ("format", format)
+            ]
+        )
+    );
+    let opts = ImportOptions {
+        old_root: data_root.to_path_buf(),
+        evorag_version: env!("CARGO_PKG_VERSION").to_owned(),
+        clock: clock.clone(),
+        ids: Arc::new(UuidV7Gen::new(clock)),
+        location: evorag_store::location::check,
+        allow_unsafe_location,
+        before_verify: None,
+        swap_hooks: Default::default(),
+    };
+    let mut confirm = |plan: &Plan<'_>| {
+        let yes = crate::ask_yes(&question(catalog, plan));
+        if yes && matches!(plan, Plan::Import { .. }) {
+            eprintln!("{}", catalog.key(MessageKey::ImportV04Started));
+        }
+        yes
+    };
+    match import_and_swap(&opts, &mut confirm) {
+        Ok(done) => {
+            print_done(catalog, &done);
+            let Finished { new_root_lock, .. } = done;
+            Ok(new_root_lock)
+        }
+        Err(ImportError::Declined) => {
+            eprintln!("{}", catalog.key(MessageKey::ImportV04DeclinedAtStartup));
+            Err(ExitCode::from(2))
+        }
+        Err(e) => {
+            for line in describe(catalog, data_root, &e) {
+                eprintln!("{line}");
+            }
+            Err(ExitCode::from(2))
         }
     }
 }

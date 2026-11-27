@@ -14,16 +14,44 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use evorag_memory::{
-    CorrectionBody, FactBody, FactDirectiveBody, KIND_CORRECTION, KIND_FACT, KIND_FACT_DIRECTIVE,
-    KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN, NoteBody, OP_FORGET, OP_UNBLOCK,
-    REDACTION_MARKERS, RecallFeedbackBody, TurnBody, TurnForgets, TurnRole, ValueKey, note_matches,
-    redaction_marker, turn_rev_checked,
+    CorrectionBody, DirectiveBody, FactBody, FactDirectiveBody, KIND_CORRECTION, KIND_DIRECTIVE,
+    KIND_FACT, KIND_FACT_DIRECTIVE, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN,
+    NoteBody, OP_FORGET, OP_UNBLOCK, REDACTION_MARKERS, RecallFeedbackBody, TurnBody, TurnForgets,
+    TurnRole, ValueKey, note_matches, redaction_marker, turn_rev_checked,
 };
 use evorag_store::export::{ExportChecks, ExportView};
 use evorag_store::{Envelope, Read, meta};
 use evorag_types::Id;
 
 use crate::forgets::TurnCheck;
+
+/// 忘れると印を解くの指示 (ID と `fact_directive` の本体の形)。v0.4 の根の `fact_directive` と、v0.5 の根の
+/// `directive` (`fact_directive` の形に写す、[`evorag_memory::directive_as_fact_directive`]) の両方を読む (それぞれの
+/// 根には、もう片方の種類の記録は無い)。読めなければ `None`。
+fn forget_directives(view: &ExportView<'_>) -> Option<Vec<(Id, FactDirectiveBody)>> {
+    let mut out: Vec<(Id, FactDirectiveBody)> = Vec::new();
+    view.for_each(KIND_FACT_DIRECTIVE, |x| {
+        if let Read::Ok(e) = x
+            && let Ok(b) = e.body_as::<FactDirectiveBody>()
+        {
+            out.push((e.id, b));
+        }
+        true
+    })
+    .ok()?;
+    view.for_each(KIND_DIRECTIVE, |x| {
+        if let Read::Ok(e) = x
+            && let Ok(b) = e.body_as::<DirectiveBody>()
+            && let Some(b) = evorag_memory::directive_as_fact_directive(&b)
+        {
+            out.push((e.id, b));
+        }
+        true
+    })
+    .ok()?;
+    out.sort_by_key(|(id, _)| *id);
+    Some(out)
+}
 
 /// 書き出しの確かめ ([`ExportChecks`])。最初に呼ばれたときに、同じ読み取りで材料を集める。
 #[derive(Default)]
@@ -108,26 +136,22 @@ pub fn journal_leftovers(
     // ターンごとの、残っている行を除く基準 (伏せ字の後の番号のいちばん大きいもの)。
     let mut cut: BTreeMap<Id, u64> = BTreeMap::new();
     let mut directives: BTreeSet<Id> = BTreeSet::new();
-    view.for_each(KIND_FACT_DIRECTIVE, |x| {
-        if let Read::Ok(e) = x
-            && let Ok(b) = e.body_as::<FactDirectiveBody>()
-            && b.op == OP_FORGET
-        {
-            for r in &b.redactions {
-                let after = u64::from(r.rev_after);
-                let Some(lines) = revs.get(&r.turn) else {
-                    continue;
-                };
-                if lines.iter().any(|&v| v < after) && lines.iter().any(|&v| v >= after) {
-                    directives.insert(e.id);
-                    let c = cut.entry(r.turn).or_insert(after);
-                    *c = (*c).max(after);
-                }
+    for (id, b) in forget_directives(view)? {
+        if b.op != OP_FORGET {
+            continue;
+        }
+        for r in &b.redactions {
+            let after = u64::from(r.rev_after);
+            let Some(lines) = revs.get(&r.turn) else {
+                continue;
+            };
+            if lines.iter().any(|&v| v < after) && lines.iter().any(|&v| v >= after) {
+                directives.insert(id);
+                let c = cut.entry(r.turn).or_insert(after);
+                *c = (*c).max(after);
             }
         }
-        true
-    })
-    .ok()?;
+    }
     let lines = cut
         .iter()
         .map(|(t, after)| revs[t].iter().filter(|&&v| v < *after).count())
@@ -185,22 +209,16 @@ impl Prepared {
     fn load(view: &ExportView<'_>, markers: &[&str]) -> Option<Self> {
         let mut bodies: Vec<(Id, FactDirectiveBody)> = Vec::new();
         let mut unblocked: BTreeSet<Id> = BTreeSet::new();
-        view.for_each(KIND_FACT_DIRECTIVE, |x| {
-            if let Read::Ok(e) = x
-                && let Ok(b) = e.body_as::<FactDirectiveBody>()
+        for (id, b) in forget_directives(view)? {
+            if b.op == OP_UNBLOCK
+                && let Some(t) = b.target
             {
-                if b.op == OP_UNBLOCK
-                    && let Some(t) = b.target
-                {
-                    unblocked.insert(t);
-                }
-                if b.op == OP_FORGET {
-                    bodies.push((e.id, b));
-                }
+                unblocked.insert(t);
             }
-            true
-        })
-        .ok()?;
+            if b.op == OP_FORGET {
+                bodies.push((id, b));
+            }
+        }
         // 戻した・修復した・古い版で開いたデータ根 (`forget.recheck` が立っている) は、起動して当て直すまで、
         // 当て直しの済んでいない忘れるがあるとみなす (照合の鍵だけで印に当たる事実は、HMAC の鍵が無いと見分け
         // られないため、04 §7.6、03 §11)。

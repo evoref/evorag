@@ -105,7 +105,9 @@ pub(crate) fn needed(inner: &Inner) -> bool {
         let st = state(inner);
         st.clean != Some(st.version)
     };
-    due && inner.facts_key.key().is_some()
+    // v0.5 の根では抽出しない (08 §2.6)。
+    due && crate::old_engine(inner)
+        && inner.facts_key.key().is_some()
         && inner.startup_done.load(std::sync::atomic::Ordering::SeqCst)
         && crate::notes::usable(inner)
         && fits(inner)

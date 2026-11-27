@@ -247,3 +247,238 @@ fn rebuild_never_creates_the_original_while_the_swap_is_unfinished() {
     assert!(t.contains("import-v04"), "{t}");
     assert!(!data.exists(), "no empty root is created: {t}");
 }
+
+/// `/health`・`/props`・`/v1/models` に答える、ループバックの偽の llama-server。モデルは見本の根の記録 (`chat.gguf`)
+/// と違う (TUI を開く前に、応答のモデルの違いで 6 で終わるように)。
+fn fake_llama_server() -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        for mut sock in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let body = if req.starts_with("GET /props") {
+                r#"{"build_info":"b1-test","model_path":"/m/other.gguf","total_slots":1,"default_generation_settings":{"n_ctx":4096}}"#
+            } else if req.starts_with("GET /v1/models") {
+                r#"{"data":[{"id":"other"}]}"#
+            } else {
+                r#"{"status":"ok"}"#
+            };
+            let _ = write!(
+                sock,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    url
+}
+
+/// データ根のファイルの (大きさ・中身)。ロックのファイルは除く (03 §12.4 の「読み方」)。
+fn files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).expect("read a directory") {
+            let path = e.expect("an entry").path();
+            if path.is_dir() {
+                walk(base, &path, out);
+                continue;
+            }
+            let rel = path
+                .strip_prefix(base)
+                .expect("under the base")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if ["lock", "lock.pid", "lock.pid.tmp"].contains(&rel.as_str()) {
+                continue;
+            }
+            out.insert(rel, std::fs::read(&path).expect("read"));
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// TUI の起動で v0.4 の根を開こうとすると、在り場所で移行せずに取り込むかを尋ねる。y 以外 (入力の終わりを含む) は
+/// 何も変えずに 2 で終わる。
+///
+/// verifies: 03 §12.4 の「きっかけ」(y 以外なら何も変えずに 2 で終わる)
+#[test]
+fn the_tui_asks_to_import_a_v04_root_and_exits_with_2_when_declined() {
+    let (tmp, data) = fixture("cli-startup-declined");
+    let url = fake_llama_server();
+    let config = format!("[llm.chat]\nurl = \"{url}\"\n");
+    let before = files(&data);
+    for answer in ["n\n", ""] {
+        let out = evorag(tmp.path(), &config, &[], answer);
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{t}");
+        assert!(t.contains("v0.4 の形式 (形式の版 0.3)"), "{t}");
+        assert!(t.contains("取り込みますか"), "{t}");
+        assert!(t.contains("取り込まなかったので"), "{t}");
+        assert_eq!(before, files(&data), "the v0.4 root is unchanged");
+        assert!(!import_dir(&data).expect("named").exists());
+        assert!(renamed_roots(tmp.path()).is_empty());
+    }
+}
+
+/// y なら `import-v04` と同じ手順で取り込んで入れ替え、新しい根で続ける (ここでは、新しい根の応答のモデルの記録と
+/// 繋がっているモデルが違うので、TUI を開く前に 6 で終わる。新しい根を開いたことの確かめ)。
+///
+/// verifies: 03 §12.4 の「きっかけ」(y なら同じ手順を行い、終えたら新しい根で続ける)
+#[test]
+fn the_tui_imports_a_v04_root_on_y_and_opens_the_new_root() {
+    let (tmp, data) = fixture("cli-startup-import");
+    let url = fake_llama_server();
+    let config = format!("[llm.chat]\nurl = \"{url}\"\n");
+    let out = evorag(tmp.path(), &config, &[], "y\n");
+    let t = text(&out);
+    assert!(t.contains("取り込みました"), "{t}");
+    assert_eq!(out.status.code(), Some(6), "the new root was opened: {t}");
+    assert!(
+        t.contains("chat.gguf"),
+        "the recorded model of the new root: {t}"
+    );
+    assert_eq!(format_of(&data).as_deref(), Some("0.5"));
+    let renamed = renamed_roots(tmp.path());
+    assert_eq!(renamed.len(), 1, "{renamed:?}");
+    assert_eq!(format_of(&renamed[0]).as_deref(), Some("0.3"));
+    assert!(!import_dir(&data).expect("named").exists());
+}
+
+/// データ根に書くほかのコマンドは、v0.4 の根に何も書かずに `import-v04` を案内して 2 で終わる。読むだけの `doctor`・
+/// `backups list`・`export` は、v0.4 の根を読むだけで扱う。
+///
+/// verifies: 03 §8 (v0.4 のデータ根を v0.5 で開いた)
+#[test]
+fn commands_that_write_refuse_a_v04_root_and_point_to_import() {
+    let (tmp, data) = fixture("cli-v04-refused");
+    let config = format!("[llm.chat]\nurl = \"{}\"\n", closed_port());
+    let before = files(&data);
+    let backup = data.join("evorag.redb").display().to_string();
+    let cases: [&[&str]; 5] = [
+        &["repair"],
+        &["rebuild"],
+        &["rebuild", "--index"],
+        &["restore", &backup],
+        &["backups", "purge", "--yes"],
+    ];
+    for args in cases {
+        let out = evorag(tmp.path(), &config, args, "");
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {t}");
+        assert!(t.contains("v0.4 の形式 (形式の版 0.3)"), "{args:?}: {t}");
+        assert!(t.contains("evorag import-v04"), "{args:?}: {t}");
+        assert_eq!(before, files(&data), "{args:?}: the v0.4 root is unchanged");
+    }
+    for args in [&["doctor"][..], &["backups", "list"][..]] {
+        let out = evorag(tmp.path(), &config, args, "");
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", text(&out));
+        assert_eq!(before, files(&data), "{args:?}: the v0.4 root is unchanged");
+    }
+    let out_dir = tmp.path().join("out");
+    let out = evorag(
+        tmp.path(),
+        &config,
+        &["export", out_dir.to_str().expect("utf-8")],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "export: {}", text(&out));
+    assert_eq!(before, files(&data), "export: the v0.4 root is unchanged");
+}
+
+/// 正しく閉じていない・DB の無い・壊れた v0.4 の根は、TUI の起動 (尋ねない) と、データ根に書くコマンドのどれでも、
+/// 修復も作り直しも `broken/` へ移すこともせずに、v0.4 で一度起動して閉じてから取り込むよう案内して 2 で終わる。
+/// `doctor` は「次の起動で修復します」とは示さない。ロックのファイルを除くすべてのファイルが変わらない。
+///
+/// verifies: 03 §8 (v0.4 のデータ根を v0.5 で開いた)
+#[test]
+fn damaged_v04_roots_are_never_repaired_or_rebuilt_in_place() {
+    type Damage = fn(&Path);
+    let cases: [(&str, Damage); 3] = [
+        ("unclean", |r| {
+            // redb の修復が要る印 (ファイルの頭の god byte、redb 4 の header.rs)。
+            let p = r.join("evorag.redb");
+            let mut b = std::fs::read(&p).expect("read");
+            b[9] |= 2;
+            std::fs::write(&p, b).expect("write");
+        }),
+        ("no-db", |r| {
+            std::fs::remove_file(r.join("evorag.redb")).expect("remove");
+        }),
+        ("broken-db", |r| {
+            std::fs::write(r.join("evorag.redb"), b"garbage").expect("write");
+        }),
+    ];
+    let url = fake_llama_server();
+    for (label, damage) in cases {
+        let (tmp, data) = fixture(&format!("cli-damaged-{label}"));
+        damage(&data);
+        let before = files(&data);
+        let tui = format!("[llm.chat]\nurl = \"{url}\"\n");
+        let closed = format!("[llm.chat]\nurl = \"{}\"\n", closed_port());
+        let other = tmp.path().join("other-backup").display().to_string();
+        let runs: [(&str, &[&str]); 6] = [
+            (tui.as_str(), &[]),
+            (closed.as_str(), &["repair"]),
+            (closed.as_str(), &["rebuild"]),
+            (closed.as_str(), &["rebuild", "--index"]),
+            (closed.as_str(), &["restore", &other]),
+            (closed.as_str(), &["backups", "purge", "--yes"]),
+        ];
+        for (config, args) in runs {
+            let out = evorag(tmp.path(), config, args, "y\n");
+            let t = text(&out);
+            assert_eq!(out.status.code(), Some(2), "{label} {args:?}: {t}");
+            assert!(
+                t.contains("v0.4 の evorag で一度起動して終了してから"),
+                "{label} {args:?}: {t}"
+            );
+            assert!(!t.contains("取り込みますか"), "{label} {args:?}: {t}");
+            assert_eq!(before, files(&data), "{label} {args:?}: unchanged");
+            assert!(!data.join("broken").exists(), "{label} {args:?}");
+            assert!(!import_dir(&data).expect("named").exists());
+        }
+        let out = evorag(tmp.path(), &closed, &["doctor"], "");
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{label} doctor: {t}");
+        assert!(
+            t.contains("v0.4 の evorag で一度起動して終了してから"),
+            "{label}: {t}"
+        );
+        assert!(!t.contains("次の起動で修復します"), "{label}: {t}");
+        assert!(!t.contains("初回の起動で作ります"), "{label}: {t}");
+        assert_eq!(before, files(&data), "{label} doctor: unchanged");
+    }
+}
+
+/// v0.5 より古い形式の退避は、今の根が空でも `restore` で戻さない (1、何も作らない)。
+///
+/// verifies: 03 §8 (v0.4 の退避は v0.4 で戻してから取り込む)
+#[test]
+fn restore_refuses_a_backup_older_than_v05() {
+    let (tmp, data) = fixture("cli-restore-v04");
+    let backup = tmp.path().join("v04-backup");
+    std::fs::create_dir_all(&backup).expect("mkdir");
+    std::fs::copy(data.join("evorag.redb"), backup.join("evorag.redb")).expect("copy");
+    let empty = tmp.path().join("fresh");
+    let cfg = tmp.path().join("config.toml");
+    std::fs::write(&cfg, "").expect("write the config");
+    let exe = std::env::var_os("NEXTEST_BIN_EXE_evorag")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_evorag").into());
+    let out = Command::new(exe)
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--data-root")
+        .arg(&empty)
+        .arg("restore")
+        .arg(&backup)
+        .output()
+        .expect("run");
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{t}");
+    assert!(t.contains("v0.5 のデータ根へは戻せません"), "{t}");
+    assert!(!empty.join("evorag.redb").exists(), "{t}");
+}

@@ -11,10 +11,15 @@
 //!
 //! 本文は保存したまま変えない。置き換えは、添える・帯に出す・検証のプロンプトに入れる直前に当てる。
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 
-use evorag_store::ReadTxn;
+use evorag_store::{Read, ReadTxn};
 use evorag_types::Id;
+
+use crate::apply::{DirectiveSet, TurnRedactions, locate_keys};
+use crate::directive::{DirectiveBody, DirectiveOp, KIND_DIRECTIVE, TurnSpan};
+use crate::value_key::{ForgetKey, ValueKey};
 
 use crate::facts::load_facts;
 use crate::fold::{FactSet, FactState, Source};
@@ -50,10 +55,80 @@ struct PrivateValue {
     sources: Vec<Source>,
 }
 
+/// v0.5 の根の、解かれていない `private` の指示 (`directive`)。指示は値の文字列を持たないので、`vks` に当たる部分
+/// 文字列と、根拠の位置 (`at`) で伏せる (08 §2.6 の M5.1〜M5.3 の扱い。M5.4 で新しい当て方に替える)。
+#[derive(Debug, Clone)]
+struct DirectivePrivates {
+    key: ForgetKey,
+    vks: BTreeSet<ValueKey>,
+    spans: Vec<TurnSpan>,
+    redactions: TurnRedactions,
+}
+
+impl DirectivePrivates {
+    /// 記録から読む。`private` の指示が無ければ `None`。あるのに鍵が使えなければ、伏せる値を確かめられないので
+    /// 失敗する。
+    fn load(tx: &ReadTxn<'_>, redaction_marker: &str) -> Result<Option<Self>, MemoryError> {
+        let mut all: Vec<(Id, DirectiveBody)> = Vec::new();
+        tx.for_each(KIND_DIRECTIVE, |r| {
+            if let Read::Ok(e) = r
+                && let Ok(b) = e.body_as::<DirectiveBody>()
+            {
+                all.push((e.id, b));
+            }
+            true
+        })?;
+        if !all.iter().any(|(_, b)| b.op() == DirectiveOp::Private) {
+            return Ok(None);
+        }
+        let set = DirectiveSet::new(all, redaction_marker, str::to_owned);
+        if set.privates().is_empty() {
+            return Ok(None);
+        }
+        let key = tx
+            .meta(evorag_store::meta::FORGET_KEY)?
+            .and_then(|h| ForgetKey::from_hex(&h))
+            .ok_or(MemoryError::KeyUnavailable)?;
+        let vks = set
+            .privates()
+            .iter()
+            .flat_map(|p| p.vks().iter().copied())
+            .collect();
+        let spans = set
+            .privates()
+            .iter()
+            .filter_map(|p| p.at().copied())
+            .collect();
+        Ok(Some(Self {
+            key,
+            vks,
+            spans,
+            redactions: set.redactions().clone(),
+        }))
+    }
+
+    /// ターン `t` の伏せる範囲: `vks` に当たる部分文字列と、根拠の位置を今の本文に写したもの (写せなければ、安全の
+    /// 側に倒して本文の全体)。
+    fn ranges(&self, t: &TurnText<'_>) -> Vec<Range<usize>> {
+        let mut out = locate_keys(&self.key, &self.vks, t.text);
+        for at in self.spans.iter().filter(|s| s.turn == t.id) {
+            let span = usize::try_from(at.start).unwrap_or(usize::MAX)
+                ..usize::try_from(at.end).unwrap_or(usize::MAX);
+            match self.redactions.remap(t.id, at.rev, span, t.rev) {
+                Some(r) => out.push(widen(t.text, r)),
+                None => out.push(0..t.text.len()),
+            }
+        }
+        out
+    }
+}
+
 /// 伏せる材料 (private の値と、伏せ字にしないで忘れた範囲)。
 #[derive(Debug, Clone, Default)]
 pub struct Masker {
     private: Vec<PrivateValue>,
+    /// v0.5 の根の private の指示 (v0.4 の根では `None`)。
+    directive_privates: Option<DirectivePrivates>,
     forgets: TurnForgets,
     /// 伏せ字の印 (`[非表示]` の範囲を、後の伏せ字で写すのに使う)。
     redaction_marker: String,
@@ -78,6 +153,7 @@ impl Masker {
             .collect();
         Self {
             private,
+            directive_privates: None,
             forgets,
             redaction_marker: redaction_marker.to_owned(),
         }
@@ -87,18 +163,21 @@ impl Masker {
     ///
     /// # Errors
     /// 記録を読めないとき。
+    /// v0.5 の根では、解かれていない `private` の指示 (`directive`) も読む ([`DirectivePrivates`])。
     pub fn load(tx: &ReadTxn<'_>, redaction_marker: &str) -> Result<Self, MemoryError> {
-        Ok(Self::new(
+        let mut m = Self::new(
             &load_facts(tx)?.set,
             TurnForgets::load(tx)?,
             redaction_marker,
-        ))
+        );
+        m.directive_privates = DirectivePrivates::load(tx, redaction_marker)?;
+        Ok(m)
     }
 
     /// 伏せるものが無い。
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.private.is_empty() && self.forgets.is_empty()
+        self.private.is_empty() && self.directive_privates.is_none() && self.forgets.is_empty()
     }
 
     /// ターン `t` の、伏せ字にしないで忘れた `[非表示]` の範囲 (今の本文の位置)。忘れるの指示と合わないターン
@@ -143,6 +222,9 @@ impl Masker {
             .into_iter()
             .map(|r| widen(t.text, r))
             .collect();
+        if let Some(p) = &self.directive_privates {
+            out.extend(p.ranges(t));
+        }
         let current = |s: &Source| exchange.iter().any(|x| x.id == s.turn && x.rev == s.rev);
         let hay = Haystack::new(t.text);
         for pv in &self.private {

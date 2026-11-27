@@ -106,6 +106,7 @@ pub fn config(
         None => (None, None),
     };
     CoreConfig {
+        root_format: evorag_core::RootFormat::V04Bench,
         data_root: root.to_path_buf(),
         config_file: None,
         evorag_version: env!("CARGO_PKG_VERSION").into(),
@@ -268,6 +269,7 @@ impl Checks {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let m = DataRootModels::open(
             root,
+            evorag_core::RootFormat::V04Bench,
             env!("CARGO_PKG_VERSION"),
             clock.clone(),
             Arc::new(UuidV7Gen::new(clock)),
