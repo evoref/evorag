@@ -678,6 +678,10 @@ fn segment_and_ledger_deletes(
         }
     }
     let mut ops = Vec::new();
+    // 台帳の区切りの鍵の埋め込み (台帳を指す、04 §5.5) も消す (ベクトルを含む)。
+    for &l in &ledgers {
+        ops.extend(ledger_embedding_deletes(tx, l)?);
+    }
     for (kind, ids) in [(KIND_SEGMENT, &segments), (KIND_PROPOSAL, &ledgers)] {
         for &id in ids {
             match tx.get(kind, id)? {
@@ -692,6 +696,27 @@ fn segment_and_ledger_deletes(
                 None => {}
             }
         }
+    }
+    Ok(ops)
+}
+
+/// 台帳 `ledger` を指す埋め込み (区切りの鍵の埋め込み、04 §5.5) を消す操作 (ベクトルと関係を含む)。台帳を消す
+/// 依頼 (セッションの削除・置き換え・出典の無い台帳の片付け) に入れる。
+///
+/// # Errors
+/// 関係か記録を読めないとき。
+pub fn ledger_embedding_deletes(
+    tx: &evorag_store::ReadTxn<'_>,
+    ledger: Id,
+) -> Result<Vec<WriteOp>, crate::MemoryError> {
+    let mut ops = Vec::new();
+    for (emb, _) in crate::read::embeddings_of(tx, ledger)? {
+        ops.push(WriteOp::Delete {
+            kind: KIND_EMBEDDING.into(),
+            id: emb,
+        });
+        ops.push(WriteOp::DeleteBlobs(emb));
+        ops.push(WriteOp::DeleteLinksOf(emb));
     }
     Ok(ops)
 }

@@ -66,11 +66,6 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
         true
     })
     .ok()?;
-    for (id, b) in evorag_memory::embedding_bodies(&r).ok()? {
-        if !chunks.contains(&b.target) && !notes.contains(&b.target) {
-            p.embeddings.push(id);
-        }
-    }
     r.for_each(KIND_RECALL_FEEDBACK, |x| {
         if let Read::Ok(e) = x
             && let Ok(f) = e.body_as::<RecallFeedbackBody>()
@@ -96,6 +91,27 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
     // 区切りは、セッションか往復のターンがすべて無ければ消す。台帳は、出典のターン (`sentences`・`refs`・`corr`・
     // `through`) がすべて無ければ消す (区切りの記録を失った台帳は、区切りを戻すのに使うので残す、04 §2)。
     let (segments, ledgers) = sourceless_segments_and_ledgers(&r, &sessions, &turns)?;
+    // 埋め込みは、対象 (チャンク・ノート・台帳) が無いか消すものなら消す (区切りの鍵の埋め込みは台帳を指す、
+    // 04 §5.5)。v0.4 の形式の根には台帳の種類が無い。v0.5 の根で台帳を読めなければ、何も消さない (台帳の集合を空と
+    // みなして、有効な埋め込みを消さないため)。
+    let gone: HashSet<Id> = ledgers.iter().map(|e| e.id).collect();
+    let all_ledgers = if store.is_v05_root() {
+        ids_of(&r, KIND_PROPOSAL)?
+    } else {
+        HashSet::new()
+    };
+    let kept_ledgers: HashSet<Id> = all_ledgers
+        .into_iter()
+        .filter(|id| !gone.contains(id))
+        .collect();
+    for (id, b) in evorag_memory::embedding_bodies(&r).ok()? {
+        if !chunks.contains(&b.target)
+            && !notes.contains(&b.target)
+            && !kept_ledgers.contains(&b.target)
+        {
+            p.embeddings.push(id);
+        }
+    }
     p.segments = segments;
     p.ledgers = ledgers;
     // 事実は、出典のターンの記録が DB に無ければ、その出典を外す (03 §4.2 の規則 12 の「見つけ方」)。

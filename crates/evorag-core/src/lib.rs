@@ -313,6 +313,8 @@ struct Inner {
     notes: Mutex<notes::State>,
     /// 区切りと区切りの呼び出し (B2) の手順の状態 (04 §4 の手順 2・3、v0.5 の根)。
     ledgers: Mutex<ledgers::State>,
+    /// 区切りの鍵を索引に入れる手順の状態 (04 §5.5、v0.5 の根)。
+    segment_keys: Mutex<ledgers::keys::State>,
     /// 事実の抽出の手順の状態 (04 §5.2.1)。
     extraction: Mutex<extraction::State>,
     /// 訂正の候補の検証の手順の状態 (04 §6)。
@@ -694,6 +696,7 @@ impl Core {
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
             ledgers: Mutex::new(ledgers::State::default()),
+            segment_keys: Mutex::new(ledgers::keys::State::default()),
             extraction: Mutex::new(extraction::State::default()),
             correction: Mutex::new(correction::State::default()),
             fact_table: Mutex::new(fact_table::State::default()),
@@ -764,6 +767,8 @@ impl Core {
             // 古い版で消した会話の派生の記録を、DB・索引・退避から除く (03 §4.2 の規則 12)。
             orphans::reconcile(&worker, gone).await;
             embedding::open(&worker).await;
+            // 区切りの鍵を索引に合わせる (v0.5 の根。前の起動の後に変わった区切りだけを入れ替える、04 §5.5)。
+            ledgers::keys::sync(&worker).await;
             // 事実の表を作っておく (最初の応答の経路で数えないように、04 §5.4)。
             fact_table::prepare(&worker).await;
             // 前の起動で済まなかった整理の job (強制終了・索引や退避を除けなかった分) を続ける (04 §7.7 の 2・5)。
@@ -1055,6 +1060,56 @@ impl Core {
             });
         }
         out
+    }
+
+    /// 試験のため: 索引に入れた区切りの鍵 (区切りの ID と鍵の文字列。区切りの ID の順、04 §5.5)。語彙の索引にある
+    /// 区切りだけ。
+    #[doc(hidden)]
+    pub fn indexed_segment_keys(&self) -> Vec<(Id, Vec<String>)> {
+        let in_lex = self
+            .inner
+            .index
+            .as_deref()
+            .map(|ix| ix.snapshot().ids_where(recall::is_segment_key))
+            .unwrap_or_default();
+        ledgers::keys::snapshot(&self.inner)
+            .into_iter()
+            .filter(|(id, _)| in_lex.contains(id))
+            .collect()
+    }
+
+    /// 試験のため: 今の埋め込みのモデルのベクトルの索引に行のある区切り (区切りの鍵の行、04 §5.5)。
+    #[doc(hidden)]
+    pub fn vector_segment_keys(&self) -> std::collections::HashSet<Id> {
+        embedding::current(&self.inner)
+            .map(|(_, ix)| {
+                ix.snapshot()
+                    .ids_where(|r| r.session == recall::SEGMENT_KEY_SESSION)
+            })
+            .unwrap_or_default()
+    }
+
+    /// 試験のため: 問い `text` を埋め込みのモデルで埋め込み、今の世代のベクトルの索引の区切りの鍵の行と比べた値
+    /// (区切りの ID と値。値の高い順)。埋め込みのモデルか索引が無ければ空。
+    #[doc(hidden)]
+    pub async fn segment_key_vector_hits(&self, text: &str) -> Vec<(Id, f32)> {
+        let (Some((client, _)), Some((_, ix))) = (
+            embedding::embedder(&self.inner),
+            embedding::current(&self.inner),
+        ) else {
+            return Vec::new();
+        };
+        let Ok(mut out) = client.embed(&[text.to_owned()]).await else {
+            return Vec::new();
+        };
+        let Some(q) = out.pop() else {
+            return Vec::new();
+        };
+        ix.snapshot()
+            .search(&q, 50, &|r| r.session != recall::SEGMENT_KEY_SESSION)
+            .into_iter()
+            .map(|(r, v)| (r.id, v))
+            .collect()
     }
 
     /// 試験のため: 区切りの呼び出し (B2) の手順の数 (このプロセスの間。04 §5.2.1)。
@@ -1460,8 +1515,9 @@ async fn save_probe_result(
             );
         }
         // 点検の結果で、区切りの呼び出しを出す先が変わりうる (縮退・止める、06 §2.1)。点検の知らせを出したときは、
-        // 状態の変化の知らせを重ねない。区切りの手順は呼ぶ先を選び直す。
+        // 状態の変化の知らせを重ねない。区切りの手順は呼ぶ先を選び直す (区切りの鍵の使う台帳も選び直す)。
         ledgers::touch(inner);
+        ledgers::keys::touch(inner);
         memory_role::refresh_after_probe(inner, !found.is_empty());
     }
 }
@@ -2249,6 +2305,7 @@ async fn delete(inner: &Arc<Inner>) {
     notes::touch(inner);
     extraction::touch(inner);
     ledgers::touch(inner);
+    ledgers::keys::touch(inner);
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
     // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。知らせる前に `background` に
@@ -2340,8 +2397,13 @@ pub(crate) async fn run_cleanup_jobs(inner: &Arc<Inner>) -> bool {
             .await
             .unwrap_or_default();
         let mut all = true;
+        let ran = !jobs.is_empty();
         for job in jobs {
             all &= run_cleanup_job(&worker, &job, false).await;
+        }
+        // 整理の job は区切りの ID も索引から除くので、その後に区切りの鍵を入れ直す (04 §5.5)。
+        if ran {
+            ledgers::keys::touch(&worker);
         }
         // 忘れるの退避の写し直し (03 §7.3)。残っている job をまとめて 1 回の写しにする。
         if !forgets::run_backup_jobs(&worker).await {
@@ -2853,7 +2915,9 @@ async fn sync_chunks(inner: &Arc<Inner>, rebuild: bool) -> Vec<Id> {
         if rebuild {
             ix.replace_all(docs)?;
         } else {
-            let have = ix.snapshot().ids();
+            // 区切りの鍵の項目は、区切りの鍵の入れ替えが指紋で合わせる (ここで除くと、起動のたびにすべての区切りの
+            // 鍵を入れ替えることになる、04 §5.5)。
+            let have = ix.snapshot().ids_where(|d| !recall::is_segment_key(d));
             let want: std::collections::HashSet<Id> = docs.iter().map(|d| d.id).collect();
             let extra: std::collections::HashSet<Id> = have.difference(&want).copied().collect();
             if !extra.is_empty() {

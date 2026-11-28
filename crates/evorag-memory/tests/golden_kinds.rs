@@ -257,6 +257,7 @@ fn embedding_v1() {
             dim: 1024,
             key: None,
             src_rev: Some(1),
+            vk: None,
         },
     );
 }

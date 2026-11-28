@@ -184,12 +184,17 @@ pub(super) async fn save(
             }
             let previous = previous_key(&r, &w);
             let replaces = replaced(&r, &body, &target, previous.as_deref()).ok_or(Saved::Discarded)??;
-            let (_, req) = crate::writes(&w)
+            let (_, mut req) = crate::writes(&w)
                 .ledger(&body, None, &replaces)
                 .map_err(|e| {
                     tracing::warn!(error = %e, "a ledger could not be written");
                     Saved::Discarded
                 })?;
+            // 消す台帳の区切りの鍵の埋め込みも、同じ依頼で消す (04 §5.5)。
+            for e in &replaces {
+                let ops = evorag_memory::ledger_embedding_deletes(&r, e.id).map_err(|_| Saved::Discarded)?;
+                req.ops.extend(ops);
+            }
             Ok(req)
         })
         .await

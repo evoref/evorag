@@ -262,6 +262,8 @@ fn rebuild(
             }
         }
     }
+    // 区切りの鍵の指紋も消す (語彙の索引を作り直すので、次の起動ですべての区切りの鍵を入れ直す、04 §5.5)。
+    crate::ledgers::keys::remove_recorded(&root).map_err(|e| RebuildError::Index(e.to_string()))?;
     let lex = crate::recall::index_dir(&root);
     if lex.exists() {
         std::fs::remove_dir_all(&lex).map_err(|e| RebuildError::Index(e.to_string()))?;
