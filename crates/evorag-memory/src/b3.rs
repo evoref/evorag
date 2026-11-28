@@ -649,6 +649,21 @@ fn touches_marker(sent: &str, sentence: &Range<usize>, positions: &[Range<usize>
     })
 }
 
+/// 保存した本文 `text` の範囲 `ranges` (保存した本文の位置) のどれかが、前のふるいの後の本文の括弧・引用符の
+/// 内側に 1 文字でも掛かるか (関門 4 と同じ規則。04 §6 の訂正の関門 3 が使う)。前のふるいの後の本文に戻せない
+/// 範囲は、掛かるとみなす (安全の側)。空の範囲は見ない。
+pub(crate) fn quoted(rules: &Rules<'_>, text: &str, ranges: &[Range<usize>]) -> bool {
+    let filtered = Prefiltered::from_stored(text);
+    let quotes = QuoteRegions::new(
+        rules.languages.iter().flat_map(|r| &r.safety.quote),
+        filtered.text(),
+    );
+    ranges
+        .iter()
+        .filter(|r| !r.is_empty())
+        .any(|r| to_sent(&filtered, r).is_none_or(|s| quotes.overlaps(None, &s)))
+}
+
 /// 属性の決め方と関門 1〜7 を順に当てる (04 §5.2)。結果は [`cache_key`] の鍵で覚えてよい。
 ///
 /// # Errors

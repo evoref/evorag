@@ -11,6 +11,7 @@ pub mod b3;
 mod chars;
 mod correction;
 pub mod corrections;
+pub mod derive;
 mod derived;
 pub use derived::RecordError;
 mod directive;
