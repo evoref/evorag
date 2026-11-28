@@ -160,6 +160,7 @@ fn ledger_for(segment: Id, u1: Id, u2: Id, status: LedgerStatus) -> LedgerBody {
         schema: LEDGER_SCHEMA,
         variant: "b2-ja-1".into(),
         model_key: "m1".into(),
+        build_info: Some("b1-test".into()),
         sentences: vec![
             SentenceSpan {
                 s: 1,

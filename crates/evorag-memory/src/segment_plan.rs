@@ -183,7 +183,7 @@ impl Packer {
 }
 
 /// 前のふるいの後の発話の文字数 (Unicode のスカラー値の数)。送らない発話は 0 (04 §2)。
-fn utterance_chars(stored: &str) -> u32 {
+pub(crate) fn utterance_chars(stored: &str) -> u32 {
     match prefilter(MODE_CHAT, stored) {
         Screened::Send(p) => u32::try_from(p.text().chars().count()).unwrap_or(u32::MAX),
         Screened::Skip(_) => 0,
