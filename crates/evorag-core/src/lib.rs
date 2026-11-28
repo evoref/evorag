@@ -24,8 +24,10 @@ mod forget_ops;
 mod forgets;
 pub use forgets::ForgetStatus;
 pub mod import_v04;
+mod ledgers;
 pub mod localtime;
 pub mod logging;
+pub use ledgers::LedgerStats;
 mod masking;
 mod memory_role;
 pub use memory_role::{MemoryCall, MemoryConfig, MemoryRoute, VerifyError};
@@ -309,6 +311,8 @@ struct Inner {
     precompute: bool,
     /// ノートの手順の状態 (04 §2)。
     notes: Mutex<notes::State>,
+    /// 区切りと区切りの呼び出し (B2) の手順の状態 (04 §4 の手順 2・3、v0.5 の根)。
+    ledgers: Mutex<ledgers::State>,
     /// 事実の抽出の手順の状態 (04 §5.2.1)。
     extraction: Mutex<extraction::State>,
     /// 訂正の候補の検証の手順の状態 (04 §6)。
@@ -689,6 +693,7 @@ impl Core {
             rerank_cache: Arc::new(recall::RerankCache::default()),
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
+            ledgers: Mutex::new(ledgers::State::default()),
             extraction: Mutex::new(extraction::State::default()),
             correction: Mutex::new(correction::State::default()),
             fact_table: Mutex::new(fact_table::State::default()),
@@ -1016,6 +1021,31 @@ impl Core {
         memory_role::resolve(&self.inner).0
     }
 
+    /// 試験のため: 記録した台帳 (区切りの呼び出しのもの。記録の ID と本体、ID の順)。
+    #[doc(hidden)]
+    pub fn ledger_bodies(&self) -> Vec<(Id, evorag_memory::LedgerBody)> {
+        let mut out = Vec::new();
+        if let Ok(r) = self.inner.store.read() {
+            let _ = r.for_each(evorag_memory::KIND_PROPOSAL, |x| {
+                if let Read::Ok(e) = x
+                    && let Some(evorag_memory::LedgerRead::Segment(b)) =
+                        evorag_memory::read_ledger(&e)
+                {
+                    out.push((e.id, *b));
+                }
+                true
+            });
+        }
+        out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// 試験のため: 区切りの呼び出し (B2) の手順の数 (このプロセスの間。04 §5.2.1)。
+    #[doc(hidden)]
+    pub fn ledger_stats(&self) -> LedgerStats {
+        ledgers::stats(&self.inner)
+    }
+
     /// B2 の呼ぶ側と試験のため: 設定した memory のサーバに繋がらなかった。繋がるまで chat で代行し、30 秒ごとに
     /// 試し直す (06 §3 の表)。
     #[doc(hidden)]
@@ -1313,7 +1343,7 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
         if old.as_ref().is_some_and(|(_, p)| probe_fresh(inner, p)) {
             continue;
         }
-        let body = match role {
+        let mut body = match role {
             evorag_memory::ROLE_CHAT => {
                 probe::chat(&*client, &key, &build, &inner.aux_request_extra, slot).await
             }
@@ -1323,6 +1353,17 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             }
             _ => probe::rerank(&*client, &key, &build).await,
         };
+        // v0.5 の根の chat と memory は、B2 の型で小さな固定の区切りを呼ぶ (06 §3.3)。
+        if inner.store.is_v05_root() && probes_b2(role) {
+            probe::add_b2(
+                &mut body,
+                &*client,
+                inner.probe_extra(role),
+                slot,
+                inner.language,
+            )
+            .await;
+        }
         tracing::info!(
             role,
             prompt_tps = body.prompt_tps,
@@ -1336,7 +1377,7 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
             "model probed"
         );
         // 型縛りの確かめが接続の失敗や締切切れで終わったものは保存せず、次の機会に点検し直す (06 §3.3 の例外)。
-        if !probe::worth_saving(&body) {
+        if !probe::worth_saving(&body) || b2_unfinished(inner, &body) {
             tracing::warn!(role, "the model probe did not finish; it is retried later");
             continue;
         }
@@ -1353,6 +1394,18 @@ pub(crate) async fn probe_unprobed(inner: &Arc<Inner>) {
 pub(crate) fn probe_fresh(inner: &Inner, p: &evorag_memory::ModelProbeBody) -> bool {
     !probe::needs_retry(p, &inner.aux_request_extra)
         && probe::is_current(p, inner.probe_extra(&p.role))
+        && !b2_unfinished(inner, p)
+}
+
+/// B2 の型で点検する役割か (06 §3.3、v0.5 の根の chat と memory)。
+fn probes_b2(role: &str) -> bool {
+    role == evorag_memory::ROLE_CHAT || role == evorag_memory::ROLE_MEMORY
+}
+
+/// v0.5 の根で、B2 の型の点検の結果が出ていない chat・memory の点検か (保存せず、保存したものは点検し直す。B2 の型の
+/// 点検を足す前の結果と、繋がらない・締切切れで終わった点検、06 §3.3)。
+fn b2_unfinished(inner: &Inner, p: &evorag_memory::ModelProbeBody) -> bool {
+    inner.store.is_v05_root() && probes_b2(&p.role) && p.b2_ok.is_none()
 }
 
 impl Inner {
@@ -1390,7 +1443,8 @@ async fn save_probe_result(
             );
         }
         // 点検の結果で、区切りの呼び出しを出す先が変わりうる (縮退・止める、06 §2.1)。点検の知らせを出したときは、
-        // 状態の変化の知らせを重ねない。
+        // 状態の変化の知らせを重ねない。区切りの手順は呼ぶ先を選び直す。
+        ledgers::touch(inner);
         memory_role::refresh_after_probe(inner, !found.is_empty());
     }
 }
@@ -2177,6 +2231,7 @@ async fn delete(inner: &Arc<Inner>) {
         .session = None;
     notes::touch(inner);
     extraction::touch(inner);
+    ledgers::touch(inner);
     // 削除の後は、次のターンの前に事実の表を作り直す (04 §5.4 の「作り直す時機」)。
     fact_table::invalidate(inner);
     // 応答のモデルのスロットのキャッシュの消去を求める (06 §4。断られたら無視する)。知らせる前に `background` に
@@ -2634,6 +2689,7 @@ fn index_turns(inner: &Arc<Inner>, ids: Vec<Id>) {
     // 話題の区切りが変わったかもしれない (04 §2)。事実を抽出する発話が増えたかもしれない (04 §5.2.1)。
     notes::touch(inner);
     extraction::touch(inner);
+    ledgers::touch(inner);
     if inner.index.is_none() {
         return;
     }

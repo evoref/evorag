@@ -189,6 +189,7 @@ fn model_probe_v1() {
             error: Some("speed: timed out".into()),
             // v0.5 の任意の項目。見本には無い。
             extra_hash: None,
+            b2_ok: None,
         },
     );
 }

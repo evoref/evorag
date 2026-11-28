@@ -35,6 +35,8 @@ pub struct MemoryCall {
     pub client: Arc<dyn LlmClient>,
     /// 実際に呼ぶモデル (台帳の `model_key`)。
     pub model_key: String,
+    /// 呼ぶ先の llama-server の `build_info` (台帳の `build_info`、`needs_call` の比べる相手。返さないサーバは空)。
+    pub build_info: String,
     /// 縮退で chat を使うときの理由 (台帳の `inputs.role_fallback` は `is_some()`)。
     pub fallback: Option<MemoryFallback>,
     /// 意図した memory の役割の model_key (台帳の `inputs.role_model_key`)。memory を設定しないときは chat の
@@ -53,20 +55,21 @@ impl MemoryCall {
         self.fallback.is_some()
     }
 
-    /// 呼ぶ先の `/props` の model_key が、選んだ時の model_key と同じかを確かめる (06 §2.1 の細目)。
+    /// 呼ぶ先の `/props` の model_key が、選んだ時の model_key と同じかを確かめる (06 §2.1 の細目)。同じなら、
+    /// 今の能力 (スロットの文脈の長さ・`build_info`) を返す。
     ///
     /// # Errors
     ///
     /// 繋がらない ([`VerifyError::Unreachable`]。memory の役割なら [`crate::Core::memory_unreachable`] を呼ぶ)、
     /// モデルが違う ([`VerifyError::Changed`])。
-    pub async fn verify(&self) -> Result<(), VerifyError> {
+    pub async fn verify(&self) -> Result<evorag_llm::ServerInfo, VerifyError> {
         let server = self
             .client
             .server_info()
             .await
             .map_err(VerifyError::Unreachable)?;
         if server.model_key == self.model_key {
-            Ok(())
+            Ok(server)
         } else {
             Err(VerifyError::Changed {
                 connected: server.model_key,
@@ -90,6 +93,7 @@ impl std::fmt::Debug for MemoryCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryCall")
             .field("model_key", &self.model_key)
+            .field("build_info", &self.build_info)
             .field("fallback", &self.fallback)
             .field("role_model_key", &self.role_model_key)
             .field("extra", &self.extra)
@@ -120,6 +124,8 @@ enum Probed {
 }
 
 fn probed(inner: &Inner, role: &str, model_key: &str, build_info: &str) -> Probed {
+    // v0.5 の根では、B2 の型の点検 (06 §3.3) にも通ったものだけを使う。
+    let v05 = inner.store.is_v05_root();
     let found = inner
         .store
         .read()
@@ -130,7 +136,11 @@ fn probed(inner: &Inner, role: &str, model_key: &str, build_info: &str) -> Probe
         // 点検し直す結果 (要求の付け足しを直した後など) は、点検し直すまで使わない (06 §3.3 の例外)。
         None => Probed::Pending,
         Some((_, p)) if !crate::probe_fresh(inner, &p) => Probed::Pending,
-        Some((_, p)) if p.structured_ok == Some(true) && p.thinking_off != Some(false) => {
+        Some((_, p))
+            if p.structured_ok == Some(true)
+                && p.thinking_off != Some(false)
+                && (!v05 || p.b2_ok == Some(true)) =>
+        {
             Probed::Usable(Box::new(p))
         }
         Some(_) => Probed::Unusable,
@@ -160,6 +170,7 @@ fn via_chat(
         Probed::Usable(_) => MemoryRoute::Call(MemoryCall {
             client,
             model_key: server.model_key.clone(),
+            build_info: server.build_info.clone(),
             fallback,
             role_model_key,
             extra: inner.aux_extra(),
@@ -216,6 +227,7 @@ pub(crate) fn resolve(inner: &Inner) -> (MemoryState, MemoryRoute) {
                 MemoryRoute::Call(MemoryCall {
                     client,
                     model_key: o.model_key.clone(),
+                    build_info: o.build_info.clone(),
                     fallback: None,
                     role_model_key: Some(o.model_key),
                     extra: crate::probe::aux_extra_with(&inner.memory_request_extra, Some(&p)),
@@ -225,6 +237,17 @@ pub(crate) fn resolve(inner: &Inner) -> (MemoryState, MemoryRoute) {
         },
         RoleState::Mismatch(_) => fallback(MemoryFallback::Mismatch),
         RoleState::Waiting | RoleState::Unset => fallback(MemoryFallback::Waiting),
+    }
+}
+
+impl Inner {
+    /// 設定 `llm.memory` で memory の役割のサーバを置いたか (置かなければ chat のサーバとモデルで呼ぶ、06 §2.1)。
+    pub(crate) fn memory_configured(&self) -> bool {
+        self.aux
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|a| a.role == evorag_memory::ROLE_MEMORY && a.client.is_some())
     }
 }
 
@@ -245,6 +268,8 @@ pub(crate) fn refresh_after_probe(inner: &Inner, announced: bool) {
     };
     if changed {
         tracing::info!(?state, "memory role changed");
+        // 区切りの手順は呼ぶ先を選び直す (縮退の入りと出)。
+        crate::ledgers::touch(inner);
         crate::emit(
             inner,
             Event::MemoryRole {

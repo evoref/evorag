@@ -351,6 +351,10 @@ pub struct ModelProbeBody {
     /// chat・memory: 点検に渡した要求の付け足し (設定の指定) のハッシュ。違えば点検し直す (06 §3.3、v0.5)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_hash: Option<String>,
+    /// chat・memory (v0.5 の根): B2 の型で小さな固定の区切りを呼び、出力が型に合った (06 §3.3)。スロットの文脈の
+    /// 長さが B2 に足りなければ、呼ばずに偽。v0.5 の根で点検していない結果は null (点検し直す)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b2_ok: Option<bool>,
 }
 
 /// リランクのしきい値と帯の下限 (05 §3.7、v0.2)。

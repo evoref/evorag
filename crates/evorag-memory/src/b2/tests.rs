@@ -372,7 +372,7 @@ fn a_segment_without_numbered_sentences_is_not_called() {
     let meta = LedgerMeta {
         segment: id(50),
         model_key: "mk",
-        build_info: "b1-test",
+        build_info: Some("b1-test"),
         caller: &caller,
         attempts: 2,
         tokens: LedgerTokens {
@@ -929,7 +929,7 @@ fn meta(caller: &CallerInputs) -> LedgerMeta<'_> {
     LedgerMeta {
         segment: id(50),
         model_key: "mk",
-        build_info: "b1-test",
+        build_info: Some("b1-test"),
         caller,
         attempts: 1,
         tokens: LedgerTokens {

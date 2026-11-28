@@ -26,8 +26,8 @@ pub struct LedgerMeta<'a> {
     pub segment: Id,
     /// 実際に呼んだモデル。
     pub model_key: &'a str,
-    /// 呼んだ先の llama-server の `build_info` (台帳の `build_info`)。
-    pub build_info: &'a str,
+    /// 呼んだ先の llama-server の `build_info` (台帳の `build_info`。サーバが返さなければ `None` で、null を書く)。
+    pub build_info: Option<&'a str>,
     pub caller: &'a CallerInputs,
     /// 締切切れと 5xx で送り直した回数。
     pub attempts: u32,
@@ -71,7 +71,7 @@ pub fn ledger_body(
         schema: LEDGER_SCHEMA,
         variant: VARIANT.to_owned(),
         model_key: meta.model_key.to_owned(),
-        build_info: Some(meta.build_info.to_owned()),
+        build_info: meta.build_info.map(str::to_owned),
         attempts: meta.attempts,
         ..LedgerBody::default()
     };
