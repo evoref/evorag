@@ -1,5 +1,6 @@
 //! v0.5 の根の種類の golden fixture と、本体の読み方 (03 §4.2 の規則 4・7・11、04 §5.2・§5.2.1・§7.5)。
 //!
+//! 対象は `directive`・`proposal`・`unit`・`segment` (`unit` と `segment` は v1 だけ。凍結は台帳だけ)。
 //! 見本は `tests/fixtures/<kind>/v1-key.bin` と `v1.value` (今の形式。v0.8 の凍結までは形式を変えたら作り直してよい、
 //! 03 §4.1)。台帳 (`proposal`) は v0.5.0 から「項目を足すだけ」なので、v0.5.0 の見本 `v0.5.0-key.bin` と
 //! `v0.5.0.value` を残し、作り直さない (後の版でも読めることを試験する、03 §4.2 の規則 4)。
@@ -240,6 +241,70 @@ fn directive_v1() {
 #[test]
 fn proposal_v1() {
     check(KIND_PROPOSAL, "v1", t(40), &sample_ledger(), false);
+}
+
+/// 単位 (導出の結果。どの項目も埋める)。
+fn sample_unit() -> UnitBody {
+    let when = UnitWhen {
+        from: Some("2026-01".into()),
+        to: None,
+        basis: WhenBasis::Stated,
+    };
+    UnitBody {
+        layer: UnitLayer::World,
+        entity: "self".into(),
+        aspect: "residence".into(),
+        free: false,
+        value: "見本の町".into(),
+        vk: "ab".repeat(32),
+        norm: NORM_V1,
+        when: Some(when.clone()),
+        tense: UnitTense::Current,
+        state: Some(UnitState::Superseded),
+        against: Some(t(32)),
+        by: Some(t(31)),
+        state_at: Some(1_764_115_200_000),
+        private: true,
+        anchors: vec![Anchor {
+            turn: t(2),
+            rev: 0,
+            start: 6,
+            end: 18,
+            s_start: 0,
+            s_end: 30,
+            kind: AnchorKind::Said,
+            when: Some(when),
+        }],
+    }
+}
+
+/// 閉じた区切り (閉じた区切りは `Immediate` で、導き直せない)。
+fn sample_segment() -> SegmentBody {
+    SegmentBody {
+        session: t(1),
+        pairs: vec![t(2), t(4), t(6)],
+        closed: true,
+        chars: 123,
+    }
+}
+
+/// verifies: AC-NFR-304-1 (単位の今の形式の見本)
+#[test]
+fn unit_v1() {
+    check(KIND_UNIT, "v1", t(30), &sample_unit(), false);
+}
+
+/// verifies: AC-NFR-304-1 (区切りの今の形式の見本)
+#[test]
+fn segment_v1() {
+    let body = sample_segment();
+    check(
+        KIND_SEGMENT,
+        "v1",
+        body.id().expect("a segment has a pair"),
+        &body,
+        false,
+    );
 }
 
 /// 台帳の v0.5.0 の見本を、今の読み手で読める (作り直さない見本。中身の期待はここに固定する)。
