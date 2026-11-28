@@ -296,6 +296,9 @@ pub struct LedgerBody {
     pub variant: String,
     /// 実際に呼んだモデル。
     pub model_key: String,
+    /// 呼んだ先の llama-server の `build_info` (06 §3)。無ければ null (この項目を足す前の台帳)。`failed` と
+    /// `failed_parts` > 0 の台帳を呼び直すかの判定に使う (04 §5.2.1 の `needs_call`)。
+    pub build_info: Option<String>,
     /// 文番号 → 根拠の文の位置 (`call` が `segment` のときだけ必須)。文番号の順。
     #[serde(default)]
     pub sentences: Vec<SentenceSpan>,
@@ -325,6 +328,7 @@ serialize_with_extra!(LedgerBody {
     schema,
     variant,
     model_key,
+    build_info,
     sentences,
     inputs,
     output,

@@ -173,6 +173,7 @@ fn sample_ledger() -> LedgerBody {
         schema: LEDGER_SCHEMA,
         variant: "b2-ja-1".into(),
         model_key: format!("{:032x}", 0x0123_4567_89ab_cdef_u128),
+        build_info: Some("b8000-0123abc".into()),
         sentences: vec![
             SentenceSpan {
                 s: 1,
@@ -245,7 +246,12 @@ fn proposal_v1() {
 /// verifies: AC-NFR-304-3 (台帳の v0.5.0 の見本を読める)
 #[test]
 fn proposal_v0_5_0_sample_stays_readable() {
-    check(KIND_PROPOSAL, "v0.5.0", t(40), &sample_ledger(), true);
+    // v0.5.0 の見本は `build_info` を足す前の形 (無い項目は null で読む)。
+    let v0_5_0 = LedgerBody {
+        build_info: None,
+        ..sample_ledger()
+    };
+    check(KIND_PROPOSAL, "v0.5.0", t(40), &v0_5_0, true);
     if bless() {
         return;
     }
@@ -259,6 +265,7 @@ fn proposal_v0_5_0_sample_stays_readable() {
     let l: LedgerBody = back.body_as().unwrap();
     assert!(l.is_segment_call());
     assert_eq!(l.status(), LedgerStatus::Complete);
+    assert_eq!(l.build_info, None);
     assert_eq!(l.segment, Some(segment_id(t(2))));
     let keys = l.output.keys();
     assert_eq!(

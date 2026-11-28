@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use evorag_types::{Id, Timestamp};
+use evorag_types::Id;
 
 use crate::kinds::SrcRev;
 use crate::ledger::{LedgerBody, LedgerStatus};
@@ -155,10 +155,13 @@ pub enum Current<'a> {
     },
 }
 
-/// 選び方の入力のうち、区切りに依らないもの。
+/// 選び方と判定の入力のうち、区切りに依らないもの。
 #[derive(Debug, Clone, Copy)]
 pub struct SelectEnv<'a, F> {
     pub current: Current<'a>,
+    /// 今呼ぶ先 (縮退の間は chat のモデル) の llama-server の `build_info`。[`needs_call`] が、`failed` と
+    /// `failed_parts` > 0 の台帳の `build_info` と比べる。
+    pub build_info: &'a str,
     /// 直前の選択 (06 §3.1 の履歴の前の model_key と、そのとき使っていた変種)。無ければ `None`。
     pub previous: Option<Selection<'a>>,
     /// 今の規則の版。
@@ -344,16 +347,25 @@ fn tail_reason(segment: &SegmentBody, l: &LedgerBody) -> Option<CallReason> {
     })
 }
 
-/// 台帳を書いた後に、呼ぶ先が変わったか (台帳の ID の時刻が `target_since` より前)。
-fn changed_after(l: StoredLedger<'_>, target_since: Timestamp) -> bool {
-    l.id.timestamp() < target_since
+impl<F> SelectEnv<'_, F> {
+    /// 台帳を呼んだ先から、今呼ぶ先 (model_key と `build_info` の組) が変わったか。`build_info` の無い (null の)
+    /// 台帳は、model_key だけで比べる (`build_info` を足す前の台帳を、まとめて呼び直さないため)。
+    fn target_changed(&self, l: &LedgerBody) -> bool {
+        let model_key = match self.current {
+            Current::Ready(s) => s.model_key,
+            Current::Fallback { called, .. } => called,
+        };
+        l.model_key != model_key
+            || l.build_info
+                .as_deref()
+                .is_some_and(|b| b != self.build_info)
+    }
 }
 
 /// 区切りを呼ぶか (呼び直すか) を決める (04 §5.2.1 の `needs_call`。裏の処理と `evorag sleep` の判定)。
 ///
-/// `target_since` は、今呼ぶ先のモデル (縮退の間は chat のモデル) の model_key と llama-server の `build_info`
-/// の組が効き始めた時刻。台帳は `build_info` を持たないので、「`failed` の台帳の後に model_key か `build_info` が
-/// 変わった」を、台帳の ID の時刻がこれより前であることで判定する。
+/// 「呼ぶ先が変わった」は、台帳の `model_key`・`build_info` と、今呼ぶ先 (縮退の間は chat のモデル) の
+/// model_key と [`SelectEnv::build_info`] の組を比べて決める (`build_info` の無い台帳は model_key だけで比べる)。
 ///
 /// 次の順に決める。
 /// 1. 使う台帳 ([`select_ledger`]) が無い: 今の選択の、有効な `failed` の台帳 (最も新しいもの) があれば、その後に
@@ -368,7 +380,6 @@ pub fn needs_call<F: Fn(Id) -> Option<u32>>(
     segment: &SegmentBody,
     ledgers: &[StoredLedger<'_>],
     env: &SelectEnv<'_, F>,
-    target_since: Timestamp,
 ) -> CallDecision {
     let Some(id) = segment.id() else {
         return CallDecision::Keep(KeepReason::NoPairs);
@@ -385,9 +396,7 @@ pub fn needs_call<F: Fn(Id) -> Option<u32>>(
             .max_by_key(|l| l.id);
         return match failed {
             None => CallDecision::Call(CallReason::NoLedger),
-            Some(&l) if changed_after(l, target_since) => {
-                CallDecision::Call(CallReason::FailedRetry)
-            }
+            Some(l) if env.target_changed(l.body) => CallDecision::Call(CallReason::FailedRetry),
             Some(l) => tail_reason(segment, l.body).map_or(
                 CallDecision::Keep(KeepReason::FailedUnchanged),
                 CallDecision::Call,
@@ -402,7 +411,7 @@ pub fn needs_call<F: Fn(Id) -> Option<u32>>(
         return CallDecision::Call(reason);
     }
     if selected.stage == Stage::Current && l.body.failed_parts > 0 {
-        return if changed_after(l, target_since) {
+        return if env.target_changed(l.body) {
             CallDecision::Call(CallReason::FailedPartsRetry)
         } else {
             CallDecision::Keep(KeepReason::FailedPartsUnchanged)

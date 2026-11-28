@@ -9,6 +9,8 @@ const V: &str = "sr1";
 const A: &str = "model-a";
 const B: &str = "model-b";
 const CHAT: &str = "chat-model";
+/// 今呼ぶ先の llama-server の `build_info` (台帳の見本も同じ)。
+const BUILD: &str = "b100-0123abc";
 
 /// 発話 `n` のターンの ID。
 fn turn(n: u8) -> Id {
@@ -48,6 +50,7 @@ fn ledger(model_key: &str, status: &str, through: u8) -> LedgerBody {
         schema: 1,
         variant: V.to_owned(),
         model_key: model_key.to_owned(),
+        build_info: Some(BUILD.to_owned()),
         status: status.to_owned(),
         ..LedgerBody::default()
     };
@@ -87,6 +90,7 @@ fn env_with<'a>(
 ) -> SelectEnv<'a, impl Fn(Id) -> Option<u32> + 'a> {
     SelectEnv {
         current,
+        build_info: BUILD,
         previous,
         versions: RuleVersions::current(CORR_V),
         turn_rev: move |t: Id| revs.get(&t).copied(),
@@ -385,15 +389,12 @@ fn after_the_role_returns_fallback_ledgers_are_previous() {
 
 // ---- needs_call ----
 
-const LATER: i64 = 1_000;
-
 fn decide(
     seg: &SegmentBody,
     entries: &[(u64, &LedgerBody)],
     env: &SelectEnv<'_, impl Fn(Id) -> Option<u32>>,
-    since: i64,
 ) -> CallDecision {
-    needs_call(seg, &stored(entries), env, Timestamp::from_millis(since))
+    needs_call(seg, &stored(entries), env)
 }
 
 #[test]
@@ -401,7 +402,7 @@ fn a_segment_without_ledgers_is_called() {
     let revs = revs();
     let env = env_a(&revs);
     assert_eq!(
-        decide(&segment(3, true), &[], &env, 0),
+        decide(&segment(3, true), &[], &env),
         CallDecision::Call(CallReason::NoLedger)
     );
     assert_eq!(
@@ -411,8 +412,7 @@ fn a_segment_without_ledgers_is_called() {
                 ..segment(1, true)
             },
             &[],
-            &env,
-            0
+            &env
         ),
         CallDecision::Keep(KeepReason::NoPairs)
     );
@@ -425,7 +425,7 @@ fn an_invalid_ledger_is_called_again() {
     let env = env_a(&revs);
     let l = ledger(A, "complete", 3);
     assert_eq!(
-        decide(&segment(3, true), &[(10, &l)], &env, 0),
+        decide(&segment(3, true), &[(10, &l)], &env),
         CallDecision::Call(CallReason::NoLedger)
     );
 }
@@ -436,7 +436,7 @@ fn a_covered_segment_is_not_called() {
     let env = env_a(&revs);
     let l = ledger(A, "complete", 3);
     assert_eq!(
-        decide(&segment(3, true), &[(10, &l)], &env, 0),
+        decide(&segment(3, true), &[(10, &l)], &env),
         CallDecision::Keep(KeepReason::Covered(Stage::Current))
     );
 }
@@ -448,14 +448,14 @@ fn old_segments_are_not_rebuilt_after_a_model_or_rule_change() {
     // モデルを B から A に替えた: B の台帳は直前の選択の台帳として使い続ける。
     let of_b = ledger(B, "complete", 3);
     assert_eq!(
-        decide(&segment(3, true), &[(10, &of_b)], &env, LATER),
+        decide(&segment(3, true), &[(10, &of_b)], &env),
         CallDecision::Keep(KeepReason::Covered(Stage::Previous))
     );
     // 規則の版が上がった: 版の不一致の段で使い続ける。
     let mut old_rules = ledger(A, "complete", 3);
     old_rules.inputs.splitter = 0;
     assert_eq!(
-        decide(&segment(3, true), &[(10, &old_rules)], &env, LATER),
+        decide(&segment(3, true), &[(10, &old_rules)], &env),
         CallDecision::Keep(KeepReason::Covered(Stage::VersionMismatch))
     );
 }
@@ -468,7 +468,7 @@ fn partial_ledgers_are_always_called_again() {
     let previous = ledger(B, "partial", 3);
     for l in [&current, &previous] {
         assert_eq!(
-            decide(&segment(3, true), &[(10, l)], &env, 0),
+            decide(&segment(3, true), &[(10, l)], &env),
             CallDecision::Call(CallReason::Partial)
         );
     }
@@ -479,25 +479,46 @@ fn a_failed_ledger_is_retried_only_after_the_target_changes() {
     let revs = revs();
     let env = env_a(&revs);
     let failed = ledger(A, "failed", 3);
-    // model_key も build_info も変わっていない (台帳の後に効き始めた組ではない)。
+    // model_key も build_info も変わっていない。
     assert_eq!(
-        decide(&segment(3, true), &[(500, &failed)], &env, 100),
+        decide(&segment(3, true), &[(500, &failed)], &env),
         CallDecision::Keep(KeepReason::FailedUnchanged)
     );
+    // build_info が変わった。
+    let rebuilt = SelectEnv {
+        build_info: "b200-4567def",
+        ..env
+    };
     assert_eq!(
-        decide(&segment(3, true), &[(500, &failed)], &env, 500),
-        CallDecision::Keep(KeepReason::FailedUnchanged)
-    );
-    // build_info が変わった (今の組が台帳の後に効き始めた)。
-    assert_eq!(
-        decide(&segment(3, true), &[(500, &failed)], &env, 501),
+        decide(&segment(3, true), &[(500, &failed)], &rebuilt),
         CallDecision::Call(CallReason::FailedRetry)
+    );
+    // build_info の無い (項目を足す前の) 台帳は、model_key が同じなら変わっていないとする。
+    let mut old = failed.clone();
+    old.build_info = None;
+    assert_eq!(
+        decide(&segment(3, true), &[(500, &old)], &rebuilt),
+        CallDecision::Keep(KeepReason::FailedUnchanged)
     );
     // model_key が変わった: 失敗した台帳は今の選択のものでない。
     let env_b = env_with(&revs, Current::Ready(sel(B)), Some(sel(A)));
     assert_eq!(
-        decide(&segment(3, true), &[(500, &failed)], &env_b, 100),
+        decide(&segment(3, true), &[(500, &failed)], &env_b),
         CallDecision::Call(CallReason::NoLedger)
+    );
+    // 縮退に入った: 役割のモデルで失敗した台帳は、chat のモデルで呼び直す。
+    let fallback = env_with(
+        &revs,
+        Current::Fallback {
+            variant: V,
+            intended: Some(A),
+            called: CHAT,
+        },
+        Some(sel(B)),
+    );
+    assert_eq!(
+        decide(&segment(3, true), &[(500, &failed)], &fallback),
+        CallDecision::Call(CallReason::FailedRetry)
     );
 }
 
@@ -507,18 +528,18 @@ fn a_failed_ledger_does_not_block_when_turns_changed_or_pairs_were_added() {
     let env = env_a(&revs);
     let failed = ledger(A, "failed", 3);
     assert_eq!(
-        decide(&segment(5, false), &[(500, &failed)], &env, 100),
+        decide(&segment(5, false), &[(500, &failed)], &env),
         CallDecision::Call(CallReason::TailGrew)
     );
     assert_eq!(
-        decide(&segment(4, true), &[(500, &failed)], &env, 100),
+        decide(&segment(4, true), &[(500, &failed)], &env),
         CallDecision::Call(CallReason::Closed)
     );
     let mut changed = revs.clone();
     changed.insert(turn(1), 2);
     let env = env_a(&changed);
     assert_eq!(
-        decide(&segment(3, true), &[(500, &failed)], &env, 100),
+        decide(&segment(3, true), &[(500, &failed)], &env),
         CallDecision::Call(CallReason::NoLedger)
     );
 }
@@ -530,7 +551,7 @@ fn a_failed_ledger_does_not_hide_an_older_usable_one() {
     let failed = ledger(A, "failed", 3);
     let of_b = ledger(B, "complete", 3);
     assert_eq!(
-        decide(&segment(3, true), &[(500, &failed), (10, &of_b)], &env, 501),
+        decide(&segment(3, true), &[(500, &failed), (10, &of_b)], &env),
         CallDecision::Keep(KeepReason::Covered(Stage::Previous))
     );
 }
@@ -542,18 +563,28 @@ fn failed_parts_are_retried_only_after_the_target_changes() {
     let mut l = ledger(A, "complete", 3);
     l.failed_parts = 1;
     assert_eq!(
-        decide(&segment(3, true), &[(500, &l)], &env, 100),
+        decide(&segment(3, true), &[(500, &l)], &env),
         CallDecision::Keep(KeepReason::FailedPartsUnchanged)
     );
+    let rebuilt = SelectEnv {
+        build_info: "b200-4567def",
+        ..env
+    };
     assert_eq!(
-        decide(&segment(3, true), &[(500, &l)], &env, 600),
+        decide(&segment(3, true), &[(500, &l)], &rebuilt),
         CallDecision::Call(CallReason::FailedPartsRetry)
+    );
+    let mut old = l.clone();
+    old.build_info = None;
+    assert_eq!(
+        decide(&segment(3, true), &[(500, &old)], &rebuilt),
+        CallDecision::Keep(KeepReason::FailedPartsUnchanged)
     );
     // 直前の選択の台帳なら、自動では作り直さない。
     let mut of_b = ledger(B, "complete", 3);
     of_b.failed_parts = 1;
     assert_eq!(
-        decide(&segment(3, true), &[(500, &of_b)], &env, 600),
+        decide(&segment(3, true), &[(500, &of_b)], &rebuilt),
         CallDecision::Keep(KeepReason::Covered(Stage::Previous))
     );
 }
@@ -580,19 +611,19 @@ fn the_tail_is_called_every_two_pairs_and_on_close() {
         (segment(4, true), CallDecision::Call(CallReason::Closed)),
     ];
     for (seg, want) in cases {
-        assert_eq!(decide(&seg, &[(10, &l)], &env, 0), want, "{seg:?}");
+        assert_eq!(decide(&seg, &[(10, &l)], &env), want, "{seg:?}");
     }
     // `through` が無い台帳は、入れた往復が分からないので呼ぶ。
     let mut no_through = ledger(A, "complete", 3);
     no_through.inputs.through = None;
     assert_eq!(
-        decide(&segment(3, true), &[(10, &no_through)], &env, 0),
+        decide(&segment(3, true), &[(10, &no_through)], &env),
         CallDecision::Call(CallReason::Closed)
     );
     // 直前の選択の台帳でも、往復が増えたら今の選択で呼ぶ。
     let of_b = ledger(B, "complete", 3);
     assert_eq!(
-        decide(&segment(5, false), &[(10, &of_b)], &env, 0),
+        decide(&segment(5, false), &[(10, &of_b)], &env),
         CallDecision::Call(CallReason::TailGrew)
     );
 }
@@ -613,22 +644,17 @@ fn entering_and_leaving_fallback_does_not_call_again() {
     );
     // 縮退に入っても、役割のモデルで作った台帳を使い続ける。
     assert_eq!(
-        decide(&segment(3, true), &[(10, &before)], &in_fallback, 0),
+        decide(&segment(3, true), &[(10, &before)], &in_fallback),
         CallDecision::Keep(KeepReason::Covered(Stage::Current))
     );
     assert_eq!(
-        decide(
-            &segment(3, true),
-            &[(10, &made_in_fallback)],
-            &in_fallback,
-            0
-        ),
+        decide(&segment(3, true), &[(10, &made_in_fallback)], &in_fallback),
         CallDecision::Keep(KeepReason::Covered(Stage::Current))
     );
     // 役割が戻っても、縮退で作った台帳を直前の選択の台帳として使い続ける。
     let returned = env_a(&revs);
     assert_eq!(
-        decide(&segment(3, true), &[(10, &made_in_fallback)], &returned, 0),
+        decide(&segment(3, true), &[(10, &made_in_fallback)], &returned),
         CallDecision::Keep(KeepReason::Covered(Stage::Previous))
     );
 }
