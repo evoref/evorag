@@ -105,6 +105,9 @@ pub(crate) enum Step {
     /// 忘れるの当て直しの残り (DB の層と、入れ替えに失敗したジャーナルの書き直し) を確かめ直す (04 §7.2)。
     /// sleep-time のほかの手順の前に置く。
     Forget,
+    /// 区切りを決め、区切りごとの 1 回の呼び出し (B2) で台帳を書く (04 §4 の手順 2・3、v0.5 の根)。埋め込みの後に
+    /// 置く。利用者が操作したら、この手順は自分で要求を止め、止めたところまでを書く (`ledgers.rs`)。
+    Ledgers,
 }
 
 /// sleep-time の手順を動かせる状態か。
@@ -143,6 +146,9 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     }
     if !waiting(Step::Embed) && crate::embedding::needed(inner) {
         return Some(Step::Embed);
+    }
+    if !waiting(Step::Ledgers) && crate::ledgers::needed(inner) {
+        return Some(Step::Ledgers);
     }
     if !waiting(Step::Notes) && crate::notes::needed(inner) {
         return Some(Step::Notes);
@@ -251,6 +257,7 @@ pub(crate) fn remaining_steps(inner: &Inner) -> Vec<String> {
     [
         (Step::Forget, crate::forgets::needed(inner)),
         (Step::Embed, crate::embedding::needed(inner)),
+        (Step::Ledgers, crate::ledgers::needed(inner)),
         (Step::Notes, crate::notes::needed(inner)),
         (Step::Extract, crate::extraction::needed(inner)),
         (Step::Verify, crate::correction::needed(inner)),
@@ -347,6 +354,14 @@ pub(crate) async fn run(inner: Arc<Inner>) {
 /// 手順を 1 つ動かす。利用者が操作したら future を落として止め、`None` を返す。終えたら、進んだか
 /// (埋め込みは 1 件でも足せたか飛ばしたか。ほかの手順は「進まなかった」として、まだ要れば待たせる)。
 async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<bool> {
+    if step == Step::Ledgers {
+        // 落とすと止めたところまでを書けないので、手順が自分で操作を見て止める (04 §5.2.1 の「止められたとき」)。
+        // 世代は、手順が待つ準備をした後に確かめる。
+        inner.working.store(true, Ordering::SeqCst);
+        let done = crate::ledgers::run(inner, generation).await;
+        inner.working.store(false, Ordering::SeqCst);
+        return done;
+    }
     let touched = inner.activity.touched_notify().notified();
     tokio::pin!(touched);
     // 待つ準備をしてから、世代が変わっていないかを確かめる (その間の操作を取りこぼさない)。
@@ -375,6 +390,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
                 crate::forgets::recheck(inner).await;
                 false
             }
+            Step::Ledgers => false,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();

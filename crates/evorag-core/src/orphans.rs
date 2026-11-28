@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use evorag_memory::{
-    KIND_CHUNK, KIND_CORRECTION, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN,
-    NoteBody, RecallFeedbackBody,
+    KIND_CHUNK, KIND_CORRECTION, KIND_NOTE, KIND_PROPOSAL, KIND_RECALL_FEEDBACK, KIND_SEGMENT,
+    KIND_SESSION, KIND_TURN, LedgerRead, NoteBody, RecallFeedbackBody, SegmentBody, read_ledger,
 };
 use evorag_store::{Read, Store, WriteOp};
 use evorag_types::{Id, IdGen, Timestamp};
@@ -24,6 +24,10 @@ struct Plan {
     embeddings: Vec<Id>,
     feedback: Vec<Id>,
     corrections: Vec<Id>,
+    /// 出典のセッションか往復のターンが無い区切りと、出典のターンが無い台帳 (v0.5 の根、04 §5.2.1 の「台帳を
+    /// 消すとき」)。
+    segments: Vec<evorag_store::Envelope>,
+    ledgers: Vec<evorag_store::Envelope>,
     /// 事実の書き込み (出典を外す・消す)。何も変えなければ `None`。
     facts: Option<evorag_memory::SourcesDropped>,
 }
@@ -89,6 +93,11 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
         true
     })
     .ok()?;
+    // 区切りは、セッションか往復のターンがすべて無ければ消す。台帳は、出典のターン (`sentences`・`refs`・`corr`・
+    // `through`) がすべて無ければ消す (区切りの記録を失った台帳は、区切りを戻すのに使うので残す、04 §2)。
+    let (segments, ledgers) = sourceless_segments_and_ledgers(&r, &sessions, &turns)?;
+    p.segments = segments;
+    p.ledgers = ledgers;
     // 事実は、出典のターンの記録が DB に無ければ、その出典を外す (03 §4.2 の規則 12 の「見つけ方」)。
     // 読めなければ、事実は次の起動で突き合わせる (ほかの派生の記録の掃除は止めない)。
     if let Ok(facts) = evorag_memory::drop_turns(&r, &|t| !turns.contains(&t), ids, now)
@@ -97,6 +106,45 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
         p.facts = Some(facts);
     }
     Some(p)
+}
+
+/// 出典の無い区切りと台帳。
+fn sourceless_segments_and_ledgers(
+    r: &evorag_store::ReadTxn<'_>,
+    sessions: &HashSet<Id>,
+    turns: &HashSet<Id>,
+) -> Option<(Vec<evorag_store::Envelope>, Vec<evorag_store::Envelope>)> {
+    let mut segments = Vec::new();
+    r.for_each(KIND_SEGMENT, |x| {
+        if let Read::Ok(e) = x
+            && let Ok(b) = e.body_as::<SegmentBody>()
+            && (!sessions.contains(&b.session) || b.pairs.iter().all(|t| !turns.contains(t)))
+        {
+            segments.push(e);
+        }
+        true
+    })
+    .ok()?;
+    let mut ledgers = Vec::new();
+    r.for_each(KIND_PROPOSAL, |x| {
+        if let Read::Ok(e) = x
+            && let Some(LedgerRead::Segment(b)) = read_ledger(&e)
+        {
+            let sources: Vec<Id> = b
+                .sources()
+                .into_iter()
+                .map(|s| s.turn)
+                .chain(b.inputs.corr.iter().map(|c| c.turn))
+                .chain(b.inputs.through.map(|t| t.turn))
+                .collect();
+            if !sources.is_empty() && sources.iter().all(|t| !turns.contains(t)) {
+                ledgers.push(e);
+            }
+        }
+        true
+    })
+    .ok()?;
+    Some((segments, ledgers))
 }
 
 /// 突き合わせる。`gone_chunks` は `sync_chunks` が消したチャンク (退避からも除く)。
@@ -117,6 +165,8 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         && p.embeddings.is_empty()
         && p.feedback.is_empty()
         && p.corrections.is_empty()
+        && p.segments.is_empty()
+        && p.ledgers.is_empty()
         && p.facts.is_none()
     {
         return;
@@ -143,6 +193,9 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         });
         ops.push(WriteOp::DeleteLinksOf(*c));
     }
+    for e in p.segments.iter().chain(&p.ledgers) {
+        ops.extend(evorag_memory::delete_segment_or_ledger(e));
+    }
     for f in &p.feedback {
         // 想起への操作はジャーナルにも書く種類なので、消したこともジャーナルに残る。
         ops.extend(w.delete_feedback(*f));
@@ -162,6 +215,8 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
             .chain(&p.embeddings)
             .chain(&p.feedback)
             .chain(&p.corrections)
+            .chain(p.segments.iter().map(|e| &e.id))
+            .chain(p.ledgers.iter().map(|e| &e.id))
             .chain(&gone_facts),
     );
     let purge_ids = purge.clone();
@@ -175,6 +230,8 @@ pub(crate) async fn reconcile(inner: &Arc<Inner>, gone_chunks: Vec<Id>) {
         embeddings = p.embeddings.len(),
         feedback = p.feedback.len(),
         corrections = p.corrections.len(),
+        segments = p.segments.len(),
+        ledgers = p.ledgers.len(),
         facts_deleted = gone_facts.len(),
         facts_trimmed = facts.dropped.trimmed,
         "orphaned derived records removed"

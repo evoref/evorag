@@ -169,6 +169,6 @@ pub use view::{
     fact_history, fact_list, find_row, private_info, row_key, rule_only, subject_name, subject_of,
 };
 pub use write::{
-    AssistantTurn, CleanupJob, Writes, delete_session, deleted_ids, expect_record, expect_turn,
-    index_job, pending_cleanup_jobs, pending_purge_jobs, purge_job,
+    AssistantTurn, CleanupJob, Writes, delete_segment_or_ledger, delete_session, deleted_ids,
+    expect_record, expect_turn, index_job, pending_cleanup_jobs, pending_purge_jobs, purge_job,
 };

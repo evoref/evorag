@@ -209,10 +209,12 @@ fn of_fallback(l: &LedgerBody, variant: &str, intended: Option<&str>) -> bool {
     l.inputs.role_fallback && l.variant == variant && l.inputs.role_model_key.as_deref() == intended
 }
 
-impl<F> SelectEnv<'_, F> {
-    /// 今の選択の台帳か (状態は問わない)。縮退の間は、同じ chat のモデルで同じ役割から縮退して作った台帳を含む。
-    fn is_current(&self, l: &LedgerBody) -> bool {
-        match self.current {
+impl Current<'_> {
+    /// 台帳がこの選択のものか (状態と有効性は問わない。選び方の「今」の段の台帳の作り)。縮退の間は、同じ chat の
+    /// モデルで同じ役割から縮退して作った台帳を含む。台帳を書く側が、置き換えて消す台帳を選ぶときにも使う。
+    #[must_use]
+    pub fn owns(self, l: &LedgerBody) -> bool {
+        match self {
             Current::Ready(s) => of_selection(l, s),
             Current::Fallback {
                 variant,
@@ -223,6 +225,13 @@ impl<F> SelectEnv<'_, F> {
                     || (of_fallback(l, variant, intended) && l.model_key == called)
             }
         }
+    }
+}
+
+impl<F> SelectEnv<'_, F> {
+    /// 今の選択の台帳か (状態は問わない)。縮退の間は、同じ chat のモデルで同じ役割から縮退して作った台帳を含む。
+    fn is_current(&self, l: &LedgerBody) -> bool {
+        self.current.owns(l)
     }
 
     /// 直前の選択の台帳か。役割が戻った後は、今の選択から縮退して作った台帳を含む。
@@ -314,6 +323,9 @@ pub enum KeepReason {
     FailedUnchanged,
     /// 使う今の選択の台帳が `failed_parts` > 0 の `complete` で、その後に呼ぶ先が変わっていない。
     FailedPartsUnchanged,
+    /// 使う台帳は `partial` だが、それより新しい今の選択の有効な `failed` の台帳があり、その後に呼ぶ先が変わって
+    /// いない (`partial` は導出にそのまま使う)。
+    FailedAfterPartial,
     /// 区切りに往復が無い (呼べない)。
     NoPairs,
 }
@@ -370,7 +382,9 @@ impl<F> SelectEnv<'_, F> {
 /// 次の順に決める。
 /// 1. 使う台帳 ([`select_ledger`]) が無い: 今の選択の、有効な `failed` の台帳 (最も新しいもの) があれば、その後に
 ///    呼ぶ先が変わったときと、その `through` から往復の増え・閉じたことで呼ぶときだけ呼ぶ。無ければ呼ぶ。
-/// 2. 使う台帳が `partial`: 呼ぶ (段を問わない)。
+/// 2. 使う台帳が `partial`: 呼ぶ (段を問わない)。ただし、その `partial` より新しい今の選択の有効な `failed` の
+///    台帳があり、その後に呼ぶ先が変わっていなければ、1 と同じくその `through` から往復の増え・閉じたことで呼ぶ
+///    ときだけ呼ぶ (止められては同じ所で失敗するのを、短い待機のたびに繰り返さないため)。
 /// 3. 使う台帳の `through` から、開いている末尾の区切りの往復が 2 つ以上増えたか、区切りが閉じて入れていない往復が
 ///    ある: 呼ぶ (段を問わない。新しい往復は今の選択で呼ぶ)。
 /// 4. 使う台帳が今の選択の `failed_parts` > 0 の `complete`: その後に呼ぶ先が変わったときだけ呼ぶ。
@@ -384,16 +398,17 @@ pub fn needs_call<F: Fn(Id) -> Option<u32>>(
     let Some(id) = segment.id() else {
         return CallDecision::Keep(KeepReason::NoPairs);
     };
+    // 今の選択の、有効な `failed` の台帳 (最も新しいもの)。
+    let failed = ledgers
+        .iter()
+        .filter(|l| {
+            of_segment(l.body, id)
+                && l.body.status() == LedgerStatus::Failed
+                && env.is_current(l.body)
+                && ledger_valid(l.body, &env.turn_rev, env.versions).is_valid()
+        })
+        .max_by_key(|l| l.id);
     let Some(selected) = select_ledger(id, ledgers, env) else {
-        let failed = ledgers
-            .iter()
-            .filter(|l| {
-                of_segment(l.body, id)
-                    && l.body.status() == LedgerStatus::Failed
-                    && env.is_current(l.body)
-                    && ledger_valid(l.body, &env.turn_rev, env.versions).is_valid()
-            })
-            .max_by_key(|l| l.id);
         return match failed {
             None => CallDecision::Call(CallReason::NoLedger),
             Some(l) if env.target_changed(l.body) => CallDecision::Call(CallReason::FailedRetry),
@@ -405,7 +420,14 @@ pub fn needs_call<F: Fn(Id) -> Option<u32>>(
     };
     let l = selected.ledger;
     if l.body.status() == LedgerStatus::Partial {
-        return CallDecision::Call(CallReason::Partial);
+        return match failed {
+            Some(f) if f.id > l.id && !env.target_changed(f.body) => tail_reason(segment, f.body)
+                .map_or(
+                    CallDecision::Keep(KeepReason::FailedAfterPartial),
+                    CallDecision::Call,
+                ),
+            _ => CallDecision::Call(CallReason::Partial),
+        };
     }
     if let Some(reason) = tail_reason(segment, l.body) {
         return CallDecision::Call(reason);

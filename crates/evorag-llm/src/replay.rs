@@ -144,6 +144,8 @@ struct State {
     requests: Vec<ChatRequest>,
     /// 終わる前に落とされた (接続を閉じた) 応答の数。
     dropped_early: usize,
+    /// 応答の断片 (本文と思考) を届けた数 (`chats` の分。試験が、断片を受け取るまで待つのに使う)。
+    delivered: usize,
     /// `/v1/embeddings` と `/v1/rerank` を呼んだ回数。
     embed_calls: usize,
     rerank_calls: usize,
@@ -194,6 +196,11 @@ impl ReplayClient {
     /// 終わる前に落とされた応答の数 (中断で接続を閉じた数)。
     pub fn dropped_early(&self) -> usize {
         self.lock().dropped_early
+    }
+
+    /// `chats` の応答の断片 (本文と思考) を届けた数。
+    pub fn delivered(&self) -> usize {
+        self.lock().delivered
     }
 
     /// 生成を 1 トークンに限った要求 (順に)。`requests` には入らない。
@@ -376,6 +383,18 @@ impl Drop for ReplayStream {
     }
 }
 
+impl ReplayStream {
+    /// 断片を 1 つ届けたと数える (`chats` の分だけ)。
+    fn delivered(&self) {
+        if !self.warm {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .delivered += 1;
+        }
+    }
+}
+
 impl ChatStream for ReplayStream {
     fn next(&mut self) -> BoxFuture<'_, Option<Result<ChatEvent, LlmError>>> {
         Box::pin(async move {
@@ -388,8 +407,12 @@ impl ChatStream for ReplayStream {
                     return Some(Err(LlmError::Cut("the stream ended before [DONE]".into())));
                 };
                 match step {
-                    Step::Delta { delta } => return Some(Ok(ChatEvent::Delta(delta))),
+                    Step::Delta { delta } => {
+                        self.delivered();
+                        return Some(Ok(ChatEvent::Delta(delta)));
+                    }
                     Step::Reasoning { reasoning } => {
+                        self.delivered();
                         return Some(Ok(ChatEvent::Reasoning(reasoning)));
                     }
                     Step::Wait { wait_ms } => {

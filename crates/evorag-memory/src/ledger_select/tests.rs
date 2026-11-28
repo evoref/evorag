@@ -475,6 +475,54 @@ fn partial_ledgers_are_always_called_again() {
 }
 
 #[test]
+fn a_newer_failed_ledger_stops_recalling_a_partial_until_the_target_changes() {
+    let revs = revs();
+    let env = env_a(&revs);
+    let partial = ledger(A, "partial", 3);
+    let failed = ledger(A, "failed", 3);
+    // `partial` の後に、同じ呼ぶ先で `failed` になった: 呼ばない (`partial` はそのまま使う)。
+    let entries = [(10, &partial), (500, &failed)];
+    assert_eq!(
+        decide(&segment(3, true), &entries, &env),
+        CallDecision::Keep(KeepReason::FailedAfterPartial)
+    );
+    assert_eq!(
+        picked(&stored(&entries), &env).map(|(ms, _)| ms),
+        Some(10),
+        "the partial ledger is still used"
+    );
+    // `failed` の方が古い: `partial` を呼び直す。
+    assert_eq!(
+        decide(&segment(3, true), &[(500, &partial), (10, &failed)], &env),
+        CallDecision::Call(CallReason::Partial)
+    );
+    // 呼ぶ先 (build_info) が変わった: 呼ぶ。
+    let rebuilt = SelectEnv {
+        build_info: "b200-4567def",
+        ..env_a(&revs)
+    };
+    assert_eq!(
+        decide(&segment(3, true), &entries, &rebuilt),
+        CallDecision::Call(CallReason::Partial)
+    );
+    // 往復が増えた・閉じた: 入力が変わったので呼ぶ。
+    assert_eq!(
+        decide(&segment(5, false), &entries, &env),
+        CallDecision::Call(CallReason::TailGrew)
+    );
+    assert_eq!(
+        decide(&segment(4, true), &entries, &env),
+        CallDecision::Call(CallReason::Closed)
+    );
+    // ほかの選択の `failed` は止めない。
+    let failed_b = ledger(B, "failed", 3);
+    assert_eq!(
+        decide(&segment(3, true), &[(10, &partial), (500, &failed_b)], &env),
+        CallDecision::Call(CallReason::Partial)
+    );
+}
+
+#[test]
 fn a_failed_ledger_is_retried_only_after_the_target_changes() {
     let revs = revs();
     let env = env_a(&revs);

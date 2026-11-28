@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use evorag_llm::{
     ChatEvent, ChatMessage, ChatRequest, Generation, LlmClient, LlmError, RequestExtra, Role,
 };
-use evorag_memory::ModelProbeBody;
+use evorag_memory::{ModelProbeBody, b2};
+use evorag_types::PromptLanguage;
 use serde_json::json;
 
 /// 1 つの課題の締切 (遅いモデルでも、点検が止まり続けないように)。
@@ -24,13 +25,14 @@ pub enum ProbeIssue {
     StructuredBroken,
 }
 
-/// 点検の結果から、使えない機能を拾う。
+/// 点検の結果から、使えない機能を拾う。B2 の型の点検 (v0.5 の根) に通らないことは、型縛りの出力が使えないことと
+/// して数える (区切りの呼び出しを止める・縮退する理由、06 §3.3)。
 pub fn issues(p: &ModelProbeBody) -> Vec<ProbeIssue> {
     let mut out = Vec::new();
     if p.thinking_off == Some(false) {
         out.push(ProbeIssue::ThinkingNotOff);
     }
-    if p.structured_ok == Some(false) {
+    if p.structured_ok == Some(false) || p.b2_ok == Some(false) {
         out.push(ProbeIssue::StructuredBroken);
     }
     out
@@ -216,7 +218,7 @@ pub fn worth_saving(p: &ModelProbeBody) -> bool {
 /// chat・memory の点検の結果が、点検に通らなかったものか (型縛りの出力が型に合わない・思考を切れない)。
 #[must_use]
 pub fn failed(p: &ModelProbeBody) -> bool {
-    p.structured_ok == Some(false) || p.thinking_off == Some(false)
+    p.structured_ok == Some(false) || p.thinking_off == Some(false) || p.b2_ok == Some(false)
 }
 
 /// chat の点検の結果が、思考を切る指定を試す前のもの (v0.3 までの点検) で、思考を切れない・型縛りの出力が
@@ -366,6 +368,108 @@ async fn generating(
         }
     }
     p
+}
+
+/// B2 の型の点検で呼ぶ、小さな固定の区切りの発話 (作った文、06 §3.3)。
+fn b2_probe_utterance(lang: PromptLanguage) -> &'static str {
+    match lang {
+        PromptLanguage::Ja => "私は大阪に住んでいて、週末は将棋を指します。",
+        PromptLanguage::En => "I live in Osaka and play shogi on weekends.",
+    }
+}
+
+/// B2 の型の点検の生成の上限 (1 文の区切りの出力は 200 トークンに届かない)。
+const B2_PROBE_MAX_TOKENS: u32 = 512;
+
+/// B2 の型の点検 (06 §3.3、v0.5 の根の chat と memory): B2 の要求の形 (システムのメッセージ・利用者のメッセージの
+/// 形・JSON Schema) で 1 文の固定の区切りを呼び、出力が型に合うか (`b2_ok`) を `p` に書く。スロットの文脈の長さが
+/// B2 に足りない構成 (06 §2.1 の「文脈の長さ」) では呼ばずに偽にする。型縛りの確かめ (`structured_ok`) に通って
+/// いなければ呼ばずに偽にする。繋がらない・締切切れで結果が出なければ null のまま (点検を保存せず、次の機会に
+/// 点検し直す、06 §3.3 の例外)。ほかの失敗 (4xx・5xx など) は偽にする。`config` は設定の要求の付け足し (点検が足した思考を切る指定は `p` から足す)。
+pub async fn add_b2(
+    p: &mut ModelProbeBody,
+    llm: &dyn LlmClient,
+    config: &RequestExtra,
+    slot: Option<u32>,
+    lang: PromptLanguage,
+) {
+    if p.structured_ok != Some(true) {
+        p.b2_ok = Some(false);
+        return;
+    }
+    let n_ctx = match llm.server_info().await {
+        Ok(s) => s.n_ctx,
+        Err(e) => {
+            p.error.get_or_insert(format!("b2: {e}"));
+            return;
+        }
+    };
+    if !usize::try_from(n_ctx).is_ok_and(b2::fits) {
+        p.b2_ok = Some(false);
+        p.error.get_or_insert(format!(
+            "b2: the slot context ({n_ctx}) is smaller than {}",
+            b2::REQUEST_TOKENS + b2::MAX_TOKENS as usize
+        ));
+        return;
+    }
+    let utterance = b2_probe_utterance(lang);
+    let pairs = [b2::Pair {
+        utterance: b2::Text {
+            turn: evorag_types::Id::from_bytes([0; 16]),
+            rev: 0,
+            text: utterance,
+            hidden: &[],
+        },
+        reply: None,
+    }];
+    let input = b2::Input {
+        language: lang,
+        pairs: &pairs,
+        candidates: &[],
+        correction_version: evorag_memory::corrections::CORRECTION_V1,
+    };
+    let Ok(layout) = b2::Layout::new(&input) else {
+        p.b2_ok = Some(false);
+        return;
+    };
+    let counts: Vec<usize> = layout.pieces().map(crate::estimate).collect();
+    let Ok(plan) = layout.plan(&counts, usize::MAX) else {
+        p.b2_ok = Some(false);
+        return;
+    };
+    let call = layout.render(&plan);
+    let Some(request) = call.requests.first() else {
+        p.b2_ok = Some(false);
+        return;
+    };
+    let extra = aux_extra_with(config, Some(p));
+    let mut req = crate::ledgers::chat_request(request, &extra, slot);
+    req.generation.max_tokens = Some(B2_PROBE_MAX_TOKENS);
+    match run_chat(llm, req).await {
+        Ok(c) => {
+            let end = if c.finish_reason.as_deref() == Some("length") {
+                b2::StreamEnd::Length
+            } else {
+                b2::StreamEnd::Finished
+            };
+            let ok = matches!(
+                b2::read_output(request, &c.text, end),
+                b2::Reading::Complete(_)
+            );
+            p.b2_ok = Some(ok);
+        }
+        Err(e) => {
+            // 繋がらない・締切切れだけは結果を出さない (点検し直す)。ほかの失敗 (4xx・5xx・途中の切断) は通らない
+            // ものとする (同じ失敗で点検し直し続けないため)。
+            if !matches!(
+                e,
+                ChatError::TimedOut | ChatError::Llm(LlmError::Connect(_))
+            ) {
+                p.b2_ok = Some(false);
+            }
+            p.error.get_or_insert(format!("b2: {e}"));
+        }
+    }
 }
 
 /// embed の役割を点検する。

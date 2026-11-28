@@ -402,6 +402,7 @@ async fn after_change(inner: &Arc<Inner>, gone: HashSet<Id>) {
     crate::fact_table::invalidate(inner);
     crate::notes::touch(inner);
     crate::extraction::touch(inner);
+    crate::ledgers::touch(inner);
 }
 
 /// ジャーナルの層 (04 §7.2): 伏せ字の後の行のあるターンの、それより前の行を除く書き直し。書き直しが済んで
