@@ -20,9 +20,11 @@
 //! - `flow`: 区切り 1 つの呼び出しの進め方 (I/O の無い状態機械)。
 //! - `call`: 止め方・要求の受け取り・区切り 1 つの呼び出し。
 //! - `save`: 台帳と区切りを書く。
+//! - `keys`: 使う台帳の `keys` から区切りの鍵を作り、語彙とベクトルの索引に入れる (04 §5.5、手順 5)。
 
 mod call;
 mod flow;
+pub(crate) mod keys;
 mod save;
 mod snapshot;
 
@@ -60,9 +62,11 @@ fn state(inner: &Inner) -> std::sync::MutexGuard<'_, State> {
     inner.ledgers.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 会話・指示・呼ぶ先が変わった (ターンを書いた、セッションを消した、忘れる、点検・役割の変化)。
+/// 会話・指示・呼ぶ先が変わった (ターンを書いた、セッションを消した、忘れる、点検・役割の変化)。区切りの鍵も
+/// 突き合わせ直す (使う台帳と、ふるいの指示が変わりうるため)。
 pub(crate) fn touch(inner: &Inner) {
     state(inner).version += 1;
+    keys::touch(inner);
 }
 
 /// 区切りの呼び出しを止めた理由 (状態の行と `doctor` の材料、04 §5.2.1 の「失敗の扱い」)。
@@ -254,6 +258,9 @@ pub(crate) async fn run(inner: &Arc<Inner>, generation: u64) -> Option<bool> {
         return Some(false);
     };
     let mut progressed = !snap.writes.is_empty();
+    if progressed {
+        keys::touch(inner);
+    }
     let wrote = save::write_segments(inner, snap.writes).await;
     drop(lock);
     if !wrote {
@@ -298,7 +305,11 @@ pub(crate) async fn run(inner: &Arc<Inner>, generation: u64) -> Option<bool> {
             return Some(false);
         }
         match calling.segment(work, &info.build_info, &mut stop).await {
-            Done::Written => progressed = true,
+            Done::Written => {
+                progressed = true;
+                // 使う台帳が替わりうるので、区切りの鍵を突き合わせ直す (04 §5.5 の「作り直し」)。
+                keys::touch(inner);
+            }
             Done::Skipped | Done::Unsent | Done::Rejected => {}
             Done::Stopped => return None,
             // 次の機会に送り直す (すぐには送り直さず、裏の処理の「繰り返しを防ぐ」で待たせる、04 §4)。止めた

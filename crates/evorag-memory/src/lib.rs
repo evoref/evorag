@@ -108,7 +108,8 @@ pub use kinds::{
     RecallRecord, Reranked, SETTING_ANSWER_FORMAT, SETTING_ANSWER_LANGUAGE, SETTING_ANSWER_LENGTH,
     SETTING_IGNORED_CONFIG, SessionBody, SessionState, SettingBody, SignalBody, SignalKind, SrcRev,
     TARGET_CONVERSATION, TURN_REV_FIELD, ThresholdBody, TurnBody, TurnObs, TurnRole, TurnState,
-    UNIT_CHUNK, UNIT_KEY, WindowRef, carried_on_restore, kinds, kinds_v05, v05_root,
+    UNIT_CHUNK, UNIT_KEY, UNIT_SEGMENT_KEY, WindowRef, carried_on_restore, kinds, kinds_v05,
+    v05_root,
 };
 pub use ledger::{
     ByteRange, CALL_SEGMENT, CorrInput, KIND_PROPOSAL, LEDGER_SCHEMA, LOOKUP_LEDGER_SEGMENT,
@@ -134,7 +135,7 @@ pub use note::{
 pub use prefilter::{MODE_CHAT, Prefiltered, Screened, SkipReason, prefilter};
 pub use read::{
     Binding, Bindings, MemoryError, Session, SessionTurns, Setting, Settings, Turn, chunks_of,
-    embedding_bodies, embedding_vector, embeddings_of_chunk, embeddings_of_model,
+    embedding_bodies, embedding_vector, embeddings_of, embeddings_of_chunk, embeddings_of_model,
     feedback_for_answer, list_sessions, load_bindings, load_probe, load_session, load_settings,
     load_threshold, pending_user_turns, session_turns, session_turns_counted,
     turns_without_session,
@@ -172,5 +173,6 @@ pub use view::{
 };
 pub use write::{
     AssistantTurn, CleanupJob, Writes, delete_segment_or_ledger, delete_session, deleted_ids,
-    expect_record, expect_turn, index_job, pending_cleanup_jobs, pending_purge_jobs, purge_job,
+    expect_record, expect_turn, index_job, ledger_embedding_deletes, pending_cleanup_jobs,
+    pending_purge_jobs, purge_job,
 };

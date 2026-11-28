@@ -2354,6 +2354,7 @@ mod tests {
             dim: 1,
             key: None,
             src_rev: Some(0),
+            vk: None,
         };
         let (chunk_emb, ops) = w.embedding(&emb(chunk_id), &[0.5]).expect("embedding");
         env.write(ops).expect("embedding");

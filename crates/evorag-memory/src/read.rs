@@ -274,6 +274,23 @@ pub fn embeddings_of_chunk(
     Ok(out)
 }
 
+/// 記録 `target` (チャンク・ノート・台帳) を指す埋め込みの記録 (ID と本体。読めない記録は ID だけで本体を
+/// `None` にする)。台帳を消すときに、その区切りの鍵の埋め込みを同じ依頼で消すため (04 §5.5)。
+pub fn embeddings_of(
+    tx: &ReadTxn<'_>,
+    target: Id,
+) -> Result<Vec<(Id, Option<EmbeddingBody>)>, MemoryError> {
+    let mut out = Vec::new();
+    for (id, _) in tx.links_to(target, REL_EMBEDDING_OF)? {
+        match tx.get(KIND_EMBEDDING, id)? {
+            Some(Read::Ok(e)) => out.push((id, e.body_as::<EmbeddingBody>().ok())),
+            Some(_) => out.push((id, None)),
+            None => {}
+        }
+    }
+    Ok(out)
+}
+
 /// 埋め込みのモデルの埋め込み (記録の ID、本体、ベクトル)。`model_key` が `None` ならすべて。
 pub fn embeddings_of_model(
     tx: &ReadTxn<'_>,

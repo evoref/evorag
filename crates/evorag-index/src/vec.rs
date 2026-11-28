@@ -266,9 +266,14 @@ impl VecSnapshot {
 
     /// 入っている記録の ID。
     pub fn ids(&self) -> HashSet<Id> {
+        self.ids_where(|_| true)
+    }
+
+    /// 入っている行のうち、`keep` が真のものの記録の ID (セッションで絞るなど)。
+    pub fn ids_where(&self, keep: impl Fn(&VecRow) -> bool) -> HashSet<Id> {
         self.segments
             .iter()
-            .flat_map(|s| s.rows.iter().map(|r| r.id))
+            .flat_map(|s| s.rows.iter().filter(|r| keep(r)).map(|r| r.id))
             .collect()
     }
 

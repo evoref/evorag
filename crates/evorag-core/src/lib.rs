@@ -313,6 +313,8 @@ struct Inner {
     notes: Mutex<notes::State>,
     /// 区切りと区切りの呼び出し (B2) の手順の状態 (04 §4 の手順 2・3、v0.5 の根)。
     ledgers: Mutex<ledgers::State>,
+    /// 区切りの鍵を索引に入れる手順の状態 (04 §5.5、v0.5 の根)。
+    segment_keys: Mutex<ledgers::keys::State>,
     /// 事実の抽出の手順の状態 (04 §5.2.1)。
     extraction: Mutex<extraction::State>,
     /// 訂正の候補の検証の手順の状態 (04 §6)。
@@ -694,6 +696,7 @@ impl Core {
             pre: precompute::Tasks::default(),
             notes: Mutex::new(notes::State::default()),
             ledgers: Mutex::new(ledgers::State::default()),
+            segment_keys: Mutex::new(ledgers::keys::State::default()),
             extraction: Mutex::new(extraction::State::default()),
             correction: Mutex::new(correction::State::default()),
             fact_table: Mutex::new(fact_table::State::default()),
@@ -764,6 +767,8 @@ impl Core {
             // 古い版で消した会話の派生の記録を、DB・索引・退避から除く (03 §4.2 の規則 12)。
             orphans::reconcile(&worker, gone).await;
             embedding::open(&worker).await;
+            // 区切りの鍵を索引に合わせる (v0.5 の根。前の起動の後に変わった区切りだけを入れ替える、04 §5.5)。
+            ledgers::keys::sync(&worker).await;
             // 事実の表を作っておく (最初の応答の経路で数えないように、04 §5.4)。
             fact_table::prepare(&worker).await;
             // 前の起動で済まなかった整理の job (強制終了・索引や退避を除けなかった分) を続ける (04 §7.7 の 2・5)。
@@ -1055,6 +1060,33 @@ impl Core {
             });
         }
         out
+    }
+
+    /// 試験のため: 索引に入れた区切りの鍵 (区切りの ID と鍵の文字列。区切りの ID の順、04 §5.5)。語彙の索引にある
+    /// 区切りだけ。
+    #[doc(hidden)]
+    pub fn indexed_segment_keys(&self) -> Vec<(Id, Vec<String>)> {
+        let in_lex = self
+            .inner
+            .index
+            .as_deref()
+            .map(|ix| ix.snapshot().ids_where(recall::is_segment_key))
+            .unwrap_or_default();
+        ledgers::keys::snapshot(&self.inner)
+            .into_iter()
+            .filter(|(id, _)| in_lex.contains(id))
+            .collect()
+    }
+
+    /// 試験のため: 今の埋め込みのモデルのベクトルの索引に行のある区切り (区切りの鍵の行、04 §5.5)。
+    #[doc(hidden)]
+    pub fn vector_segment_keys(&self) -> std::collections::HashSet<Id> {
+        embedding::current(&self.inner)
+            .map(|(_, ix)| {
+                ix.snapshot()
+                    .ids_where(|r| r.session == recall::SEGMENT_KEY_SESSION)
+            })
+            .unwrap_or_default()
     }
 
     /// 試験のため: 区切りの呼び出し (B2) の手順の数 (このプロセスの間。04 §5.2.1)。

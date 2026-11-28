@@ -130,6 +130,12 @@ impl CheckedKeys {
         self.keys.iter().map(|(_, k)| k)
     }
 
+    /// 検査を通った鍵と、その台帳の `keys` の中の位置 ([`Dropped::index`] と同じ数え方。台帳の順)。ふるいで
+    /// 捨てた鍵 ([`SegmentKeys::dropped`]) の位置から鍵を引くため。
+    pub fn entries(&self) -> impl Iterator<Item = (usize, &SegmentKey)> {
+        self.keys.iter().map(|(i, k)| (*i, k))
+    }
+
     /// 検査を通った鍵の値の鍵 (埋め込みを指す値の集合)。
     #[must_use]
     pub fn vks(&self) -> BTreeSet<ValueKey> {

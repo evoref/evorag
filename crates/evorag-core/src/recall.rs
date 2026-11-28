@@ -7,6 +7,9 @@
 //! - 出典は「信頼しない引用」の枠に入れ、今の発話の直前に置く (次のターンでは外す、§4.1)。枠の区切りに
 //!   は要求ごとの乱数の並びを含め、本文に同じ並びがあれば除く (§4.3)。予算は 800 トークン (n_ctx が
 //!   小さければ半分、§4.1。`context::frame_budgets`)。
+//! - 区切りの鍵 (04 §5.5、v0.5 の根) は、区切りのすべての往復を引くためだけに使う。当たったら区切りの往復の原文を
+//!   添える (鍵は添えない、OQ-36 の 7)。項目は区切りの ID で、セッションに結び付けない値で入れ、今のセッションの
+//!   区切りの項目は候補を集める段階で除く ([`CurrentOnly`])。
 //! - 事実から作った検索の鍵 (04 §5.5) は、出典の往復を引くためだけに使う。当たったら、今の事実の状態を
 //!   読み直し (private・`Retracted` になった事実の鍵は、索引に残っていても使わない、05 §3.2)、出典の
 //!   往復の原文を添える (鍵は添えない、OQ-36 の 7)。
@@ -19,8 +22,9 @@ use std::sync::Arc;
 use evorag_index::lex::{LexIndex, Opened};
 use evorag_llm::LlmClient;
 use evorag_memory::{
-    ChunkBody, FactKey, KIND_CHUNK, KIND_NOTE, KIND_SESSION, KIND_TURN, NoteBody, RecallDecision,
-    RecallRecord, Turn, TurnBody, TurnRole, TurnState,
+    ChunkBody, FactKey, KIND_CHUNK, KIND_NOTE, KIND_SEGMENT, KIND_SESSION, KIND_TURN, NoteBody,
+    REL_SEGMENT_SESSION, RecallDecision, RecallRecord, SegmentBody, Turn, TurnBody, TurnRole,
+    TurnState,
 };
 use evorag_retrieval::doc_input;
 use evorag_retrieval::recall::{Decision, RecallConfig, recall};
@@ -170,6 +174,27 @@ pub(crate) fn fact_doc(k: &FactKey) -> evorag_index::lex::DocInput {
     doc_input(k.fact, FACT_KEY_SESSION, &k.text)
 }
 
+/// 区切りの鍵の項目のセッション (04 §5.5)。鍵の項目はセッションに結び付けないので、どのセッションにも属さない
+/// 値で語彙とベクトルの索引に入れる。事実の鍵の値とは分ける (事実の鍵の手順が区切りの鍵の項目を除かないため)。
+/// 今のセッションの区切りの項目は、候補を集める段階で除く ([`CurrentOnly`])。
+pub(crate) const SEGMENT_KEY_SESSION: Id =
+    Id::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// 区切りの鍵を語彙の索引の項目にする (鍵ごとに 1 件。ID は区切りの ID、04 §5.5)。
+pub(crate) fn segment_docs<'k>(
+    segment: Id,
+    keys: impl IntoIterator<Item = &'k str>,
+) -> Vec<evorag_index::lex::DocInput> {
+    keys.into_iter()
+        .map(|k| doc_input(segment, SEGMENT_KEY_SESSION, k))
+        .collect()
+}
+
+/// 索引の項目が区切りの鍵か。
+pub(crate) fn is_segment_key(d: &evorag_index::lex::Doc) -> bool {
+    d.session == SEGMENT_KEY_SESSION
+}
+
 /// 語彙の索引に今ある事実の鍵の項目 (事実の ID)。
 pub(crate) fn indexed_fact_keys(index: &LexIndex) -> HashSet<Id> {
     index.snapshot().ids_where(is_fact_key)
@@ -178,6 +203,49 @@ pub(crate) fn indexed_fact_keys(index: &LexIndex) -> HashSet<Id> {
 /// 索引の項目が事実の鍵か。
 pub(crate) fn is_fact_key(d: &evorag_index::lex::Doc) -> bool {
     d.session == FACT_KEY_SESSION
+}
+
+/// セッションに結び付けない索引の項目のうち、今のセッション `current` の往復だけを指すもの。想起の候補を集める
+/// 段階で除く (今のセッションのターンを添えないのと同じ、04 §5.5、05 §3.2)。
+struct CurrentOnly {
+    session: Id,
+    /// 今のセッションのターンだけを出典とする事実 (の鍵の ID)。
+    facts: HashSet<Id>,
+    /// 今のセッションの区切り (の鍵の ID)。
+    segments: HashSet<Id>,
+}
+
+impl CurrentOnly {
+    fn of(store: &Store, current: Id) -> Self {
+        Self {
+            session: current,
+            facts: current_only_facts(store, current),
+            segments: current_segments(store, current),
+        }
+    }
+
+    /// 語彙の索引の項目を除くか。
+    fn skips(&self, d: &evorag_index::lex::Doc) -> bool {
+        d.session == self.session
+            || (is_fact_key(d) && self.facts.contains(&d.id))
+            || (is_segment_key(d) && self.segments.contains(&d.id))
+    }
+
+    /// ベクトルの索引の行を除くか。
+    fn skips_row(&self, row: &evorag_index::vec::VecRow) -> bool {
+        row.session == self.session
+            || (row.session == SEGMENT_KEY_SESSION && self.segments.contains(&row.id))
+    }
+}
+
+/// セッション `current` の区切り (v0.5 の根。区切りの無い根では空)。
+fn current_segments(store: &Store, current: Id) -> HashSet<Id> {
+    store
+        .read()
+        .ok()
+        .and_then(|r| r.links_to(current, REL_SEGMENT_SESSION).ok())
+        .map(|v| v.into_iter().map(|(id, _)| id).collect())
+        .unwrap_or_default()
 }
 
 /// 今のセッション `current` のターンだけを出典とする事実 (残っている出典のターンが、今のセッションの外に
@@ -213,8 +281,9 @@ fn current_only_facts(store: &Store, current: Id) -> HashSet<Id> {
         .collect()
 }
 
-/// 索引の当たり (チャンク・ノート・事実の鍵) が指すターン。ノートは、指す往復の発話のターンのすべて
-/// (04 §2)。事実の鍵は、今の状態で鍵を持つ事実の出典のターンのうち、今のセッション `current` に無いもの
+/// 索引の当たり (チャンク・ノート・区切りの鍵・事実の鍵) が指すターン。ノートは、指す往復の発話のターンのすべて
+/// (04 §2)。区切りの鍵は、区切りのすべての往復の発話のターンのうち読めるもの (今のセッションの区切りは無し、
+/// 04 §5.5)。事実の鍵は、今の状態で鍵を持つ事実の出典のターンのうち、今のセッション `current` に無いもの
 /// (新しい順、04 §5.5、05 §3.2)。
 fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id, current: Id) -> Vec<Id> {
     if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_CHUNK, id) {
@@ -231,6 +300,21 @@ fn hit_turns(rtx: &evorag_store::ReadTxn<'_>, id: Id, current: Id) -> Vec<Id> {
             .ok()
             .filter(|n| evorag_memory::note_is_current(rtx, n))
             .map(|n| n.exchanges)
+            .unwrap_or_default();
+    }
+    if let Ok(Some(Read::Ok(e))) = rtx.get(KIND_SEGMENT, id) {
+        // 消したセッションの区切りは DB に無い (05 §3.2 の「DB に無い記録」)。往復の発話のターンが見えなくなっても
+        // 区切りは変わらないので、読めるターンだけを指す。
+        return e
+            .body_as::<SegmentBody>()
+            .ok()
+            .filter(|s| s.session != current)
+            .map(|s| {
+                s.pairs
+                    .into_iter()
+                    .filter(|t| matches!(rtx.get(KIND_TURN, *t), Ok(Some(Read::Ok(_)))))
+                    .collect()
+            })
             .unwrap_or_default();
     }
     let Some(key) = evorag_memory::load_fact(rtx, id)
@@ -852,12 +936,12 @@ pub(crate) async fn eval_exchanges(
         return Vec::new();
     };
     let snap = index.snapshot();
-    let current_only = current_only_facts(store, session);
+    let current_only = CurrentOnly::of(store, session);
     let r = recall(
         &snap,
         query,
         None,
-        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
+        &|d| current_only.skips(d),
         &RecallConfig::default(),
     );
     let mut lists: Vec<Vec<Id>> = vec![
@@ -872,7 +956,7 @@ pub(crate) async fn eval_exchanges(
         let rows = v
             .index
             .snapshot()
-            .search(&qv, CANDIDATES, &|row| row.session == session);
+            .search(&qv, CANDIDATES, &|row| current_only.skips_row(row));
         lists.push(vector_turns(store, &rows, session));
     }
     // ID だけを返すので、置き換えの言語はどちらでもよい。
@@ -978,13 +1062,13 @@ async fn select_for(
     };
     let snap = index.snapshot();
     // 今のセッションのターンは直近の会話に入るので、候補から除く (05 §3.2)。今のセッションだけを出典とする
-    // 事実の鍵も除く (04 §5.5)。
-    let current_only = current_only_facts(store, session);
+    // 事実の鍵と、今のセッションの区切りの鍵も除く (04 §5.5)。
+    let current_only = CurrentOnly::of(store, session);
     let mut r = recall(
         &snap,
         &query,
         previous.as_deref(),
-        &|d| d.session == session || (is_fact_key(d) && current_only.contains(&d.id)),
+        &|d| current_only.skips(d),
         &RecallConfig::default(),
     );
     if r.decision == Decision::Skip {
@@ -1035,7 +1119,7 @@ async fn select_for(
                 let rows = v
                     .index
                     .snapshot()
-                    .search(&qv, CANDIDATES, &|row| row.session == session);
+                    .search(&qv, CANDIDATES, &|row| current_only.skips_row(row));
                 lists.push(vector_turns(store, &rows, session));
             }
             // 問いの埋め込みが締切に間に合わない: その要求だけ語彙の候補で (05 §3.5)。

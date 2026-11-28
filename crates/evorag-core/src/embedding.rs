@@ -11,8 +11,11 @@
 //!   残る・同じチャンクを 2 度埋め込む、を防ぐ)。埋め込みの要求の間は鍵を持たない。
 //! - 保存は冪等: 同じモデル・同じチャンクの前の埋め込みは、同じ依頼で消してから書く。
 //! - 埋め込みのサーバに断られ続けるチャンクは、このプロセスの間は飛ばす (後ろのチャンクを止めないため)。
+//! - 区切りの鍵 (04 §5.5、v0.5 の根) は、区切りの ID の項目ごとに、索引に入れた鍵 ([`crate::ledgers::keys`]) を
+//!   1 行ずつ埋め込み、記録は (台帳の ID, 鍵の値の鍵) で指す。同じ記録 (同じモデル) があれば、要求を出さずに
+//!   そのベクトルを使い直す。区切りの行はまとめて入れる (鍵が 1 つでも断られたら、その区切りを飛ばす)。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,8 +23,8 @@ use evorag_index::lex::Opened;
 use evorag_index::vec::{Unit, VecIndex, VecInput};
 use evorag_llm::LlmClient;
 use evorag_memory::{
-    ChunkBody, EmbeddingBody, KIND_CHUNK, KIND_NOTE, KIND_TURN, NoteBody, TurnBody, UNIT_CHUNK,
-    UNIT_KEY,
+    ChunkBody, EmbeddingBody, KIND_CHUNK, KIND_NOTE, KIND_PROPOSAL, KIND_TURN, NoteBody, TurnBody,
+    UNIT_CHUNK, UNIT_KEY, UNIT_SEGMENT_KEY, ValueKey,
 };
 use evorag_store::Read;
 use evorag_types::Id;
@@ -89,12 +92,17 @@ pub(crate) fn current(inner: &Inner) -> Option<(String, Arc<VecIndex>)> {
 }
 
 /// 足りないチャンク (語彙の索引にあって、今のモデルのベクトルの索引に無く、飛ばしていないもの) と、全体の数。
-/// 事実の検索の鍵は埋め込まない (語彙の索引だけ、fact_table.rs) ので数えない。
+/// 事実の検索の鍵は埋め込まない (語彙の索引だけ、fact_table.rs) ので数えない。区切りの鍵は、区切りの鍵の手順が
+/// 突き合わせた区切りだけを数える (読む鍵がまだ分からない区切りを飛ばさないため)。
 fn missing(inner: &Inner, key: &str) -> (Vec<Id>, usize) {
     let Some(lex) = &inner.index else {
         return (Vec::new(), 0);
     };
-    let all = lex.snapshot().ids_where(|d| !crate::recall::is_fact_key(d));
+    let segments = crate::ledgers::keys::indexed_ids(inner);
+    let all = lex.snapshot().ids_where(|d| {
+        !crate::recall::is_fact_key(d)
+            && (!crate::recall::is_segment_key(d) || segments.contains(&d.id))
+    });
     let have: HashSet<Id> = match current(inner) {
         Some((k, ix)) if k == key => ix.snapshot().ids(),
         _ => HashSet::new(),
@@ -227,11 +235,50 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
         .map(|ix| ix.snapshot().ids())
         .unwrap_or_default();
     let mut stale = Vec::new();
+    // 区切りの鍵の埋め込みは台帳を指す (04 §5.5)。行は区切りの鍵の手順が区切りの ID で入れるので、ここでは索引に
+    // 足さず、台帳の無いもの・今と前のモデルでないもの・(モデル, 台帳, 鍵) の重複だけを消す。
+    let mut ledgers: HashSet<Id> = HashSet::new();
+    let _ = r.for_each(KIND_PROPOSAL, |x| {
+        if let Read::Ok(e) = x {
+            ledgers.insert(e.id);
+        }
+        true
+    });
+    let mut keys_seen: HashMap<(String, Id, String), Id> = HashMap::new();
+    let mut key_dim: Option<usize> = None;
     // 今と前のモデルの、対象と単位 (チャンク、またはノートの鍵の位置) ごとに 1 件 (新しい記録を残す。ID は
     // 時刻の順)。
     let mut mine: HashMap<(Id, Option<u32>), (Id, EmbeddingBody)> = HashMap::new();
     let mut prev: HashMap<(Id, Option<u32>), Id> = HashMap::new();
     for (id, b) in bodies {
+        if b.unit == UNIT_SEGMENT_KEY {
+            let usable = ledgers.contains(&b.target)
+                && b.vk.as_deref().and_then(ValueKey::from_hex).is_some()
+                && (b.model_key == key || previous == Some(b.model_key.as_str()));
+            if !usable {
+                stale.push(id);
+                continue;
+            }
+            if b.model_key == key {
+                key_dim.get_or_insert(b.dim as usize);
+            }
+            let unit = (
+                b.model_key.clone(),
+                b.target,
+                b.vk.clone().unwrap_or_default(),
+            );
+            match keys_seen.get(&unit) {
+                Some(kept) if *kept > id => stale.push(id),
+                Some(kept) => {
+                    stale.push(*kept);
+                    keys_seen.insert(unit, id);
+                }
+                None => {
+                    keys_seen.insert(unit, id);
+                }
+            }
+            continue;
+        }
         let orphan = !chunks.is_empty() && !chunks.contains(&b.target);
         if orphan {
             stale.push(id);
@@ -271,7 +318,12 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
         None => Vec::new(),
     };
     let dir = vec_dir(&root, key);
-    let Some(dim) = mine.values().next().map(|(_, b)| b.dim as usize) else {
+    let Some(dim) = mine
+        .values()
+        .next()
+        .map(|(_, b)| b.dim as usize)
+        .or(key_dim)
+    else {
         // 今のモデルの記録が無い: 索引のフォルダがあっても、中身は信用できないので消す (作り直す)。
         if dir.is_dir() {
             let _ = std::fs::remove_dir_all(&dir);
@@ -284,8 +336,10 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
     };
     let (ix, opened) = VecIndex::open(&dir, dim).ok()?;
     let want: HashSet<Id> = mine.keys().map(|(t, _)| *t).collect();
+    // 区切りの鍵の行は、区切りの鍵の手順が突き合わせる (区切りの ID の行で、記録の対象は台帳のため)。
     let have = if opened == Opened::Ok {
-        ix.snapshot().ids()
+        ix.snapshot()
+            .ids_where(|r| r.session != crate::recall::SEGMENT_KEY_SESSION)
     } else {
         HashSet::new()
     };
@@ -395,7 +449,12 @@ fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) -> Vec<Id> {
         }
         return Vec::new();
     };
-    let extra: HashSet<Id> = ix.snapshot().ids().difference(want).copied().collect();
+    let extra: HashSet<Id> = ix
+        .snapshot()
+        .ids_where(|r| r.session != crate::recall::SEGMENT_KEY_SESSION)
+        .difference(want)
+        .copied()
+        .collect();
     match ix.remove(&extra) {
         Ok(()) => Vec::new(),
         Err(e) => {
@@ -407,19 +466,60 @@ fn sync_previous(dir: &std::path::Path, want: &HashSet<Id>) -> Vec<Id> {
     }
 }
 
-/// 埋め込む 1 件 (チャンク 1 つ、またはノートの鍵 1 つ)。
-struct Item {
-    id: Id,
-    session: Id,
-    /// ノートの鍵の位置 (チャンクは `None`)。
-    key: Option<u32>,
-    text: String,
-    /// チャンクの出典のターンの改訂の番号 (03 §3.3 の `src_rev`)。ノートの鍵は `None` (ノートの `src_revs` で判定)。
-    src_rev: Option<u32>,
+/// 埋め込む単位の対象。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    /// チャンク (出典のターンの改訂の番号、03 §3.3 の `src_rev`)。
+    Chunk { src_rev: u32 },
+    /// ノートの鍵の位置 (ノートの `src_revs` で判定するので `src_rev` は持たない)。
+    Note { key: u32 },
+    /// 区切りの鍵 (04 §5.5)。記録は (台帳の ID, 鍵の値の鍵) で指し、`session` は区切りのセッション。
+    Segment {
+        ledger: Id,
+        vk: ValueKey,
+        session: Id,
+    },
 }
 
-/// 埋め込む本文を読む。チャンクは範囲を元のターンの本文から取り、ノートは鍵のそれぞれを 1 件にする。
-fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
+/// 埋め込む 1 件 (チャンク 1 つ、ノートの鍵 1 つ、または区切りの鍵 1 つ)。
+struct Item {
+    /// 索引の行の ID (チャンク・ノート・区切り)。
+    id: Id,
+    /// 索引の行のセッション (区切りの鍵はセッションに結び付けない値)。
+    session: Id,
+    target: Target,
+    text: String,
+    /// 同じモデルの記録があって使い直す (区切りの鍵だけ)。記録は書かない。
+    reused: bool,
+}
+
+/// 区切りの鍵の、あるモデルの埋め込みの記録 (新しい順)。
+fn segment_key_embeddings(
+    r: &evorag_store::ReadTxn<'_>,
+    ledger: Id,
+    vk: &ValueKey,
+    model_key: &str,
+) -> Vec<Id> {
+    let hex = vk.to_hex();
+    let mut out: Vec<Id> = evorag_memory::embeddings_of(r, ledger)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, b)| {
+            b.as_ref().is_some_and(|b| {
+                b.unit == UNIT_SEGMENT_KEY
+                    && b.model_key == model_key
+                    && b.vk.as_deref() == Some(hex.as_str())
+            })
+        })
+        .map(|(id, _)| id)
+        .collect();
+    out.sort_by(|a, b| b.cmp(a));
+    out
+}
+
+/// 埋め込む本文を読む。チャンクは範囲を元のターンの本文から取り、ノートは鍵のそれぞれを 1 件にする。区切りは
+/// 索引に入れた鍵のそれぞれを 1 件にし、同じモデルの記録があればそのベクトルを添える。
+fn unit_texts(inner: &Inner, ids: &[Id], model_key: &str) -> Vec<(Item, Option<Vec<f32>>)> {
     let Ok(r) = inner.store.read() else {
         return Vec::new();
     };
@@ -428,17 +528,44 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
     let hide = crate::masking::Hide::load(&r, inner.language);
     let mut out = Vec::new();
     for id in ids {
+        if let Some(seg) = crate::ledgers::keys::indexed(inner, *id) {
+            for k in &seg.keys {
+                let vk = k.vk();
+                let known = segment_key_embeddings(&r, seg.ledger, &vk, model_key)
+                    .into_iter()
+                    .find_map(|e| evorag_memory::embedding_vector(&r, e).ok().flatten())
+                    .filter(|v| !v.is_empty() && v.iter().all(|x| x.is_finite()));
+                out.push((
+                    Item {
+                        id: *id,
+                        session: crate::recall::SEGMENT_KEY_SESSION,
+                        target: Target::Segment {
+                            ledger: seg.ledger,
+                            vk,
+                            session: seg.session,
+                        },
+                        text: k.text().to_owned(),
+                        reused: known.is_some(),
+                    },
+                    known,
+                ));
+            }
+            continue;
+        }
         if let Ok(Some(Read::Ok(e))) = r.get(KIND_NOTE, *id)
             && let Ok(n) = e.body_as::<NoteBody>()
         {
             for (i, k) in n.keys.iter().enumerate() {
-                out.push(Item {
-                    id: *id,
-                    session: n.session,
-                    key: Some(i as u32),
-                    text: k.clone(),
-                    src_rev: None,
-                });
+                out.push((
+                    Item {
+                        id: *id,
+                        session: n.session,
+                        target: Target::Note { key: i as u32 },
+                        text: k.clone(),
+                        reused: false,
+                    },
+                    None,
+                ));
             }
             continue;
         }
@@ -461,13 +588,18 @@ fn unit_texts(inner: &Inner, ids: &[Id]) -> Vec<Item> {
             start: c.start as usize,
             end: c.end as usize,
         };
-        out.push(Item {
-            id: *id,
-            session: c.session,
-            key: None,
-            text: evorag_retrieval::chunk::slice(&tb.text, span),
-            src_rev: Some(c.src_rev()),
-        });
+        out.push((
+            Item {
+                id: *id,
+                session: c.session,
+                target: Target::Chunk {
+                    src_rev: c.src_rev(),
+                },
+                text: evorag_retrieval::chunk::slice(&tb.text, span),
+                reused: false,
+            },
+            None,
+        ));
     }
     out
 }
@@ -509,7 +641,8 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if batch.is_empty() {
             break;
         }
-        let items = unit_texts(inner, &batch);
+        let (items, known): (Vec<Item>, Vec<Option<Vec<f32>>>) =
+            unit_texts(inner, &batch, &key).into_iter().unzip();
         let read: HashSet<Id> = items.iter().map(|i| i.id).collect();
         // 読めないチャンク (区切りの作り直しで消えた直後など) は、このプロセスの間は飛ばす
         // (次の起動の突き合わせで片付く)。
@@ -529,10 +662,22 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
         if items.is_empty() {
             continue;
         }
-        let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
-        let vectors = embed_each(&*client, &texts).await;
-        // 断られ続ける単位は飛ばす (後ろを止めないため)。ノートは、鍵が 1 つでも断られたら全体を飛ばす
-        // (鍵の行はノートごとにまとめて入れ替えるので、一部だけを書かない)。
+        // 使い直せる記録の無いものだけを埋め込む。
+        let pending: Vec<usize> = known
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_none())
+            .map(|(n, _)| n)
+            .collect();
+        let texts: Vec<String> = pending.iter().map(|&n| items[n].text.clone()).collect();
+        let mut vectors = known;
+        if !texts.is_empty() {
+            for (n, v) in pending.into_iter().zip(embed_each(&*client, &texts).await) {
+                vectors[n] = v;
+            }
+        }
+        // 断られ続ける単位は飛ばす (後ろを止めないため)。ノートと区切りは、鍵が 1 つでも断られたら全体を飛ばす
+        // (鍵の行はノート・区切りごとにまとめて入れ替えるので、一部だけを書かない)。
         let refused: HashSet<Id> = items
             .iter()
             .zip(&vectors)
@@ -581,63 +726,137 @@ pub(crate) async fn run(inner: &Arc<Inner>) -> bool {
     progressed
 }
 
+/// 行をまとめて入れてよい区切り: 埋め込んだ鍵が、今索引に入れている鍵 (台帳と値の鍵の集合) と同じもの (埋め込んで
+/// いる間に区切りの鍵の手順が鍵を入れ替えた区切りは、一部の行だけを入れないように書かない)。
+fn current_segments(inner: &Inner, items: &[Item]) -> HashSet<Id> {
+    let mut got: HashMap<Id, (Id, BTreeSet<ValueKey>)> = HashMap::new();
+    for i in items {
+        if let Target::Segment { ledger, vk, .. } = &i.target {
+            got.entry(i.id)
+                .or_insert_with(|| (*ledger, BTreeSet::new()))
+                .1
+                .insert(*vk);
+        }
+    }
+    got.into_iter()
+        .filter(|(seg, (ledger, vks))| {
+            crate::ledgers::keys::indexed(inner, *seg).is_some_and(|now| {
+                now.ledger == *ledger
+                    && now.keys.iter().map(|k| k.vk()).collect::<BTreeSet<_>>() == *vks
+            })
+        })
+        .map(|(seg, _)| seg)
+        .collect()
+}
+
+/// 埋め込みの記録の中身 (対象の記録の種類と ID、単位、鍵の位置、出典の改訂の番号、鍵の値の鍵、セッション)。
+struct Record {
+    kind: &'static str,
+    target: Id,
+    unit: &'static str,
+    key: Option<u32>,
+    src_rev: Option<u32>,
+    vk: Option<ValueKey>,
+    session: Id,
+}
+
+impl Item {
+    fn record(&self) -> Record {
+        match &self.target {
+            Target::Chunk { src_rev } => Record {
+                kind: KIND_CHUNK,
+                target: self.id,
+                unit: UNIT_CHUNK,
+                key: None,
+                src_rev: Some(*src_rev),
+                vk: None,
+                session: self.session,
+            },
+            Target::Note { key } => Record {
+                kind: KIND_NOTE,
+                target: self.id,
+                unit: UNIT_KEY,
+                key: Some(*key),
+                src_rev: None,
+                vk: None,
+                session: self.session,
+            },
+            Target::Segment {
+                ledger,
+                vk,
+                session,
+            } => Record {
+                kind: KIND_PROPOSAL,
+                target: *ledger,
+                unit: UNIT_SEGMENT_KEY,
+                key: None,
+                src_rev: None,
+                vk: Some(*vk),
+                session: *session,
+            },
+        }
+    }
+}
+
 /// 埋め込みを記録し、索引に足す (呼び手は `index_lock` を持つ)。同じモデル・同じチャンクの前の埋め込みは
-/// 同じ依頼で消す (冪等)。索引がまだ無ければ、ベクトルの次元で開く。
+/// 同じ依頼で消す (冪等)。使い直す区切りの鍵の埋め込みは記録を書かず、行だけを足す。索引がまだ無ければ、
+/// ベクトルの次元で開く。
 async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<f32>>) -> bool {
     let w = writes(inner);
     let mut ops = Vec::new();
     let mut rows = Vec::new();
+    let segments = current_segments(inner, &items);
     {
         let Ok(r) = inner.store.read() else {
             return false;
         };
         let mut cleared = HashSet::new();
         for (item, v) in items.into_iter().zip(vectors) {
-            let id = item.id;
-            // 埋め込んでいる間に消えたチャンクとノートは書かない (削除・区切りの作り直し・ノートの作り直しは、
-            // この鍵の下で行う)。
-            let kind = if item.key.is_some() {
-                KIND_NOTE
-            } else {
-                KIND_CHUNK
-            };
-            if !matches!(r.get(kind, id), Ok(Some(Read::Ok(_)))) {
+            if matches!(item.target, Target::Segment { .. }) && !segments.contains(&item.id) {
                 continue;
             }
-            // 書き手のトランザクションの中でも、対象が残っていることを確かめる (04 §7.7 の 4)。
-            if !cleared.contains(&id) {
-                ops.push(evorag_memory::expect_record(kind, id));
+            let rec = item.record();
+            // 埋め込んでいる間に消えたチャンク・ノート・台帳は書かない (削除・区切りの作り直し・ノートの作り直しと
+            // 区切りの鍵の入れ替えは、この鍵の下で行う)。
+            if !matches!(r.get(rec.kind, rec.target), Ok(Some(Read::Ok(_)))) {
+                continue;
             }
-            if cleared.insert(id) {
-                for old in evorag_memory::embeddings_of_chunk(&r, id, key).unwrap_or_default() {
-                    ops.extend(w.delete_embedding(old));
+            if !item.reused {
+                // 書き手のトランザクションの中でも、対象が残っていることを確かめる (04 §7.7 の 4)。
+                if !cleared.iter().any(|(t, _)| *t == rec.target) {
+                    ops.push(evorag_memory::expect_record(rec.kind, rec.target));
                 }
-            }
-            let body = EmbeddingBody {
-                target: id,
-                unit: if item.key.is_some() {
-                    UNIT_KEY
-                } else {
-                    UNIT_CHUNK
+                if cleared.insert((rec.target, rec.vk)) {
+                    let old = match &rec.vk {
+                        Some(vk) => segment_key_embeddings(&r, rec.target, vk, key),
+                        None => evorag_memory::embeddings_of_chunk(&r, rec.target, key)
+                            .unwrap_or_default(),
+                    };
+                    for old in old {
+                        ops.extend(w.delete_embedding(old));
+                    }
                 }
-                .to_owned(),
-                session: item.session,
-                model_key: key.to_owned(),
-                dim: v.len() as u32,
-                key: item.key,
-                src_rev: item.src_rev,
-            };
-            match w.embedding(&body, &v) {
-                Ok((_, o)) => ops.extend(o),
-                Err(_) => return false,
+                let body = EmbeddingBody {
+                    target: rec.target,
+                    unit: rec.unit.to_owned(),
+                    session: rec.session,
+                    model_key: key.to_owned(),
+                    dim: v.len() as u32,
+                    key: rec.key,
+                    src_rev: rec.src_rev,
+                    vk: rec.vk.map(|v| v.to_hex()),
+                };
+                match w.embedding(&body, &v) {
+                    Ok((_, o)) => ops.extend(o),
+                    Err(_) => return false,
+                }
             }
             rows.push(VecInput {
-                id,
+                id: item.id,
                 session: item.session,
-                unit: if item.key.is_some() {
-                    Unit::Key
-                } else {
-                    Unit::Chunk
+                unit: match item.target {
+                    Target::Chunk { .. } => Unit::Chunk,
+                    Target::Note { .. } | Target::Segment { .. } => Unit::Key,
                 },
                 vector: v,
             });
@@ -646,7 +865,7 @@ async fn save(inner: &Arc<Inner>, key: &str, items: Vec<Item>, vectors: Vec<Vec<
     if rows.is_empty() {
         return true;
     }
-    if write_derived(inner, ops).await.is_err() {
+    if !ops.is_empty() && write_derived(inner, ops).await.is_err() {
         return false;
     }
     let index = match current(inner) {

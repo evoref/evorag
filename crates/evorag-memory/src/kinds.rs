@@ -65,6 +65,8 @@ pub const KIND_EMBEDDING: &str = "embedding";
 pub const UNIT_CHUNK: &str = "chunk";
 /// 埋め込みの単位: ノートの検索の鍵 (04 §2)。`target` はノート、`key` は鍵の位置。
 pub const UNIT_KEY: &str = "key";
+/// 埋め込みの単位: 区切りの鍵 (04 §5.5、v0.5 の根)。`target` は台帳、`vk` は鍵の文字列の値の鍵。
+pub const UNIT_SEGMENT_KEY: &str = "segment_key";
 
 /// `embedding` の本体 (v1)。出典の ID を本体にも持つ (03 §4.2 の規則 12)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,10 @@ pub struct EmbeddingBody {
     /// 無い・null は 0 とみなす ([`SrcRev::of`])。
     #[serde(default)]
     pub src_rev: Option<u32>,
+    /// 単位 `segment_key` のときの、鍵の文字列の値の鍵 (64 桁の小文字の 16 進、04 §5.5)。区切りの鍵の埋め込みは
+    /// (台帳の ID, この値) で指す (台帳の掃除で `keys` の位置がずれるため)。ほかの単位では書かない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vk: Option<String>,
 }
 
 /// `note` の本体 (v1、種類 [`KIND_NOTE`](crate::import_v04::KIND_NOTE))。出典の往復の発話のターンの ID を
@@ -924,6 +930,7 @@ mod derived_names {
             dim: 1,
             key: None,
             src_rev: None,
+            vk: None,
         };
         out.push(w.embedding(&embedding, &[0.0]).expect("embedding").1);
         let note = NoteBody {

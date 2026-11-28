@@ -108,6 +108,9 @@ pub(crate) enum Step {
     /// 区切りを決め、区切りごとの 1 回の呼び出し (B2) で台帳を書く (04 §4 の手順 2・3、v0.5 の根)。埋め込みの後に
     /// 置く。利用者が操作したら、この手順は自分で要求を止め、止めたところまでを書く (`ledgers.rs`)。
     Ledgers,
+    /// 使う台帳の `keys` から区切りの鍵を作り、索引に合わせる (04 §5.5、04 §4 の手順 5、v0.5 の根)。台帳の後に置く。
+    /// 鍵の埋め込みは、次の回の埋め込みの手順が作る。
+    SegmentKeys,
 }
 
 /// sleep-time の手順を動かせる状態か。
@@ -149,6 +152,9 @@ fn next_sleep(inner: &Inner, skip: &HashMap<Step, Instant>) -> Option<Step> {
     }
     if !waiting(Step::Ledgers) && crate::ledgers::needed(inner) {
         return Some(Step::Ledgers);
+    }
+    if !waiting(Step::SegmentKeys) && crate::ledgers::keys::needed(inner) {
+        return Some(Step::SegmentKeys);
     }
     if !waiting(Step::Notes) && crate::notes::needed(inner) {
         return Some(Step::Notes);
@@ -258,6 +264,7 @@ pub(crate) fn remaining_steps(inner: &Inner) -> Vec<String> {
         (Step::Forget, crate::forgets::needed(inner)),
         (Step::Embed, crate::embedding::needed(inner)),
         (Step::Ledgers, crate::ledgers::needed(inner)),
+        (Step::SegmentKeys, crate::ledgers::keys::needed(inner)),
         (Step::Notes, crate::notes::needed(inner)),
         (Step::Extract, crate::extraction::needed(inner)),
         (Step::Verify, crate::correction::needed(inner)),
@@ -391,6 +398,7 @@ async fn run_step(inner: &Arc<Inner>, step: Step, generation: u64) -> Option<boo
                 false
             }
             Step::Ledgers => false,
+            Step::SegmentKeys => crate::ledgers::keys::sync(inner).await,
             Step::Backup => {
                 // ファイルの写しは落とせないので、待つ (LLM の要求は出さない)。
                 let worker = inner.clone();
