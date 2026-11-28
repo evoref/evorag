@@ -57,15 +57,67 @@ fn chat(chats: &[String]) -> ReplayClient {
 
 /// 埋め込みのサーバ (文字の bi-gram から作る決定的なベクトル)。
 fn embedder() -> ReplayClient {
-    ReplayClient::from_json(
-        r#"{
-          "props": {"build_info": "b1-test", "model_path": "/m/emb.gguf", "total_slots": 4,
-                    "default_generation_settings": {"n_ctx": 8192}},
-          "models": {"data": [{"id": "emb", "meta": {"n_params": 5, "size": 9, "n_vocab": 7}}]},
-          "embed": {"dim": 8}
-        }"#,
-    )
+    embedder_of(9)
+}
+
+/// `size` を変えると別の埋め込みのモデルになる。
+fn embedder_of(size: u64) -> ReplayClient {
+    ReplayClient::from_json(&format!(
+        r#"{{
+          "props": {{"build_info": "b1-test", "model_path": "/m/emb-{size}.gguf", "total_slots": 4,
+                    "default_generation_settings": {{"n_ctx": 8192}}}},
+          "models": {{"data": [{{"id": "emb", "meta": {{"n_params": 5, "size": {size}, "n_vocab": 7}}}}]}},
+          "embed": {{"dim": 64}}
+        }}"#
+    ))
     .expect("an embedder")
+}
+
+/// 埋め込みのモデルの model_key。
+fn embed_key(size: u64) -> String {
+    let meta = evorag_llm::ModelMeta {
+        n_params: Some(5),
+        size: Some(size),
+        n_vocab: Some(7),
+        n_ctx_train: None,
+    };
+    evorag_llm::model_key(&format!("/m/emb-{size}.gguf"), &meta, "emb")
+}
+
+/// 埋め込みのモデルを `size` のものに切り替える (`evorag setup` の記録の付け替え、06 §3)。
+fn bind_embedder(root: &Path, size: u64) {
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(NOW)));
+    let m = evorag_core::rebind::DataRootModels::open(
+        root,
+        RootFormat::V05,
+        "0.5.0",
+        clock.clone(),
+        Arc::new(UuidV7Gen::with_seed(clock, size + 70)),
+    )
+    .expect("the models");
+    m.bind(
+        "embed",
+        evorag_memory::ModelOrigin {
+            model_key: embed_key(size),
+            file_name: format!("emb-{size}.gguf"),
+            model_name: "emb".into(),
+            n_params: Some(5),
+            size: Some(size),
+            n_vocab: Some(7),
+            build_info: "b1-test".into(),
+        },
+    )
+    .expect("bind");
+}
+
+/// 埋め込みのモデル `size` の世代のベクトルの索引に、区切り `seg` の行があるか。
+fn generation_has(root: &Path, size: u64, seg: Id) -> bool {
+    let dir = root
+        .join("index")
+        .join("memory")
+        .join(format!("vec-{}", embed_key(size)));
+    evorag_index::vec::VecIndex::open_existing(&dir)
+        .is_some_and(|ix| ix.snapshot().ids().contains(&seg))
 }
 
 /// 生成を終えた答え。
@@ -322,6 +374,8 @@ fn config(root: &Path, at: i64, embed: Option<&ReplayClient>) -> CoreConfig {
 struct Seen {
     keys: Vec<(Id, Vec<String>)>,
     vectors: BTreeSet<Id>,
+    /// このプロセスの間に区切りの鍵の項目を入れ替えた区切りの数。
+    changed: usize,
 }
 
 /// コアを `at` の時刻で起動し、裏の処理が落ち着くまで待つ。
@@ -334,6 +388,7 @@ async fn run_core(root: &Path, at: i64, llm: &ReplayClient, embed: Option<&Repla
     let seen = Seen {
         keys: core.indexed_segment_keys(),
         vectors: core.vector_segment_keys().into_iter().collect(),
+        changed: core.ledger_stats().segment_keys_changed,
     };
     core.shutdown().await;
     seen
@@ -391,6 +446,7 @@ async fn keys_of_the_used_ledger_are_indexed_and_embedded() {
         "the URL fails gate 6"
     );
     assert!(seen.vectors.contains(&seg), "{seen:?}");
+    assert_eq!(seen.changed, 1);
 
     let seed = Seed::open(&root, NOW + MIN, 9);
     let (ledger, _) = seed.ledgers().pop().expect("a ledger");
@@ -419,6 +475,7 @@ async fn keys_of_the_used_ledger_are_indexed_and_embedded() {
     let again = run_core(&root, NOW + 2 * MIN, &chat(&[]), Some(&emb2)).await;
     assert_eq!(again.keys, seen.keys);
     assert_eq!(again.vectors, seen.vectors);
+    assert_eq!(again.changed, 0, "nothing is replaced on a plain restart");
     assert_eq!(
         embedding_ids(&root),
         before_emb2,
@@ -680,6 +737,205 @@ async fn a_changed_fingerprint_rebuilds_the_items() {
     assert_eq!(rebuilt.keys, seen.keys);
     assert_eq!(rebuilt.vectors, seen.vectors);
     assert!(file.is_file());
+}
+
+/// 忘れた・private にした値の鍵には、同じ問いでも当たらない (語彙の索引で添えず、ベクトルの索引にもその鍵の行が
+/// 無い)。指示の前は、同じ問いが鍵で当たる。
+///
+/// verifies: 04 §5.5 (導出の時点のふるい), 04 §7.1 (忘れる・private の鍵を索引から除く)
+#[tokio::test(flavor = "multi_thread")]
+async fn forgotten_or_private_keys_are_not_hit_by_the_same_query() {
+    const ASKED: &str = "モンステラを育てていて、水やりは週に一回にしています。";
+    const KEY: &str = "観葉植物の世話";
+    const QUERY: &str = "観葉植物の世話について前に話したことを教えて";
+    for (case, op) in [
+        ("private", DirectiveOp::Private),
+        ("forget", DirectiveOp::Forget),
+    ] {
+        let dir = TempDir::new(&format!("segkeys-nohit-{case}"));
+        let root = dir.path().to_path_buf();
+        let seg = {
+            let seed = Seed::open(&root, NOW - 30 * MIN, 1);
+            seed.probe();
+            let s = seed.session("植物");
+            let (u, _) = seed.pair(s, ASKED, "それくらいが目安ですね。");
+            evorag_memory::segment_id(u)
+        };
+        // 指示の前: 鍵の行が問いの鍵とちょうど合う。
+        let emb = embedder();
+        let (core, _rx, _) = Core::start(
+            config(&root, NOW, Some(&emb)),
+            Arc::new(chat(&[keys_output(&[KEY])]).clone()),
+        )
+        .await
+        .expect("start");
+        core.settle().await;
+        core.settle_background().await;
+        let hits = core.segment_key_vector_hits(KEY).await;
+        assert!(
+            hits.iter().any(|(id, v)| *id == seg && *v > 0.99),
+            "{hits:?}"
+        );
+        core.shutdown().await;
+
+        Seed::open(&root, NOW + MIN, 9).value_directive(op, KEY);
+        let llm = chat(&[out("覚えています")]);
+        let emb2 = embedder();
+        let (core, mut rx, _) = Core::start(
+            config(&root, NOW + 2 * MIN, Some(&emb2)),
+            Arc::new(llm.clone()),
+        )
+        .await
+        .expect("start");
+        core.settle().await;
+        core.settle_background().await;
+        assert!(core.indexed_segment_keys().is_empty(), "{case}");
+        let hits = core.segment_key_vector_hits(KEY).await;
+        assert!(hits.iter().all(|(id, _)| *id != seg), "{case}: {hits:?}");
+        core.hold(true);
+        core.command(Command::NewSession {
+            title: "今日".into(),
+        });
+        until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+        core.command(Command::Send { text: QUERY.into() });
+        until(&mut rx, |e| matches!(e, Event::ResponseFinished { .. })).await;
+        core.settle().await;
+        core.shutdown().await;
+        let last = llm
+            .requests()
+            .last()
+            .map(|r| {
+                r.messages
+                    .iter()
+                    .map(|m| m.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .expect("the answer request");
+        assert!(!last.contains(ASKED), "{case}: {last}");
+    }
+}
+
+/// 埋め込みのモデルを切り替えた後も、前の世代の索引に区切りの鍵の行が残る。鍵が変わった区切りの行は、前の世代の索引
+/// からも除く。
+///
+/// verifies: 04 §7.2 (索引は今の世代と前の世代のすべてから除く), 05 §2.2 (前のモデルの索引を 1 世代残す)
+#[tokio::test(flavor = "multi_thread")]
+async fn changed_keys_leave_the_previous_generation_too() {
+    let dir = TempDir::new("segkeys-generations");
+    let root = dir.path().to_path_buf();
+    let seg = seed_hobby(&root);
+    run_core(
+        &root,
+        NOW,
+        &chat(&[keys_output(&["将棋", "京都の暮らし"])]),
+        Some(&embedder_of(9)),
+    )
+    .await;
+    assert!(generation_has(&root, 9, seg));
+    bind_embedder(&root, 10);
+    let switched = run_core(&root, NOW + MIN, &chat(&[]), Some(&embedder_of(10))).await;
+    assert!(
+        switched.vectors.contains(&seg),
+        "embedded with the new model"
+    );
+    assert!(
+        generation_has(&root, 9, seg),
+        "the previous generation keeps its rows"
+    );
+    assert!(generation_has(&root, 10, seg));
+
+    Seed::open(&root, NOW + 2 * MIN, 9).value_directive(DirectiveOp::Private, "将棋");
+    let after = run_core(&root, NOW + 3 * MIN, &chat(&[]), Some(&embedder_of(10))).await;
+    assert_eq!(after.keys, [(seg, names(&["京都の暮らし"]))]);
+    assert!(after.vectors.contains(&seg));
+    assert!(
+        !generation_has(&root, 9, seg),
+        "the changed segment leaves the previous generation"
+    );
+}
+
+/// 指紋を書いた後 (入れ替える区切りを除いた指紋) で止まったときは、次の起動でその区切りを入れ替え直す。埋め込みは
+/// 記録から使い直す。
+///
+/// verifies: 04 §5.5 (入れ替える時機と仕方: 途中で止まったら、次の起動で入れ替え直す)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sync_stopped_after_the_fingerprints_were_written_is_redone() {
+    let dir = TempDir::new("segkeys-stopped");
+    let root = dir.path().to_path_buf();
+    let seg = seed_hobby(&root);
+    let seen = run_core(
+        &root,
+        NOW,
+        &chat(&[keys_output(&["将棋", "京都の暮らし"])]),
+        Some(&embedder()),
+    )
+    .await;
+    // 入れ替える前に書く指紋 (入れ替える区切りを除いたもの) だけが残った形。索引の項目はそのまま。
+    let file = root.join("index").join("memory").join("segment-keys.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).expect("the file")).expect("json");
+    state["segments"]
+        .as_object_mut()
+        .expect("segments")
+        .remove(&seg.to_string());
+    std::fs::write(&file, serde_json::to_vec(&state).expect("json")).expect("write");
+    let before = embedding_ids(&root);
+    let again = run_core(&root, NOW + MIN, &chat(&[]), Some(&embedder())).await;
+    assert_eq!(again.changed, 1, "the segment is replaced again");
+    assert_eq!(again.keys, seen.keys);
+    assert_eq!(again.vectors, seen.vectors);
+    assert_eq!(embedding_ids(&root), before);
+    let later = run_core(&root, NOW + 2 * MIN, &chat(&[]), Some(&embedder())).await;
+    assert_eq!(later.changed, 0);
+}
+
+/// 指示を読めない (忘れるの範囲を確かめられない) ときは、区切りの鍵の項目をすべて索引から外す (フェイルクローズ)。
+/// 埋め込みは残し、読めるようになったら入れ直す。
+///
+/// verifies: 04 §5.5 (入れ替える時機と仕方: フェイルクローズ), 03 §3.1.1 (確かめられなければ止める)
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_directives_withdraw_the_segment_keys() {
+    let dir = TempDir::new("segkeys-closed");
+    let root = dir.path().to_path_buf();
+    let seg = seed_hobby(&root);
+    let seen = run_core(
+        &root,
+        NOW,
+        &chat(&[keys_output(&["将棋", "京都の暮らし"])]),
+        Some(&embedder()),
+    )
+    .await;
+    assert_eq!(seen.keys.len(), 1);
+    let (directive, valid) = {
+        let seed = Seed::open(&root, NOW + MIN, 9);
+        let id = seed.value_directive(DirectiveOp::Private, "囲碁");
+        let e = seed.get(evorag_memory::KIND_DIRECTIVE, id);
+        let mut broken = e.clone();
+        broken
+            .set_body(&serde_json::json!({"op": 7}))
+            .expect("a body");
+        seed.write(vec![WriteOp::Put(broken)]);
+        (id, e)
+    };
+    let before = embedding_ids(&root);
+    let closed = run_core(&root, NOW + 2 * MIN, &chat(&[]), Some(&embedder())).await;
+    assert!(closed.keys.is_empty(), "{closed:?}");
+    assert!(!closed.vectors.contains(&seg));
+    assert_eq!(embedding_ids(&root), before, "the embeddings are kept");
+    // 読めるようになったら入れ直す (埋め込みは使い直す)。
+    {
+        let seed = Seed::open(&root, NOW + 3 * MIN, 10);
+        assert_eq!(
+            seed.get(evorag_memory::KIND_DIRECTIVE, directive).id,
+            directive
+        );
+        seed.write(vec![WriteOp::Put(valid)]);
+    }
+    let back = run_core(&root, NOW + 4 * MIN, &chat(&[]), Some(&embedder())).await;
+    assert_eq!(back.keys, seen.keys);
+    assert!(back.vectors.contains(&seg));
+    assert_eq!(embedding_ids(&root), before);
 }
 
 /// v0.4 の形式の根 (比較の台) では、区切りの鍵を作らず、指紋のファイルも書かない。

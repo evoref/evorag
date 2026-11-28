@@ -237,13 +237,18 @@ fn plan_open(inner: &Inner, key: &str, previous: Option<&str>) -> Option<OpenPla
     let mut stale = Vec::new();
     // 区切りの鍵の埋め込みは台帳を指す (04 §5.5)。行は区切りの鍵の手順が区切りの ID で入れるので、ここでは索引に
     // 足さず、台帳の無いもの・今と前のモデルでないもの・(モデル, 台帳, 鍵) の重複だけを消す。
+    // v0.5 の根で台帳を読めなければ開かない (台帳の集合を空とみなして、有効な埋め込みを消さないため)。v0.4 の形式の
+    // 根には台帳の種類が無い。
     let mut ledgers: HashSet<Id> = HashSet::new();
-    let _ = r.for_each(KIND_PROPOSAL, |x| {
-        if let Read::Ok(e) = x {
-            ledgers.insert(e.id);
-        }
-        true
-    });
+    if inner.store.is_v05_root() {
+        r.for_each(KIND_PROPOSAL, |x| {
+            if let Read::Ok(e) = x {
+                ledgers.insert(e.id);
+            }
+            true
+        })
+        .ok()?;
+    }
     let mut keys_seen: HashMap<(String, Id, String), Id> = HashMap::new();
     let mut key_dim: Option<usize> = None;
     // 今と前のモデルの、対象と単位 (チャンク、またはノートの鍵の位置) ごとに 1 件 (新しい記録を残す。ID は

@@ -92,10 +92,15 @@ fn plan(store: &Store, ids: &dyn IdGen, now: Timestamp) -> Option<Plan> {
     // `through`) がすべて無ければ消す (区切りの記録を失った台帳は、区切りを戻すのに使うので残す、04 §2)。
     let (segments, ledgers) = sourceless_segments_and_ledgers(&r, &sessions, &turns)?;
     // 埋め込みは、対象 (チャンク・ノート・台帳) が無いか消すものなら消す (区切りの鍵の埋め込みは台帳を指す、
-    // 04 §5.5)。v0.4 の形式の根には台帳の種類が無い。
+    // 04 §5.5)。v0.4 の形式の根には台帳の種類が無い。v0.5 の根で台帳を読めなければ、何も消さない (台帳の集合を空と
+    // みなして、有効な埋め込みを消さないため)。
     let gone: HashSet<Id> = ledgers.iter().map(|e| e.id).collect();
-    let kept_ledgers: HashSet<Id> = ids_of(&r, KIND_PROPOSAL)
-        .unwrap_or_default()
+    let all_ledgers = if store.is_v05_root() {
+        ids_of(&r, KIND_PROPOSAL)?
+    } else {
+        HashSet::new()
+    };
+    let kept_ledgers: HashSet<Id> = all_ledgers
         .into_iter()
         .filter(|id| !gone.contains(id))
         .collect();

@@ -1751,6 +1751,43 @@ pub fn session_title(store: &Store, session: Id) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// 今のセッションの区切りの鍵の項目と行は、候補を集める段階で除く。ほかのセッションの区切りの鍵と、セッションに
+    /// 結び付く項目 (チャンク) の今のセッションの判定は、そのまま。
+    ///
+    /// verifies: 04 §5.5 (鍵の項目はセッションに結び付けない), 05 §3.2 (今のセッションのターンは除く)
+    #[test]
+    fn segment_keys_of_the_current_session_are_skipped() {
+        let id = |b: u8| Id::from_bytes([b; 16]);
+        let (current, other) = (id(1), id(2));
+        let (mine, theirs) = (id(3), id(4));
+        let only = CurrentOnly {
+            session: current,
+            facts: HashSet::new(),
+            segments: [mine].into_iter().collect(),
+        };
+        let doc = |id: Id, session: Id| evorag_index::lex::Doc {
+            id,
+            session,
+            len: 1,
+        };
+        assert!(only.skips(&doc(mine, SEGMENT_KEY_SESSION)));
+        assert!(!only.skips(&doc(theirs, SEGMENT_KEY_SESSION)));
+        assert!(
+            only.skips(&doc(id(5), current)),
+            "a chunk of the current session"
+        );
+        assert!(!only.skips(&doc(id(5), other)));
+        let row = |id: Id, session: Id| evorag_index::vec::VecRow {
+            id,
+            session,
+            unit: evorag_index::vec::Unit::Key,
+        };
+        assert!(only.skips_row(&row(mine, SEGMENT_KEY_SESSION)));
+        assert!(!only.skips_row(&row(theirs, SEGMENT_KEY_SESSION)));
+        // 区切りの鍵の値でない行は、区切りの ID と同じでも除かない (ノートの鍵などの別の項目)。
+        assert!(!only.skips_row(&row(mine, other)));
+    }
+
     /// verifies: AC-FR-402-1 (語彙とベクトルの順位を RRF で合わせる、05 §3.3)
     #[test]
     fn rrf_prefers_turns_found_by_both_and_breaks_ties_by_recency() {

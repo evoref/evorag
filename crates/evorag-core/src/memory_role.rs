@@ -270,6 +270,7 @@ pub(crate) fn refresh_after_probe(inner: &Inner, announced: bool) {
         tracing::info!(?state, "memory role changed");
         // 区切りの手順は呼ぶ先を選び直す (縮退の入りと出)。
         crate::ledgers::touch(inner);
+        crate::ledgers::keys::touch(inner);
         crate::emit(
             inner,
             Event::MemoryRole {

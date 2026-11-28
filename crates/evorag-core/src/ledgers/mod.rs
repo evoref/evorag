@@ -62,11 +62,11 @@ fn state(inner: &Inner) -> std::sync::MutexGuard<'_, State> {
     inner.ledgers.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 会話・指示・呼ぶ先が変わった (ターンを書いた、セッションを消した、忘れる、点検・役割の変化)。区切りの鍵も
-/// 突き合わせ直す (使う台帳と、ふるいの指示が変わりうるため)。
+/// 会話・指示・呼ぶ先が変わった (ターンを書いた、セッションを消した、忘れる、点検・役割の変化)。区切りの鍵は、
+/// 使う台帳か指示か呼ぶ先が変わりうるところで別に突き合わせ直す ([`keys::touch`]。ターンを足しただけでは
+/// 変わらない)。
 pub(crate) fn touch(inner: &Inner) {
     state(inner).version += 1;
-    keys::touch(inner);
 }
 
 /// 区切りの呼び出しを止めた理由 (状態の行と `doctor` の材料、04 §5.2.1 の「失敗の扱い」)。
@@ -86,13 +86,20 @@ pub struct LedgerStats {
     pub nothing_sent: usize,
     /// 区切りの呼び出しを止めている理由 (止めていなければ `None`)。
     pub halted: Option<HaltReason>,
+    /// このプロセスの間に、区切りの鍵の項目を入れ替えた区切りの数 (指紋が違った・語彙の索引に無かった、04 §5.5)。
+    pub segment_keys_changed: usize,
+    /// このプロセスの間に、区切りの鍵の項目を除いた区切りの数 (鍵が無くなった・区切りが消えた)。
+    pub segment_keys_removed: usize,
 }
 
 pub(crate) fn stats(inner: &Inner) -> LedgerStats {
+    let (segment_keys_changed, segment_keys_removed) = keys::counts(inner);
     let st = state(inner);
     LedgerStats {
         nothing_sent: st.unsent.len(),
         halted: st.halted.as_ref().map(|(_, r)| *r),
+        segment_keys_changed,
+        segment_keys_removed,
     }
 }
 

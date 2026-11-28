@@ -6,7 +6,8 @@
 //! ([`crate::embedding`]) が語彙の索引との差から作り、(台帳の ID, 鍵の値の鍵) で記録する。同じ記録があれば
 //! 埋め込みの要求を出さずに使い直す (`/private off` で同じ鍵が戻るとき・使う台帳が戻ったとき)。
 //!
-//! - **突き合わせ** ([`sync`]): 起動の後と、会話・指示・呼ぶ先が変わった後・台帳を書いた後 ([`touch`]) に、記録から
+//! - **突き合わせ** ([`sync`]): 起動の後と、区切りか台帳を書いた後・指示か呼ぶ先が変わった後・セッションを消した後・
+//!   索引の整理の job の後 ([`touch`]。発話のたびには行わない) に、記録から
 //!   求めた鍵と、索引に入れた鍵 (区切りごとの指紋) を比べ、違う区切りの項目だけを入れ替える (区切りの ID の項目を
 //!   語彙とベクトルのすべての世代の索引から除いてから、語彙の索引に足す)。指紋は索引の置き場所の
 //!   `segment-keys.json` に持ち (作り直せる派生の値、05 §2.3)、入れ替える前に、入れ替える区切りを除いた指紋を
@@ -17,8 +18,12 @@
 //!   鍵の埋め込みは残す (索引の項目だけを除く)。
 //! - 導出 (B4) が入るまで、導出で private の印を付けた単位は無いものとしてふるう (`private_units` は空)。
 //!
-//! `memory.forget_key` が使えないとき・指示を読めないときは、索引を変えない (鍵の値の鍵と忘れるの範囲を確かめ
-//! られないため。03 §3.1.1 のフェイルクローズ)。旧エンジンの根 ([`crate::RootFormat::V04Bench`]) では動かさない。
+//! - 索引から除けなかったときは、除く ID を索引の整理の job に書き (04 §7.7 の 2)、次の回に記録の指紋から入れ替え
+//!   直す。
+//!
+//! `memory.forget_key` が使えないとき・指示を読めないときは、区切りの鍵の項目をすべて索引から外す (鍵の値の鍵と
+//! 忘れるの範囲を確かめられないため。03 §3.1.1 のフェイルクローズ。埋め込みは残す)。旧エンジンの根
+//! ([`crate::RootFormat::V04Bench`]) では動かさない。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -88,6 +93,9 @@ pub(crate) struct State {
     /// 今の `indexed` の指紋をファイルに書けた。
     saved: bool,
     memo: HashMap<Id, Memo>,
+    /// このプロセスの間に入れ替えた区切りと、除いた区切りの数 ([`counts`])。
+    changed_total: usize,
+    removed_total: usize,
 }
 
 fn state(inner: &Inner) -> std::sync::MutexGuard<'_, State> {
@@ -236,19 +244,37 @@ impl Choice {
     }
 }
 
-/// 記録から求めた、索引に入れる区切りの鍵と消す埋め込み。
+/// 記録から求めた、索引に入れる区切りの鍵。
 struct Plan {
     desired: HashMap<Id, Indexed>,
-    /// 消す埋め込みの記録。
-    stale: Vec<Id>,
+    /// 検査かふるいを当て直した台帳と、その今の検査を通った鍵・忘れるのふるいで除いた鍵 (その台帳の埋め込みを、
+    /// 鍵の下で見直す)。
+    fresh: Vec<Fresh>,
     memo: HashMap<Id, Memo>,
 }
 
-/// 指示の本体 (読めない指示があれば `None`)。
-fn directive_bodies(r: &ReadTxn<'_>) -> Option<Vec<(Id, DirectiveBody)>> {
+/// 検査かふるいを当て直した台帳 1 つ。
+struct Fresh {
+    ledger: Id,
+    live: BTreeSet<ValueKey>,
+    forgotten: BTreeSet<ValueKey>,
+}
+
+/// 記録を読んだ結果。
+enum Planned {
+    Ready(Plan),
+    /// 鍵の値の鍵か忘れるの範囲を確かめられない (`memory.forget_key` が使えない・指示を読めない)。区切りの鍵の
+    /// 項目をすべて外す (フェイルクローズ、03 §3.1.1)。
+    Closed,
+    /// 記録を読めなかった (次の回に試し直す)。
+    Failed,
+}
+
+/// 指示の本体。読めない指示があれば `Err(())` (読み取りそのものの失敗は `Ok(None)`)。
+fn directive_bodies(r: &ReadTxn<'_>) -> Result<Option<Vec<(Id, DirectiveBody)>>, ()> {
     let mut bodies = Vec::new();
     let mut unreadable = 0usize;
-    r.for_each(KIND_DIRECTIVE, |x| {
+    let walked = r.for_each(KIND_DIRECTIVE, |x| {
         match x {
             Read::Ok(e) => match e.body_as::<DirectiveBody>() {
                 Ok(b) => bodies.push((e.id, b)),
@@ -257,26 +283,28 @@ fn directive_bodies(r: &ReadTxn<'_>) -> Option<Vec<(Id, DirectiveBody)>> {
             _ => unreadable += 1,
         }
         true
-    })
-    .ok()?;
+    });
+    if walked.is_err() {
+        return Ok(None);
+    }
     if unreadable > 0 {
         tracing::warn!(
             unreadable,
-            "directives could not be read; segment keys are not changed"
+            "directives could not be read; segment keys are withdrawn from the index"
         );
-        return None;
+        return Err(());
     }
-    Some(bodies)
+    Ok(Some(bodies))
 }
 
-/// 台帳 1 つに検査とふるいを当てる (前と同じ入力なら使い直す)。
+/// 台帳 1 つに検査とふるいを当てる。前と同じ入力なら使い直す (当て直したら 2 つ目が真)。
 fn memo_of(
     old: &mut HashMap<Id, Memo>,
     ledger: Id,
     body: &LedgerBody,
     first_turn: Option<Id>,
     cx: (&Rules<'_>, &ForgetKey, &DirectiveSet, Stamp),
-) -> Memo {
+) -> (Memo, bool) {
     let (rules, key, directives, stamp) = cx;
     let raw = &body.output.keys().items;
     if let Some(m) = old.remove(&ledger)
@@ -284,7 +312,7 @@ fn memo_of(
         && m.stamp == stamp
         && m.first_turn == first_turn
     {
-        return m;
+        return (m, false);
     }
     let checked = check_keys(rules, key, &body.output);
     let empty = BTreeSet::new();
@@ -301,53 +329,63 @@ fn memo_of(
         .filter(|d| matches!(d.reason, KeyDrop::Forgotten(_)))
         .filter_map(|d| by_index.get(&d.index).copied())
         .collect();
-    Memo {
+    let memo = Memo {
         raw: raw.clone(),
         stamp,
         first_turn,
         kept: screened.keys().to_vec(),
         checked,
         forgotten,
-    }
+    };
+    (memo, true)
 }
 
-/// 記録を読んで、索引に入れる区切りの鍵と消す埋め込みを求める (I/O は読み取りだけ)。
+/// 記録を読んで、索引に入れる区切りの鍵を求める (I/O は読み取りだけ。索引を書き換える経路の直列化の外で呼ぶ)。
 fn plan(
     store: &Store,
     lang: PromptLanguage,
     key: &ForgetKey,
     choice: &Choice,
     mut old: HashMap<Id, Memo>,
-) -> Option<Plan> {
-    let r = store.read().ok()?;
-    let bodies = directive_bodies(&r)?;
+) -> Planned {
+    let Ok(r) = store.read() else {
+        return Planned::Failed;
+    };
+    let bodies = match directive_bodies(&r) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Planned::Failed,
+        Err(()) => return Planned::Closed,
+    };
     let stamp: Stamp = (bodies.len(), bodies.iter().map(|(id, _)| *id).max());
     let directives = DirectiveSet::new(
         bodies,
         evorag_memory::redaction_marker(lang.as_str()),
         str::to_owned,
     );
-    let ledgers = super::snapshot::load_ledgers(&r)?;
+    let Some(ledgers) = super::snapshot::load_ledgers(&r) else {
+        return Planned::Failed;
+    };
     let mut segments: HashMap<Id, SegmentBody> = HashMap::new();
-    r.for_each(KIND_SEGMENT, |x| {
+    let walked = r.for_each(KIND_SEGMENT, |x| {
         if let Read::Ok(e) = x
             && let Ok(b) = e.body_as::<SegmentBody>()
         {
             segments.insert(e.id, b);
         }
         true
-    })
-    .ok()?;
+    });
     let mut revs: HashMap<Id, u32> = HashMap::new();
-    r.for_each(KIND_TURN, |x| {
+    let walked_turns = r.for_each(KIND_TURN, |x| {
         if let Read::Ok(e) = x
             && let Some(rev) = turn_rev_checked(&e)
         {
             revs.insert(e.id, rev);
         }
         true
-    })
-    .ok()?;
+    });
+    if walked.is_err() || walked_turns.is_err() {
+        return Planned::Failed;
+    }
     let env = SelectEnv {
         current: choice.current(),
         build_info: &choice.build_info,
@@ -360,7 +398,24 @@ fn plan(
     };
     let rules = Rules::bundled();
     let cx = (&rules, key, &directives, stamp);
+    // すべての台帳 (使っていない台帳を含む。その埋め込みを見直すため) に検査とふるいを当てる。入力の変わらない
+    // 台帳は前の結果を使う。
     let mut memo: HashMap<Id, Memo> = HashMap::new();
+    let mut fresh = Vec::new();
+    for (seg, list) in &ledgers {
+        let first_turn = segments.get(seg).and_then(|s| s.pairs.first().copied());
+        for (id, body) in list {
+            let (m, recomputed) = memo_of(&mut old, *id, body, first_turn, cx);
+            if recomputed {
+                fresh.push(Fresh {
+                    ledger: *id,
+                    live: m.checked.vks(),
+                    forgotten: m.forgotten.clone(),
+                });
+            }
+            memo.insert(*id, m);
+        }
+    }
     let mut desired = HashMap::new();
     for (seg, body) in &segments {
         let Some(stored) = ledgers.get(seg) else {
@@ -374,63 +429,44 @@ fn plan(
             continue;
         };
         let id = chosen.ledger.id;
-        let m = memo_of(
-            &mut old,
-            id,
-            chosen.ledger.body,
-            body.pairs.first().copied(),
-            cx,
+        let Some(m) = memo.get(&id).filter(|m| !m.kept.is_empty()) else {
+            continue;
+        };
+        desired.insert(
+            *seg,
+            Indexed {
+                ledger: id,
+                session: body.session,
+                hash: fingerprint(id, &m.kept),
+                keys: m.kept.clone(),
+            },
         );
-        if !m.kept.is_empty() {
-            desired.insert(
-                *seg,
-                Indexed {
-                    ledger: id,
-                    session: body.session,
-                    hash: fingerprint(id, &m.kept),
-                    keys: m.kept.clone(),
-                },
-            );
-        }
-        memo.insert(id, m);
     }
-    // 区切りの鍵の埋め込みを持つ台帳 (使っていない台帳を含む) の、今の検査の結果に無い鍵と忘れた鍵の埋め込み。
+    Planned::Ready(Plan {
+        desired,
+        fresh,
+        memo,
+    })
+}
+
+/// 当て直した台帳の区切りの鍵の埋め込みのうち、今の検査の結果に無い鍵と忘れた鍵のもの (鍵の下で読む。読んでから
+/// 鍵を取るまでの間に保存された埋め込みも見るため)。
+fn stale_embeddings(store: &Store, fresh: &[Fresh]) -> Option<Vec<Id>> {
+    let r = store.read().ok()?;
     let mut stale = Vec::new();
-    for (seg, list) in &ledgers {
-        let first_turn = segments.get(seg).and_then(|s| s.pairs.first().copied());
-        for (id, body) in list {
-            let found = evorag_memory::embeddings_of(&r, *id).ok()?;
-            let mine: Vec<(Id, Option<ValueKey>)> = found
-                .into_iter()
-                .filter_map(|(e, b)| {
-                    let b = b.filter(|b| b.unit == UNIT_SEGMENT_KEY)?;
-                    Some((e, b.vk.as_deref().and_then(ValueKey::from_hex)))
-                })
-                .collect();
-            if mine.is_empty() {
+    for f in fresh {
+        for (e, b) in evorag_memory::embeddings_of(&r, f.ledger).ok()? {
+            let Some(b) = b.filter(|b| b.unit == UNIT_SEGMENT_KEY) else {
                 continue;
-            }
-            let m = match memo.remove(id) {
-                Some(m) => m,
-                None => memo_of(&mut old, *id, body, first_turn, cx),
             };
-            let live = m.checked.vks();
-            stale.extend(
-                mine.into_iter()
-                    .filter(|(_, vk)| {
-                        vk.is_none_or(|v| !live.contains(&v) || m.forgotten.contains(&v))
-                    })
-                    .map(|(e, _)| e),
-            );
-            memo.insert(*id, m);
+            let vk = b.vk.as_deref().and_then(ValueKey::from_hex);
+            if vk.is_none_or(|v| !f.live.contains(&v) || f.forgotten.contains(&v)) {
+                stale.push(e);
+            }
         }
     }
     stale.sort();
-    Some(Plan {
-        desired,
-        stale,
-        memo,
-    })
+    Some(stale)
 }
 
 /// 指紋のファイルの中身。
@@ -491,69 +527,98 @@ pub(crate) fn remove_recorded(root: &Path) -> std::io::Result<()> {
     }
 }
 
-/// 区切りの鍵を索引に合わせる (起動の後と sleep-time の手順)。チャンクと索引を変える処理の鍵の下の、落とされない
-/// task で行う。合わせられたら `true`。
+/// 記録を読み直す回数の上限 (読んでから索引を書き換える経路の直列化を取るまでに変更が続いたとき)。
+const SYNC_TRIES: usize = 3;
+
+/// 区切りの鍵を索引に合わせる (起動の後と sleep-time の手順)。記録を読んで鍵を求めるのは、チャンクと索引を変える
+/// 処理の鍵の外で行い、鍵を取ってから、その間に変更が無かったことを確かめて、落とされない task で当てる (変更が
+/// あれば読み直す)。合わせられたら `true`。
 pub(crate) async fn sync(inner: &Arc<Inner>) -> bool {
-    if crate::old_engine(inner) {
+    if crate::old_engine(inner) || inner.index.is_none() {
         return true;
     }
-    let (Some(_), Some(key)) = (inner.index.clone(), inner.facts_key.key().cloned()) else {
-        return true;
-    };
-    let version = state(inner).version;
-    // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した保存は終わっている)。
-    let lock = inner.index_lock.clone().lock_owned().await;
-    let worker = inner.clone();
-    let task = tokio::spawn(async move {
-        let _lock = lock;
-        let choice = Choice::of(&worker);
-        let old = std::mem::take(&mut state(&worker).memo);
-        let store = worker.store.clone();
-        let lang = worker.language;
-        let planned = tokio::task::spawn_blocking(move || plan(&store, lang, &key, &choice, old))
-            .await
-            .ok()
-            .flatten();
-        let Some(plan) = planned else {
-            return false;
+    for _ in 0..SYNC_TRIES {
+        let version = state(inner).version;
+        let planned = match inner.facts_key.key().cloned() {
+            None => Planned::Closed,
+            Some(key) => {
+                let choice = Choice::of(inner);
+                let old = std::mem::take(&mut state(inner).memo);
+                let store = inner.store.clone();
+                let lang = inner.language;
+                tokio::task::spawn_blocking(move || plan(&store, lang, &key, &choice, old))
+                    .await
+                    .unwrap_or(Planned::Failed)
+            }
         };
-        apply(&worker, plan).await
-    });
-    let done = task.await.unwrap_or(false);
-    if done {
-        state(inner).clean = Some(version);
+        if matches!(planned, Planned::Failed) {
+            return false;
+        }
+        // 鍵は spawn の前に取る (終了の処理が鍵を取れたら、出した保存は終わっている)。
+        let lock = inner.index_lock.clone().lock_owned().await;
+        if state(inner).version != version {
+            if let Planned::Ready(p) = planned {
+                state(inner).memo = p.memo;
+            }
+            continue;
+        }
+        let worker = inner.clone();
+        let done = tokio::spawn(async move {
+            let _lock = lock;
+            apply(&worker, planned).await
+        })
+        .await
+        .unwrap_or(false);
+        if done {
+            state(inner).clean = Some(version);
+        }
+        return done;
     }
-    done
+    false
 }
 
 /// 求めた鍵を索引に当てる (呼び手は `index_lock` を持つ)。
-async fn apply(inner: &Arc<Inner>, plan: Plan) -> bool {
-    let Plan {
-        desired,
-        stale,
-        memo,
-    } = plan;
-    state(inner).memo = memo;
-    if !stale.is_empty() {
-        let w = crate::writes(inner);
-        let ops: Vec<_> = stale
-            .iter()
-            .flat_map(|id| w.delete_embedding(*id))
-            .collect();
-        if let Err(e) = crate::write_derived(inner, ops).await {
-            tracing::warn!(error = %e, "stale segment key embeddings could not be removed");
-            return false;
+async fn apply(inner: &Arc<Inner>, planned: Planned) -> bool {
+    let (desired, fresh) = match planned {
+        Planned::Ready(p) => {
+            state(inner).memo = p.memo;
+            (p.desired, p.fresh)
         }
-        tracing::info!(
-            removed = stale.len(),
-            "stale segment key embeddings removed"
-        );
+        Planned::Closed => {
+            tracing::warn!("segment keys cannot be checked; they are withdrawn from the index");
+            state(inner).memo.clear();
+            (HashMap::new(), Vec::new())
+        }
+        Planned::Failed => return false,
+    };
+    if !fresh.is_empty() {
+        let store = inner.store.clone();
+        let Ok(Some(stale)) =
+            tokio::task::spawn_blocking(move || stale_embeddings(&store, &fresh)).await
+        else {
+            return false;
+        };
+        if !stale.is_empty() {
+            let w = crate::writes(inner);
+            let ops: Vec<_> = stale
+                .iter()
+                .flat_map(|id| w.delete_embedding(*id))
+                .collect();
+            if let Err(e) = crate::write_derived(inner, ops).await {
+                tracing::warn!(error = %e, "stale segment key embeddings could not be removed");
+                return false;
+            }
+            tracing::info!(
+                removed = stale.len(),
+                "stale segment key embeddings removed"
+            );
+        }
     }
     let Some(ix) = inner.index.clone() else {
         return true;
     };
     let root = inner.store.data_root().to_path_buf();
-    // 索引に入れた鍵の指紋 (起動の後の最初の回は、前の起動が書いたファイルから)。
+    // 索引に入れた鍵の指紋 (起動の後の最初の回と、前の回が失敗した後は、ファイルから)。
     let known = {
         let st = state(inner);
         st.indexed.as_ref().map(|m| {
@@ -614,6 +679,7 @@ async fn apply(inner: &Arc<Inner>, plan: Plan) -> bool {
         let saved = tokio::task::spawn_blocking(move || save_recorded(&r2, &kept)).await;
         if !matches!(saved, Ok(Ok(()))) {
             tracing::warn!("the segment key fingerprints could not be written; keys wait");
+            state(inner).indexed = None;
             return false;
         }
     }
@@ -632,26 +698,36 @@ async fn apply(inner: &Arc<Inner>, plan: Plan) -> bool {
         st.saved = false;
     }
     let worker = inner.clone();
-    let done = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
-        let vectors = crate::embedding::remove_everywhere(&worker, &gone);
-        ix.remove(&gone)?;
-        if !docs.is_empty() {
-            ix.add(docs)?;
-        }
-        Ok(vectors)
-    })
-    .await;
-    match done {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => {
-            // ベクトルの索引から除けなかった行は、次の回で入れ替え直す (指紋は書かない)。
-            tracing::warn!("segment keys could not be removed from a vector index");
-            return false;
-        }
-        _ => {
-            tracing::warn!("segment keys could not be written to the lexical index");
-            return false;
-        }
+    let gone2 = gone.clone();
+    let removed_all =
+        tokio::task::spawn_blocking(move || crate::remove_from_indexes(&worker, &gone2))
+            .await
+            .unwrap_or(false);
+    if !removed_all {
+        // 除けなかった ID は索引の整理の job で試し直す (04 §7.7 の 2)。入れ替える区切りは入れ直さず、次の回に記録の
+        // 指紋から入れ替え直す。
+        tracing::warn!("segment keys could not be removed from an index; a cleanup job retries");
+        queue_cleanup(inner, &gone).await;
+        state(inner).indexed = None;
+        return false;
+    }
+    let added = if docs.is_empty() {
+        true
+    } else {
+        matches!(
+            tokio::task::spawn_blocking(move || ix.add(docs)).await,
+            Ok(Ok(()))
+        )
+    };
+    if !added {
+        tracing::warn!("segment keys could not be written to the lexical index");
+        state(inner).indexed = None;
+        return false;
+    }
+    {
+        let mut st = state(inner);
+        st.changed_total += n_changed;
+        st.removed_total += n_removed;
     }
     tracing::info!(
         changed = n_changed,
@@ -659,6 +735,31 @@ async fn apply(inner: &Arc<Inner>, plan: Plan) -> bool {
         "segment keys synced"
     );
     persist(inner, &root, want).await
+}
+
+/// 索引から除けなかった ID を、索引の整理の job に書く (同じ ID の集合の job が残っていれば足さない)。
+async fn queue_cleanup(inner: &Arc<Inner>, gone: &HashSet<Id>) {
+    let queued = inner
+        .store
+        .read()
+        .ok()
+        .and_then(|r| evorag_memory::pending_cleanup_jobs(&r).ok())
+        .unwrap_or_default()
+        .iter()
+        .any(|j| !j.backups && j.ids.iter().copied().collect::<HashSet<Id>>() == *gone);
+    if !queued {
+        let mut ids: Vec<Id> = gone.iter().copied().collect();
+        ids.sort();
+        match evorag_memory::index_job(&crate::writes(inner), ids) {
+            Ok((_, op)) => {
+                if let Err(e) = crate::write_derived(inner, vec![op]).await {
+                    tracing::warn!(error = %e, "the index cleanup job could not be written");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "the index cleanup job could not be made"),
+        }
+    }
+    crate::flag_cleanup(inner);
 }
 
 /// 今の指紋を書く。
@@ -671,6 +772,12 @@ async fn persist(inner: &Inner, root: &Path, want: BTreeMap<Id, String>) -> bool
     }
     state(inner).saved = ok;
     ok
+}
+
+/// 試験と `doctor` のための数: このプロセスの間に入れ替えた区切りと、除いた区切りの数。
+pub(crate) fn counts(inner: &Inner) -> (usize, usize) {
+    let st = state(inner);
+    (st.changed_total, st.removed_total)
 }
 
 #[cfg(test)]
