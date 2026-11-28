@@ -2,18 +2,20 @@
 //!
 //! 走らせるのは [`CASES`] の事例の、ターン・区切り・選択・台帳・導出・`import_v04` の段と、期待の `units` (完全に
 //! 比べる)・`label`・`same_as` (単位の集合・本体・導出の指紋)・`ends`・`not_live`・`counts` (書いた関門の理由)・
-//! `doctor` (`import_private_unmatched`)。区切りの発話に前のふるいと文の分け方 v1 を当てて台帳の `sentences` と訂正の
+//! `doctor` (`import_private_unmatched`)・`profile` (導いた単位から `profile::rows`・`render` で作った行。`absent` は
+//! `forget_key` の段の鍵の状態で `profile::decide` が置かないと決めること)。区切りの発話に前のふるいと文の分け方 v1 を当てて台帳の `sentences` と訂正の
 //! 候補の表 (`corr`) を作り、区切りごとに `select_ledger` で使う台帳を選んでから導く。取り込んだ根では、導くたびに
 //! `import.v04_ended` の表で `end` を足して導き直す (返るものが無くなるまで)。`order = "shuffle"` の導出は、台帳を
 //! 読む順 (区切りの到着の順・同じ区切りの複数の選択の台帳の順) と、台帳の中の候補の順を乱す。
 //!
-//! 走らせない段 (鍵の使えない状態・再起動) は [`IGNORED_OPS`]、比べない期待 (プロファイルは M5.3 の次の PR、台帳の
-//! 掃除の期待は書き込みの経路の PR) は [`IGNORED_EXPECT`] に挙げる。
+//! 走らせない段 (再起動) は [`IGNORED_OPS`]、比べない期待 (台帳の掃除の期待は書き込みの経路の PR) は
+//! [`IGNORED_EXPECT`] に挙げる。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
+use evorag_types::PromptLanguage;
 use serde_json::{Value as Json, json};
 use sha2::{Digest, Sha256};
 use toml::{Table, Value};
@@ -30,6 +32,7 @@ use crate::ledger_select::{
     Current, RuleVersions as SelectVersions, SelectEnv, Selection, StoredLedger, select_ledger,
 };
 use crate::prefilter::{MODE_CHAT, PREFILTER_V1, Screened, prefilter};
+use crate::profile::{self, History, KeyState, PROFILE_BUDGET, Place, SwapPoint};
 use crate::sentences::{SPLITTER_V1, split_v1};
 use crate::unit::{UnitState, UnitTense, WhenBasis};
 use crate::value_key::{ForgetKey, value_key};
@@ -43,20 +46,27 @@ const CASES: &[(&str, &str)] = &[
     ("governance.toml", "GV10"),
     ("governance.toml", "GV11"),
     ("governance.toml", "GV12"),
+    ("attacks.toml", "AT01"),
     ("attacks.toml", "AT03"),
+    ("attacks.toml", "AT04"),
+    ("attacks.toml", "AT06"),
+    ("attacks.toml", "AT07"),
+    ("attacks.toml", "AT08"),
+    ("attacks.toml", "AT09"),
+    ("attacks.toml", "AT10"),
+    ("attacks.toml", "AT11"),
 ];
 
-/// `stage = "M5.3"` のうち、ここで走らせない事例。攻撃の事例は関門の走らせる側 (`b3::cases`) が関門で決まる部分を
-/// 走らせ、FI02 は書き手と強制終了の注入が要る (core の PR で走らせる)。
-const ELSEWHERE: &[&str] = &[
-    "AT01", "AT02", "AT04", "AT05", "AT06", "AT07", "AT08", "AT09", "AT10", "AT11", "FI02",
-];
+/// `stage = "M5.3"` のうち、ここで走らせない事例。攻撃の事例は関門の走らせる側 (`b3::cases`) も関門で決まる部分を
+/// 走らせ、ここでは導出とプロファイルまでを走らせる (区切りの鍵の期待 (`seg_keys`) を持つ AT02・AT05 は `b3::cases`
+/// だけ)。FI02 は書き手と強制終了の注入が要る (core の PR で走らせる)。
+const ELSEWHERE: &[&str] = &["AT02", "AT05", "FI02"];
 
 /// 走らせない操作。
-const IGNORED_OPS: &[&str] = &["forget_key", "restart"];
+const IGNORED_OPS: &[&str] = &["restart"];
 
 /// 比べない期待の項目。
-const IGNORED_EXPECT: &[&str] = &["profile", "ledgers"];
+const IGNORED_EXPECT: &[&str] = &["ledgers"];
 
 /// 事例の変種 (台帳の `variant` の既定)。
 const VARIANT: &str = "v1";
@@ -146,6 +156,10 @@ struct Run {
     cache: GateCache,
     problems: Vec<String>,
     seq: u16,
+    /// 事例の言語 (`lang`。省くと `ja`)。
+    language: Option<PromptLanguage>,
+    /// `forget_key` の段で鍵を使えなくした。
+    key_unavailable: bool,
 }
 
 /// 台帳の候補の要素を wire の形に (長い名前 → `s`・`l`・`e`・`a`・`v`・`m`・`tn`)。
@@ -568,6 +582,9 @@ impl Run {
                 }
             }
         }
+        if let Some(want) = e.get("profile") {
+            self.compare_profile(&last, want);
+        }
         if let Some(want) = e.get("doctor").and_then(Value::as_array) {
             for w in want.iter().filter_map(Value::as_str) {
                 let rules = Rules::bundled();
@@ -588,11 +605,82 @@ impl Run {
         }
         for k in e.keys() {
             let known = [
-                "units", "same_as", "label", "ends", "not_live", "counts", "doctor",
+                "units", "same_as", "label", "ends", "not_live", "counts", "doctor", "profile",
             ];
             if !known.contains(&k.as_str()) && !IGNORED_EXPECT.contains(&k.as_str()) {
                 self.fail(format!("the runner does not compare `{k}`"));
             }
+        }
+    }
+
+    /// プロファイルの行を比べる (README の `profile`): 属性と entity の組の並びは順で、同じ組の中は集合で比べる。
+    fn compare_profile(&mut self, last: &Derived, want: &Value) {
+        let language = self.language.unwrap_or(PromptLanguage::Ja);
+        let rules = Rules::bundled();
+        let rows = profile::rows(
+            last.units.iter().map(|u| (u.id, &u.body)),
+            Dictionary::bundled(),
+            &rules,
+            language,
+        );
+        let made = profile::render(&rows, language, PROFILE_BUDGET, |s| s.chars().count());
+        let at = SwapPoint {
+            governance: 0,
+            key: if self.key_unavailable {
+                KeyState::Unavailable
+            } else {
+                KeyState::Available
+            },
+            history_tokens: 0,
+            history: History::Kept,
+        };
+        let place = profile::decide(None, made.as_ref().map(|p| p.version.as_str()), &at).place;
+        if let Some(t) = want.as_table() {
+            if t.get("absent").and_then(Value::as_bool) == Some(true) && place != Place::Omit {
+                self.fail("the profile is placed".to_owned());
+            }
+            return;
+        }
+        if place == Place::Omit {
+            self.fail("the profile is omitted".to_owned());
+            return;
+        }
+        let tags: Vec<String> = made
+            .iter()
+            .flat_map(|p| &p.units)
+            .filter_map(|id| last.get(*id))
+            .map(|u| {
+                let b = &u.body;
+                let planned = if b.tense == UnitTense::Planned {
+                    " (予定)"
+                } else {
+                    ""
+                };
+                format!("{}/{}={}{planned}", b.entity, b.aspect, b.value)
+            })
+            .collect();
+        let want: Vec<String> = want
+            .as_array()
+            .expect("profile rows")
+            .iter()
+            .map(|v| v.as_str().expect("a row").to_owned())
+            .collect();
+        // 同じ (entity, 属性) の続く行を 1 つの組にまとめる (組の中の順は値の鍵の順で、データ根の鍵に依る)。
+        let grouped = |rows: &[String]| -> Vec<(String, BTreeSet<String>)> {
+            let mut out: Vec<(String, BTreeSet<String>)> = Vec::new();
+            for r in rows {
+                let group = r.split_once('=').map_or(r.as_str(), |(g, _)| g).to_owned();
+                match out.last_mut() {
+                    Some((g, set)) if *g == group => {
+                        set.insert(r.clone());
+                    }
+                    _ => out.push((group, BTreeSet::from([r.clone()]))),
+                }
+            }
+            out
+        };
+        if grouped(&tags) != grouped(&want) {
+            self.fail(format!("profile {tags:?}"));
         }
     }
 
@@ -758,6 +846,10 @@ impl Run {
                     self.previous = Some(old);
                 }
                 "import_v04" => self.import(op),
+                "forget_key" => {
+                    self.key_unavailable =
+                        op.get("available").and_then(Value::as_bool) == Some(false);
+                }
                 k if IGNORED_OPS.contains(&k) => {
                     if k == "restart" {
                         self.cache.clear();
@@ -773,10 +865,10 @@ impl Run {
     }
 }
 
-/// M5.3 の事例 (DR03 の導出の決定性、DR06 の単位と日付、GV10〜GV12 の取り込みの `end` と private、AT03 の長い一度の
-/// 入力)。
+/// M5.3 の事例 (DR03 の導出の決定性、DR06 の単位と日付とプロファイル、GV10〜GV12 の取り込みの `end` と private、
+/// 攻撃の事例の単位とプロファイル (AT03 の長い一度の入力、AT09 のプロファイルの書式を壊す型など))。
 ///
-/// verifies: AC-FR-315-1 (DR03: 読む順を乱しても単位の集合・本体・指紋が同じ)、AC-FR-315-4 (DR03・DR06: 相対の日付を
+/// verifies: AC-FR-316-1 (DR06・AT09 など: プロファイルの行)、AC-FR-315-1 (DR03: 読む順を乱しても単位の集合・本体・指紋が同じ)、AC-FR-315-4 (DR03・DR06: 相対の日付を
 /// 発話のターンの UTC からのずれで解き、ずれの無いターンは `no_offset` を残す)
 #[test]
 fn derive_cases_of_m5_3_run() {
@@ -791,6 +883,7 @@ fn derive_cases_of_m5_3_run() {
         let mut run = Run {
             case: (*id).to_owned(),
             current: "m0".to_owned(),
+            language: str_of(case, "lang").map(|l| PromptLanguage::parse(l).expect("a language")),
             ..Run::default()
         };
         for s in case["step"].as_array().expect("steps") {
