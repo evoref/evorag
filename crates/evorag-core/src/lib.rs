@@ -27,7 +27,7 @@ pub mod import_v04;
 mod ledgers;
 pub mod localtime;
 pub mod logging;
-pub use ledgers::LedgerStats;
+pub use ledgers::{HaltReason, LedgerStats};
 mod masking;
 mod memory_role;
 pub use memory_role::{MemoryCall, MemoryConfig, MemoryRoute, VerifyError};
@@ -1037,6 +1037,23 @@ impl Core {
             });
         }
         out.sort_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// 試験のため: 記録した区切り (本体、ID の順)。
+    #[doc(hidden)]
+    pub fn segment_bodies(&self) -> Vec<evorag_memory::SegmentBody> {
+        let mut out = Vec::new();
+        if let Ok(r) = self.inner.store.read() {
+            let _ = r.for_each(evorag_memory::KIND_SEGMENT, |x| {
+                if let Read::Ok(e) = x
+                    && let Ok(b) = e.body_as::<evorag_memory::SegmentBody>()
+                {
+                    out.push(b);
+                }
+                true
+            });
+        }
         out
     }
 

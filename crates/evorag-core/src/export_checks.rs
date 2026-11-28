@@ -15,9 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use evorag_memory::{
     CorrectionBody, DirectiveBody, FactBody, FactDirectiveBody, KIND_CORRECTION, KIND_DIRECTIVE,
-    KIND_FACT, KIND_FACT_DIRECTIVE, KIND_NOTE, KIND_RECALL_FEEDBACK, KIND_SESSION, KIND_TURN,
-    NoteBody, OP_FORGET, OP_UNBLOCK, REDACTION_MARKERS, RecallFeedbackBody, TurnBody, TurnForgets,
-    TurnRole, ValueKey, note_matches, redaction_marker, turn_rev_checked,
+    KIND_FACT, KIND_FACT_DIRECTIVE, KIND_NOTE, KIND_PROPOSAL, KIND_RECALL_FEEDBACK, KIND_SEGMENT,
+    KIND_SESSION, KIND_TURN, LedgerRead, NoteBody, OP_FORGET, OP_UNBLOCK, REDACTION_MARKERS,
+    RecallFeedbackBody, SegmentBody, TurnBody, TurnForgets, TurnRole, ValueKey, note_matches,
+    read_ledger, redaction_marker, turn_rev_checked,
 };
 use evorag_store::export::{ExportChecks, ExportView};
 use evorag_store::{Envelope, Read, meta};
@@ -384,6 +385,25 @@ impl Prepared {
             KIND_RECALL_FEEDBACK => env.body_as::<RecallFeedbackBody>().map_or(true, |b| {
                 exists(view, KIND_TURN, b.answer) && exists(view, KIND_TURN, b.target)
             }),
+            // 区切りと台帳 (v0.5 の根): 出典のセッションか、出典のターンがすべて無いものは含めない (消したセッション
+            // の区切りと台帳、03 §4.2 の規則 12)。
+            KIND_SEGMENT => env.body_as::<SegmentBody>().map_or(true, |b| {
+                exists(view, KIND_SESSION, b.session)
+                    && b.pairs.iter().any(|t| exists(view, KIND_TURN, *t))
+            }),
+            KIND_PROPOSAL => match read_ledger(env) {
+                Some(LedgerRead::Segment(b)) => {
+                    let sources: Vec<Id> = b
+                        .sources()
+                        .into_iter()
+                        .map(|s| s.turn)
+                        .chain(b.inputs.corr.iter().map(|c| c.turn))
+                        .chain(b.inputs.through.map(|t| t.turn))
+                        .collect();
+                    sources.is_empty() || sources.iter().any(|t| exists(view, KIND_TURN, *t))
+                }
+                _ => true,
+            },
             _ => true,
         }
     }

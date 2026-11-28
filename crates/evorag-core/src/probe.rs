@@ -385,7 +385,7 @@ const B2_PROBE_MAX_TOKENS: u32 = 512;
 /// 形・JSON Schema) で 1 文の固定の区切りを呼び、出力が型に合うか (`b2_ok`) を `p` に書く。スロットの文脈の長さが
 /// B2 に足りない構成 (06 §2.1 の「文脈の長さ」) では呼ばずに偽にする。型縛りの確かめ (`structured_ok`) に通って
 /// いなければ呼ばずに偽にする。繋がらない・締切切れで結果が出なければ null のまま (点検を保存せず、次の機会に
-/// 点検し直す、06 §3.3 の例外)。`config` は設定の要求の付け足し (点検が足した思考を切る指定は `p` から足す)。
+/// 点検し直す、06 §3.3 の例外)。ほかの失敗 (4xx・5xx など) は偽にする。`config` は設定の要求の付け足し (点検が足した思考を切る指定は `p` から足す)。
 pub async fn add_b2(
     p: &mut ModelProbeBody,
     llm: &dyn LlmClient,
@@ -404,7 +404,7 @@ pub async fn add_b2(
             return;
         }
     };
-    if !b2::fits(n_ctx as usize) {
+    if !usize::try_from(n_ctx).is_ok_and(b2::fits) {
         p.b2_ok = Some(false);
         p.error.get_or_insert(format!(
             "b2: the slot context ({n_ctx}) is smaller than {}",
@@ -459,6 +459,14 @@ pub async fn add_b2(
             p.b2_ok = Some(ok);
         }
         Err(e) => {
+            // 繋がらない・締切切れだけは結果を出さない (点検し直す)。ほかの失敗 (4xx・5xx・途中の切断) は通らない
+            // ものとする (同じ失敗で点検し直し続けないため)。
+            if !matches!(
+                e,
+                ChatError::TimedOut | ChatError::Llm(LlmError::Connect(_))
+            ) {
+                p.b2_ok = Some(false);
+            }
             p.error.get_or_insert(format!("b2: {e}"));
         }
     }

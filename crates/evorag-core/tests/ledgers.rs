@@ -5,6 +5,7 @@
 //! 応答のモデルの点検の結果も書いておき (B2 の型の点検に通った)、起動の後の裏の処理が B2 を呼ぶ。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,8 @@ use evorag_store::testutil::TempDir;
 use evorag_store::{
     Envelope, OpenOptions, Read, Store, WriteOp, WriteRequest, Writer, WriterHandle,
 };
-use evorag_types::{Id, ManualClock, Timestamp, UuidV7Gen};
+use evorag_types::api::{Command, Event};
+use evorag_types::{Clock, Id, ManualClock, Timestamp, UuidV7Gen};
 use sha2::{Digest, Sha256};
 
 const NOW: i64 = 1_795_000_000_000;
@@ -237,7 +239,22 @@ fn config(
     memory: MemoryConfig,
     sleep: evorag_core::SleepConfig,
 ) -> CoreConfig {
-    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(at)));
+    config_with(
+        root,
+        Arc::new(ManualClock::new(Timestamp::from_millis(at))),
+        memory,
+        sleep,
+    )
+}
+
+/// 時計を渡す形 (同じプロセスの中で時計を進める試験)。
+fn config_with(
+    root: &Path,
+    clock: Arc<ManualClock>,
+    memory: MemoryConfig,
+    sleep: evorag_core::SleepConfig,
+) -> CoreConfig {
+    let at = clock.now().as_millis();
     let mut aux = evorag_llm::RequestExtra::new();
     aux.insert(
         "chat_template_kwargs".into(),
@@ -554,6 +571,17 @@ async fn the_open_tail_is_called_again_after_two_more_pairs() {
     assert!(segs[0].closed);
 }
 
+/// 条件が成り立つまで待つ (10 秒で panic する)。
+async fn wait_for(cond: impl Fn() -> bool) {
+    for _ in 0..1_000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the condition did not hold within 10 s");
+}
+
 /// 試験のため: 台帳が条件に合うまで待つ。
 async fn wait_ledgers(
     core: &Core,
@@ -618,7 +646,7 @@ async fn a_stopped_call_keeps_the_closed_elements_as_a_partial_ledger() {
     }
     assert_eq!(llm.requests().len(), 1, "the call is streaming");
     // 断片を受け取るまで待つ。
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for(|| llm.delivered() >= 1).await;
     core.hold(true);
     let touched = Instant::now();
     core.touch();
@@ -1070,4 +1098,560 @@ async fn the_chat_probe_on_a_v05_root_calls_the_b2_shape() {
         }
         core.shutdown().await;
     }
+}
+
+/// 届いたイベントのうち、`pred` に合うものまで待つ。
+async fn until(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    pred: impl Fn(&Event) -> bool,
+) {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("an event in time")
+            .expect("the channel is open");
+        if pred(&ev) {
+            return;
+        }
+    }
+}
+
+/// 台帳のあるセッションを消すと、区切りと台帳も同じ依頼で消え、退避の写し直しの job の ID に入る。起動し直しても
+/// 残らない。
+///
+/// verifies: 04 §5.2.1 (セッションを消すとき。AC-FR-309-4 のうち区切りと台帳の分)
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_session_removes_its_segments_and_ledgers() {
+    let dir = TempDir::new("b2-delete");
+    let root = dir.path().to_path_buf();
+    let b = seed_basic(&root);
+    let llm = chat(&[out(&basic_output())]);
+    let ledgers = run_core(&root, NOW, &llm).await;
+    assert_eq!(ledgers.len(), 1);
+    let ledger = ledgers[0].0;
+    let segment = ledgers[0].1.segment.expect("a segment");
+    // 削除の操作の ID (退避の写し直しの job に入るもの) に、区切りと台帳が入る。
+    let session = {
+        let seed = Seed::open(&root, NOW + MIN, 7);
+        let session = seed
+            .get(KIND_TURN, b.u[0])
+            .body_as::<evorag_memory::TurnBody>()
+            .expect("a turn")
+            .session;
+        let r = seed.store.read().expect("read");
+        let s = evorag_memory::load_session(&r, session).expect("the session");
+        let ops = evorag_memory::delete_session(&r, &s.envelope, &seed.writes()).expect("ops");
+        let ids = evorag_memory::deleted_ids(&ops);
+        assert!(ids.contains(&ledger) && ids.contains(&segment), "{ids:?}");
+        session
+    };
+    // 画面からの削除。
+    let llm = chat(&[]);
+    let (core, mut rx, _) = Core::start(
+        config(
+            &root,
+            NOW + 2 * MIN,
+            MemoryConfig::default(),
+            evorag_core::SleepConfig::immediate(),
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+    core.command(Command::OpenSession { id: session });
+    until(&mut rx, |e| matches!(e, Event::SessionOpened { .. })).await;
+    core.command(Command::DeleteSession);
+    until(&mut rx, |e| matches!(e, Event::SessionDeleted { .. })).await;
+    core.settle_background().await;
+    assert!(core.ledger_bodies().is_empty());
+    core.shutdown().await;
+    assert!(Seed::open(&root, NOW + 3 * MIN, 8).segments().is_empty());
+    let llm = chat(&[]);
+    assert!(run_core(&root, NOW + 4 * MIN, &llm).await.is_empty());
+    assert!(llm.requests().is_empty());
+}
+
+/// 古い版が消したセッションの区切りと台帳 (出典のセッションとターンが無い) は、書き出しに含めず、起動時の突き合わせで
+/// 消す。
+///
+/// verifies: 03 §4.2 (規則 12 の突き合わせ), 03 §11 (出典の無い派生の記録を書き出さない)
+#[tokio::test(flavor = "multi_thread")]
+async fn sourceless_segments_and_ledgers_are_not_exported_and_are_removed_at_start() {
+    let dir = TempDir::new("b2-orphans");
+    let root = dir.path().join("root");
+    let b = seed_basic(&root);
+    let llm = chat(&[out(&basic_output())]);
+    assert_eq!(run_core(&root, NOW, &llm).await.len(), 1);
+    {
+        // セッションとターンだけを消す (区切りと台帳を知らない古い版の削除)。
+        let seed = Seed::open(&root, NOW + MIN, 7);
+        let session = seed
+            .get(KIND_TURN, b.u[0])
+            .body_as::<evorag_memory::TurnBody>()
+            .expect("a turn")
+            .session;
+        let mut ops = Vec::new();
+        for t in b.u.iter().chain(&b.r) {
+            ops.push(WriteOp::Delete {
+                kind: KIND_TURN.into(),
+                id: *t,
+            });
+        }
+        ops.push(WriteOp::Delete {
+            kind: KIND_SESSION.into(),
+            id: session,
+        });
+        seed.write(ops);
+        assert_eq!(seed.segments().len(), 1);
+    }
+    let out_dir = dir.path().join("export");
+    let checks = evorag_core::export_checks::ExportFilter::new();
+    let report = evorag_store::export::export(
+        &root,
+        &out_dir,
+        &evorag_store::export::ExportOptions {
+            evorag_version: "0.5.0",
+            now_ms: NOW,
+            exclude: &[],
+            checks: &checks,
+        },
+    )
+    .expect("export");
+    assert_eq!(report.kinds.get("proposal"), None, "{:?}", report.kinds);
+    assert_eq!(report.kinds.get("segment"), None, "{:?}", report.kinds);
+    assert!(report.skipped_by_check >= 2);
+    let llm = chat(&[]);
+    assert!(run_core(&root, NOW + 2 * MIN, &llm).await.is_empty());
+    assert!(Seed::open(&root, NOW + 3 * MIN, 8).segments().is_empty());
+}
+
+/// 閉じた区切り 1 つのセッションを `n` 個作る。
+fn seed_sessions(root: &Path, n: usize) {
+    let seed = Seed::open(root, NOW - 30 * MIN, 1);
+    seed.probe("chat", &chat_key());
+    for i in 0..n {
+        let s = seed.session(&format!("話 {i}"));
+        seed.pair(s, "私は大阪に住んでいます。", None);
+    }
+}
+
+/// 4xx は台帳を書かずに続けての失敗に数え、3 区切りで呼び出しを止める (4 つ目の区切りは呼ばない)。
+///
+/// verifies: 04 §5.2.1 (失敗の扱い・続けて失敗したとき)
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_calls_write_nothing_and_halt_after_three_segments() {
+    let dir = TempDir::new("b2-4xx");
+    let root = dir.path().to_path_buf();
+    seed_sessions(&root, 4);
+    let rejected = r#"{"http_error": {"status": 400, "body": "bad request_extra"}}"#.to_owned();
+    let llm = chat(&[rejected.clone(), rejected.clone(), rejected]);
+    let (core, _rx, _) = Core::start(
+        config(
+            &root,
+            NOW,
+            MemoryConfig::default(),
+            evorag_core::SleepConfig::immediate(),
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(llm.requests().len(), 3, "the fourth segment is not called");
+    assert!(
+        core.ledger_bodies().is_empty(),
+        "no failed ledger for a 4xx"
+    );
+    assert_eq!(
+        core.ledger_stats().halted,
+        Some(evorag_core::HaltReason::Failures)
+    );
+    core.retry_background_now();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    core.settle_background().await;
+    assert_eq!(llm.requests().len(), 3, "stays halted for the same target");
+    core.shutdown().await;
+}
+
+/// 呼ぶ前に確かめたスロットの文脈の長さが B2 に足りなければ、呼ばない。
+///
+/// verifies: 06 §2.1 (文脈の長さ)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_too_small_context_stops_before_the_call() {
+    let dir = TempDir::new("b2-ctx");
+    let root = dir.path().to_path_buf();
+    let memory_key = key_of("qwen3-4b.gguf", 9);
+    {
+        let seed = Seed::open(&root, NOW - 30 * MIN, 1);
+        seed.probe("chat", &chat_key());
+        seed.probe("memory", &memory_key);
+        let s = seed.session("話");
+        seed.pair(s, "私は大阪に住んでいます。", None);
+    }
+    let memory = Arc::new(Swappable(Mutex::new(Arc::new(server(
+        "qwen3-4b.gguf",
+        9,
+        8192,
+        true,
+        &[],
+    )))));
+    let llm = chat(&[]);
+    let (core, _rx, _) = Core::start(
+        config(
+            &root,
+            NOW,
+            MemoryConfig {
+                client: Some(memory.clone() as Arc<dyn LlmClient>),
+                request_extra: Default::default(),
+            },
+            evorag_core::SleepConfig {
+                idle: Duration::from_secs(2),
+                ..evorag_core::SleepConfig::immediate()
+            },
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.hold(true);
+    core.settle().await;
+    let small = server("qwen3-4b.gguf", 9, 4096, true, &[]);
+    *memory.0.lock().expect("lock") = Arc::new(small.clone());
+    core.hold(false);
+    core.settle_background().await;
+    assert!(small.requests().is_empty());
+    assert!(llm.requests().is_empty());
+    assert!(core.ledger_bodies().is_empty());
+    core.shutdown().await;
+}
+
+/// 同じプロセスの中で、開いている末尾の区切りが閉じる時刻 (最後のターンから 10 分) になると、手順がまた動いて
+/// 区切りを閉じる (台帳がすべての往復を入れているので呼ばない)。
+///
+/// verifies: 04 §2 (区切りを閉じる時機)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tail_closes_on_the_timer_in_the_same_process() {
+    let dir = TempDir::new("b2-timer");
+    let root = dir.path().to_path_buf();
+    {
+        let seed = Seed::open(&root, NOW - MIN, 1);
+        seed.probe("chat", &chat_key());
+        let s = seed.session("話");
+        seed.pair(s, "私は大阪に住んでいます。", None);
+    }
+    let clock = Arc::new(ManualClock::new(Timestamp::from_millis(NOW)));
+    let llm = chat(&[out(&output(&["大阪"], &[unit(1, "residence", "大阪")], ""))]);
+    let (core, _rx, _) = Core::start(
+        config_with(
+            &root,
+            clock.clone(),
+            MemoryConfig::default(),
+            evorag_core::SleepConfig::immediate(),
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+    core.settle_background().await;
+    assert_eq!(llm.requests().len(), 1);
+    assert!(core.segment_bodies().iter().all(|s| !s.closed));
+    clock.set(Timestamp::from_millis(NOW + 11 * MIN));
+    wait_for(|| {
+        let segs = core.segment_bodies();
+        !segs.is_empty() && segs.iter().all(|s| s.closed)
+    })
+    .await;
+    core.settle_background().await;
+    assert_eq!(
+        llm.requests().len(),
+        1,
+        "the ledger already covers the pairs"
+    );
+    core.shutdown().await;
+}
+
+/// `full` の出力のうち `cut` の前まで流して止まる答え。
+fn hang_before(full: &str, cut: &str) -> String {
+    let head = &full[..full.find(cut).expect("the cut")];
+    format!(
+        r#"{{"events": [{{"delta": {}}}, {{"hang": true}}]}}"#,
+        serde_json::to_string(head).expect("a string")
+    )
+}
+
+/// 裏の処理が待機に戻るまで待つ。
+async fn until_idle(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>) {
+    until(rx, |e| {
+        matches!(
+            e,
+            Event::BackgroundState {
+                state: evorag_types::api::BackgroundState::Idle
+            }
+        )
+    })
+    .await;
+}
+
+/// 流れている要求を、断片を受け取った後に止め、裏の処理が待機に戻るまで待つ。
+async fn stop_after_delivery(
+    core: &Core,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    llm: &ReplayClient,
+    delivered: usize,
+) {
+    wait_for(|| llm.delivered() >= delivered).await;
+    let dropped = llm.dropped_early();
+    core.hold(true);
+    let touched = Instant::now();
+    core.touch();
+    wait_for(|| llm.dropped_early() > dropped).await;
+    assert!(
+        touched.elapsed() < Duration::from_secs(1),
+        "stopped within 1 s"
+    );
+    until_idle(rx).await;
+}
+
+/// `failed` を書いても使える `partial` は残し、完結した要素の少ない `partial` は書かない。
+///
+/// verifies: 04 §5.2.1 (`partial`・`failed` を書くとき)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_usable_partial_survives_a_failed_or_smaller_partial() {
+    let dir = TempDir::new("b2-keep-partial");
+    let root = dir.path().to_path_buf();
+    seed_sessions(&root, 1);
+    let full = output(
+        &["大阪"],
+        &[unit(1, "residence", "大阪"), unit(1, "hobby", "大阪の散歩")],
+        "",
+    );
+    let llm = chat(&[
+        hang_before(&full, r#""a": "hobby""#),
+        hang_before(&full, r#""units""#),
+        out("JSON ではない"),
+        out("JSON ではない"),
+    ]);
+    let (core, mut rx, _) = Core::start(
+        config(
+            &root,
+            NOW,
+            MemoryConfig::default(),
+            evorag_core::SleepConfig::immediate(),
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+    stop_after_delivery(&core, &mut rx, &llm, 1).await;
+    let first = wait_ledgers(&core, |l| l.len() == 1).await;
+    assert_eq!(first[0].1.status, "partial");
+    // 2 回目は `keys` だけで止める: 要素が少ないので書かない。
+    core.hold(false);
+    stop_after_delivery(&core, &mut rx, &llm, 2).await;
+    let after = core.ledger_bodies();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].0, first[0].0, "the larger partial is kept");
+    // 3 回目は型が合わず `failed`: `partial` は残る。
+    core.hold(false);
+    let both = wait_ledgers(&core, |l| l.len() == 2).await;
+    let statuses: Vec<&str> = both.iter().map(|(_, l)| l.status.as_str()).collect();
+    assert_eq!(statuses, ["partial", "failed"]);
+    assert_eq!(both[0].0, first[0].0);
+    core.hold(true);
+    core.shutdown().await;
+}
+
+/// `/props` と `/tokenize` を止められる llama-server。止めた要求が落とされると数える。
+struct Gate {
+    inner: ReplayClient,
+    hang_info: AtomicBool,
+    hang_count: AtomicBool,
+    entered: AtomicUsize,
+    dropped: Arc<AtomicUsize>,
+}
+
+/// 落とされたら数える。
+struct Dropped(Arc<AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Gate {
+    fn new(inner: ReplayClient) -> Self {
+        Self {
+            inner,
+            hang_info: AtomicBool::new(false),
+            hang_count: AtomicBool::new(false),
+            entered: AtomicUsize::new(0),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn hang(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let _guard = Dropped(self.dropped.clone());
+        std::future::pending::<()>().await;
+    }
+}
+
+impl LlmClient for Gate {
+    fn health(&self) -> BoxFuture<'_, Result<(), LlmError>> {
+        self.inner.health()
+    }
+    fn server_info(&self) -> BoxFuture<'_, Result<ServerInfo, LlmError>> {
+        Box::pin(async move {
+            if self.hang_info.load(Ordering::SeqCst) {
+                self.hang().await;
+            }
+            self.inner.server_info().await
+        })
+    }
+    fn count_tokens<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<usize, LlmError>> {
+        Box::pin(async move {
+            if self.hang_count.load(Ordering::SeqCst) {
+                self.hang().await;
+            }
+            self.inner.count_tokens(text).await
+        })
+    }
+    fn chat(&self, req: ChatRequest) -> BoxFuture<'_, Result<Box<dyn ChatStream>, LlmError>> {
+        self.inner.chat(req)
+    }
+}
+
+/// 最初のトークンの前・`/tokenize` の最中・呼ぶ先の確かめ (`/props`) の最中に操作しても、1 秒以内に止まり、
+/// 台帳を書かない。
+///
+/// verifies: AC-NFR-105-1 (区切りの呼び出しのどの時点でも 1 秒以内に止まる)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_at_any_point_ends_within_a_second_without_a_ledger() {
+    for point in ["first token", "tokenize", "verify"] {
+        let dir = TempDir::new("b2-stop-points");
+        let root = dir.path().to_path_buf();
+        seed_sessions(&root, 1);
+        let replay = chat(&[r#"{"events": [{"hang": true}]}"#.to_owned()]);
+        let gate = Arc::new(Gate::new(replay.clone()));
+        let (core, mut rx, _) = Core::start(
+            config(
+                &root,
+                NOW,
+                MemoryConfig::default(),
+                evorag_core::SleepConfig {
+                    idle: Duration::from_secs(2),
+                    ..evorag_core::SleepConfig::immediate()
+                },
+            ),
+            gate.clone() as Arc<dyn LlmClient>,
+        )
+        .await
+        .expect("start");
+        core.hold(true);
+        core.settle().await;
+        match point {
+            "tokenize" => gate.hang_count.store(true, Ordering::SeqCst),
+            "verify" => gate.hang_info.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+        core.hold(false);
+        if point == "first token" {
+            wait_for(|| replay.requests().len() == 1).await;
+        } else {
+            wait_for(|| gate.entered.load(Ordering::SeqCst) >= 1).await;
+        }
+        core.hold(true);
+        let touched = Instant::now();
+        core.touch();
+        if point == "first token" {
+            wait_for(|| replay.dropped_early() == 1).await;
+        } else {
+            wait_for(|| gate.dropped.load(Ordering::SeqCst) >= 1).await;
+        }
+        assert!(
+            touched.elapsed() < Duration::from_secs(1),
+            "{point}: stopped within 1 s"
+        );
+        until_idle(&mut rx).await;
+        assert!(core.ledger_bodies().is_empty(), "{point}");
+        gate.hang_count.store(false, Ordering::SeqCst);
+        gate.hang_info.store(false, Ordering::SeqCst);
+        core.shutdown().await;
+    }
+}
+
+/// 呼び出しの間に出典のターンが伏せ字で書き換わったら (改訂の番号が進んだら)、掃除で番号を合わせずに台帳を捨てる。
+///
+/// verifies: 04 §4 (書く前に改訂の番号を確かめ、合わなければ捨てる), 04 §7.5 (読んだ後に足された忘れる)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ledger_is_discarded_when_a_turn_is_redacted_during_the_call() {
+    let dir = TempDir::new("b2-redacted");
+    let root = dir.path().to_path_buf();
+    let u = {
+        let seed = Seed::open(&root, NOW - 30 * MIN, 1);
+        seed.probe("chat", &chat_key());
+        let s = seed.session("話");
+        seed.pair(s, "私は大阪に住んでいます。", None).0
+    };
+    let slow = format!(
+        r#"{{"events": [{{"delta": {}}}, {{"wait_ms": 2000}}, {{"done": {{}}}}]}}"#,
+        serde_json::to_string(&output(&["大阪"], &[unit(1, "residence", "大阪")], ""))
+            .expect("a string")
+    );
+    let llm = chat(&[slow]);
+    let (core, _rx, _) = Core::start(
+        config(
+            &root,
+            NOW,
+            MemoryConfig::default(),
+            evorag_core::SleepConfig::immediate(),
+        ),
+        Arc::new(llm.clone()),
+    )
+    .await
+    .expect("start");
+    core.settle().await;
+    wait_for(|| llm.delivered() >= 1).await;
+    assert!(core.bump_turn_revision(u).await);
+    core.settle_background().await;
+    assert_eq!(llm.requests().len(), 1);
+    assert!(
+        core.ledger_bodies().is_empty(),
+        "the stale ledger is discarded"
+    );
+    core.shutdown().await;
+}
+
+/// B2 の型の点検が 4xx で失敗したら、通らないものとして保存する (点検し直し続けない)。
+///
+/// verifies: 06 §3.3 (B2 の型の点検の細目)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_b2_probe_is_saved_as_failed() {
+    let dir = TempDir::new("b2-probe-4xx");
+    let root = dir.path().to_path_buf();
+    let structured = r#"{"events": [{"delta": "{\"n\": 3}"}, {"done": {}}]}"#.to_owned();
+    let speed = r#"{"events": [{"delta": "1"}, {"done": {"prompt_tokens": 300, "completion_tokens": 11}}]}"#.to_owned();
+    let rejected = r#"{"http_error": {"status": 400, "body": "grammar"}}"#.to_owned();
+    let llm = chat(&[structured, speed, rejected]);
+    let mut cfg = config(
+        &root,
+        NOW,
+        MemoryConfig::default(),
+        evorag_core::SleepConfig::immediate(),
+    );
+    cfg.probe_models = true;
+    let (core, _rx, _) = Core::start(cfg, Arc::new(llm.clone()))
+        .await
+        .expect("start");
+    core.settle().await;
+    core.settle_probe().await;
+    let p = core.probe_result("chat").expect("saved");
+    assert_eq!(p.b2_ok, Some(false), "{p:?}");
+    assert!(matches!(core.memory_route(), MemoryRoute::Stopped));
+    core.shutdown().await;
 }

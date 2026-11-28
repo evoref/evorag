@@ -209,10 +209,12 @@ fn of_fallback(l: &LedgerBody, variant: &str, intended: Option<&str>) -> bool {
     l.inputs.role_fallback && l.variant == variant && l.inputs.role_model_key.as_deref() == intended
 }
 
-impl<F> SelectEnv<'_, F> {
-    /// 今の選択の台帳か (状態は問わない)。縮退の間は、同じ chat のモデルで同じ役割から縮退して作った台帳を含む。
-    fn is_current(&self, l: &LedgerBody) -> bool {
-        match self.current {
+impl Current<'_> {
+    /// 台帳がこの選択のものか (状態と有効性は問わない。選び方の「今」の段の台帳の作り)。縮退の間は、同じ chat の
+    /// モデルで同じ役割から縮退して作った台帳を含む。台帳を書く側が、置き換えて消す台帳を選ぶときにも使う。
+    #[must_use]
+    pub fn owns(self, l: &LedgerBody) -> bool {
+        match self {
             Current::Ready(s) => of_selection(l, s),
             Current::Fallback {
                 variant,
@@ -223,6 +225,13 @@ impl<F> SelectEnv<'_, F> {
                     || (of_fallback(l, variant, intended) && l.model_key == called)
             }
         }
+    }
+}
+
+impl<F> SelectEnv<'_, F> {
+    /// 今の選択の台帳か (状態は問わない)。縮退の間は、同じ chat のモデルで同じ役割から縮退して作った台帳を含む。
+    fn is_current(&self, l: &LedgerBody) -> bool {
+        self.current.owns(l)
     }
 
     /// 直前の選択の台帳か。役割が戻った後は、今の選択から縮退して作った台帳を含む。

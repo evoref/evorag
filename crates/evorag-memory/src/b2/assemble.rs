@@ -38,7 +38,8 @@ pub struct LedgerMeta<'a> {
 /// 台帳を書けない理由。
 #[derive(Debug, thiserror::Error)]
 pub enum AssembleError {
-    /// 呼び出しがあるのに、結果が 1 つも無い (止められて完結した要素が無い。台帳を書かない)。
+    /// 呼び出しがあるのに、結果が 1 つも無いか、送らなかった呼び出しが残るのに型の合った結果が無い (止められて
+    /// 完結した要素が無い。台帳を書かない)。
     #[error("no call has a result")]
     NoResult,
     /// 結果の数が呼び出しの数より多い。
@@ -56,7 +57,8 @@ pub enum AssembleError {
 /// - 型の合った呼び出しの出力を順にまとめ ([`Parsed::merge`])、台帳の `sentences`・`corr`・`refs`・
 ///   `input_hash` はその呼び出しだけで作る。失敗した呼び出しの数を `failed_parts` に書く。
 /// - `status`: どれかの呼び出しが止められたか、送らなかった呼び出しが残れば `partial`、ほかは `complete`。
-///   すべての呼び出しが失敗したときだけ `failed` (出力は合わなかった理由だけ。入力は送った呼び出しのもの)。
+///   すべての呼び出しを送ってすべて失敗したときだけ `failed` (出力は合わなかった理由だけ。入力は送った呼び出しの
+///   もの)。送らなかった呼び出しが残るのに型の合った結果が無ければ書かない ([`AssembleError::NoResult`])。
 ///
 /// # Errors
 /// 呼び出しがあるのに結果が無いとき、結果が呼び出しより多いとき、出力を CBOR にできないとき。
@@ -125,6 +127,8 @@ pub fn ledger_body(
             };
             (m, status)
         }
+        // 止めたので送らなかった呼び出しが残り、合った出力が 1 つも無い (止めた区切りに `failed` を書かない)。
+        None if results.len() < call.requests.len() => return Err(AssembleError::NoResult),
         None => {
             used = (0..results.len()).collect();
             (

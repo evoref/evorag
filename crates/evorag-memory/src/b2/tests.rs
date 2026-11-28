@@ -981,9 +981,18 @@ fn a_failed_part_is_left_out_of_the_ledger() {
     assert_eq!(body.failed_parts, 0);
     assert_eq!(body.sentences.len(), 2);
     assert_eq!(body.inputs.input_hash, call.input_hash(&[0]));
-    // 結果が無い・多すぎるのは誤り。
+    // 結果が無い・多すぎるのは誤り。1 つ目が失敗し、2 つ目を送る前に止めたときも書かない (止めた区切りに
+    // `failed` を書かない)。
     assert!(matches!(
         ledger_body(&call, &[], &meta(&caller)),
+        Err(AssembleError::NoResult)
+    ));
+    assert!(matches!(
+        ledger_body(
+            &call,
+            &[Outcome::Failed(Parsed::failed(InvalidReason::NotJson))],
+            &meta(&caller)
+        ),
         Err(AssembleError::NoResult)
     ));
     let three = vec![Outcome::Failed(Parsed::failed(InvalidReason::NotJson)); 3];

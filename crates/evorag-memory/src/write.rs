@@ -633,6 +633,7 @@ pub fn delete_session(
         });
         ops.push(WriteOp::DeleteLinksOf(turn));
     }
+    ops.extend(segment_and_ledger_deletes(tx, session.id, &turns)?);
     ops.push(WriteOp::DeleteLookup {
         kind: KIND_SESSION.into(),
         field: LOOKUP_UPDATED_AT.into(),
@@ -645,6 +646,72 @@ pub fn delete_session(
     });
     ops.push(WriteOp::DeleteLinksOf(session.id));
     Ok(ops)
+}
+
+/// セッションの区切りと台帳を消す操作 (04 §5.2.1 の「台帳を消すとき」、03 §4.2 の規則 12、v0.5 の根)。区切りは
+/// セッションへの関係から、台帳は区切りへの関係 (区切りの記録を失った台帳を含む) と、出典のターンへの関係から
+/// 集める。読めない記録も、封筒と関係を消す。
+fn segment_and_ledger_deletes(
+    tx: &evorag_store::ReadTxn<'_>,
+    session: Id,
+    turns: &std::collections::BTreeSet<Id>,
+) -> Result<Vec<WriteOp>, crate::MemoryError> {
+    use crate::ledger::{KIND_PROPOSAL, REL_LEDGER_SEGMENT, REL_LEDGER_TURN};
+    use crate::segment::{KIND_SEGMENT, REL_SEGMENT_SESSION};
+    let mut segments = std::collections::BTreeSet::new();
+    let mut ledgers = std::collections::BTreeSet::new();
+    for (seg, _) in tx.links_to(session, REL_SEGMENT_SESSION)? {
+        segments.insert(seg);
+        ledgers.extend(
+            tx.links_to(seg, REL_LEDGER_SEGMENT)?
+                .into_iter()
+                .map(|(l, _)| l),
+        );
+    }
+    for &turn in turns {
+        for (l, _) in tx.links_to(turn, REL_LEDGER_TURN)? {
+            ledgers.insert(l);
+            // 区切りの記録を失った台帳の区切りへの関係 (区切りの ID は台帳の `segment`)。
+            for (seg, _) in tx.links_from(l, REL_LEDGER_SEGMENT)? {
+                segments.insert(seg);
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    for (kind, ids) in [(KIND_SEGMENT, &segments), (KIND_PROPOSAL, &ledgers)] {
+        for &id in ids {
+            match tx.get(kind, id)? {
+                Some(evorag_store::Read::Ok(e)) => ops.extend(delete_segment_or_ledger(&e)),
+                Some(_) => {
+                    ops.push(WriteOp::Delete {
+                        kind: kind.into(),
+                        id,
+                    });
+                    ops.push(WriteOp::DeleteLinksOf(id));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(ops)
+}
+
+/// 区切りか台帳の記録を、関係と副索引ごと消す操作 (ほかの種類の記録は封筒と関係だけを消す)。
+#[must_use]
+pub fn delete_segment_or_ledger(e: &Envelope) -> Vec<WriteOp> {
+    match e.kind.as_str() {
+        crate::segment::KIND_SEGMENT => {
+            crate::derived::delete_ops(e, crate::segment::derive_segment)
+        }
+        crate::ledger::KIND_PROPOSAL => crate::derived::delete_ops(e, crate::ledger::derive_ledger),
+        _ => vec![
+            WriteOp::Delete {
+                kind: e.kind.clone(),
+                id: e.id,
+            },
+            WriteOp::DeleteLinksOf(e.id),
+        ],
+    }
 }
 
 /// 消した記録を退避から除く job (03 §7.3)。削除と同じ依頼に入れる。
