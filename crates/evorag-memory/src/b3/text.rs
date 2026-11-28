@@ -15,8 +15,8 @@ use crate::value_key::{Needle, normalize_loose, normalize_v1};
 pub(super) const SELF: &str = "self";
 
 /// プロファイル (表) で `self` を表す語と、利用者本人を表す語。旧エンジンの `table::SELF_LABELS` に「ユーザー」
-/// 「ユーザ」を足したもの (プロファイルの書式を M5.3 で移すときに、そちらと揃える)。
-pub(super) const SELF_LABELS: [&str; 4] = ["利用者", "user", "ユーザー", "ユーザ"];
+/// 「ユーザ」を足したもの (プロファイルの主語の欄の語 (`profile::self_label`) を含むことを試験で確かめる)。
+pub(crate) const SELF_LABELS: [&str; 4] = ["利用者", "user", "ユーザー", "ユーザ"];
 
 /// 主語の呼び名の長さの上限 (文字数、04 §5.2 の関門 5)。呼び名はプロファイル (システムプロンプト) に入る。
 pub const MAX_SUBJECT_CHARS: usize = 32;

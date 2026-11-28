@@ -55,6 +55,8 @@ pub use rules::{
     SubjectRules, b3_rules,
 };
 use sensitive::is_sensitive;
+#[cfg(test)]
+pub(crate) use text::SELF_LABELS;
 pub use text::{MAX_SUBJECT_CHARS, check_text};
 use text::{SELF, check_subject, has_redaction_marker};
 

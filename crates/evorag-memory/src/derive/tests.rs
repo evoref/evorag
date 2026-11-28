@@ -673,6 +673,62 @@ fn private_marks_the_value_and_its_successors() {
     assert_eq!(next.private_by.map(|h| h.1), Some(PrivateHit::Successor));
 }
 
+/// 導いた単位のプロファイルの行 (`entity/aspect=value`)。
+fn profile_rows(d: &Derived) -> Vec<String> {
+    use crate::profile;
+    use evorag_types::PromptLanguage;
+    let rows = profile::rows(
+        d.units.iter().map(|u| (u.id, &u.body)),
+        Dictionary::bundled(),
+        &Rules::bundled(),
+        PromptLanguage::Ja,
+    );
+    profile::render(&rows, PromptLanguage::Ja, profile::PROFILE_BUDGET, |s| {
+        s.chars().count()
+    })
+    .map(|p| {
+        p.units
+            .iter()
+            .map(|id| {
+                let b = &d.get(*id).expect("a unit").body;
+                format!("{}/{}={}", b.entity, b.aspect, b.value)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+#[test]
+fn successors_of_a_private_value_stay_out_of_the_profile() {
+    // 後継まで: 指示の後に言った今の値も private になり、プロファイルに入らない (属性の行が無くなる)。
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let h = w.say("私はくるみが食べられません。");
+    w.ledger(&[h], &[u(1, "dietary", "くるみ")]);
+    let mut p = dict_directive(DirectiveOp::Private, "residence", "港南台");
+    p.scope = Some(PrivateScope::Successors.name().to_owned());
+    w.directive(p);
+    let b = w.say("私は汐見坂に住んでいます。");
+    w.ledger(&[b], &[u(1, "residence", "汐見坂")]);
+    let d = w.derive();
+    assert_eq!(state(&d, "residence", "汐見坂"), Some(UnitState::Live));
+    assert!(find(&d, "residence", "汐見坂").body.private);
+    assert_eq!(profile_rows(&d), ["self/dietary=くるみ"]);
+
+    // この値だけ: 後の値は private にならず、プロファイルに入る。
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let mut p = dict_directive(DirectiveOp::Private, "residence", "港南台");
+    p.scope = Some("value_only".to_owned());
+    w.directive(p);
+    assert_eq!(profile_rows(&w.derive()), Vec::<String>::new());
+    let b = w.say("私は汐見坂に住んでいます。");
+    w.ledger(&[b], &[u(1, "residence", "汐見坂")]);
+    assert_eq!(profile_rows(&w.derive()), ["self/residence=汐見坂"]);
+}
+
 #[test]
 fn an_end_written_for_a_free_aspect_still_hits_after_the_aspect_is_mapped() {
     // 04 §7.5 の「辞書の写しの後の end」: 写す前の自由記述の属性の鍵とも比べる。

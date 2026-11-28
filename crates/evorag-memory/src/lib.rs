@@ -30,6 +30,7 @@ mod lexical;
 mod mask;
 mod note;
 mod prefilter;
+pub mod profile;
 mod read;
 mod rules;
 mod segment;
