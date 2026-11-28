@@ -24,7 +24,7 @@ commands:
   dist                     build the release archive, SHA256SUMS and release.json (12 §5)
       [--target T] [--out DIR] [--skip-build] [--tag vX.Y.Z]
       [--manifest-only]    only rewrite SHA256SUMS and release.json for the archives in --out
-  bench [--out DIR]        benchmarks BM-101..104, 106, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
+  bench [--out DIR]        benchmarks BM-101..104, 106, 109, 201 in release (09 §5.1); results to docs/perf/<X.Y.Z>
   verify-tag TAG           check a release tag before building (09 §9.2 step 4)
   live-llm [--out DIR]     tests against real llama-servers (09 §3.4): chat and the fact recall eval
                            (09 §5.2) at EVORAG_LIVE_LLM_URL, recall at EVORAG_LIVE_EMBED_URL and
@@ -220,6 +220,8 @@ fn bench(root: &Path, args: &[String]) -> bool {
             "evorag-tui",
             "-p",
             "evorag-index",
+            "-p",
+            "evorag-memory",
             "--run-ignored",
             "only",
             "--test-threads",
