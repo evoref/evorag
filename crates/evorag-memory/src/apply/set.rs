@@ -493,13 +493,26 @@ pub struct Adoption {
 /// 採る・戻すが単位に当たった理由。根拠の位置で当たった単位を、値の鍵で当たった単位より先に採る (04 §7.5)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AdoptHit {
-    /// 根拠の位置 (`at`) で当たった。
+    /// 根拠の位置 (`at`) で当たり、同じ (entity, 属性) の組の単位。
     Position,
+    /// 根拠の位置 (`at`) で当たったが、ほかの (entity, 属性) の組の単位 (同じ位置に複数の単位があるとき、同じ組の
+    /// 単位を先に採る)。
+    PositionOther,
     /// 値の鍵で、同じ (entity, 属性) の組に当たった。
     Value,
 }
 
 impl Adoption {
+    /// 値の鍵 (単位を値の鍵の索引で引くため)。
+    pub(crate) fn keys(&self) -> &BTreeSet<ValueKey> {
+        &self.vks
+    }
+
+    /// 根拠の位置 (単位を根拠のターンの索引で引くため)。
+    pub(crate) fn at(&self) -> Option<&TurnSpan> {
+        self.at.as_ref()
+    }
+
     /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
@@ -517,14 +530,18 @@ impl Adoption {
     /// 述語、[`DirectiveSet::forgotten_by`]) は、畳みの側で確かめる。
     #[must_use]
     pub fn hits(&self, u: &UnitProbe<'_, '_>, red: &TurnRedactions) -> Option<AdoptHit> {
+        let p = u.probe;
+        let same_group = self.entity.contains(p) && self.aspect.same_group(p);
         if let Some(at) = &self.at
             && u.anchors.iter().any(|a| at_hits(at, self.imported, a, red))
         {
-            return Some(AdoptHit::Position);
+            return Some(if same_group {
+                AdoptHit::Position
+            } else {
+                AdoptHit::PositionOther
+            });
         }
-        let p = u.probe;
-        (self.vks.contains(&p.keys.vk) && self.entity.contains(p) && self.aspect.same_group(p))
-            .then_some(AdoptHit::Value)
+        (self.vks.contains(&p.keys.vk) && same_group).then_some(AdoptHit::Value)
     }
 }
 
@@ -541,6 +558,29 @@ pub struct End {
 }
 
 impl End {
+    /// 書く前の `end` の本体 `b` (ID `id`) から、指示の集合に入れるときと同じ形で作る (足す前に当たりを確かめるため。
+    /// `import-v04` の表の照らし、04 §7.4)。entity か属性を欠けば `None`。
+    #[must_use]
+    pub fn from_body(id: Id, b: &DirectiveBody, resolve: impl Fn(&str) -> String) -> Option<Self> {
+        let resolve: &dyn Fn(&str) -> String = &resolve;
+        let (entity, aspect) = event_target(DirectiveOp::End, b, resolve)?;
+        let (vks, _) = parse_vks(&b.vks);
+        Some(Self {
+            id,
+            vks,
+            entity,
+            aspect,
+            turn: b.turn,
+            cause: b.cause,
+            origin: b.origin(),
+        })
+    }
+
+    /// 終える値の値の鍵と照合の鍵 (単位を値の鍵の索引で引くため)。
+    pub(crate) fn keys(&self) -> &BTreeSet<ValueKey> {
+        &self.vks
+    }
+
     /// 指示の ID。
     #[must_use]
     pub fn id(&self) -> Id {
@@ -572,6 +612,31 @@ impl End {
     pub fn hits(&self, p: &Probe<'_>) -> bool {
         p.keys.any_in(&self.vks) && self.entity.contains(p) && self.aspect.same_group(p)
     }
+}
+
+/// `end`・採る・戻すの entity の同値類と属性 (04 §7.4・§7.5)。entity か属性を欠くものは `None` (当てずに数える)。
+/// `end` は生の文字列を今の規則で解き直し、書いたときの正規化した entity も同値類に入れる。
+fn event_target(
+    op: DirectiveOp,
+    b: &DirectiveBody,
+    resolve: &dyn Fn(&str) -> String,
+) -> Option<(EntityClass, DirectiveAspect)> {
+    let aspect = DirectiveAspect::of(b);
+    let raw = if op == DirectiveOp::End {
+        b.entity_raw.as_deref().or(b.entity.as_deref())
+    } else {
+        b.entity.as_deref()
+    }?;
+    if aspect == DirectiveAspect::Missing {
+        return None;
+    }
+    let mut entity = EntityClass::of(raw, &b.aliases, resolve);
+    if let Some(e) = b.entity.as_deref() {
+        let more = EntityClass::of(e, &[], resolve);
+        entity.v1.extend(more.v1);
+        entity.loose.extend(more.loose);
+    }
+    Some((entity, aspect))
 }
 
 /// 畳みの列の中の位置 (04 §5.3 の「入力の順」)。指示もターンも UUID v7 なので、1 本の列に並ぶ。
@@ -751,23 +816,10 @@ impl DirectiveSet {
         vks: BTreeSet<ValueKey>,
         resolve: &dyn Fn(&str) -> String,
     ) {
-        let aspect = DirectiveAspect::of(b);
-        // `end` は生の文字列を今の規則で解き直す (04 §7.4)。書いたときの正規化した entity も同値類に入れる。
-        let raw = if op == DirectiveOp::End {
-            b.entity_raw.as_deref().or(b.entity.as_deref())
-        } else {
-            b.entity.as_deref()
-        };
-        let (Some(raw), false) = (raw, aspect == DirectiveAspect::Missing) else {
+        let Some((entity, aspect)) = event_target(op, b, resolve) else {
             self.counts.incomplete += 1;
             return;
         };
-        let mut entity = EntityClass::of(raw, &b.aliases, resolve);
-        if let Some(e) = b.entity.as_deref() {
-            let more = EntityClass::of(e, &[], resolve);
-            entity.v1.extend(more.v1);
-            entity.loose.extend(more.loose);
-        }
         match op {
             DirectiveOp::End => self.ends.push(End {
                 id,

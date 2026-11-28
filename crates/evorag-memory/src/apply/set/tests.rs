@@ -499,6 +499,36 @@ fn the_timeline_orders_candidates_adoptions_and_ends() {
     );
 }
 
+/// verifies: 04 §7.5 (採る・戻すの根拠の位置で当たる単位が 2 つ以上あれば、指示と同じ (entity, 属性) の単位を先に採る)
+#[test]
+fn adoption_by_position_prefers_the_same_group() {
+    let mut b = body(DirectiveOp::Revert, "self", dict("residence"), "東京");
+    let at = TurnSpan {
+        turn: id(3),
+        rev: 0,
+        start: 0,
+        end: 6,
+    };
+    b.at = Some(at);
+    let s = set(vec![(20, b)]);
+    let a = &s.adoptions()[0];
+    let hit = |p: &Probe<'_>| {
+        a.hits(
+            &UnitProbe {
+                probe: p,
+                anchors: &[at],
+            },
+            s.redactions(),
+        )
+    };
+    let same = probe("self", dict("residence"), "東京", 1);
+    let other = probe("self", dict("hometown"), "東京", 1);
+    assert_eq!(hit(&same), Some(AdoptHit::Position));
+    assert_eq!(hit(&other), Some(AdoptHit::PositionOther));
+    assert!(AdoptHit::Position < AdoptHit::PositionOther);
+    assert!(AdoptHit::PositionOther < AdoptHit::Value);
+}
+
 /// verifies: 04 §5.5 (private の vks か、導出で private の印を付けた単位の鍵に、語句か部分文字列が当たる区切りの鍵を除く)
 #[test]
 fn private_screens_keys_by_substrings() {

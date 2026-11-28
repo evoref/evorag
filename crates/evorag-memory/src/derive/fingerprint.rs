@@ -322,9 +322,9 @@ pub struct Stamp {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dates::date_rules;
     use super::*;
     use crate::b3::Rules;
-    use crate::derive::dates::date_rules;
 
     fn id(n: u8) -> Id {
         let mut b = [0u8; 16];

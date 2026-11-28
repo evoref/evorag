@@ -19,7 +19,7 @@
 //! 変えて今の値に戻る / 自由記述の属性 (置き換えない) と出来事 (日付ごとに 1 件) を足した / 今の値が無いときの同じ
 //! 値の `Contested` は言い直しで `Live` になる (`end` の後) / 長い一度の入力の候補は置き換えの条件を満たさない /
 //! 訂正は単位を作らず、同じ位置の新しい値の候補の置き換えの条件になる / `end` を畳みの列に混ぜる / 忘れる・private
-//! は `apply` の指示の当て方の述語で当てる。
+//! は `apply` の指示の当て方の述語で当てる。細目は 04 §5.3 の「導出の細目」。
 //!
 //! **依存の規則**: このモジュールは、旧エンジンのモジュール (`facts`・`fold`・`correction`・`note`・`extract`・
 //! `table`・`forget`・`mask`・`view`・`gates`) に依存しない (旧エンジンは v0.5 の判定の前に外す、08 §2.6)。
@@ -48,7 +48,7 @@ pub use fingerprint::{
     Components, DERIVE_VERSION, DirectiveStamp, Fingerprint, LedgerDigest, Stamp, Versions,
     fingerprint, unit_id,
 };
-pub use import::{NewEnd, import_ends};
+pub use import::{NewEnd, import_ends, unmatched_imported_privates};
 
 use crate::apply::{DirectiveSet, PrivateHit, UnitProbe};
 use crate::b3::{self, Aspect, CacheKey, Env, Evidence, Note, Passed, Reason, Utterance};
@@ -73,6 +73,9 @@ pub enum Speaker {
 pub struct TurnInput<'a> {
     /// セッション (訂正の関門 4 の「同じセッション」)。
     pub session: Id,
+    /// 同じセッションの 1 つ前のターン (発話か応答。セッションの最初のターンは `None`)。訂正の関門 4 は、この鎖を
+    /// たどって候補の発話より前のターンを集め、鎖の途中のターンが入力に無ければ関門 4 を落とす側に倒す。
+    pub prev: Option<Id>,
     pub speaker: Speaker,
     /// 今の改訂の番号。
     pub rev: u32,
@@ -90,7 +93,9 @@ pub struct TurnInput<'a> {
 pub struct Inputs<'a> {
     /// 区切りごとに使う台帳 (`ledger_select::select_ledger` の結果。順は問わない)。
     pub ledgers: &'a [Selected<'a>],
-    /// ターン (ID → 今の本文)。台帳の根拠のターンと、訂正の関門 4 のための同じセッションのターンを含める。
+    /// ターン (ID → 今の本文)。台帳の根拠のターンのセッションの、すべてのターン (応答を含む) を渡す (訂正の関門 4 は
+    /// 同じセッションの前のターンを見るので、欠けると関門 4 の結果が呼び手の渡す範囲に依る。欠けていれば
+    /// `context_missing` と数えて、その訂正を当てない)。
     pub turns: &'a BTreeMap<Id, TurnInput<'a>>,
     /// 指示の集合 (忘れる・private・採る・戻す・`end`)。
     pub directives: &'a DirectiveSet,
@@ -258,7 +263,7 @@ impl Derived {
 
 /// 単位の組 (層, entity, 属性, 辞書か自由記述かの別)。畳みの中の単位の集合は、この組で引く (04 §5.3)。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct GroupKey {
+struct GroupKey {
     pub layer: UnitLayer,
     pub entity: String,
     pub aspect: String,
@@ -267,7 +272,7 @@ pub(crate) struct GroupKey {
 
 /// 畳みに渡す候補 1 つ (関門 1〜8 を通ったもの)。
 #[derive(Debug, Clone)]
-pub(crate) struct Cand {
+struct Cand {
     pub passed: Passed,
     /// 値の位置が長い一度の入力の範囲に掛かる。
     pub long: bool,
@@ -280,6 +285,8 @@ pub(crate) struct Cand {
     pub card: Option<Cardinality>,
     /// 辞書の属性に写す前の自由記述の属性の鍵。
     pub was_free: Option<String>,
+    /// 入力の順の鍵 (04 §5.3)。
+    pub order: fold::Order,
 }
 
 impl Cand {
@@ -366,6 +373,7 @@ fn cand_of(inputs: &Inputs<'_>, passed: Passed) -> Cand {
         &passed.value.keys.vk.to_hex(),
         date.as_deref(),
     );
+    let order = fold::Order::candidate(&passed);
     Cand {
         passed,
         long,
@@ -374,29 +382,48 @@ fn cand_of(inputs: &Inputs<'_>, passed: Passed) -> Cand {
         group,
         card,
         was_free,
+        order,
     }
 }
 
-/// 訂正の関門 4 で古い値を探す本文: 候補の発話の直前の応答 (同じセッションの、候補の発話より前の最後の応答) と、
-/// 同じセッションの候補の発話より前の利用者の発話の、前のふるいの後の本文 (04 §6 の「判定の入力」)。
-fn correction_context(inputs: &Inputs<'_>, turn: Id) -> Vec<String> {
-    let Some(session) = inputs.turns.get(&turn).map(|t| t.session) else {
-        return Vec::new();
-    };
-    let before = inputs
-        .turns
-        .range(..turn)
-        .filter(|(_, t)| t.session == session);
-    let mut answer: Option<&str> = None;
+/// 訂正の関門 4 で古い値を探す本文のターン: 候補の発話の直前の応答 (同じセッションの、候補の発話より前の最後の
+/// 応答) と、同じセッションの候補の発話より前の利用者の発話 (04 §6 の「判定の入力」)。ターンの `prev` の鎖を
+/// たどり、本文 (応答は保存した本文、発話は前のふるいの後の本文) を `texts` に 1 回だけ作る。鎖の途中のターンが
+/// 入力に無いか、別のセッションなら `None`。
+fn correction_context(
+    inputs: &Inputs<'_>,
+    turn: Id,
+    texts: &mut HashMap<Id, fold::ContextText>,
+) -> Option<Vec<Id>> {
+    let session = inputs.turns.get(&turn)?.session;
+    let mut answer: Option<Id> = None;
     let mut out = Vec::new();
-    for (_, t) in before {
+    let mut cur = inputs.turns.get(&turn)?.prev;
+    while let Some(id) = cur {
+        let t = inputs
+            .turns
+            .get(&id)
+            .filter(|t| t.session == session && id < turn)?;
         match t.speaker {
-            Speaker::Assistant => answer = Some(t.text),
-            Speaker::User => out.push(Prefiltered::from_stored(t.text).text().to_owned()),
+            Speaker::Assistant => {
+                if answer.is_none() {
+                    answer = Some(id);
+                    texts
+                        .entry(id)
+                        .or_insert_with(|| fold::ContextText::new(t.text.to_owned()));
+                }
+            }
+            Speaker::User => {
+                out.push(id);
+                texts.entry(id).or_insert_with(|| {
+                    fold::ContextText::new(Prefiltered::from_stored(t.text).text().to_owned())
+                });
+            }
         }
+        cur = t.prev;
     }
-    out.extend(answer.map(str::to_owned));
-    out
+    out.extend(answer);
+    Some(out)
 }
 
 /// 全件の導出 (04 §5.3)。
@@ -412,6 +439,8 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
     let mut used: HashMap<CacheKey, Result<Passed, Reason>> = HashMap::new();
     let mut cands: Vec<Cand> = Vec::new();
     let mut corrections: Vec<correct::Prepared> = Vec::new();
+    let mut texts: HashMap<Id, fold::ContextText> = HashMap::new();
+    let mut contexts: HashMap<Id, Option<Vec<Id>>> = HashMap::new();
     // 台帳を ID の順に当てる (結果は順に依らないが、数え方と覚えの当たりもそろえる)。
     let mut ledgers: Vec<&Selected<'_>> = inputs.ledgers.iter().collect();
     ledgers.sort_by_key(|s| s.ledger.id);
@@ -433,6 +462,7 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
         let units = body.output.units();
         counts.mismatched += units.mismatched;
         let first = cands.len();
+        let mut dropped: Vec<Passed> = Vec::new();
         for unit in &units.items {
             let key = b3::cache_key(&inputs.env, &evidence, unit);
             let result = if let Some(r) = used.get(&key) {
@@ -460,12 +490,15 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
                     }
                     if b3::forgotten(inputs.directives, &p).is_some() {
                         *counts.gates.entry(Reason::Forgotten).or_default() += 1;
+                        dropped.push(p);
                     } else {
                         cands.push(cand_of(inputs, p));
                     }
                 }
             }
         }
+        // 台帳の中の候補を入力の順に並べる (訂正の位置と相手を、台帳の中の候補の順に依らず決めるため)。
+        cands[first..].sort_by(|a, b| a.order.cmp(&b.order));
         let verdicts = body.output.corrections();
         counts.mismatched += verdicts.mismatched;
         if !sel.stage.uses_corrections() {
@@ -476,6 +509,7 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
             continue;
         }
         let ledger_cands: Vec<(usize, &Cand)> = cands.iter().enumerate().skip(first).collect();
+        let dropped: Vec<&Passed> = dropped.iter().collect();
         for v in &verdicts.items {
             let Some(corr) = body.inputs.corr.iter().find(|c| c.id == v.id) else {
                 *counts
@@ -484,10 +518,23 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
                     .or_default() += 1;
                 continue;
             };
-            match correct::prepare(inputs, corr, v.verdict, &ledger_cands) {
+            match correct::prepare(inputs, corr, v.verdict, &ledger_cands, &dropped) {
                 Ok(Some(mut p)) => {
-                    p.context = correction_context(inputs, p.turn);
-                    corrections.push(p);
+                    let context = contexts
+                        .entry(p.turn)
+                        .or_insert_with(|| correction_context(inputs, p.turn, &mut texts));
+                    match context {
+                        Some(c) => {
+                            p.context.clone_from(c);
+                            corrections.push(p);
+                        }
+                        None => {
+                            *counts
+                                .corrections
+                                .entry(CorrectionReason::ContextMissing)
+                                .or_default() += 1;
+                        }
+                    }
                 }
                 Ok(None) => {
                     *counts
@@ -504,6 +551,7 @@ pub fn derive(inputs: &Inputs<'_>, cache: &mut GateCache) -> Derived {
     let folded = fold::Folder::new(
         &cands,
         &corrections,
+        &texts,
         inputs.directives,
         inputs.env.rules,
         &mut counts,

@@ -9,9 +9,9 @@ use std::ops::Range;
 
 use evorag_types::Id;
 
-use super::{Cand, Inputs};
+use super::{Cand, Inputs, Speaker};
 use crate::apply::ValueKeys;
-use crate::b3::{Recorded, quoted};
+use crate::b3::{Passed, Recorded, quoted};
 use crate::chars::is_separator;
 use crate::ledger::{ByteRange, CorrInput, LedgerVerdict};
 
@@ -41,6 +41,8 @@ pub enum CorrectionReason {
     Ambiguous,
     /// 検証済みの訂正が、単位の置き換えの条件 (04 §5.3 の「単値の辞書の属性」の 2 つ目) になった。
     Applied,
+    /// 関門 4 の材料 (候補の発話の前の、同じセッションのターン) が入力に欠けている。関門 4 を落とす側に倒す。
+    ContextMissing,
     /// 版の不一致の段で選んだ台帳の判定 (使わない、04 §5.2.1)。
     StaleLedger,
 }
@@ -61,6 +63,7 @@ impl CorrectionReason {
             Self::NoEffect => "no_effect",
             Self::Ambiguous => "ambiguous",
             Self::Applied => "applied",
+            Self::ContextMissing => "context_missing",
             Self::StaleLedger => "stale_ledger",
         }
     }
@@ -86,10 +89,10 @@ pub(super) struct Prepared {
     pub new_range: ByteRange,
     /// 古い値 (`{old}` の穴の中で一致した保存した本文の部分文字列)。
     pub old: Recorded,
-    /// 新しい値の単位の候補 (畳みの候補の番号)。
+    /// 新しい値の単位の候補 (畳みの候補の番号。入力の順)。
     pub cands: Vec<usize>,
-    /// 関門 4 で古い値を探す本文 (直前の応答と、同じセッションのそれより前の利用者の発話の前のふるいの後の本文)。
-    pub context: Vec<String>,
+    /// 関門 4 で古い値を探す本文のターン (直前の応答と、同じセッションのそれより前の利用者の発話)。
+    pub context: Vec<Id>,
 }
 
 /// 保存した本文 `text` の範囲 `r` から、前後の区切りの文字 (空白・記号) を除いた範囲。空になれば `None`。
@@ -173,13 +176,15 @@ fn fixed_regions(
 }
 
 /// 畳みの前の関門 (1・2・3・5 と `forgotten`) を当てる (04 §6)。`corr` は判定の `id` で引いた候補、`cands` は
-/// 同じ台帳の、関門を通った単位の候補 (畳みの候補の番号と組)。通れば `Ok(Some)`、古い値の穴の無い型は `Ok(None)`
-/// (単位を変えない訂正)、外れれば最初に外れた理由。
+/// 同じ台帳の、関門を通った単位の候補 (畳みの候補の番号と組。入力の順)、`dropped` は同じ台帳の、関門 1〜7 を通った
+/// が関門 8 で捨てた候補。通れば `Ok(Some)`、古い値の穴の無い型は `Ok(None)` (単位を変えない訂正)、外れれば最初に
+/// 外れた理由。新しい値の候補が関門 8 で捨てた候補にしか無ければ `forgotten`。
 pub(super) fn prepare(
     inputs: &Inputs<'_>,
     corr: &CorrInput,
     verdict: LedgerVerdict,
     cands: &[(usize, &Cand)],
+    dropped: &[&Passed],
 ) -> Result<Option<Prepared>, CorrectionReason> {
     if verdict != LedgerVerdict::Accept {
         return Err(CorrectionReason::NotCorrection);
@@ -190,7 +195,7 @@ pub(super) fn prepare(
     let turn = inputs
         .turns
         .get(&corr.turn)
-        .filter(|t| t.speaker == super::Speaker::User && t.rev == corr.rev)
+        .filter(|t| t.speaker == Speaker::User && t.rev == corr.rev)
         .ok_or(CorrectionReason::NewNotInUtterance)?;
     let text = turn.text;
     // 関門 2: 新しい値の候補は、同じターンの、値の位置が `{new}` の穴の固定の部分に接する端にあるもの。後ろに固定の
@@ -199,24 +204,30 @@ pub(super) fn prepare(
     let hole =
         trim_separators(text, &to_range(corr.new)).ok_or(CorrectionReason::NewNotInUtterance)?;
     let trailing = corr.pattern.trim_end().ends_with("{new}");
+    let at_edge = |p: &Passed| {
+        let v = to_range(p.value.range);
+        p.turn == corr.turn
+            && p.rev == corr.rev
+            && hole.start <= v.start
+            && v.end <= hole.end
+            && if trailing {
+                v.start == hole.start
+            } else {
+                v.end == hole.end
+            }
+    };
     let aligned: Vec<(usize, &Cand)> = cands
         .iter()
         .copied()
-        .filter(|(_, c)| {
-            let v = to_range(c.passed.value.range);
-            c.passed.turn == corr.turn
-                && c.passed.rev == corr.rev
-                && hole.start <= v.start
-                && v.end <= hole.end
-                && if trailing {
-                    v.start == hole.start
-                } else {
-                    v.end == hole.end
-                }
-        })
+        .filter(|(_, c)| at_edge(&c.passed))
         .collect();
     if aligned.is_empty() {
-        return Err(CorrectionReason::NewNotInUtterance);
+        // 新しい値の候補が忘れた値だった (関門 8 で捨てた) ときは、忘れた値として数える (04 §6)。
+        return Err(if dropped.iter().any(|p| at_edge(p)) {
+            CorrectionReason::Forgotten
+        } else {
+            CorrectionReason::NewNotInUtterance
+        });
     }
     // 関門 3: 新しい値の一致と型の固定の部分が、括弧・引用符の内側に無い。
     let old_range = to_range(old_hole);
@@ -256,7 +267,12 @@ pub(super) fn prepare(
             n.vk != old.keys.vk && n.loose != old.keys.loose
         })
         .collect();
-    let Some(first) = directed.first() else {
+    // 訂正の位置は、新しい値の候補のうち最も前の値の範囲 (台帳の中の候補の順に依らない)。
+    let Some(new_range) = directed
+        .iter()
+        .map(|(_, c)| c.passed.value.range)
+        .min_by_key(|r| (r.start, r.end))
+    else {
         return Err(CorrectionReason::Direction);
     };
     // 忘れた値を訂正で戻さない (04 §6 の「判定の入力」。entity と属性を問わない広い側)。
@@ -272,7 +288,7 @@ pub(super) fn prepare(
     Ok(Some(Prepared {
         turn: corr.turn,
         rev: corr.rev,
-        new_range: first.1.passed.value.range,
+        new_range,
         old,
         cands: directed.iter().map(|(i, _)| *i).collect(),
         context: Vec::new(),

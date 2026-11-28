@@ -7,10 +7,10 @@ use std::ops::Range;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::apply::{DirectiveSet, ValueKeys};
+use crate::apply::{DirectiveSet, PrivateHit, ValueKeys};
 use crate::b3::{Dictionary, Rules};
 use crate::corrections::{CORRECTION_V1, find_holes};
-use crate::directive::{DirectiveBody, DirectiveOp, PrivateScope};
+use crate::directive::{DirectiveBody, DirectiveOp, PrivateScope, TurnSpan};
 use crate::import_v04::{EndedValue, V04Ended};
 use crate::ledger::{ByteRange, CALL_SEGMENT, CorrInput, LedgerBody, LedgerOutput, SentenceSpan};
 use crate::ledger_select::{Stage, StoredLedger};
@@ -190,6 +190,7 @@ impl World {
     }
 
     fn turn_inputs(&self) -> BTreeMap<Id, TurnInput<'_>> {
+        let mut last: BTreeMap<Id, Id> = BTreeMap::new();
         self.turns
             .iter()
             .map(|(id, t)| {
@@ -197,6 +198,7 @@ impl World {
                     *id,
                     TurnInput {
                         session: t.session,
+                        prev: last.insert(t.session, *id),
                         speaker: t.speaker,
                         rev: 0,
                         text: &t.text,
@@ -654,10 +656,7 @@ fn private_marks_the_value_and_its_successors() {
     let d = w.derive();
     let x = find(&d, "residence", "港南台");
     assert!(x.body.private);
-    assert_eq!(
-        x.private_by.map(|h| h.1),
-        Some(crate::apply::PrivateHit::Value)
-    );
+    assert_eq!(x.private_by.map(|h| h.1), Some(PrivateHit::Value));
 
     let mut w = World::default();
     let a = w.say("私は港南台に住んでいます。");
@@ -671,10 +670,7 @@ fn private_marks_the_value_and_its_successors() {
     assert!(find(&d, "residence", "港南台").body.private);
     let next = find(&d, "residence", "汐見坂");
     assert!(next.body.private);
-    assert_eq!(
-        next.private_by.map(|h| h.1),
-        Some(crate::apply::PrivateHit::Successor)
-    );
+    assert_eq!(next.private_by.map(|h| h.1), Some(PrivateHit::Successor));
 }
 
 #[test]
@@ -743,6 +739,288 @@ fn a_correction_whose_old_value_is_not_current_has_no_effect() {
     assert_eq!(d.counts.correction(CorrectionReason::OldNotFound), 1);
 }
 
+/// 多値の属性で、新しい値がすでに開いていても、検証済みの訂正は古い値を置き換える (旧エンジンと同じ)。
+#[test]
+fn a_correction_replaces_the_old_value_even_if_the_new_one_is_open() {
+    let mut w = World::default();
+    let a = w.say("趣味は将棋です。");
+    let b = w.say("趣味は囲碁です。");
+    w.ledger(&[a, b], &[u(1, "hobby", "将棋"), u(2, "hobby", "囲碁")]);
+    w.answer("将棋と囲碁ですね。");
+    let c = w.say("いや、将棋じゃなくて囲碁が趣味です。");
+    w.ledger_with(&[c], &[u(1, "hobby", "囲碁")], &[(1, "accept")]);
+    let d = w.derive();
+    let go = find(&d, "hobby", "囲碁");
+    let shogi = find(&d, "hobby", "将棋");
+    assert_eq!(
+        shogi.body.state,
+        Some(UnitState::Superseded),
+        "{:#?}",
+        d.counts
+    );
+    assert_eq!(shogi.body.by, Some(go.id));
+    assert!(
+        shogi
+            .body
+            .anchors
+            .iter()
+            .any(|a| a.kind == AnchorKind::Corrected)
+    );
+    assert_eq!(d.counts.correction(CorrectionReason::Applied), 1);
+    assert_eq!(d.counts.correction(CorrectionReason::NoEffect), 0);
+}
+
+/// 訂正の位置と相手は、台帳の中の候補の順に依らない (AC-FR-315-1)。
+#[test]
+fn a_correction_does_not_depend_on_the_order_of_candidates() {
+    let run = |units: &[Value]| {
+        let mut w = World::default();
+        let a = w.say("私は大阪に住んでいます。");
+        w.ledger(&[a], &[u(1, "residence", "大阪")]);
+        w.answer("大阪はいいところですね。");
+        let b = w.say("いや、大阪じゃなくて京都駅の近くに住んでいます。");
+        w.ledger_with(&[b], units, &[(1, "accept")]);
+        w.derive()
+    };
+    let x = [u(1, "residence", "京都"), u(1, "residence", "京都駅")];
+    let y = [x[1].clone(), x[0].clone()];
+    let (dx, dy) = (run(&x), run(&y));
+    assert_eq!(dx, dy);
+    assert_eq!(state(&dx, "residence", "大阪"), Some(UnitState::Superseded));
+}
+
+/// 置き換えられた値を同じターンで 2 回言っても繰り上げない。次のターンの言い直しで繰り上げる (04 §5.3)。
+#[test]
+fn a_repetition_in_the_same_turn_does_not_promote() {
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let b = w.say("私は汐見坂に住んでいます。");
+    w.ledger(&[b], &[u(1, "residence", "汐見坂")]);
+    let c = w.say("港南台に住んでるよ。港南台に住んでるんだ。");
+    w.ledger(
+        &[c],
+        &[u(1, "residence", "港南台"), u(2, "residence", "港南台")],
+    );
+    let d = w.derive();
+    assert_eq!(
+        state(&d, "residence", "港南台"),
+        Some(UnitState::Contested),
+        "{:#?}",
+        summary(&d)
+    );
+    assert_eq!(state(&d, "residence", "汐見坂"), Some(UnitState::Live));
+
+    let e = w.say("港南台に住んでるよ。");
+    w.ledger(&[e], &[u(1, "residence", "港南台")]);
+    let d = w.derive();
+    assert_eq!(state(&d, "residence", "港南台"), Some(UnitState::Live));
+}
+
+/// 戻すは、指示の時点で `Contested` の単位にも当たる (04 §7.5)。
+#[test]
+fn revert_hits_a_contested_value() {
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let b = w.say("私は汐見坂に住んでいます。");
+    w.ledger(&[b], &[u(1, "residence", "汐見坂")]);
+    let c = w.say("港南台に住んでるよ。");
+    w.ledger(&[c], &[u(1, "residence", "港南台")]);
+    w.directive(dict_directive(DirectiveOp::Revert, "residence", "港南台"));
+    let d = w.derive();
+    assert_eq!(state(&d, "residence", "港南台"), Some(UnitState::Live));
+    assert_eq!(
+        state(&d, "residence", "汐見坂"),
+        Some(UnitState::Superseded)
+    );
+    assert_eq!(d.counts.folded(FoldNote::AdoptMissed), 0);
+}
+
+/// v0.5 で変えたところ: `past` が `Contested` に来たら `Superseded`、予定の開き直し、自由記述の `past` の後の
+/// `current`、多値の同じ値の言い直し、1 つの文の 2 つの候補。
+#[test]
+fn v05_differences_in_the_fold() {
+    // past が Contested に来たら Superseded (by なし)。
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let b = w.say("霧笛町に住んでるよ。");
+    w.ledger(&[b], &[u(1, "residence", "霧笛町")]);
+    let c = w.say("以前は霧笛町に住んでいました。");
+    w.ledger(&[c], &[with(u(1, "residence", "霧笛町"), "tn", "past")]);
+    let d = w.derive();
+    let x = find(&d, "residence", "霧笛町");
+    assert_eq!(
+        (x.body.state, x.body.by),
+        (Some(UnitState::Superseded), None)
+    );
+
+    // 置き換えられた値を予定として言うと、同じ単位を予定として開き直す。
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "港南台")]);
+    let b = w.say("私は汐見坂に住んでいます。");
+    w.ledger(&[b], &[u(1, "residence", "汐見坂")]);
+    let c = w.say("来年、港南台に引っ越す予定です。");
+    w.ledger(&[c], &[with(u(1, "residence", "港南台"), "tn", "planned")]);
+    let d = w.derive();
+    assert_eq!(d.units.len(), 2);
+    let plan = find(&d, "residence", "港南台");
+    assert_eq!(
+        (plan.body.state, plan.body.tense),
+        (Some(UnitState::Live), UnitTense::Planned)
+    );
+    assert_eq!(state(&d, "residence", "汐見坂"), Some(UnitState::Live));
+
+    // 自由記述の属性の past の後の current は Live に戻る。
+    let mut w = World::default();
+    let a = w.say("前の住まいは霧ヶ丘でした。");
+    w.ledger(&[a], &[with(u(1, "住まい", "霧ヶ丘"), "tn", "past")]);
+    let b = w.say("住まいは霧ヶ丘です。");
+    w.ledger(&[b], &[u(1, "住まい", "霧ヶ丘")]);
+    let d = w.derive();
+    let x = find(&d, "住まい", "霧ヶ丘");
+    assert_eq!(
+        (x.body.state, x.body.tense),
+        (Some(UnitState::Live), UnitTense::Current)
+    );
+
+    // 多値の属性で置き換えられた値の言い直しは、同じ単位を Live に戻す。
+    let mut w = World::default();
+    let a = w.say("趣味は将棋です。");
+    w.ledger(&[a], &[u(1, "hobby", "将棋")]);
+    let b = w.say("趣味は将棋から囲碁に変えました。");
+    w.ledger(&[b], &[with(u(1, "hobby", "囲碁"), "old", "将棋")]);
+    let c = w.say("趣味は将棋です。");
+    w.ledger(&[c], &[u(1, "hobby", "将棋")]);
+    let d = w.derive();
+    assert_eq!(d.units.len(), 2);
+    assert_eq!(state(&d, "hobby", "将棋"), Some(UnitState::Live));
+    assert_eq!(state(&d, "hobby", "囲碁"), Some(UnitState::Live));
+
+    // 1 つの文の 2 つの候補は、どちらも単位になる。
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいて、趣味は将棋です。");
+    w.ledger(&[a], &[u(1, "hobby", "将棋"), u(1, "residence", "港南台")]);
+    let d = w.derive();
+    assert_eq!(state(&d, "residence", "港南台"), Some(UnitState::Live));
+    assert_eq!(state(&d, "hobby", "将棋"), Some(UnitState::Live));
+}
+
+/// 長い一度の入力の候補は、今の値を終える・変えるどの経路も起こさない (`past`・否定・多値の `old`、04 §5.3)。
+#[test]
+fn a_long_single_input_does_not_end_or_change_the_current_value() {
+    let long = |w: &mut World, text: &str| {
+        let t = w.say(text);
+        w.turns.get_mut(&t).expect("turn").long = std::iter::once(0..text.len()).collect();
+        t
+    };
+    let mut w = World::default();
+    let a = w.say("私は港南台に住んでいます。");
+    let h = w.say("趣味は将棋です。");
+    w.ledger(
+        &[a, h],
+        &[u(1, "residence", "港南台"), u(2, "hobby", "将棋")],
+    );
+    let b = long(&mut w, "以前は港南台に住んでいました。");
+    w.ledger(&[b], &[with(u(1, "residence", "港南台"), "tn", "past")]);
+    let c = long(&mut w, "もう港南台には住んでいません。");
+    w.ledger(&[c], &[with(u(1, "residence", "港南台"), "m", "negated")]);
+    let e = long(&mut w, "趣味は将棋から囲碁に変えました。");
+    w.ledger(&[e], &[with(u(1, "hobby", "囲碁"), "old", "将棋")]);
+    let d = w.derive();
+    assert_eq!(
+        state(&d, "residence", "港南台"),
+        Some(UnitState::Live),
+        "{:#?}",
+        summary(&d)
+    );
+    assert_eq!(state(&d, "hobby", "将棋"), Some(UnitState::Live));
+    assert_eq!(state(&d, "hobby", "囲碁"), Some(UnitState::Live));
+}
+
+/// 同じ位置・同じ値で `old` だけが違う 2 つの候補は、`old` が今の値に当たる方を先に当てる (候補の順に依らない)。
+#[test]
+fn the_candidate_whose_old_value_is_current_goes_first() {
+    for flip in [false, true] {
+        let mut w = World::default();
+        let a = w.say("趣味は将棋です。");
+        w.ledger(&[a], &[u(1, "hobby", "将棋")]);
+        let b = w.say("趣味は将棋から囲碁に変えました。");
+        let mut units = vec![
+            with(u(1, "hobby", "囲碁"), "old", "趣味"),
+            with(u(1, "hobby", "囲碁"), "old", "将棋"),
+        ];
+        if flip {
+            units.reverse();
+        }
+        w.ledger(&[b], &units);
+        let d = w.derive();
+        assert_eq!(
+            state(&d, "hobby", "将棋"),
+            Some(UnitState::Superseded),
+            "flip {flip}"
+        );
+    }
+}
+
+/// 訂正の関門 4 の材料が欠けた入力 (前のターンの鎖が途切れる) では、訂正を当てない。
+#[test]
+fn a_correction_without_its_session_context_is_not_applied() {
+    let mut w = World::default();
+    let a = w.say("私は大阪に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "大阪")]);
+    let gone = w.answer("大阪はいいところですね。");
+    let b = w.say("いや、大阪じゃなくて京都に住んでいます。");
+    w.ledger_with(&[b], &[u(1, "residence", "京都")], &[(1, "accept")]);
+    w.turns.remove(&gone);
+    let mut turns = w.turn_inputs();
+    // 鎖は応答を指したまま、応答だけが入力に無い。
+    turns.get_mut(&b).expect("turn").prev = Some(gone);
+    let directives = w.directive_set();
+    let selected: Vec<Selected<'_>> = w
+        .ledgers
+        .iter()
+        .map(|(id, body)| Selected {
+            ledger: StoredLedger { id: *id, body },
+            stage: Stage::Current,
+        })
+        .collect();
+    let rules = Rules::bundled();
+    let d = derive(
+        &Inputs {
+            ledgers: &selected,
+            turns: &turns,
+            directives: &directives,
+            env: Env {
+                dictionary: Dictionary::bundled(),
+                rules: &rules,
+                key: &KEY,
+            },
+            dates: dates::date_rules(),
+        },
+        &mut GateCache::new(),
+    );
+    assert_eq!(d.counts.correction(CorrectionReason::ContextMissing), 1);
+    assert_eq!(state(&d, "residence", "京都"), Some(UnitState::Contested));
+}
+
+/// 訂正の新しい値が忘れた値だったときは `forgotten` と数える (04 §6)。
+#[test]
+fn a_correction_to_a_forgotten_value_counts_as_forgotten() {
+    let mut w = World::default();
+    let a = w.say("私は大阪に住んでいます。");
+    w.ledger(&[a], &[u(1, "residence", "大阪")]);
+    w.answer("大阪はいいところですね。");
+    let b = w.say("いや、大阪じゃなくて京都に住んでいます。");
+    w.ledger_with(&[b], &[u(1, "residence", "京都")], &[(1, "accept")]);
+    w.directive(dict_directive(DirectiveOp::Forget, "residence", "京都"));
+    let d = w.derive();
+    assert_eq!(d.counts.correction(CorrectionReason::Forgotten), 1);
+    assert_eq!(state(&d, "residence", "大阪"), Some(UnitState::Live));
+}
+
 // ---- 決定性の性質の試験 (09 §3.5.1) ----
 
 /// 小さな擬似乱数 (xorshift64*)。
@@ -779,9 +1057,11 @@ fn random_world(seed: u64) -> World {
         let n = 1 + r.below(3);
         let mut turns = Vec::new();
         let mut units = Vec::new();
-        for k in 0..n {
-            let s = u32::try_from(k + 1).expect("fits");
-            match r.below(5) {
+        let mut corrections: Vec<(u32, &str)> = Vec::new();
+        let mut s = 0u32;
+        for _ in 0..n {
+            s += 1;
+            match r.below(7) {
                 0 => {
                     let p = PLACES[r.below(PLACES.len())];
                     turns.push(w.say(&format!("私は{p}に住んでいます。")));
@@ -802,7 +1082,7 @@ fn random_world(seed: u64) -> World {
                     turns.push(w.say(&format!("趣味は{h}です。")));
                     units.push(u(s, "hobby", h));
                 }
-                _ => {
+                4 => {
                     turns.push(w.say("昨日、海辺の公園でバーベキューをしました。"));
                     units.push(with(
                         with(u(s, "したこと", "バーベキュー"), "l", "episode"),
@@ -810,9 +1090,28 @@ fn random_world(seed: u64) -> World {
                         "昨日",
                     ));
                 }
+                5 => {
+                    // 訂正の候補と、同じ穴の端に 2 つの候補 (台帳の中の順は下で乱す)。
+                    let p = PLACES[r.below(PLACES.len())];
+                    let q = PLACES[r.below(PLACES.len())];
+                    turns.push(w.say(&format!("いや、{p}じゃなくて{q}駅の近くに住んでいます。")));
+                    units.push(u(s, "residence", q));
+                    units.push(u(s, "residence", &format!("{q}駅")));
+                    let id = u32::try_from(corrections.len() + 1).expect("fits");
+                    corrections.push((id, ["accept", "reject"][r.below(2)]));
+                }
+                _ => {
+                    // 1 つの文に 2 つの候補。
+                    let p = PLACES[r.below(PLACES.len())];
+                    let h = HOBBIES[r.below(HOBBIES.len())];
+                    turns.push(w.say(&format!("{p}に住んでいて、趣味は{h}です。")));
+                    units.push(u(s, "residence", p));
+                    units.push(u(s, "hobby", h));
+                }
             }
         }
-        w.ledger(&turns, &units);
+        r.shuffle(&mut units);
+        w.ledger_with(&turns, &units, &corrections);
         if r.below(4) == 0 {
             let p = PLACES[r.below(PLACES.len())];
             let op = [
@@ -942,32 +1241,89 @@ fn import_ends_close_values_that_were_not_current_in_v04() {
     };
     let rules = Rules::bundled();
     let resolve = |s: &str| rules.resolve_entity(s);
+    let imported_at = w.next_id();
     let d = w.derive();
-    let ends = import_ends(&d, &table, &w.directive_set(), &KEY, resolve);
+    let ends = import_ends(&d, &table, &w.directive_set(), &KEY, imported_at, resolve);
     assert_eq!(ends.len(), 1);
-    let e = &ends[0];
-    let mut b = DirectiveBody::new(DirectiveOp::End);
-    b.entity = Some(e.entity.clone());
-    b.entity_raw = Some(e.entity_raw.clone());
-    b.aspect = Some(e.aspect.clone());
-    b.vks = e.vks.clone();
-    b.turn = e.turn;
-    b.origin = "import".to_owned();
-    b.norm = Some(1);
-    w.directive(b);
+    assert_eq!(ends[0].turn, a);
+    w.directive(ends[0].body());
     let d = w.derive();
     assert_eq!(
         state(&d, "residence", "港南台"),
         Some(UnitState::Superseded)
     );
-    assert!(import_ends(&d, &table, &w.directive_set(), &KEY, resolve).is_empty());
+    assert!(import_ends(&d, &table, &w.directive_set(), &KEY, imported_at, resolve).is_empty());
 
     // 取り込みの後に言い直した値は、end の後の候補として Live になり、もう end を足さない。
     let c = w.say("私は港南台に住んでいます。");
     w.ledger(&[c], &[u(1, "residence", "港南台")]);
     let d = w.derive();
     assert_eq!(state(&d, "residence", "港南台"), Some(UnitState::Live));
-    assert!(import_ends(&d, &table, &w.directive_set(), &KEY, resolve).is_empty());
+    assert!(import_ends(&d, &table, &w.directive_set(), &KEY, imported_at, resolve).is_empty());
+}
+
+/// 取り込みの end の entity は、`end` の当て方と同じ同値類で比べる (「田中さん」と「田中 さん」)。表の出典の
+/// ターンが無い値は、取り込んだ時点を位置にする。
+#[test]
+fn import_ends_use_the_entity_class_and_the_import_position() {
+    let mut w = World::default();
+    let a = w.say("田中 さんは港南台に住んでいます。");
+    w.ledger(&[a], &[with(u(1, "residence", "港南台"), "e", "田中 さん")]);
+    let table = V04Ended {
+        v: 1,
+        done: false,
+        values: vec![EndedValue {
+            entity: "田中さん".to_owned(),
+            aspect: "residence".to_owned(),
+            vks: vks("港南台"),
+            turn: None,
+        }],
+    };
+    let rules = Rules::bundled();
+    let resolve = |s: &str| rules.resolve_entity(s);
+    let imported_at = w.next_id();
+    let d = w.derive();
+    assert_eq!(
+        find(&d, "residence", "港南台").body.entity,
+        "田中 さん",
+        "{:#?}",
+        summary(&d)
+    );
+    let ends = import_ends(&d, &table, &w.directive_set(), &KEY, imported_at, resolve);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].turn, imported_at);
+    w.directive(ends[0].body());
+    let d = w.derive();
+    assert_eq!(
+        state(&d, "residence", "港南台"),
+        Some(UnitState::Superseded)
+    );
+    assert!(import_ends(&d, &table, &w.directive_set(), &KEY, imported_at, resolve).is_empty());
+}
+
+#[test]
+fn imported_privates_that_hit_no_unit_are_reported() {
+    let mut w = World::default();
+    let a = w.say("甘えびは食べられません。");
+    w.ledger(&[a], &[u(1, "dietary", "えび")]);
+    let mut hit = dict_directive(DirectiveOp::Private, "dietary", "甘えび");
+    hit.imported = true;
+    hit.at = Some(TurnSpan {
+        turn: a,
+        rev: 0,
+        start: 0,
+        end: u32::try_from("甘えび".len()).expect("fits"),
+    });
+    w.directive(hit);
+    let mut miss = dict_directive(DirectiveOp::Private, "likes", "ラーメン");
+    miss.imported = true;
+    let miss = w.directive(miss);
+    let d = w.derive();
+    assert!(find(&d, "dietary", "えび").body.private);
+    assert_eq!(
+        unmatched_imported_privates(&d, &w.directive_set(), &KEY),
+        vec![miss]
+    );
 }
 
 // ---- 単位の本体 ----
@@ -1055,30 +1411,123 @@ fn derive_bench_10k_units() {
     println!("derive 10k: cold {cold_ms} ms, warm {warm_ms} ms");
 }
 
-/// ベンチの小さな形 (常に走らせる。遅い機械でも収まる緩い上限で、畳みが件数の 2 乗にならないことを見る)。
-#[test]
-fn derive_scales_roughly_linearly() {
-    let build = |n: u32| {
-        let mut w = World::default();
-        for seg in 0..n {
-            let mut turns = Vec::new();
-            let mut units = Vec::new();
-            for k in 0..4u32 {
-                let i = seg * 4 + k;
-                turns.push(w.say(&format!("私は町{i}番に住んでいます。趣味は将棋{i}です。")));
-                units.push(u(2 * k + 1, "residence", &format!("町{i}番")));
-                units.push(u(2 * k + 2, "hobby", &format!("将棋{i}")));
+/// 区切りに近い長さの発話の合成データ (`segments` の区切り × 8 往復、1 往復に候補 2 件)。発話は前後に雑談の文を
+/// 持ち、往復ごとに応答を置き、16 往復に 1 回は住まいの訂正にする。指示は、住まいの値の `end` (`ends` 件)、
+/// 趣味の値の忘れると private (`others` 件ずつ)。
+fn mixed_world(segments: u32, ends: u32, others: u32) -> World {
+    const CHAT: &str =
+        "今日は天気が良かったので、近所の公園まで散歩に出かけて、帰りにパン屋に寄りました。";
+    const MORE: &str =
+        "夕方からは少し雨が降りそうなので、洗濯物は早めに取り込んでおこうと思います。";
+    let mut w = World::default();
+    let mut positions = Vec::new();
+    for seg in 0..segments {
+        let session = u8::try_from(seg % 200).expect("fits");
+        let mut turns = Vec::new();
+        let mut units = Vec::new();
+        let mut corrections: Vec<(u32, &str)> = Vec::new();
+        for k in 0..8u32 {
+            let i = seg * 8 + k;
+            let s = 4 * k;
+            let residence = if i % 16 == 15 {
+                format!("いや、町{}番じゃなくて町{i}番に住んでいます。", i - 1)
+            } else {
+                format!("私は町{i}番に住んでいます。")
+            };
+            let t = w.say_in(
+                session,
+                &format!("{CHAT}{residence}趣味は将棋{i}です。{MORE}"),
+            );
+            turns.push(t);
+            positions.push(t);
+            if i % 16 == 15 {
+                corrections.push((
+                    u32::try_from(corrections.len() + 1).expect("fits"),
+                    "accept",
+                ));
             }
-            w.ledger(&turns, &units);
+            units.push(u(s + 2, "residence", &format!("町{i}番")));
+            units.push(u(s + 3, "hobby", &format!("将棋{i}")));
+            let id = w.next_id();
+            w.turns.insert(
+                id,
+                TurnData {
+                    session: id_at(0, u16::from(session)),
+                    speaker: Speaker::Assistant,
+                    text: format!("{MORE}{CHAT}"),
+                    tz: Some(540),
+                    long: Vec::new(),
+                },
+            );
         }
-        w
-    };
-    let w = build(125);
+        w.ledger_with(&turns, &units, &corrections);
+    }
+    let n = segments * 8;
+    for k in 0..ends {
+        let i = k * n / ends.max(1);
+        let mut e = dict_directive(DirectiveOp::End, "residence", &format!("町{i}番"));
+        e.entity_raw = Some("self".to_owned());
+        e.turn = Some(positions[usize::try_from(i).expect("fits")]);
+        w.directive(e);
+    }
+    for k in 0..others {
+        let i = k * n / others.max(1);
+        w.directive(dict_directive(
+            DirectiveOp::Forget,
+            "hobby",
+            &format!("将棋{i}"),
+        ));
+        let p = dict_directive(DirectiveOp::Private, "hobby", &format!("将棋{}", i + 1));
+        w.directive(p);
+    }
+    w
+}
+
+/// 覚えの無い導出と覚えの効いた導出の時間 (ミリ秒)。
+fn timed(w: &World) -> (u128, u128, Derived) {
     let order: Vec<usize> = (0..w.ledgers.len()).collect();
     let mut cache = GateCache::new();
-    let _ = w.derive_with(&mut cache, &order);
     let t = std::time::Instant::now();
-    let d = w.derive_with(&mut cache, &order);
-    assert_eq!(d.units.len(), 1_000);
-    assert!(t.elapsed().as_secs() < 10, "warm derive of 1,000 units");
+    let cold = w.derive_with(&mut cache, &order);
+    let cold_ms = t.elapsed().as_millis();
+    let t = std::time::Instant::now();
+    let warm = w.derive_with(&mut cache, &order);
+    let warm_ms = t.elapsed().as_millis();
+    assert_eq!(cold.units, warm.units);
+    assert_eq!(warm.cache.misses, 0);
+    (cold_ms, warm_ms, warm)
+}
+
+/// 区切りに近い長さの発話で、訂正・`end` (300 件)・忘れる・private (50 件ずつ) を混ぜた 1 万件。
+#[test]
+#[ignore = "bench: run with --release --ignored"]
+fn derive_bench_10k_mixed() {
+    let w = mixed_world(625, 300, 50);
+    let (cold, warm, d) = timed(&w);
+    assert!(d.counts.correction(CorrectionReason::Applied) > 0);
+    assert!(d.counts.folded(FoldNote::Ended) > 0);
+    assert!(d.units.iter().any(|u| u.body.private));
+    println!(
+        "derive 10k mixed: cold {cold} ms, warm {warm} ms ({} units, {:?})",
+        d.units.len(),
+        d.counts.corrections
+    );
+}
+
+/// ベンチの小さな形 (常に走らせる)。覚えの効いた導出の時間が件数のほぼ 1 乗で増えることを見る (件数を 4 倍にした
+/// ときに 2 乗なら 16 倍になるので、8 倍と少しの余裕を上限にする)。
+#[test]
+fn derive_scales_roughly_linearly() {
+    let small = mixed_world(32, 16, 4);
+    let large = mixed_world(128, 64, 16);
+    // 1 回目は温める (覚えと割り当て)。
+    let (_, small_ms, ds) = timed(&small);
+    let (_, large_ms, dl) = timed(&large);
+    assert!(ds.units.len() >= 400 && dl.units.len() >= 1_600);
+    assert!(
+        large_ms <= 8 * small_ms.max(10) + 200,
+        "warm derive: {small_ms} ms for {} units, {large_ms} ms for {} units",
+        ds.units.len(),
+        dl.units.len()
+    );
 }

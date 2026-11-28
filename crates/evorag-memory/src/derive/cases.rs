@@ -1,14 +1,17 @@
-//! 試験の事例 (`tests/memory-cases/v0.5/derive.toml`) のうち、純粋な導出で決まるものを走らせる小さな走らせる側。
+//! 試験の事例 (`tests/memory-cases/v0.5/`) のうち、純粋な導出で決まるものを走らせる小さな走らせる側。
 //!
-//! 走らせるのは `stage = "M5.3"` の事例 ([`CASES`]) の、ターン・区切り・選択・台帳・導出の段と、期待の `units`
-//! (完全に比べる)・`label`・`same_as` (単位の集合・本体・導出の指紋)。区切りの発話に前のふるいと文の分け方 v1 を
-//! 当てて台帳の `sentences` を作り、区切りごとに `select_ledger` で使う台帳を選んでから導く。`order = "shuffle"`
-//! の導出は、台帳を読む順 (区切りの到着の順・同じ区切りの複数の選択の台帳の順) と、台帳の中の候補の順を乱す。
+//! 走らせるのは [`CASES`] の事例の、ターン・区切り・選択・台帳・導出・`import_v04` の段と、期待の `units` (完全に
+//! 比べる)・`label`・`same_as` (単位の集合・本体・導出の指紋)・`ends`・`not_live`・`counts` (書いた関門の理由)・
+//! `doctor` (`import_private_unmatched`)。区切りの発話に前のふるいと文の分け方 v1 を当てて台帳の `sentences` と訂正の
+//! 候補の表 (`corr`) を作り、区切りごとに `select_ledger` で使う台帳を選んでから導く。取り込んだ根では、導くたびに
+//! `import.v04_ended` の表で `end` を足して導き直す (返るものが無くなるまで)。`order = "shuffle"` の導出は、台帳を
+//! 読む順 (区切りの到着の順・同じ区切りの複数の選択の台帳の順) と、台帳の中の候補の順を乱す。
 //!
-//! 走らせない段 (プロファイル・鍵の使えない状態・再起動) は [`IGNORED_OPS`] と [`IGNORED_EXPECT`] に挙げる (プロファイル
-//! は M5.3 の次の PR、起動し直しは覚えを空にして導くだけ)。
+//! 走らせない段 (鍵の使えない状態・再起動) は [`IGNORED_OPS`]、比べない期待 (プロファイルは M5.3 の次の PR、台帳の
+//! 掃除の期待は書き込みの経路の PR) は [`IGNORED_EXPECT`] に挙げる。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::path::PathBuf;
 
 use serde_json::{Value as Json, json};
@@ -17,25 +20,43 @@ use toml::{Table, Value};
 
 use super::tests::id_at;
 use super::*;
+use crate::apply::ValueKeys;
 use crate::b3::{Dictionary, Rules};
-use crate::corrections::CORRECTION_V1;
-use crate::ledger::{CALL_SEGMENT, LedgerBody, LedgerOutput, SentenceSpan};
-use crate::ledger_select::{Current, SelectEnv, Selection, StoredLedger, select_ledger};
+use crate::corrections::{CORRECTION_V1, find_holes};
+use crate::directive::{DirectiveBody, DirectiveOp, TurnSpan};
+use crate::import_v04::{EndedValue, V04Ended};
+use crate::ledger::{ByteRange, CALL_SEGMENT, CorrInput, LedgerBody, LedgerOutput, SentenceSpan};
+use crate::ledger_select::{
+    Current, RuleVersions as SelectVersions, SelectEnv, Selection, StoredLedger, select_ledger,
+};
 use crate::prefilter::{MODE_CHAT, PREFILTER_V1, Screened, prefilter};
 use crate::sentences::{SPLITTER_V1, split_v1};
 use crate::unit::{UnitState, UnitTense, WhenBasis};
-use crate::value_key::ForgetKey;
+use crate::value_key::{ForgetKey, value_key};
 
 const KEY: ForgetKey = ForgetKey::from_bytes_const([7; 32]);
 
-/// 走らせる事例 (`derive.toml` の `stage = "M5.3"`)。
-const CASES: &[&str] = &["DR03", "DR06"];
+/// 走らせる事例 (ファイル, ID)。
+const CASES: &[(&str, &str)] = &[
+    ("derive.toml", "DR03"),
+    ("derive.toml", "DR06"),
+    ("governance.toml", "GV10"),
+    ("governance.toml", "GV11"),
+    ("governance.toml", "GV12"),
+    ("attacks.toml", "AT03"),
+];
+
+/// `stage = "M5.3"` のうち、ここで走らせない事例。攻撃の事例は関門の走らせる側 (`b3::cases`) が関門で決まる部分を
+/// 走らせ、FI02 は書き手と強制終了の注入が要る (core の PR で走らせる)。
+const ELSEWHERE: &[&str] = &[
+    "AT01", "AT02", "AT04", "AT05", "AT06", "AT07", "AT08", "AT09", "AT10", "AT11", "FI02",
+];
 
 /// 走らせない操作。
 const IGNORED_OPS: &[&str] = &["forget_key", "restart"];
 
-/// 比べない期待の項目 (プロファイルは M5.3 の次の PR)。
-const IGNORED_EXPECT: &[&str] = &["profile"];
+/// 比べない期待の項目。
+const IGNORED_EXPECT: &[&str] = &["profile", "ledgers"];
 
 /// 事例の変種 (台帳の `variant` の既定)。
 const VARIANT: &str = "v1";
@@ -46,9 +67,9 @@ fn root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-fn cases() -> Vec<Table> {
-    let path = root().join("../../tests/memory-cases/v0.5/derive.toml");
-    let text = std::fs::read_to_string(&path).expect("derive.toml");
+fn cases(file: &str) -> Vec<Table> {
+    let path = root().join("../../tests/memory-cases/v0.5").join(file);
+    let text = std::fs::read_to_string(&path).expect(file);
     let doc: Table = toml::from_str(&text).expect("parses");
     doc["case"]
         .as_array()
@@ -64,7 +85,7 @@ fn str_of<'v>(t: &'v Table, k: &str) -> Option<&'v str> {
 
 /// `2026-04-01T10:00:00Z` を UNIX 時刻のミリ秒に。
 fn parse_at(s: &str) -> i64 {
-    let n = |r: std::ops::Range<usize>| -> i64 { s[r].parse().expect("a number") };
+    let n = |r: Range<usize>| -> i64 { s[r].parse().expect("a number") };
     let (y, mo, d) = (n(0..4), n(5..7), n(8..10));
     let (h, mi, sec) = (n(11..13), n(14..16), n(17..19));
     // H. Hinnant の days_from_civil。
@@ -87,12 +108,20 @@ fn parse_tz(s: &str) -> Option<i32> {
     Some(sign * (h * 60 + m))
 }
 
+fn byte_range(r: &Range<usize>) -> ByteRange {
+    ByteRange {
+        start: u32::try_from(r.start).expect("fits"),
+        end: u32::try_from(r.end).expect("fits"),
+    }
+}
+
 struct Turn {
     id: Id,
     session: Id,
     speaker: Speaker,
     text: String,
     tz: Option<i32>,
+    long: Vec<Range<usize>>,
 }
 
 /// 期待と比べる単位の形 (書いた項目だけ)。
@@ -106,9 +135,13 @@ struct Run {
     sessions: BTreeMap<String, Id>,
     segments: BTreeMap<String, Vec<Id>>,
     ledgers: Vec<(Id, LedgerBody, Vec<Json>)>,
+    directives: Vec<(Id, DirectiveBody)>,
+    /// `import.v04_ended` の表と、取り込んだ時点。
+    imported: Option<(V04Ended, Id)>,
     current: String,
     previous: Option<String>,
     derived: Option<Snapshot>,
+    last: Option<Derived>,
     labels: BTreeMap<String, Snapshot>,
     cache: GateCache,
     problems: Vec<String>,
@@ -149,6 +182,13 @@ impl Run {
             .map_or_else(|| id.to_string(), |(k, _)| k.clone())
     }
 
+    /// これまでのターンより後の ID (台帳・指示の記録の ID)。
+    fn next_id(&mut self) -> Id {
+        let latest = self.turns.iter().map(|t| t.id).max().expect("turns");
+        self.seq += 1;
+        id_at(latest.timestamp().as_millis() + 1, self.seq)
+    }
+
     fn add_turn(&mut self, t: &Table) {
         let name = str_of(t, "id").expect("id").to_owned();
         let session = str_of(t, "session").expect("session").to_owned();
@@ -163,13 +203,20 @@ impl Run {
             "assistant" => Speaker::Assistant,
             _ => Speaker::User,
         };
+        let text = str_of(t, "text").expect("text").to_owned();
+        let long = if t.get("long_input").and_then(Value::as_bool) == Some(true) {
+            std::iter::once(0..text.len()).collect()
+        } else {
+            Vec::new()
+        };
         self.names.insert(name, id);
         self.turns.push(Turn {
             id,
             session,
             speaker,
-            text: str_of(t, "text").expect("text").to_owned(),
+            text,
             tz: parse_tz(str_of(t, "tz").unwrap_or("+09:00")),
+            long,
         });
     }
 
@@ -181,9 +228,22 @@ impl Run {
             .cloned()
             .expect("the segment is declared");
         let mut sentences = Vec::new();
+        let mut corr = Vec::new();
         let mut n = 1;
         for t in &pairs {
-            let Screened::Send(f) = prefilter(MODE_CHAT, &self.turn(*t).text) else {
+            let text = &self.turn(*t).text;
+            if let Some(h) = find_holes(MODE_CHAT, text) {
+                corr.push(CorrInput {
+                    id: u32::try_from(corr.len() + 1).expect("fits"),
+                    turn: *t,
+                    rev: 0,
+                    pattern: h.pattern.to_owned(),
+                    new: byte_range(&h.new),
+                    old: h.old.as_ref().map(byte_range),
+                    extra: Default::default(),
+                });
+            }
+            let Screened::Send(f) = prefilter(MODE_CHAT, text) else {
                 continue;
             };
             for r in split_v1(f.text()) {
@@ -198,27 +258,30 @@ impl Run {
                 n += 1;
             }
         }
+        let list = |k: &str| -> Vec<Json> {
+            l.get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|v| serde_json::to_value(v).expect("json"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let units: Vec<Json> = l
             .get("units")
             .and_then(Value::as_array)
             .map(|a| a.iter().map(wire_unit).collect())
             .unwrap_or_default();
-        let keys: Vec<String> = l
-            .get("keys")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|k| k.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
         let mut output = LedgerOutput::default();
-        output.set_section(LedgerOutput::KEYS, &keys).expect("keys");
+        output
+            .set_section(LedgerOutput::KEYS, &list("keys"))
+            .expect("keys");
         output
             .set_section(LedgerOutput::UNITS, &units)
             .expect("units");
         output
-            .set_section(LedgerOutput::CORRECTIONS, &Vec::<Json>::new())
+            .set_section(LedgerOutput::CORRECTIONS, &list("corrections"))
             .expect("corrections");
         let mut body = LedgerBody {
             call: CALL_SEGMENT.to_owned(),
@@ -234,14 +297,136 @@ impl Run {
         body.inputs.prefilter = PREFILTER_V1;
         body.inputs.splitter = SPLITTER_V1;
         body.inputs.correction = CORRECTION_V1;
-        let latest = self.turns.iter().map(|t| t.id).max().expect("turns");
-        self.seq += 1;
-        let id = id_at(latest.timestamp().as_millis() + 1, self.seq);
+        body.inputs.corr = corr;
+        let id = self.next_id();
         self.ledgers.push((id, body, units));
     }
 
-    /// 全件の導出。`shuffle` があれば、台帳を読む順と台帳の中の候補の順をその種で乱す。
+    /// `import_v04` の段: v0.4 の事実の表から `import.v04_ended` を作り、指示を写す (03 §12.4)。
+    fn import(&mut self, op: &Table) {
+        let v04 = op["v04"].as_table().expect("v04");
+        let mut values = Vec::new();
+        for f in v04["facts"].as_array().expect("facts") {
+            let f = f.as_table().expect("a fact");
+            let state = str_of(f, "state").expect("state");
+            if state != "Superseded" && state != "Retracted" {
+                continue;
+            }
+            let turn = f["sources"]
+                .as_array()
+                .expect("sources")
+                .iter()
+                .map(|s| self.names[s.as_str().expect("a turn name")])
+                .max();
+            values.push(EndedValue {
+                entity: str_of(f, "entity").unwrap_or("self").to_owned(),
+                aspect: str_of(f, "aspect").expect("aspect").to_owned(),
+                vks: ValueKeys::of(&KEY, str_of(f, "value").expect("value")).to_hex(),
+                turn,
+            });
+        }
+        for d in v04["directives"].as_array().expect("directives") {
+            let d = d.as_table().expect("a directive");
+            let target = d["target"].as_table().expect("target");
+            let value = str_of(target, "value").expect("value");
+            let op = match str_of(d, "op").expect("op") {
+                "forget" => DirectiveOp::Forget,
+                "private" => DirectiveOp::Private,
+                k => {
+                    self.fail(format!("the runner does not copy a v0.4 `{k}`"));
+                    return;
+                }
+            };
+            let mut b = DirectiveBody::new(op);
+            b.entity = Some(str_of(target, "entity").unwrap_or("self").to_owned());
+            b.aspect = Some(str_of(target, "aspect").expect("aspect").to_owned());
+            b.norm = Some(1);
+            b.imported = true;
+            if op == DirectiveOp::Forget {
+                b.vks = ValueKeys::of(&KEY, value).to_hex();
+                b.redact = d.get("redact").and_then(Value::as_bool).unwrap_or(true);
+            } else {
+                b.vks = vec![value_key(&KEY, value).to_hex()];
+            }
+            if let Some(at) = d.get("at").and_then(Value::as_table) {
+                let turn = self.names[str_of(at, "turn").expect("turn")];
+                let text = &self.turn(turn).text;
+                let start = text
+                    .find(str_of(at, "text").expect("text"))
+                    .expect("the range text is in the turn");
+                let len = str_of(at, "text").expect("text").len();
+                b.at = Some(TurnSpan {
+                    turn,
+                    rev: 0,
+                    start: u32::try_from(start).expect("fits"),
+                    end: u32::try_from(start + len).expect("fits"),
+                });
+            }
+            let id = self.next_id();
+            self.directives.push((id, b));
+        }
+        let at = self.next_id();
+        self.imported = Some((
+            V04Ended {
+                v: 1,
+                done: false,
+                values,
+            },
+            at,
+        ));
+    }
+
+    fn turn_inputs(&self) -> BTreeMap<Id, TurnInput<'_>> {
+        let mut order: Vec<&Turn> = self.turns.iter().collect();
+        order.sort_by_key(|t| t.id);
+        let mut last: BTreeMap<Id, Id> = BTreeMap::new();
+        order
+            .into_iter()
+            .map(|t| {
+                (
+                    t.id,
+                    TurnInput {
+                        session: t.session,
+                        prev: last.insert(t.session, t.id),
+                        speaker: t.speaker,
+                        rev: 0,
+                        text: &t.text,
+                        tz_offset: t.tz,
+                        long_inputs: &t.long,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 全件の導出 (取り込んだ根では、表の `end` を足して導き直す)。`shuffle` があれば、台帳を読む順と台帳の中の候補の
+    /// 順をその種で乱す。
     fn derive(&mut self, shuffle: Option<u64>) {
+        let rules = Rules::bundled();
+        let resolve = |s: &str| rules.resolve_entity(s);
+        for _ in 0..8 {
+            let d = self.derive_once(shuffle);
+            let Some((table, at)) = &self.imported else {
+                self.last = Some(d);
+                return;
+            };
+            let directives =
+                DirectiveSet::new(self.directives.iter().cloned(), "[伏せ字]", resolve);
+            let ends = import_ends(&d, table, &directives, &KEY, *at, resolve);
+            if ends.is_empty() {
+                self.last = Some(d);
+                return;
+            }
+            for e in ends {
+                let id = self.next_id();
+                self.directives.push((id, e.body()));
+            }
+        }
+        self.fail("the import ends do not settle".to_owned());
+    }
+
+    fn derive_once(&mut self, shuffle: Option<u64>) -> Derived {
+        let mut cache = std::mem::take(&mut self.cache);
         let mut ledgers = self.ledgers.clone();
         if let Some(seed) = shuffle {
             let mut r = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -265,23 +450,7 @@ impl Run {
                     .expect("units");
             }
         }
-        let turns: BTreeMap<Id, TurnInput<'_>> = self
-            .turns
-            .iter()
-            .map(|t| {
-                (
-                    t.id,
-                    TurnInput {
-                        session: t.session,
-                        speaker: t.speaker,
-                        rev: 0,
-                        text: &t.text,
-                        tz_offset: t.tz,
-                        long_inputs: &[],
-                    },
-                )
-            })
-            .collect();
+        let turns = self.turn_inputs();
         let current = Selection {
             variant: VARIANT,
             model_key: &self.current,
@@ -294,26 +463,22 @@ impl Run {
             current: Current::Ready(current),
             build_info: "",
             previous,
-            versions: crate::ledger_select::RuleVersions::current(CORRECTION_V1),
+            versions: SelectVersions::current(CORRECTION_V1),
             turn_rev: |id: Id| turns.get(&id).map(|t| t.rev),
         };
         let stored: Vec<StoredLedger<'_>> = ledgers
             .iter()
             .map(|(id, body, _)| StoredLedger { id: *id, body })
             .collect();
-        let segments: Vec<Id> = self
-            .segments
-            .values()
-            .map(|p| p[0])
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let segments: BTreeSet<Id> = self.segments.values().map(|p| p[0]).collect();
         let selected: Vec<Selected<'_>> = segments
             .iter()
             .filter_map(|s| select_ledger(*s, &stored, &env))
             .collect();
         let rules = Rules::bundled();
-        let directives = DirectiveSet::new(Vec::new(), "[伏せ字]", |s| rules.resolve_entity(s));
+        let directives = DirectiveSet::new(self.directives.iter().cloned(), "[伏せ字]", |s| {
+            rules.resolve_entity(s)
+        });
         let inputs = Inputs {
             ledgers: &selected,
             turns: &turns,
@@ -325,7 +490,7 @@ impl Run {
             },
             dates: dates::date_rules(),
         };
-        let d = super::derive(&inputs, &mut self.cache);
+        let d = super::derive(&inputs, &mut cache);
         // 指紋は記録した台帳の本体から作る (乱すのは読む順と、覚えと畳みに渡す候補の順だけ)。
         let digests: Vec<LedgerDigest> = self
             .ledgers
@@ -338,24 +503,31 @@ impl Run {
         let versions = Versions::new(Dictionary::bundled(), &rules, dates::date_rules(), 1);
         let f = fingerprint(&Components {
             ledgers: &digests,
-            directives: DirectiveStamp::default(),
+            directives: DirectiveStamp {
+                count: u64::try_from(self.directives.len()).expect("fits"),
+                max: self.directives.iter().map(|(id, _)| *id).max(),
+            },
             versions: &versions,
             current: Current::Ready(current),
             previous,
         });
-        self.derived = Some((d.units, f));
+        self.cache = cache;
+        self.derived = Some((d.units.clone(), f));
+        d
     }
 
     fn expect(&mut self, e: &Table) {
-        let Some((units, f)) = self.derived.clone() else {
-            return self.fail("an expectation before any derivation".to_owned());
+        let (Some((units, f)), Some(last)) = (self.derived.clone(), self.last.clone()) else {
+            self.fail("an expectation before any derivation".to_owned());
+            return;
         };
         if let Some(want) = e.get("units").and_then(Value::as_array) {
             self.compare_units(&units, want);
         }
         if let Some(label) = str_of(e, "same_as") {
             let Some((u0, f0)) = self.labels.get(label).cloned() else {
-                return self.fail(format!("no label {label}"));
+                self.fail(format!("no label {label}"));
+                return;
             };
             if u0 != units {
                 self.fail(format!("units are not the same as {label}"));
@@ -365,13 +537,95 @@ impl Run {
             }
         }
         if let Some(label) = str_of(e, "label") {
-            self.labels.insert(label.to_owned(), (units, f));
+            self.labels.insert(label.to_owned(), (units.clone(), f));
+        }
+        if let Some(want) = e.get("ends").and_then(Value::as_array) {
+            self.compare_ends(want);
+        }
+        if let Some(want) = e.get("not_live").and_then(Value::as_array) {
+            for w in want.iter().filter_map(Value::as_str) {
+                let live = units.iter().any(|u| {
+                    let b = &u.body;
+                    b.state == Some(UnitState::Live)
+                        && format!("{}/{}={}", b.entity, b.aspect, b.value) == w
+                });
+                if live {
+                    self.fail(format!("{w} is live"));
+                }
+            }
+        }
+        if let Some(want) = e.get("counts").and_then(Value::as_table) {
+            for (name, n) in want {
+                let Some(r) = Reason::ALL.iter().find(|r| r.as_str() == name) else {
+                    self.fail(format!(
+                        "the runner compares only gate reasons, not `{name}`"
+                    ));
+                    continue;
+                };
+                let have = last.counts.gate(*r);
+                if i64::try_from(have).ok() != n.as_integer() {
+                    self.fail(format!("count {name}: {have}"));
+                }
+            }
+        }
+        if let Some(want) = e.get("doctor").and_then(Value::as_array) {
+            for w in want.iter().filter_map(Value::as_str) {
+                let rules = Rules::bundled();
+                let directives =
+                    DirectiveSet::new(self.directives.iter().cloned(), "[伏せ字]", |s| {
+                        rules.resolve_entity(s)
+                    });
+                let ok = match w {
+                    "import_private_unmatched" => {
+                        !unmatched_imported_privates(&last, &directives, &KEY).is_empty()
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    self.fail(format!("doctor does not report {w}"));
+                }
+            }
         }
         for k in e.keys() {
-            if !["units", "same_as", "label"].contains(&k.as_str())
-                && !IGNORED_EXPECT.contains(&k.as_str())
-            {
+            let known = [
+                "units", "same_as", "label", "ends", "not_live", "counts", "doctor",
+            ];
+            if !known.contains(&k.as_str()) && !IGNORED_EXPECT.contains(&k.as_str()) {
                 self.fail(format!("the runner does not compare `{k}`"));
+            }
+        }
+    }
+
+    fn compare_ends(&mut self, want: &[Value]) {
+        let ends: Vec<(Id, DirectiveBody)> = self
+            .directives
+            .iter()
+            .filter(|(_, b)| b.op() == DirectiveOp::End)
+            .cloned()
+            .collect();
+        if ends.len() != want.len() {
+            self.fail(format!("{} ends, want {}", ends.len(), want.len()));
+        }
+        for w in want {
+            let w = w.as_table().expect("an end");
+            let aspect = str_of(w, "aspect").expect("aspect");
+            let vk = value_key(&KEY, str_of(w, "value").expect("value")).to_hex();
+            let origin = str_of(w, "origin").unwrap_or("user");
+            let turn = str_of(w, "turn").expect("turn");
+            let found = ends.iter().any(|(id, b)| {
+                let at = b.turn.unwrap_or(*id);
+                let at_name = if b.turn.is_none() {
+                    "(self)".to_owned()
+                } else {
+                    self.name_of(at)
+                };
+                b.aspect.as_deref() == Some(aspect)
+                    && b.vks.contains(&vk)
+                    && b.origin().name() == origin
+                    && at_name == turn
+            });
+            if !found {
+                self.fail(format!("no end {aspect} at {turn} ({origin})"));
             }
         }
     }
@@ -503,6 +757,7 @@ impl Run {
                     let old = std::mem::replace(&mut self.current, model);
                     self.previous = Some(old);
                 }
+                "import_v04" => self.import(op),
                 k if IGNORED_OPS.contains(&k) => {
                     if k == "restart" {
                         self.cache.clear();
@@ -518,15 +773,16 @@ impl Run {
     }
 }
 
-/// `derive.toml` の M5.3 の事例 (DR03 の導出の決定性、DR06 の単位と日付)。
+/// M5.3 の事例 (DR03 の導出の決定性、DR06 の単位と日付、GV10〜GV12 の取り込みの `end` と private、AT03 の長い一度の
+/// 入力)。
 ///
 /// verifies: AC-FR-315-1 (DR03: 読む順を乱しても単位の集合・本体・指紋が同じ)、AC-FR-315-4 (DR03・DR06: 相対の日付を
 /// 発話のターンの UTC からのずれで解き、ずれの無いターンは `no_offset` を残す)
 #[test]
 fn derive_cases_of_m5_3_run() {
-    let all = cases();
     let mut problems = Vec::new();
-    for id in CASES {
+    for (file, id) in CASES {
+        let all = cases(file);
         let case = all
             .iter()
             .find(|c| str_of(c, "id") == Some(id))
@@ -545,13 +801,29 @@ fn derive_cases_of_m5_3_run() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
-/// M5.3 の事例は、すべてここで走らせる (ほかの段の事例は、その段で走らせる)。
+/// M5.3 の事例は、ここか、挙げたほかの走らせる側で走らせる。
 #[test]
 fn every_m5_3_case_is_run() {
-    let staged: Vec<String> = cases()
+    let mut staged: BTreeSet<String> = BTreeSet::new();
+    for file in [
+        "derive.toml",
+        "governance.toml",
+        "attacks.toml",
+        "forget.toml",
+        "faults.toml",
+    ] {
+        staged.extend(
+            cases(file)
+                .iter()
+                .filter(|c| str_of(c, "stage") == Some("M5.3"))
+                .filter_map(|c| str_of(c, "id").map(str::to_owned)),
+        );
+    }
+    let covered: BTreeSet<String> = CASES
         .iter()
-        .filter(|c| str_of(c, "stage") == Some("M5.3"))
-        .filter_map(|c| str_of(c, "id").map(str::to_owned))
+        .map(|(_, id)| *id)
+        .chain(ELSEWHERE.iter().copied())
+        .map(str::to_owned)
         .collect();
-    assert_eq!(staged, CASES);
+    assert_eq!(staged, covered);
 }
