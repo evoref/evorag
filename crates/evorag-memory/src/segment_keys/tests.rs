@@ -392,7 +392,11 @@ fn stale_embeddings_are_the_keys_that_left_the_check() {
 // ---- M5.0 の事例 ----
 
 fn cases_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/memory-cases/v0.5")
+    // 実行時の値を先に見る (no-network の CI は、試験を別の場所に写した作業ツリーで走らせる)。
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .join("../../tests/memory-cases/v0.5")
 }
 
 /// `file` の事例 `id` の、区切りの名前 → 最後の台帳の `keys`、と最後の `seg_keys` の期待。
