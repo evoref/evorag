@@ -10,6 +10,7 @@ pub mod b2;
 pub mod b3;
 mod chars;
 mod correction;
+pub mod corrections;
 mod derived;
 pub use derived::RecordError;
 mod directive;
